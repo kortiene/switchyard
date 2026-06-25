@@ -42,10 +42,14 @@ session can pick up where we stopped.
 **Repository state:** all of this session's work is **merged to `main`**
 (no remote — local merge). `main` HEAD is the docs commit recording the merge,
 on top of the merge commit
-`d5f2588 merge: declarative cli change-request provider (#4 step 2 — cli CR)`,
+`badcf50 merge: dead-code cleanup + stale-doc audit (§8p)`,
 with the session's commits in history:
 
 ```
+badcf50 merge: dead-code cleanup + stale-doc audit (§8p)
+b5700d1 docs(adw_sdlc): fix stale documentation                  (§8p)
+110cdf1 refactor(adw_sdlc): remove dead exports                  (§8p)
+a892e56 docs(adw_sdlc): record the cli change-request merge to main in HANDOVER (§8o)
 d5f2588 merge: declarative cli change-request provider (#4 step 2 — cli CR)
 a6c49a2 feat(adw_sdlc): declarative cli change-request provider (§8o)
 c4aa31f docs(adw_sdlc): record the 2.5a/2.5b merge to main in HANDOVER (§8n)
@@ -88,6 +92,13 @@ The `cli` change-request provider (§8o) is the `feat` commit `a6c49a2`, merged 
 after merging. Both the commit and the merge were performed only at the user's
 explicit request (invariant §3.8 — the ADW code path runs no `git`/`gh` itself).
 No new dependency; no config-schema change; no build artifact left behind.
+
+The dead-code cleanup + stale-doc audit (§8p) is two commits on the
+`chore/dead-code-and-stale-docs` branch — `110cdf1 refactor: remove dead exports`
+and `b5700d1 docs: fix stale documentation` — merged to `main` in `badcf50`; the
+branch was deleted after merging. Behavior-neutral (suite unchanged at 450); no
+new dependency, no build artifact. This very entry is the follow-up `docs` commit
+recording that merge.
 
 ## 2. Session goal
 
@@ -876,6 +887,54 @@ declarative driver covers work items (`cli`+`rest`) and change requests
 (`cli`+`rest`); remaining #4 surface: 2.5c token refresh (deferred, demand-gated)
 and **step 3** (out-of-process broker, a §10 hard stop).
 
+## 8p. Follow-up session — dead-code cleanup + stale-doc audit (housekeeping)
+
+A maintenance pass (not a feature slice): remove genuine dead weight and bring the
+docs back in line with the code. Two commits, merged in `badcf50` (see §1).
+
+**Audit method.** `npx ts-prune` (unused exports), `npx depcheck` (deps), `git
+grep` for references, plus orphan-module / commented-code / artifact sweeps. The
+package proved very clean: **depcheck found no unused deps**, no orphan modules, no
+commented-out code, no stray build artifacts, working tree clean. ts-prune's
+output is dominated by the `src/index.ts` public-API barrel (every re-export reads
+as "unused" because nothing in-repo imports the package's own entry point — those
+are intentional, incl. the §6 compat aliases) — filtering the barrel + the
+"used in module" over-exports left exactly **4 genuinely-dead exports**.
+
+**Removal (`110cdf1` refactor — behavior-neutral, 0 refs each, all superseded by
+config):**
+- `MX_ADW_BOT_TAG` (`exec.ts`) — runtime reads `getAdwConfig().progress.tag`.
+- `currentBranch()` (`git.ts`) — no callers.
+- `CROSS_BOUNDARY_HINTS` / `DOC_HINTS` (`phases.ts`) — the e2e/doc gates read
+  `config.gates.{e2e,documentation}.hints` directly.
+  Both files imported `DEFAULT_ADW_CONFIG` only for a removed symbol → that import
+  dropped too; the word-boundary matching rationale was folded into `hintIn`'s doc
+  comment rather than deleted. ~−18 net lines. **Not removed** (intentional,
+  flagged by tooling but kept): the `index.ts` barrel, the §6 compat aliases,
+  `issue.ts` / the `issue` command, `pricing.ts`, fixtures/mirrors. The ~13
+  cosmetic "drop the `export` keyword" over-exports were deliberately skipped
+  (low ROI).
+
+**Stale-doc fixes (`b5700d1` docs — audited every package doc vs. the code):**
+- README + UNIVERSAL: schema overrides, custom phases, and the declarative
+  `cli`/`rest` providers (work items + change requests) are **implemented**, not
+  "proposals / not yet implemented"; UNIVERSAL now carries the real provider-kind
+  matrix (workItems & changeRequests = `github`,`cli`,`rest`).
+- DESIGN-provider-plugins / DESIGN-declarative-providers / DESIGN-schema-overrides:
+  status headers → DONE where shipped (step 2 incl. the `cli` change-request
+  provider + 2.5a/2.5b; only 2.5c + out-of-process plugin deferred); the
+  "closed switch" rationale rewritten for the registry; the loop/gated non-goal
+  got a forward-pointer to where it shipped (§8i).
+- HEALTHTECH_PORT: test count `343/27` → `450/32`.
+- PLAN: a reading-note banner flags the standalone-port divergences (npm not pnpm;
+  `tools.ts` / `child/spawn-child.ts` never built) — the historical migration plan
+  is annotated, not rewritten. `PARITY.md` / `MEMORY_STACK.md` were verified still
+  accurate (historical / forward-looking records) and left untouched.
+
+Verified: typecheck, `lint:env`, full suite (**450**, unchanged — the removed
+symbols had no tests), build+clean, byte-identical github dry-run. No new
+dependency, no config/interface change.
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -1090,7 +1149,8 @@ the provider-kind registry — §8j, +15 for the declarative `cli` work-item
 provider — §8k, +10 for the declarative `rest`/HTTP work-item provider — §8l,
 +9 for the declarative `rest` change-request provider — §8m, +13 for the
 declarative primitives 2.5a transforms + 2.5b pagination — §8n, +9 for the
-declarative `cli` change-request provider — §8o). The session left
+declarative `cli` change-request provider — §8o; the §8p housekeeping pass added
+no tests — it removed dead code only, so the count is unchanged). The session left
 no build artifact, no temporary files, and no untracked binary churn. The ADW
 orchestrator code path still runs no `git`/`gh` itself; the commits and the local
 merge to `main` recorded in §1 were performed only at the user's explicit request
@@ -1099,4 +1159,6 @@ merge to `main` recorded in §1 were performed only at the user's explicit reque
 change-requests) slices are committed as `0ac57a5` and merged to `main`
 (`07b90f6`); the §8n step-2.5a/2.5b primitives are committed as `214d3ee` and
 merged to `main` (`3199cad`); the §8o `cli` change-request provider is committed
-as `a6c49a2` and merged to `main` (`d5f2588`). The working tree is clean.** — see §1.
+as `a6c49a2` and merged to `main` (`d5f2588`); the §8p dead-code cleanup +
+stale-doc audit is committed as `110cdf1`/`b5700d1` and merged to `main`
+(`badcf50`). The working tree is clean.** — see §1.
