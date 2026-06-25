@@ -307,7 +307,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 546 tests, 39 files)
+# 3) Full test suite (current: 556 tests, 40 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -1191,6 +1191,41 @@ production-code change; the alias machinery in `src/env-vars.ts` is untouched.
 Issue class: `fix`. Run mode: native. No kernel/runtime/prompt-pack/config
 change. `npm run verify` stays green (546 tests, 39 files).
 
+## 8x. Live ADW run — issue #7 (feat: live secret-boundary audit scaffold)
+
+Secret-boundary audit scaffold: asserts, on a real spawned runner environment,
+that `GH_TOKEN` / `MATRIX_*` / `ADW_*` / `MX_AGENT_*` are absent — without
+ever printing a secret value (key names and pass/fail booleans only). Complements
+the static `lint:env` gate and the mocked env tests with a live-oriented,
+spawn-crossing check that cannot be replicated in-process.
+
+- `adw_sdlc/docs/SECRET-BOUNDARY-AUDIT.md` (new) — the procedure doc: the
+  three-layer model (static source lint / mocked in-process unit / live spawned
+  audit); the load-bearing no-secret-printing rule (sentinel values seed the
+  source env, never real credentials; the child emits key NAMES only, never
+  values); the mode-conditional denied set (phased `allowGhToken: false` vs.
+  one-shot `allowGhToken: true`); the deterministic check command
+  (`npx vitest run test/secret-boundary-audit.test.ts`); and the operator
+  live-mode snippet that exercises the real `process.env` on an operator box
+  without making any agent call or spending money.
+- `adw_sdlc/test/secret-boundary-audit.test.ts` (new, +10) — vitest suite
+  that crosses the spawn boundary: (1) phased runner env for all four runners
+  exposes no denied key to a spawned child; (2) positive control: a no-allowlist
+  spawn does expose the denials, proving the clean result is the allowlist's doing;
+  (3) structural no-value-printing check (stdout never contains the sentinel);
+  (4) one-shot mode pin (`GH_TOKEN`/`GH_BIN` present but no deny-prefix key);
+  (5) `EXPECTED_LEAK` consistency guard vs. `POISONED` fixture; (6) deny-prefixed
+  `extraAllow` keys are silently dropped at the spawn boundary; (7) `ENV_DENY_PREFIXES`
+  regression pin (exact set must be reviewed on change); (8) allowlisted keys
+  actually reach the child (no trivially-empty-env false-pass); (9) `RUNNER_IDS`
+  and `RUNNER_ENV_ALLOW` cover the same runner set (no audit blind spot); (10)
+  non-denied `extraAllow` keys are observable in the spawned child's own
+  `process.env` (spawn-boundary forwarding confirmed).
+- `adw_sdlc/README.md` — documentation map entry for `docs/SECRET-BOUNDARY-AUDIT.md`.
+
+Issue class: `feat`. Run mode: native. No kernel/runtime/prompt-pack/config
+change. `npm run verify` stays green (556 tests, 40 files).
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -1397,7 +1432,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **540 passing across 36 files**
+Test count baseline after this session: **556 passing across 40 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1411,7 +1446,8 @@ passes added no tests — §8p removed dead code, §8q removed dead imports + en
 the unused-symbol typecheck guards and refactored 4 tests onto `withScopedEnv`;
 +4 for the parity hard-failure-rate harness — §8r, +2 for the force-fenced
 measurement mode — §8s, +16 for the observed-live ledger + cross-document sync —
-§8u, +35 for the parity-rate-core extraction — §8v). The §8v refactor (issue #5
+§8u, +35 for the parity-rate-core extraction — §8v, +6 for the env-naming
+drift guard — §8w, +10 for the live secret-boundary audit scaffold — §8x). The §8v refactor (issue #5
 — split parity-rate classification from rendering) added `tools/parity-rate-core.ts`
 (pure core module, no new test file) and extended `test/parity-rate.test.ts` with
 35 direct unit tests of the extracted core (39 tests total in the file, up from 4

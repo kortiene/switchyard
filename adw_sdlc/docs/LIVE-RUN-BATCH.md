@@ -10,7 +10,12 @@ live `claude` ADW runs**. These satisfy the `MVP-READINESS.md` §1 gate
 > (feat: MVP live-run observation ledger) has been run as a **native** ADW run,
 > producing `adw_sdlc/docs/OBSERVED-LIVE-LEDGER.md`. Issue #4 (test: failure-drill
 > scaffold) has been run as a **native** ADW run, producing
-> `adw_sdlc/docs/FAILURE-DRILLS.md`. Issues 2, 5–8 remain planned.
+> `adw_sdlc/docs/FAILURE-DRILLS.md`. Issue #5 (refactor: parity-rate-core
+> extraction) has been run as a **native** ADW run (§8v). Issue #6 (fix: ADW_*
+> env-naming drift guard) has been run as a **native** ADW run (§8w). Issue #7
+> (feat: live secret-boundary audit scaffold) has been run as a **native** ADW
+> run, producing `adw_sdlc/docs/SECRET-BOUNDARY-AUDIT.md` and
+> `adw_sdlc/test/secret-boundary-audit.test.ts` (§8x). Issues 2, 8 remain planned.
 
 ## Why a single `verify` gate first
 
