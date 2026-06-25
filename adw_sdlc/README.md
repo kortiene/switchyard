@@ -125,11 +125,33 @@ the metaprompt generator; it consumes the committed `.adw/prompts/*.md` files.
 
 ## Development
 
+`npm run verify` is the **canonical local/CI quality gate**. It runs every check
+below in order, exits non-zero if any fails, and removes the `dist/` build
+artifact at the end:
+
+```bash
+npm run verify   # typecheck → lint:env → pack:check → test → build → rm -rf dist
+```
+
+ADW live runs use it as the single test command (the gate is shell-split and run
+without a shell, so a chained `a && b` command will not work — one command is
+required):
+
+```bash
+ADW_TEST_CMD="npm run verify"
+```
+
+See [`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md) for the live-run
+rationale and command templates.
+
+The individual gates `verify` chains, for running a single stage during
+development:
+
 ```bash
 npm run typecheck     # tsc --noEmit
 npm run lint:env      # static secret-boundary lint (fail-closed)
-npm test              # vitest suite
 npm run pack:check    # generated prompt-pack drift guard
+npm test              # vitest suite
 npm run build         # tsc -p tsconfig.build.json  (dist/ is a build artifact)
 ```
 
