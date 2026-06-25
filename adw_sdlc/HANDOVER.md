@@ -42,10 +42,13 @@ session can pick up where we stopped.
 **Repository state:** all of this session's work is **merged to `main`**
 (no remote — local merge). `main` HEAD is the docs commit recording the merge,
 on top of the merge commit
-`badcf50 merge: dead-code cleanup + stale-doc audit (§8p)`,
+`1070d9e merge: drop dead imports + extract withScopedEnv test helper (§8q)`,
 with the session's commits in history:
 
 ```
+1070d9e merge: drop dead imports + extract withScopedEnv test helper (§8q)
+41e4111 test(adw_sdlc): extract withScopedEnv helper               (§8q)
+93165ee refactor(adw_sdlc): drop dead imports, enable unused-symbol guards (§8q)
 badcf50 merge: dead-code cleanup + stale-doc audit (§8p)
 b5700d1 docs(adw_sdlc): fix stale documentation                  (§8p)
 110cdf1 refactor(adw_sdlc): remove dead exports                  (§8p)
@@ -97,8 +100,14 @@ The dead-code cleanup + stale-doc audit (§8p) is two commits on the
 `chore/dead-code-and-stale-docs` branch — `110cdf1 refactor: remove dead exports`
 and `b5700d1 docs: fix stale documentation` — merged to `main` in `badcf50`; the
 branch was deleted after merging. Behavior-neutral (suite unchanged at 450); no
-new dependency, no build artifact. This very entry is the follow-up `docs` commit
-recording that merge.
+new dependency, no build artifact.
+
+The unused-imports cleanup + test-helper extraction (§8q) is two commits on the
+`chore/unused-imports-and-test-helper` branch — `93165ee refactor: drop dead
+imports, enable unused-symbol guards` and `41e4111 test: extract withScopedEnv
+helper` — merged to `main` in `1070d9e`; the branch was deleted after merging.
+Behavior-neutral (suite unchanged at 450). This very entry is the follow-up `docs`
+commit recording that merge.
 
 ## 2. Session goal
 
@@ -935,6 +944,41 @@ Verified: typecheck, `lint:env`, full suite (**450**, unchanged — the removed
 symbols had no tests), build+clean, byte-identical github dry-run. No new
 dependency, no config/interface change.
 
+## 8q. Follow-up session — unused-import cleanup + test-helper extraction (housekeeping)
+
+A second maintenance pass, surfacing a class of dead code the §8p export-scan
+structurally **could not** see. `ts-prune` flags unused *exports*; it says nothing
+about unused *imports/locals/params*. Compiling with `tsc --noUnusedLocals
+--noUnusedParameters` surfaced **6 unused imports in `src/orchestrator.ts`** —
+leftovers from the provider-first refactor (the runtime goes through the
+`OrchestratorDeps` seam / `deps.*`, not these direct functions): `detectRepo`,
+`issueState`, `resolveGhBin`, `workingTreeDirty` (from `exec.js`) and `fetchIssue`,
+`setStatus` (from `work-item.js`). They were the complete set — nothing else in
+`src/` or `test/` tripped the flags.
+
+**C1 — `93165ee` (refactor):** removed the 6 imports and **enabled
+`noUnusedLocals` + `noUnusedParameters` in `tsconfig.json`** so this rot is caught
+by `npm run typecheck` (and the build, which inherits via `extends`) going forward
+— a durable guard, not a one-time sweep. The whole tree (src + test) passes both
+flags. **`npm run typecheck` now enforces unused-symbol checks** in addition to
+`strict` + `noUncheckedIndexedAccess` (see §8 gates).
+
+**C3 — `41e4111` (test):** extracted `withScopedEnv(vars, fn)` into a new
+`test/helpers.ts` (the first shared test helper) — sets env vars, runs the body,
+restores each key's prior value (or unsets it) even on throw. Replaced the
+hand-rolled `process.env` save/restore + `try/finally` dance in **4 provider
+tests** with it (−44 lines in `providers.test.ts`; the easy-to-botch restore logic
+now lives in one tested place). The 2 remaining `try/finally` blocks there are
+stderr-spy restores (a different pattern), left alone. Synchronous by design — the
+one async env-manipulating test (`orchestrator.test.ts`, a single absent-var case)
+was left as-is rather than widen the helper.
+
+Skipped (as recommended in the §8p inventory): the ~13 cosmetic "drop the `export`
+keyword" over-exports (low ROI), and adding eslint/prettier (a separate tooling
+decision, not cleanup). Verified: typecheck (with the new guards), `lint:env`,
+full suite (**450**, unchanged), build+clean, byte-identical github dry-run. No
+new dependency, no behavior change.
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -1149,8 +1193,10 @@ the provider-kind registry — §8j, +15 for the declarative `cli` work-item
 provider — §8k, +10 for the declarative `rest`/HTTP work-item provider — §8l,
 +9 for the declarative `rest` change-request provider — §8m, +13 for the
 declarative primitives 2.5a transforms + 2.5b pagination — §8n, +9 for the
-declarative `cli` change-request provider — §8o; the §8p housekeeping pass added
-no tests — it removed dead code only, so the count is unchanged). The session left
+declarative `cli` change-request provider — §8o; the §8p and §8q housekeeping
+passes added no tests — §8p removed dead code, §8q removed dead imports + enabled
+the unused-symbol typecheck guards and refactored 4 tests onto `withScopedEnv` —
+so the count is unchanged). The session left
 no build artifact, no temporary files, and no untracked binary churn. The ADW
 orchestrator code path still runs no `git`/`gh` itself; the commits and the local
 merge to `main` recorded in §1 were performed only at the user's explicit request
@@ -1161,4 +1207,6 @@ change-requests) slices are committed as `0ac57a5` and merged to `main`
 merged to `main` (`3199cad`); the §8o `cli` change-request provider is committed
 as `a6c49a2` and merged to `main` (`d5f2588`); the §8p dead-code cleanup +
 stale-doc audit is committed as `110cdf1`/`b5700d1` and merged to `main`
-(`badcf50`). The working tree is clean.** — see §1.
+(`badcf50`); the §8q unused-import cleanup + test-helper extraction is committed
+as `93165ee`/`41e4111` and merged to `main` (`1070d9e`). The working tree is
+clean.** — see §1.
