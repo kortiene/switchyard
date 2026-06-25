@@ -10,11 +10,13 @@ import {
 } from '../src/providers.js';
 import { parseAdwConfig } from '../src/config.js';
 import {
+  parseCliChangeRequestDescriptor,
   parseCliWorkItemDescriptor,
   parseRestChangeRequestDescriptor,
   parseRestWorkItemDescriptor,
 } from '../src/provider-descriptor.js';
 import {
+  createCliChangeRequestProvider,
   createCliWorkItemProvider,
   createRestChangeRequestProvider,
   createRestWorkItemProvider,
@@ -70,7 +72,7 @@ describe('createProvidersFromConfig', () => {
       cli: ['github'],
       workItems: ['cli', 'github', 'rest'],
       vcs: ['git'],
-      changeRequests: ['github', 'rest'],
+      changeRequests: ['cli', 'github', 'rest'],
     });
   });
 
@@ -366,6 +368,125 @@ describe('declarative rest change-request provider', () => {
 
     const bad = parseAdwConfig({ providers: { changeRequests: { ...raw, allowedHosts: ['other.example.com'] } } });
     expect(() => createProvidersFromConfig(bad, () => [])).toThrow(/not in allowedHosts/);
+  });
+});
+
+describe('declarative cli change-request provider', () => {
+  const descriptorRaw = {
+    type: 'cli',
+    authEnv: 'GITLAB_TOKEN',
+    routes: {
+      findForBranch: {
+        command: ['glab', 'mr', 'list', '--repo', '{repo}', '--source-branch', '{branch}', '--output', 'json'],
+        map: { url: '$[0].web_url' },
+      },
+      create: {
+        command: ['glab', 'mr', 'create', '--repo', '{repo}', '--source-branch', '{branch}', '--target-branch', '{base}', '--title', '{title}', '--description', '{body}', '--output', 'json'],
+        map: { number: '$.iid', url: '$.web_url' },
+      },
+      squashMerge: { command: ['glab', 'mr', 'merge', '{id}', '--repo', '{repo}', '--squash', '--yes'] },
+      pipelineStatus: {
+        command: ['glab', 'ci', 'status', '--repo', '{repo}', '{id}', '--output', 'json'],
+        statusPath: '$.status | lower',
+        stateMap: { success: 'success', failed: 'failure' },
+      },
+      failingJobs: {
+        command: ['glab', 'ci', 'list', '--repo', '{repo}', '{id}', '--status', 'failed', '--output', 'json'],
+        itemsPath: '$.jobs',
+        map: [{ name: '$.name', logExcerpt: '$.failure_reason | default:(none)' }],
+      },
+    },
+  };
+  const descriptor = parseCliChangeRequestDescriptor(descriptorRaw);
+  const ctx = { ghBin: null, repo: 'group/proj' };
+
+  it('create: substitutes argv, scopes the env to one credential (GH_TOKEN withheld), maps number/url/id', () => {
+    const calls: { cmd: readonly string[]; env?: Record<string, string> }[] = [];
+    const fakeCapture = (cmd: readonly string[], opts?: { env?: Record<string, string> }): Captured => {
+      calls.push({ cmd, env: opts?.env });
+      return { returncode: 0, stdout: JSON.stringify({ iid: 7, web_url: 'https://gitlab.example.com/g/p/-/merge_requests/7' }), stderr: '' };
+    };
+    const prevGitlab = process.env['GITLAB_TOKEN'];
+    const prevGh = process.env['GH_TOKEN'];
+    process.env['GITLAB_TOKEN'] = 'tok';
+    process.env['GH_TOKEN'] = 'gh-secret';
+    try {
+      const result = createCliChangeRequestProvider(descriptor, fakeCapture).create(ctx, {
+        branch: 'feat/7-x',
+        base: 'main',
+        title: 'My MR',
+        body: 'desc',
+      });
+      expect(result).toEqual({ id: '7', number: 7, url: 'https://gitlab.example.com/g/p/-/merge_requests/7', error: null });
+      const first = calls[0]!;
+      expect(first.cmd).toEqual(['glab', 'mr', 'create', '--repo', 'group/proj', '--source-branch', 'feat/7-x', '--target-branch', 'main', '--title', 'My MR', '--description', 'desc', '--output', 'json']);
+      expect(first.env?.['GITLAB_TOKEN']).toBe('tok'); // one credential in
+      expect(first.env?.['GH_TOKEN']).toBeUndefined(); // GitHub authority withheld
+    } finally {
+      if (prevGitlab === undefined) delete process.env['GITLAB_TOKEN'];
+      else process.env['GITLAB_TOKEN'] = prevGitlab;
+      if (prevGh === undefined) delete process.env['GH_TOKEN'];
+      else process.env['GH_TOKEN'] = prevGh;
+    }
+  });
+
+  it('findForBranch maps a url from the response, null when none, null on failure', () => {
+    const found = createCliChangeRequestProvider(descriptor, () => ({ returncode: 0, stdout: JSON.stringify([{ web_url: 'https://x/1' }]), stderr: '' }));
+    expect(found.findForBranch(ctx, 'feat/x')).toBe('https://x/1');
+    const none = createCliChangeRequestProvider(descriptor, () => ({ returncode: 0, stdout: '[]', stderr: '' }));
+    expect(none.findForBranch(ctx, 'feat/x')).toBeNull();
+    const fail = createCliChangeRequestProvider(descriptor, () => ({ returncode: 1, stdout: '', stderr: 'boom' }));
+    expect(fail.findForBranch(ctx, 'feat/x')).toBeNull();
+  });
+
+  it('squashMerge runs the templated command and reports ok/failure (stderr surfaced)', () => {
+    const seen: (readonly string[])[] = [];
+    const merged = createCliChangeRequestProvider(descriptor, (cmd) => {
+      seen.push(cmd);
+      return { returncode: 0, stdout: '', stderr: '' };
+    });
+    expect(merged.squashMerge(ctx, 7)).toEqual({ ok: true, error: null });
+    expect(seen[0]).toEqual(['glab', 'mr', 'merge', '7', '--repo', 'group/proj', '--squash', '--yes']);
+    const failed = createCliChangeRequestProvider(descriptor, () => ({ returncode: 1, stdout: '', stderr: 'merge conflict\n' }));
+    expect(failed.squashMerge(ctx, 7)).toEqual({ ok: false, error: 'merge conflict' });
+  });
+
+  it('pipelineStatus maps via stateMap (after a `| lower` transform) and fills failingJobs when red', () => {
+    const transport = (cmd: readonly string[]): Captured => {
+      if (cmd[1] === 'ci' && cmd[2] === 'status') return { returncode: 0, stdout: JSON.stringify({ status: 'FAILED' }), stderr: '' };
+      if (cmd[1] === 'ci' && cmd[2] === 'list') {
+        return { returncode: 0, stdout: JSON.stringify({ jobs: [{ name: 'build', failure_reason: 'tsc' }, { name: 'lint', failure_reason: '' }] }), stderr: '' };
+      }
+      return { returncode: 1, stdout: '', stderr: '' };
+    };
+    const status = createCliChangeRequestProvider(descriptor, transport).pipelineStatus(ctx, 7);
+    expect(status.state).toBe('failure'); // 'FAILED' | lower ⇒ 'failed' ⇒ failure
+    expect(status.failingJobs).toEqual([
+      { name: 'build', logExcerpt: 'tsc' },
+      { name: 'lint', logExcerpt: '(none)' }, // default applied to the empty reason
+    ]);
+  });
+
+  it('pipelineStatus is green without enumerating jobs (no extra invocation)', () => {
+    let listCalled = false;
+    const transport = (cmd: readonly string[]): Captured => {
+      if (cmd[1] === 'ci' && cmd[2] === 'status') return { returncode: 0, stdout: JSON.stringify({ status: 'success' }), stderr: '' };
+      if (cmd[1] === 'ci' && cmd[2] === 'list') {
+        listCalled = true;
+        return { returncode: 0, stdout: '{"jobs":[]}', stderr: '' };
+      }
+      return { returncode: 1, stdout: '', stderr: '' };
+    };
+    expect(createCliChangeRequestProvider(descriptor, transport).pipelineStatus(ctx, 7)).toEqual({ state: 'success', failingJobs: [] });
+    expect(listCalled).toBe(false); // jobs only enumerated when red
+  });
+
+  it('is built through createProvidersFromConfig for type "cli", and fails closed when misconfigured', () => {
+    const good = parseAdwConfig({ providers: { changeRequests: descriptorRaw } });
+    expect(createProvidersFromConfig(good, () => []).changeRequests.squashMerge).toBeTypeOf('function');
+
+    const bad = parseAdwConfig({ providers: { changeRequests: { type: 'cli' } } });
+    expect(() => createProvidersFromConfig(bad, () => [])).toThrow(/invalid cli change-request provider/);
   });
 });
 

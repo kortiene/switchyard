@@ -156,10 +156,12 @@ export {
   evalScalar,
   evalScalarMapping,
   isAllowedHost,
+  parseCliChangeRequestDescriptor,
   parseCliWorkItemDescriptor,
   parsePath,
   parseRestChangeRequestDescriptor,
   parseRestWorkItemDescriptor,
+  type CliChangeRequestDescriptor,
   type CliWorkItemDescriptor,
   type FetchFieldMap,
   type Paginate,
@@ -172,6 +174,7 @@ export {
   type Transform,
 } from './provider-descriptor.js';
 export {
+  createCliChangeRequestProvider,
   createCliWorkItemProvider,
   createRestChangeRequestProvider,
   createRestWorkItemProvider,

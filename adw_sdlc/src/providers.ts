@@ -21,11 +21,13 @@ import { DEFAULT_ADW_CONFIG, getAdwConfig, type AdwConfig } from './config.js';
 import { AdwError } from './errors.js';
 import * as git from './git.js';
 import {
+  parseCliChangeRequestDescriptor,
   parseCliWorkItemDescriptor,
   parseRestChangeRequestDescriptor,
   parseRestWorkItemDescriptor,
 } from './provider-descriptor.js';
 import {
+  createCliChangeRequestProvider,
   createCliWorkItemProvider,
   createRestChangeRequestProvider,
   createRestWorkItemProvider,
@@ -249,6 +251,7 @@ const VCS_PROVIDERS: Record<string, VcsFactory> = {
 };
 const CHANGE_REQUEST_PROVIDERS: Record<string, ChangeRequestFactory> = {
   github: createGitHubChangeRequestProvider,
+  cli: (config) => createCliChangeRequestProvider(parseCliChangeRequestDescriptor(config.providers.changeRequests)),
   rest: (config) => createRestChangeRequestProvider(parseRestChangeRequestDescriptor(config.providers.changeRequests)),
 };
 

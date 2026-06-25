@@ -7,6 +7,7 @@ import {
   evalScalar,
   evalScalarMapping,
   isAllowedHost,
+  parseCliChangeRequestDescriptor,
   parseCliWorkItemDescriptor,
   parsePath,
   parseRestChangeRequestDescriptor,
@@ -399,5 +400,73 @@ describe('parseRestChangeRequestDescriptor', () => {
     expect(() =>
       withJobs({ path: '/x/{branch}', itemsPath: '$', map: [{ name: '$.n', logExcerpt: '$.r' }] }),
     ).toThrow(/unknown placeholder \{branch\}/);
+  });
+});
+
+describe('parseCliChangeRequestDescriptor', () => {
+  const valid = {
+    type: 'cli',
+    authEnv: 'GITLAB_TOKEN',
+    routes: {
+      findForBranch: {
+        command: ['glab', 'mr', 'list', '--repo', '{repo}', '--source-branch', '{branch}', '--output', 'json'],
+        map: { url: '$[0].web_url' },
+      },
+      create: {
+        command: ['glab', 'mr', 'create', '--repo', '{repo}', '--source-branch', '{branch}', '--target-branch', '{base}', '--title', '{title}', '--description', '{body}', '--output', 'json'],
+        map: { number: '$.iid', url: '$.web_url' },
+      },
+      squashMerge: { command: ['glab', 'mr', 'merge', '{id}', '--repo', '{repo}', '--squash', '--yes'] },
+    },
+  };
+
+  it('compiles a valid descriptor (commands kept, scalar maps pre-parsed with transforms)', () => {
+    const d = parseCliChangeRequestDescriptor(valid);
+    expect(d.authEnv).toBe('GITLAB_TOKEN');
+    expect(d.routes.create.command).toContain('{title}');
+    expect(d.routes.findForBranch.url).toEqual({
+      segments: [{ kind: 'index', index: 0 }, { kind: 'key', key: 'web_url' }],
+      transforms: [],
+    });
+    expect(d.routes.create.number).toEqual({ segments: [{ kind: 'key', key: 'iid' }], transforms: [] });
+    expect(d.routes.pipelineStatus).toBeUndefined();
+    expect(d.routes.failingJobs).toBeUndefined();
+  });
+
+  it('compiles optional pipelineStatus + single-shot failingJobs (no paginate)', () => {
+    const d = parseCliChangeRequestDescriptor({
+      ...valid,
+      routes: {
+        ...valid.routes,
+        pipelineStatus: {
+          command: ['glab', 'ci', 'status', '--repo', '{repo}', '{id}', '--output', 'json'],
+          statusPath: '$.status | lower',
+          stateMap: { success: 'success', failed: 'failure' },
+        },
+        failingJobs: {
+          command: ['glab', 'ci', 'list', '--repo', '{repo}', '{id}', '--status', 'failed', '--output', 'json'],
+          itemsPath: '$.jobs',
+          map: [{ name: '$.name', logExcerpt: '$.failure_reason | default:(none)' }],
+        },
+      },
+    });
+    expect(d.routes.pipelineStatus?.status.transforms).toEqual([{ kind: 'lower' }]);
+    expect(d.routes.pipelineStatus?.stateMap).toEqual({ success: 'success', failed: 'failure' });
+    expect(d.routes.failingJobs?.itemsPath).toEqual([{ kind: 'key', key: 'jobs' }]);
+    expect(d.routes.failingJobs?.item.logExcerpt.transforms).toEqual([{ kind: 'default', value: '(none)' }]);
+  });
+
+  it('rejects missing required routes, an unknown placeholder, and a reserved authEnv', () => {
+    expect(() =>
+      parseCliChangeRequestDescriptor({ type: 'cli', routes: { findForBranch: valid.routes.findForBranch } }),
+    ).toThrow(/invalid cli change-request provider.*create/);
+    // {id} is not bound at create time (the MR does not exist yet).
+    expect(() =>
+      parseCliChangeRequestDescriptor({
+        ...valid,
+        routes: { ...valid.routes, create: { ...valid.routes.create, command: ['glab', 'mr', 'create', '{id}'] } },
+      }),
+    ).toThrow(/unknown placeholder \{id\}/);
+    expect(() => parseCliChangeRequestDescriptor({ ...valid, authEnv: 'GH_TOKEN' })).toThrow(/reserved/);
   });
 });

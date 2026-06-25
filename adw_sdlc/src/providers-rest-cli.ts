@@ -27,6 +27,7 @@ import {
   evalScalar,
   evalScalarMapping,
   isAllowedHost,
+  type CliChangeRequestDescriptor,
   type CliWorkItemDescriptor,
   type Paginate,
   type PathSegment,
@@ -65,23 +66,26 @@ function parseJson(text: string): unknown {
 }
 
 /**
- * Build a declarative `cli` WorkItemProvider from a validated descriptor.
- *
- * The scoped env is rebuilt per call (cheap; reads the current parent env). It
- * grants only the base allowlist plus the descriptor's one `authEnv`, with
- * GH_TOKEN withheld (`allowGhToken: false`) and deny-prefixed keys dropped by
- * `safeSubprocessEnv`. `captureFn` is an injectable seam for tests; production
- * uses the real synchronous `capture`.
+ * Scoped one-credential command runner shared by the cli providers. The env is
+ * rebuilt per call (cheap; reads the current parent env): the base allowlist plus
+ * the descriptor's single `authEnv`, with GH_TOKEN withheld (`allowGhToken:
+ * false`) and deny-prefixed keys dropped by `safeSubprocessEnv`. `capture()` runs
+ * with no shell, so a bound placeholder value is one verbatim argv token (no
+ * word-splitting / injection). `captureFn` is an injectable seam for tests.
  */
+function makeCliRunner(authEnv: string | undefined, captureFn: CaptureFn) {
+  const scopedEnv = (): Record<string, string> =>
+    safeSubprocessEnv({ allowGhToken: false, extraAllow: authEnv ? [authEnv] : [] });
+  return (command: readonly string[], vars: Record<string, string>): Captured =>
+    captureFn(substituteArgv(command, vars), { env: scopedEnv() });
+}
+
+/** Build a declarative `cli` WorkItemProvider from a validated descriptor. */
 export function createCliWorkItemProvider(
   descriptor: CliWorkItemDescriptor,
   captureFn: CaptureFn = capture,
 ): WorkItemProvider {
-  const scopedEnv = (): Record<string, string> =>
-    safeSubprocessEnv({ allowGhToken: false, extraAllow: descriptor.authEnv ? [descriptor.authEnv] : [] });
-
-  const run = (command: readonly string[], vars: Record<string, string>): Captured =>
-    captureFn(substituteArgv(command, vars), { env: scopedEnv() });
+  const run = makeCliRunner(descriptor.authEnv, captureFn);
 
   return {
     fetch: (ctx: ProviderContext, id) => {
@@ -502,6 +506,105 @@ export function createRestChangeRequestProvider(
       const res = requester.request(routes.squashMerge, { repo: ctx.repo, id: String(id) }, routes.squashMerge.body);
       if (!ok(res)) {
         return { ok: false, error: res.error ?? `merge failed (status ${res.status})` };
+      }
+      return { ok: true, error: null };
+    },
+  };
+}
+
+/**
+ * Build a declarative `cli` ChangeRequestProvider from a validated descriptor.
+ *
+ * The CLI symmetry of {@link createRestChangeRequestProvider}: it shells the
+ * project's forge CLI (`glab mr …`) through the shared scoped one-credential
+ * runner (GH_TOKEN withheld, no shell). `squashMerge` is the merge-authorized
+ * route — bound by the same scoped env as every cli route; the orchestrator keeps
+ * the gating (it merges only after the review/CI gates pass) and all git. A CLI
+ * returns the whole job list per invocation, so `failingJobs` is single-shot (no
+ * pagination). `captureFn` is an injectable seam for tests.
+ */
+export function createCliChangeRequestProvider(
+  descriptor: CliChangeRequestDescriptor,
+  captureFn: CaptureFn = capture,
+): ChangeRequestProvider {
+  const run = makeCliRunner(descriptor.authEnv, captureFn);
+  const routes = descriptor.routes;
+
+  const collectFailingJobs = (ctx: ProviderContext, id: number | string): PipelineJob[] => {
+    const route = routes.failingJobs;
+    if (!route) {
+      return [];
+    }
+    const result = run(route.command, { repo: ctx.repo, id: String(id) });
+    if (result.returncode !== 0) {
+      return [];
+    }
+    const data = parseJson(result.stdout);
+    if (data === null) {
+      return [];
+    }
+    return evalItems(data, route.itemsPath).map((item) => ({
+      name: evalScalarMapping(item, route.item.name),
+      logExcerpt: evalScalarMapping(item, route.item.logExcerpt),
+    }));
+  };
+
+  return {
+    findForBranch: (ctx: ProviderContext, branch) => {
+      const result = run(routes.findForBranch.command, { repo: ctx.repo, branch });
+      if (result.returncode !== 0) {
+        return null;
+      }
+      const data = parseJson(result.stdout);
+      if (data === null) {
+        return null;
+      }
+      return evalScalarMapping(data, routes.findForBranch.url) || null;
+    },
+    create: (ctx: ProviderContext, input: CreateChangeRequestInput): CreateChangeRequestResult => {
+      const result = run(routes.create.command, {
+        repo: ctx.repo,
+        branch: input.branch,
+        base: input.base,
+        title: input.title,
+        body: input.body,
+      });
+      if (result.returncode !== 0) {
+        return { id: null, number: null, url: null, error: result.stderr.trim() || `create failed (exit ${result.returncode})` };
+      }
+      const data = parseJson(result.stdout);
+      if (data === null) {
+        return { id: null, number: null, url: null, error: 'unparseable create response' };
+      }
+      const numberText = evalScalarMapping(data, routes.create.number);
+      const number = numberText !== '' && Number.isFinite(Number(numberText)) ? Number(numberText) : null;
+      const url = evalScalarMapping(data, routes.create.url) || null;
+      const id = number !== null ? String(number) : url;
+      return { id, number, url, error: null };
+    },
+    pipelineStatus: (ctx: ProviderContext, id): PipelineStatus => {
+      const route = routes.pipelineStatus;
+      if (!route) {
+        // No pipeline route configured ⇒ nothing to gate on (treated as green).
+        return { state: 'none', failingJobs: [] };
+      }
+      const result = run(route.command, { repo: ctx.repo, id: String(id) });
+      if (result.returncode !== 0) {
+        return { state: 'unknown', failingJobs: [] };
+      }
+      const data = parseJson(result.stdout);
+      if (data === null) {
+        return { state: 'unknown', failingJobs: [] };
+      }
+      const forgeStatus = evalScalarMapping(data, route.status);
+      const state = route.stateMap[forgeStatus] ?? 'unknown';
+      const failingJobs = state === 'failure' ? collectFailingJobs(ctx, id) : [];
+      return { state, failingJobs };
+    },
+    squashMerge: (ctx: ProviderContext, id): OperationResult => {
+      const result = run(routes.squashMerge.command, { repo: ctx.repo, id: String(id) });
+      if (result.returncode !== 0) {
+        return { ok: false, error: result.stderr.trim() || `merge failed (exit ${result.returncode})` };
       }
       return { ok: true, error: null };
     },
