@@ -113,5 +113,6 @@ hardcoded for security and must not be relaxed by a project pack.
 | [`MEMORY_STACK.md`](./MEMORY_STACK.md) | Decision record for the deferred cross-run memory feature |
 | [`docs/DESIGN-schema-overrides.md`](./docs/DESIGN-schema-overrides.md) | Design proposal for per-phase schema overrides / custom phases (not yet implemented) |
 | [`docs/DESIGN-custom-phase-control-flow.md`](./docs/DESIGN-custom-phase-control-flow.md) | Design for loop/gated custom phases (custom gates + resolve-style loops) |
+| [`docs/DESIGN-provider-plugins.md`](./docs/DESIGN-provider-plugins.md) | Security/sandboxing design pass for provider plugin loading (proposal; not implemented) |
 | [`HANDOVER.md`](./HANDOVER.md) | Session-to-session universalization handover and roadmap |
 | [`docs/examples/`](./docs/examples/) | Example non-HealthTech project packs |
