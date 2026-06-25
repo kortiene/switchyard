@@ -163,8 +163,9 @@ without an explicit security/LLM/API-break review.
 4. **CLI command name `issue`** is documented as a backward-compatible
    GitHub alias and must not be renamed.
 5. **Control-plane env prefixes** are load-bearing in `ENV_DENY_PREFIXES`
-   and the static lint. Canonical env knobs use `ADW_*`; inherited `MX_AGENT_*`
-   aliases remain denied for compatibility. Removing or rebranding a denied
+   and the static lint. Canonical env knobs use `ADW_*`; deprecated
+   compatibility `MX_AGENT_*` aliases remain denied from runner children.
+   Removing or rebranding a denied
    prefix needs a separate security/API-break review.
 6. **State v1 fields** (`issue_number`, `pr_number`, `pr_url`, etc.)
    remain canonical for resume and cross-language interoperability with
@@ -307,7 +308,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 556 tests, 40 files)
+# 3) Full test suite (current: 578 tests, 41 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -1226,6 +1227,39 @@ spawn-crossing check that cannot be replicated in-process.
 Issue class: `feat`. Run mode: native. No kernel/runtime/prompt-pack/config
 change. `npm run verify` stays green (556 tests, 40 files).
 
+## 8y. Live ADW run — issue #8 (chore: normalize handover/env docs after rename)
+
+Docs-only audit + automated regression guard confirming that `HANDOVER.md`,
+`HEALTHTECH_PORT.md`, `PARITY.md`, and `docs/UNIVERSAL.md` present `ADW_*` as the
+canonical env prefix with `MX_AGENT_*` unambiguously as a deprecated compatibility
+alias — never the reverse. All four docs were already compliant by inspection (every
+specific `MX_AGENT_[A-Z]+` name appears in a deny-prefix enumeration, rename/guard
+description, or explicit deprecated-alias annotation — none presents a bare
+`MX_AGENT_*` as the name to use). The deliverable is the repeatable automated guard
+that locks in the invariant so future doc edits cannot silently regress it.
+
+- `adw_sdlc/test/handover-env-docs-normalize.test.ts` (new, +22) — vitest
+  doc-assertion guard. Seven describe blocks: **(1) bare-canonical scan** — no
+  specific `MX_AGENT_[A-Z]+` name in the four docs without framing context
+  (`deprecated`/`legacy`/`alias`/`deny`/`compatibility`/`→`/`ENV_DENY_PREFIXES`/…);
+  **(2) detector self-tests** (fires on bare instructional use, does not fire on
+  wildcard forms or framed lines); **(3) per-doc authority statement** (each doc
+  contains ≥1 canonical-vs-deprecated sentence, pattern-matched); **(4) HANDOVER.md
+  security claim** (``MX_AGENT_*` aliases remain denied from runner children`` +
+  §10 rebranding invariant ``deprecated compatibility `MX_AGENT_*` aliases. Removing
+  either denied…``); **(5) UNIVERSAL.md security claim** (``MX_AGENT_*` keys are
+  withheld from runner children``); **(6) PLAN.md historical banner** (Reading note
+  + `canonicalized under \`ADW_*\`` + deprecated-aliases annotation + denied-from-
+  subprocesses claim — all three assertions must hold so the banner is not removed);
+  **(7) irregular-pair accuracy + `ENV_ALIASES` source-of-truth tie** (no
+  no wrong assume-yes alias, no abbreviated forced-fenced canonical name (including
+  the variant missing `_JSON`), no parity-prefixed forced-fenced legacy alias;
+  detector fires/does-not-fire on each alias from `ENV_ALIASES`; all canonical
+  names `ADW_`-prefixed).
+
+Issue class: `chore`. Run mode: native. No kernel/runtime/prompt-pack/config
+change. `npm run verify` stays green (578 tests, 41 files).
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -1316,8 +1350,8 @@ plausible slices each cross a real boundary:
 2. **Phase preamble wording changes** — LLM-facing prompt content;
    rewording risks behavior drift the suite cannot detect.
 3. **Control-plane env-prefix rebranding** — canonical `ADW_*` names now exist
-   with deprecated `MX_AGENT_*` aliases. Removing either denied prefix still
-   needs a separate security/API-break review.
+   with deprecated compatibility `MX_AGENT_*` aliases. Removing either denied
+   prefix still needs a separate security/API-break review.
 4. **CLI command rename (`issue` → `work-item`)** — documented backward
    compatibility alias; rename would break downstream and the Python
    engine handoff.
@@ -1432,7 +1466,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **556 passing across 40 files**
+Test count baseline after this session: **578 passing across 41 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1447,7 +1481,8 @@ the unused-symbol typecheck guards and refactored 4 tests onto `withScopedEnv`;
 +4 for the parity hard-failure-rate harness — §8r, +2 for the force-fenced
 measurement mode — §8s, +16 for the observed-live ledger + cross-document sync —
 §8u, +35 for the parity-rate-core extraction — §8v, +6 for the env-naming
-drift guard — §8w, +10 for the live secret-boundary audit scaffold — §8x). The §8v refactor (issue #5
+drift guard — §8w, +10 for the live secret-boundary audit scaffold — §8x,
++22 for the env-naming docs regression guard — §8y). The §8v refactor (issue #5
 — split parity-rate classification from rendering) added `tools/parity-rate-core.ts`
 (pure core module, no new test file) and extended `test/parity-rate.test.ts` with
 35 direct unit tests of the extracted core (39 tests total in the file, up from 4
