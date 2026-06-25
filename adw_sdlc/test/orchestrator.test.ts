@@ -993,6 +993,44 @@ describe('run() integration', () => {
     expect(readdirSync(tmp)).toEqual([]); // no workspace minted
   });
 
+  it('threads timeoutMs from RunOptions into every runAgentPhase call (Drill 1 path)', async () => {
+    const seen: number[] = [];
+    const deps = testDeps({
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
+      runAgentPhase: agentStub(PHASE_RESULTS, (opts) => {
+        seen.push(opts.timeoutMs ?? -1);
+        if (opts.phase === 'review') {
+          mkdirSync(opts.state.workspace(), { recursive: true });
+          writeFileSync(commitMessagePath(opts.state), 'feat: x\n\ncloses #5', 'utf8');
+          writeFileSync(prBodyPath(opts.state), 'b', 'utf8');
+        }
+      }),
+    });
+    const rc = await run(5, createMockRunner(), { yes: true, noProgress: true, timeoutMs: 30_000 }, deps);
+    expect(rc).toBe(0);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((ms) => ms === 30_000)).toBe(true);
+  });
+
+  it('threads maxBudgetUsd from RunOptions into every runAgentPhase call (Drill 2 path)', async () => {
+    const seen: Array<number | undefined> = [];
+    const deps = testDeps({
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
+      runAgentPhase: agentStub(PHASE_RESULTS, (opts) => {
+        seen.push(opts.maxBudgetUsd);
+        if (opts.phase === 'review') {
+          mkdirSync(opts.state.workspace(), { recursive: true });
+          writeFileSync(commitMessagePath(opts.state), 'feat: x\n\ncloses #5', 'utf8');
+          writeFileSync(prBodyPath(opts.state), 'b', 'utf8');
+        }
+      }),
+    });
+    const rc = await run(5, createMockRunner(), { yes: true, noProgress: true, maxBudgetUsd: 2.5 }, deps);
+    expect(rc).toBe(0);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((usd) => usd === 2.5)).toBe(true);
+  });
+
   it('rejects a misconfigured custom phase at startup, before the dry-run plan prints', async () => {
     // 'audit' is registered and in the chain but has no template/schema. The
     // startup preflight runs even under --dry-run (which doubles as a config
