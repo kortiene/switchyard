@@ -26,22 +26,11 @@ import { shellSplit } from './common.js';
 import { DEFAULT_ADW_CONFIG, getAdwConfig, isClosedWorkItemState, type AdwConfig } from './config.js';
 import { AdwError } from './errors.js';
 import { safeSubprocessEnv } from './env.js';
-import {
-  assumeYes,
-  capture,
-  confirm,
-  detectRepo,
-  issueState,
-  note,
-  postProgress,
-  resolveGhBin,
-  workingTreeDirty,
-  type Captured,
-} from './exec.js';
+import { assumeYes, capture, confirm, note, postProgress, type Captured } from './exec.js';
 import * as git from './git.js';
 import { prNumberFromUrl } from './git.js';
 import type { AgentRunner } from './invoker.js';
-import { deriveBranch, fetchIssue, setStatus, type WorkItemContext } from './work-item.js';
+import { deriveBranch, type WorkItemContext } from './work-item.js';
 import {
   commitMessagePath,
   composePhasePrompt,
