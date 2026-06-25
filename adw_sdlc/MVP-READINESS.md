@@ -81,9 +81,11 @@ npm run parity:rate -- agents/
   once: a real nudge-retry that recovers, a `--timeout`-tripped fast-fail, a tiny
   `--max-budget` cap, and a kill-then-`--resume`. All are "mocked ✅"; none has
   been seen live.
-- [ ] ❌ **"Mocked ✅ → observed live?" ledger.** For each of PARITY's 12 boxes,
-  has it been seen live even once? Today almost none have. That ledger is the real
-  readiness dashboard; #332 is proof the mocks under-specify reality.
+- [ ] 🔧 **"Mocked ✅ → observed live?" ledger.** For each of PARITY's 13
+  Section-10 guarantees, has it been seen live even once? The dashboard lives in
+  [`docs/OBSERVED-LIVE-LEDGER.md`](./docs/OBSERVED-LIVE-LEDGER.md); today almost
+  every row is still `⏳` (seeded from PR #331 / run `007fd5ba`). #332 is proof the
+  mocks under-specify reality.
 - [ ] ⏳ **Operational basics** for an agent that spends money and edits repos: a
   bounded cost envelope (~$35/run is real) with the `maxBudgetUsd` ceiling +
   kill-switch confirmed live; the secret boundary asserted once on a *real*

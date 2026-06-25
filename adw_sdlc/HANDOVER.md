@@ -1109,6 +1109,34 @@ comparative parity bar needs (see MVP-READINESS.md §1 and
 `tools/parity-rate.ts`). Issue class: `docs`. No kernel change; no code paths
 change; `npm run verify` stays green.
 
+## 8u. Live ADW run — issue #3 (feat: MVP live-run observation ledger, native)
+
+Issue #3 from the live-run batch: a native ADW run that builds the "mocked ✅ → observed live?" readiness dashboard.
+
+- `adw_sdlc/docs/OBSERVED-LIVE-LEDGER.md` (new) — the live-counterpart to
+  `PARITY.md`: one row per Section-10 guarantee, each carrying an explicit
+  observed-live status (`✅`/`🟡`/`⏳`/`N/A`). Seeded conservatively from the one
+  prior live `claude` run (Issue #304 → PR #331, run `007fd5ba`, ≈$34.76).
+  Headline: **6 `✅`, 4 `🟡`, 2 `⏳`, 1 `N/A`** — exactly the honest picture of
+  where live coverage stands after a single run (load-bearing security/failure
+  guarantees #5 and #8 remain owed).
+- `adw_sdlc/MVP-READINESS.md` (§1 only) — updated the "Mocked ✅ → observed
+  live? ledger" bullet: links `docs/OBSERVED-LIVE-LEDGER.md`, reconciles "12
+  boxes" → "13 Section-10 guarantees", and flips `❌` → `🔧` (the ledger artifact
+  now exists; the gate itself — every row observed-live — is still open).
+- `adw_sdlc/test/observed-live-ledger-doc.test.ts` (new, +16) — focused
+  doc-assertion test encoding all acceptance criteria: ledger non-empty, all 13
+  guarantees present, each row has an explicit status token, legend vocabulary
+  present, seed evidence cited (`007fd5ba`/`#331`), required sections present,
+  last-updated marker present, headline tally sums to 13 and matches the actual
+  column, MVP-READINESS has a proper hyperlink to the ledger, and a cross-document
+  sync block that parses PARITY.md Section 10 live to enforce one-to-one row
+  count, name presence, and row order. `npm run verify` stays green.
+
+Issue class: `feat`. Run mode: native. No kernel/runtime/prompt-pack/config change.
+Pure docs + one doc-assertion test. `docs/README.md` documentation map updated to
+include the new ledger. `docs/LIVE-RUN-BATCH.md` status updated to reflect #3 is done.
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -1315,7 +1343,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **466 passing across 35 files**
+Test count baseline after this session: **482 passing across 36 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1328,7 +1356,8 @@ declarative `cli` change-request provider — §8o; the §8p and §8q housekeepi
 passes added no tests — §8p removed dead code, §8q removed dead imports + enabled
 the unused-symbol typecheck guards and refactored 4 tests onto `withScopedEnv`;
 +4 for the parity hard-failure-rate harness — §8r, +2 for the force-fenced
-measurement mode — §8s). The session left
+measurement mode — §8s, +16 for the observed-live ledger + cross-document sync —
+§8u). The session left
 no build artifact, no temporary files, and no untracked binary churn. The ADW
 orchestrator code path still runs no `git`/`gh` itself; the commits and the local
 merge to `main` recorded in §1 were performed only at the user's explicit request
