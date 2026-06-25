@@ -474,9 +474,43 @@ palette.
 - [x] Behaviour stays read-only and safe; no new automatic execution.
 - [x] Extension typechecks against installed Pi types; repo gates stay green.
 
+## Final polish pass (implemented)
+
+A closing pass on lifecycle, discoverability, and resilience — no behaviour
+regressions, still read-only by default.
+
+- **Session cleanup.** A `session_shutdown` hook releases every UI surface the
+  extension installs — `clear(ctx)` (the two widgets + status) and
+  `ctx.ui.setFooter(undefined)` to restore the built-in footer — guarded by
+  `ctx.hasUI`. (No timers/watchers exist; the autocomplete provider is
+  session-scoped and torn down by Pi.)
+- **Palette keybinding.** `pi.registerShortcut("ctrl+shift+a", …)` opens the
+  same palette as `/adw-menu`. Both call one shared `openMenu(ctx)` closure, so
+  the command and the shortcut can never drift; the shortcut is surfaced in the
+  below-editor hint (`/adw-menu  palette · ctrl+shift+a`).
+- **Argument completions.** `getArgumentCompletions` gives Tab-completion for
+  `/adw`, `/adw-footer`, `/adw-issues` (`on|off|toggle…`) and `/adw-check`
+  (`typecheck|lint-env|pack-check|test|build|all`).
+- **Error resilience.** A `safely(ctx, label, fn)` wrapper turns a thrown error
+  in any interactive flow (`runsFlow`/`configFlow`/`mvpFlow`/`openMenu`) into a
+  `notify(…, "error")` instead of crashing the extension.
+- **Cleanup.** Dropped the unused `pi` parameter from `runsFlow`.
+
+### Acceptance criteria
+
+- [x] Closing a session leaves no ADW widgets/status/footer behind.
+- [x] `ctrl+shift+a` opens the same palette as `/adw-menu`; both dispatch
+      identically (shared `openMenu`).
+- [x] Tab-completion offers the documented arguments for the listed commands.
+- [x] No new ambient execution/network; `/adw-run` still confirms before any
+      mutation.
+- [x] Extension typechecks against installed Pi types.
+
 ## Current status
 
-**All phases (1–5) are implemented.** Commands: `/adw`, `/adw-refresh`,
+**All phases (1–5) are implemented**, plus a final polish pass (session
+cleanup, a `ctrl+shift+a` palette shortcut, argument completions, and
+error-resilient flows). Commands: `/adw`, `/adw-refresh`,
 `/adw-menu`, `/adw-runs`, `/adw-config`, `/adw-mvp`, `/adw-dry-run`,
 `/adw-check`, `/adw-run` (guarded), `/adw-footer`, `/adw-issues`.
 

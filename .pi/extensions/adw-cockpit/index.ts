@@ -901,7 +901,7 @@ function commandHintWidget() {
 		const cmd = (name: string, desc: string) =>
 			`${theme.fg("dim", "▸ ")}${theme.bold(theme.fg("accent", name))} ${theme.fg("dim", desc)}`;
 		const hint = [
-			cmd("/adw-menu", "palette"),
+			cmd("/adw-menu", "palette \u00b7 ctrl+shift+a"),
 			cmd("/adw-runs", "inspect"),
 			cmd("/adw-config", "config"),
 			cmd("/adw-mvp", "readiness"),
@@ -1113,6 +1113,12 @@ function parseWorkItemId(args: string): string | null {
 	return /^\d+$/.test(id) ? id : null;
 }
 
+/** Tab-completion for a command's fixed option list, filtered by the typed prefix. */
+function argCompletions(options: readonly string[], prefix: string): AutocompleteItem[] {
+	const p = prefix.trim().toLowerCase();
+	return options.filter((o) => o.startsWith(p)).map((o) => ({ value: o, label: o }));
+}
+
 // --- Phase 5: workflow assistant --------------------------------------------
 
 /** MVP-readiness docs summarised by the /adw-mvp panel. */
@@ -1167,80 +1173,103 @@ function buildMvpSections(cwd: string): BrowserSection[] {
 
 // --- shared flows (callable from both a command and the /adw-menu palette) ---
 
+/** Human-readable message for a caught unknown error. */
+function errText(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Run an interactive flow, surfacing any thrown error as a notification rather
+ * than letting it crash the extension (an overlay/IO failure must not take the
+ * cockpit down).
+ */
+async function safely(ctx: ExtensionContext, label: string, fn: () => Promise<void>): Promise<void> {
+	try {
+		await fn();
+	} catch (err) {
+		ctx.ui.notify(`${label} failed: ${errText(err)}`, "error");
+	}
+}
+
 async function configFlow(ctx: ExtensionContext): Promise<void> {
-	// parseJsonObject returns null for a missing OR malformed file; the builder
-	// turns that into a single readable error section.
-	const config = parseJsonObject(join(ctx.cwd, ".adw", "config.json"));
-	const sections = buildConfigSections(config, ctx.cwd);
-	if (ctx.mode !== "tui") {
-		if (!config) {
-			ctx.ui.notify("No readable .adw/config.json (missing or malformed).", "warning");
+	await safely(ctx, "Inspect config", async () => {
+		// parseJsonObject returns null for a missing OR malformed file; the builder
+		// turns that into a single readable error section.
+		const config = parseJsonObject(join(ctx.cwd, ".adw", "config.json"));
+		const sections = buildConfigSections(config, ctx.cwd);
+		if (ctx.mode !== "tui") {
+			if (!config) {
+				ctx.ui.notify("No readable .adw/config.json (missing or malformed).", "warning");
+				return;
+			}
+			const warnings = sections.filter((s) => s.warn).map((s) => s.title);
+			ctx.ui.notify(
+				`ADW config: ${sections.length} sections (${sections.map((s) => s.title).join(", ")}).` +
+					`${warnings.length ? ` Warnings: ${warnings.join(", ")}.` : ""} Open in TUI to browse.`,
+				warnings.length ? "warning" : "info",
+			);
 			return;
 		}
-		const warnings = sections.filter((s) => s.warn).map((s) => s.title);
-		ctx.ui.notify(
-			`ADW config: ${sections.length} sections (${sections.map((s) => s.title).join(", ")}).` +
-				`${warnings.length ? ` Warnings: ${warnings.join(", ")}.` : ""} Open in TUI to browse.`,
-			warnings.length ? "warning" : "info",
-		);
-		return;
-	}
-	await showSectionBrowser(ctx, "ADW CONFIG", "\u00b7 .adw/config.json", sections);
+		await showSectionBrowser(ctx, "ADW CONFIG", "\u00b7 .adw/config.json", sections);
+	});
 }
 
 async function mvpFlow(ctx: ExtensionContext): Promise<void> {
-	const sections = buildMvpSections(ctx.cwd);
-	if (ctx.mode !== "tui") {
-		const summary = sections.map((s) => `${s.title} ${s.summary}`).join(" \u00b7 ");
-		ctx.ui.notify(`ADW MVP readiness \u2014 ${summary}. Open in TUI to browse.`, sections.some((s) => s.warn) ? "warning" : "info");
-		return;
-	}
-	await showSectionBrowser(ctx, "ADW MVP READINESS", "\u00b7 adw_sdlc/", sections);
+	await safely(ctx, "MVP readiness", async () => {
+		const sections = buildMvpSections(ctx.cwd);
+		if (ctx.mode !== "tui") {
+			const summary = sections.map((s) => `${s.title} ${s.summary}`).join(" \u00b7 ");
+			ctx.ui.notify(`ADW MVP readiness \u2014 ${summary}. Open in TUI to browse.`, sections.some((s) => s.warn) ? "warning" : "info");
+			return;
+		}
+		await showSectionBrowser(ctx, "ADW MVP READINESS", "\u00b7 adw_sdlc/", sections);
+	});
 }
 
-async function runsFlow(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
-	// Non-TUI UI modes (rpc/json/print) cannot host a custom overlay; fall back
-	// to a one-line summary notification instead of failing.
-	if (ctx.mode !== "tui") {
-		const runs = listRuns(ctx.cwd);
-		if (runs.length === 0) {
-			ctx.ui.notify("No ADW runs found under agents/", "info");
-			return;
-		}
-		const latest = runs[0]!;
-		ctx.ui.notify(
-			`ADW runs: ${runs.length}; latest ${latest.adwId}${latest.issueNumber ? ` (#${latest.issueNumber})` : ""}. Open in TUI to browse.`,
-			"info",
-		);
-		return;
-	}
-	// TUI flow: list -> detail -> (optional) insert resume command. Re-reads runs
-	// each pass so "Back to run list" reflects the latest state.
-	void pi;
-	for (;;) {
-		const runs = listRuns(ctx.cwd);
-		if (runs.length === 0) {
-			ctx.ui.notify("No ADW runs found under agents/", "info");
-			return;
-		}
-		const runId = await pickRun(ctx, runs);
-		if (!runId) return;
-		const run = runs.find((r) => r.adwId === runId);
-		if (!run) return;
-		const action = await showRunDetail(ctx, run);
-		if (action === "back") continue;
-		if (action === "insert") {
-			const cmd = resumeCommandFor(run);
-			if (!cmd) {
-				ctx.ui.notify(`Run ${run.adwId} has no recorded issue number; cannot build a resume command`, "warning");
+async function runsFlow(ctx: ExtensionContext): Promise<void> {
+	await safely(ctx, "Browse runs", async () => {
+		// Non-TUI UI modes (rpc/json/print) cannot host a custom overlay; fall back
+		// to a one-line summary notification instead of failing.
+		if (ctx.mode !== "tui") {
+			const runs = listRuns(ctx.cwd);
+			if (runs.length === 0) {
+				ctx.ui.notify("No ADW runs found under agents/", "info");
 				return;
 			}
-			ctx.ui.setEditorText(cmd);
-			ctx.ui.notify("Resume command inserted into the editor (not executed)", "info");
+			const latest = runs[0]!;
+			ctx.ui.notify(
+				`ADW runs: ${runs.length}; latest ${latest.adwId}${latest.issueNumber ? ` (#${latest.issueNumber})` : ""}. Open in TUI to browse.`,
+				"info",
+			);
 			return;
 		}
-		return;
-	}
+		// TUI flow: list -> detail -> (optional) insert resume command. Re-reads runs
+		// each pass so "Back to run list" reflects the latest state.
+		for (;;) {
+			const runs = listRuns(ctx.cwd);
+			if (runs.length === 0) {
+				ctx.ui.notify("No ADW runs found under agents/", "info");
+				return;
+			}
+			const runId = await pickRun(ctx, runs);
+			if (!runId) return;
+			const run = runs.find((r) => r.adwId === runId);
+			if (!run) return;
+			const action = await showRunDetail(ctx, run);
+			if (action === "back") continue;
+			if (action === "insert") {
+				const cmd = resumeCommandFor(run);
+				if (!cmd) {
+					ctx.ui.notify(`Run ${run.adwId} has no recorded issue number; cannot build a resume command`, "warning");
+					return;
+				}
+				ctx.ui.setEditorText(cmd);
+				ctx.ui.notify("Resume command inserted into the editor (not executed)", "info");
+				return;
+			}
+			return;
+		}
+	});
 }
 
 // --- command cores (flag-free; callers handle widget/footer refresh) --------
@@ -1475,73 +1504,17 @@ export default function adwCockpitExtension(pi: ExtensionAPI): void {
 		if (footerEnabled) applyFooter(ctx, true);
 	};
 
-	pi.on("session_start", (_event, ctx) => {
-		if (enabled) refresh(ctx);
-		if (footerEnabled) applyFooter(ctx, true);
-		// Lazy, opt-in #issue autocomplete (TUI only; no network until enabled + '#').
-		if (ctx.mode === "tui") setupIssueAutocomplete(pi, ctx, () => issuesEnabled);
-	});
-
-	pi.on("agent_end", (_event, ctx) => postCmd(ctx));
-
-	pi.registerCommand("adw", {
-		description: "Toggle the read-only ADW Cockpit widget (args: on/show/off/hide/toggle)",
-		handler: async (args, ctx) => {
-			const action = args.trim().toLowerCase();
-			if (action === "on" || action === "show") enabled = true;
-			else if (action === "off" || action === "hide") enabled = false;
-			else if (action === "" || action === "toggle") enabled = !enabled;
-			else {
-				ctx.ui.notify("Usage: /adw [on|show|off|hide|toggle]", "warning");
-				return;
-			}
-
-			if (enabled) {
-				refresh(ctx);
-				ctx.ui.notify("ADW Cockpit shown", "info");
-			} else {
-				clear(ctx);
-				ctx.ui.notify("ADW Cockpit hidden", "info");
-			}
-		},
-	});
-
-	pi.registerCommand("adw-refresh", {
-		description: "Refresh the read-only ADW Cockpit widget",
-		handler: async (_args, ctx) => {
-			enabled = true;
-			refresh(ctx);
-			if (footerEnabled) applyFooter(ctx, true);
-			ctx.ui.notify("ADW Cockpit refreshed", "info");
-		},
-	});
-
-	pi.registerCommand("adw-footer", {
-		description: "Toggle the compact ADW custom footer",
-		handler: async (args, ctx) => {
-			const action = args.trim().toLowerCase();
-			if (action === "on" || action === "show") footerEnabled = true;
-			else if (action === "off" || action === "hide") footerEnabled = false;
-			else if (action === "" || action === "toggle") footerEnabled = !footerEnabled;
-			else {
-				ctx.ui.notify("Usage: /adw-footer [on|show|off|hide|toggle]", "warning");
-				return;
-			}
-			applyFooter(ctx, footerEnabled);
-			ctx.ui.notify(footerEnabled ? "ADW footer enabled" : "ADW footer restored to default", "info");
-		},
-	});
-
-	pi.registerCommand("adw-menu", {
-		description: "Open the ADW command palette",
-		handler: async (_args, ctx) => {
-			if (ctx.mode !== "tui") {
-				ctx.ui.notify(
-					"ADW: /adw /adw-refresh /adw-runs /adw-config /adw-mvp /adw-dry-run <id> /adw-check all /adw-run <id> /adw-footer /adw-issues",
-					"info",
-				);
-				return;
-			}
+	// Open the palette and dispatch the chosen action. Shared by the /adw-menu
+	// command and the ctrl+shift+a shortcut so the two paths never drift.
+	const openMenu = async (ctx: ExtensionContext): Promise<void> => {
+		if (ctx.mode !== "tui") {
+			ctx.ui.notify(
+				"ADW: /adw /adw-refresh /adw-runs /adw-config /adw-mvp /adw-dry-run <id> /adw-check all /adw-run <id> /adw-footer /adw-issues",
+				"info",
+			);
+			return;
+		}
+		await safely(ctx, "ADW menu", async () => {
 			const action = await pickMenuAction(ctx, footerEnabled);
 			if (!action) return;
 			switch (action) {
@@ -1551,7 +1524,7 @@ export default function adwCockpitExtension(pi: ExtensionAPI): void {
 					ctx.ui.notify("ADW Cockpit refreshed", "info");
 					break;
 				case "runs":
-					await runsFlow(pi, ctx);
+					await runsFlow(ctx);
 					break;
 				case "config":
 					await configFlow(ctx);
@@ -1591,7 +1564,83 @@ export default function adwCockpitExtension(pi: ExtensionAPI): void {
 					ctx.ui.notify(footerEnabled ? "ADW footer enabled" : "ADW footer restored to default", "info");
 					break;
 			}
+		});
+	};
+
+	pi.on("session_start", (_event, ctx) => {
+		if (enabled) refresh(ctx);
+		if (footerEnabled) applyFooter(ctx, true);
+		// Lazy, opt-in #issue autocomplete (TUI only; no network until enabled + '#').
+		if (ctx.mode === "tui") setupIssueAutocomplete(pi, ctx, () => issuesEnabled);
+	});
+
+	pi.on("agent_end", (_event, ctx) => postCmd(ctx));
+
+	// Release every UI surface this extension installs when the session ends.
+	pi.on("session_shutdown", (_event, ctx) => {
+		if (!ctx.hasUI) return;
+		clear(ctx); // widgets + status
+		ctx.ui.setFooter(undefined); // restore the built-in footer
+	});
+
+	pi.registerShortcut("ctrl+shift+a", {
+		description: "Open the ADW menu",
+		handler: (ctx) => openMenu(ctx),
+	});
+
+	pi.registerCommand("adw", {
+		description: "Toggle the read-only ADW Cockpit widget (args: on/show/off/hide/toggle)",
+		getArgumentCompletions: (prefix) => argCompletions(["on", "off", "toggle", "show", "hide"], prefix),
+		handler: async (args, ctx) => {
+			const action = args.trim().toLowerCase();
+			if (action === "on" || action === "show") enabled = true;
+			else if (action === "off" || action === "hide") enabled = false;
+			else if (action === "" || action === "toggle") enabled = !enabled;
+			else {
+				ctx.ui.notify("Usage: /adw [on|show|off|hide|toggle]", "warning");
+				return;
+			}
+
+			if (enabled) {
+				refresh(ctx);
+				ctx.ui.notify("ADW Cockpit shown", "info");
+			} else {
+				clear(ctx);
+				ctx.ui.notify("ADW Cockpit hidden", "info");
+			}
 		},
+	});
+
+	pi.registerCommand("adw-refresh", {
+		description: "Refresh the read-only ADW Cockpit widget",
+		handler: async (_args, ctx) => {
+			enabled = true;
+			refresh(ctx);
+			if (footerEnabled) applyFooter(ctx, true);
+			ctx.ui.notify("ADW Cockpit refreshed", "info");
+		},
+	});
+
+	pi.registerCommand("adw-footer", {
+		description: "Toggle the compact ADW custom footer",
+		getArgumentCompletions: (prefix) => argCompletions(["on", "off", "toggle", "show", "hide"], prefix),
+		handler: async (args, ctx) => {
+			const action = args.trim().toLowerCase();
+			if (action === "on" || action === "show") footerEnabled = true;
+			else if (action === "off" || action === "hide") footerEnabled = false;
+			else if (action === "" || action === "toggle") footerEnabled = !footerEnabled;
+			else {
+				ctx.ui.notify("Usage: /adw-footer [on|show|off|hide|toggle]", "warning");
+				return;
+			}
+			applyFooter(ctx, footerEnabled);
+			ctx.ui.notify(footerEnabled ? "ADW footer enabled" : "ADW footer restored to default", "info");
+		},
+	});
+
+	pi.registerCommand("adw-menu", {
+		description: "Open the ADW command palette (also: ctrl+shift+a)",
+		handler: async (_args, ctx) => openMenu(ctx),
 	});
 
 	pi.registerCommand("adw-dry-run", {
@@ -1622,6 +1671,7 @@ export default function adwCockpitExtension(pi: ExtensionAPI): void {
 
 	pi.registerCommand("adw-check", {
 		description: "Run an explicit ADW package check: typecheck | lint-env | pack-check | test | build | all",
+		getArgumentCompletions: (prefix) => argCompletions(["typecheck", "lint-env", "pack-check", "test", "build", "all"], prefix),
 		handler: async (args, ctx) => {
 			await execChecks(pi, ctx, args.trim() || "typecheck");
 			postCmd(ctx);
@@ -1645,12 +1695,13 @@ export default function adwCockpitExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("adw-runs", {
 		description: "Browse recent ADW runs (read-only); can insert a resume command into the editor",
 		handler: async (_args, ctx) => {
-			await runsFlow(pi, ctx);
+			await runsFlow(ctx);
 		},
 	});
 
 	pi.registerCommand("adw-issues", {
 		description: "Toggle #issue autocomplete (uses gh + the network when on)",
+		getArgumentCompletions: (prefix) => argCompletions(["on", "off", "toggle"], prefix),
 		handler: async (args, ctx) => {
 			const action = args.trim().toLowerCase();
 			if (action === "on" || action === "show") issuesEnabled = true;
