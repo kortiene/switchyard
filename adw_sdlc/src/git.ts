@@ -47,11 +47,6 @@ function emit(cmd: readonly string[], dryRun: boolean): GitResult | null {
   return null;
 }
 
-/** Return the current git branch name (empty string if undeterminable). */
-export function currentBranch(): string {
-  return capture(['git', 'rev-parse', '--abbrev-ref', 'HEAD']).stdout.trim();
-}
-
 /** Fetch origin and switch to `branch`, creating it from origin/<base>. */
 export function createOrCheckoutBranch(branch: string, base: string, dryRun = false): GitResult {
   if (dryRun) {
