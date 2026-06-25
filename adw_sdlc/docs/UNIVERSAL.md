@@ -212,6 +212,50 @@ HTTP. It reuses the same rest base (`baseUrl`/`allowedHosts`/`authEnv`/
   gates pass) and all git (branch/commit/push stay the `git` provider). A
   provider never receives `GH_TOKEN` or raw git/gh authority.
 
+### Declarative `cli` change requests (no code)
+
+The **CLI symmetry** of the rest change-request provider: drive the change-request
+lifecycle through a forge CLI (`glab mr …`) by describing command templates +
+field maps, instead of HTTP routes. Same field grammar (scalars carry transforms;
+`failingJobs` maps an array via `itemsPath` + a one-element item template). It
+shells the CLI through the same scoped one-credential env every `cli` route uses
+(`authEnv` only, **GH_TOKEN withheld**, no shell — so a bound `{…}` value is one
+verbatim argv token):
+
+```jsonc
+"providers": {
+  "changeRequests": {
+    "type": "cli",
+    "authEnv": "GITLAB_TOKEN",
+    "routes": {
+      "findForBranch": { "command": ["glab","mr","list","--repo","{repo}","--source-branch","{branch}","-F","json"],
+                         "map": { "url": "$[0].web_url" } },
+      "create": { "command": ["glab","mr","create","--repo","{repo}","-b","{branch}","-t","{base}","--title","{title}","--description","{body}","-F","json"],
+                  "map": { "number": "$.iid", "url": "$.web_url" } },
+      "squashMerge": { "command": ["glab","mr","merge","{id}","--repo","{repo}","--squash","--yes"] },
+      "pipelineStatus": { "command": ["glab","ci","status","--repo","{repo}","{id}","-F","json"],
+                          "statusPath": "$.status | lower", "stateMap": { "success": "success", "failed": "failure" } },
+      "failingJobs": { "command": ["glab","ci","list","--repo","{repo}","{id}","--status","failed","-F","json"],
+                       "itemsPath": "$.jobs", "map": [ { "name": "$.name", "logExcerpt": "$.failure_reason | default:" } ] }
+    }
+  }
+}
+```
+
+- `findForBranch`/`create`/`squashMerge` are required; `pipelineStatus`/
+  `failingJobs` are optional. Placeholders per route: `{repo,branch}` (find),
+  `{repo,branch,base,title,body}` (create), `{repo,id}` (merge/pipeline/jobs) —
+  `{id}` is intentionally **not** bound at create time.
+- `create` maps `number`/`url` (id = number when present, else the url);
+  `pipelineStatus.stateMap` maps the forge status onto `CiState`; `failingJobs` is
+  **single-shot** (a CLI returns the whole list per invocation — no pagination),
+  populated only when the pipeline is red.
+- **`squashMerge` is the merge-authorized route** — same scoped one-credential
+  boundary as every `cli` route; the orchestrator keeps the gating and all git,
+  and the provider never receives `GH_TOKEN`. The trust is exactly what the `cli`
+  work-item provider already extends (running the configured forge CLI with the
+  user's scoped forge token).
+
 ### Declarative provider primitives (step 2.5)
 
 Three bounded primitives extend the declarative driver while staying **data, not

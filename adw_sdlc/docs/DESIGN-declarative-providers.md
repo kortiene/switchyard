@@ -322,8 +322,15 @@ imports nothing from these.
    same host allowlist + https + scoped credential as every rest route.
    `squashMerge` is bound by those same checks; the orchestrator still owns the
    gating and all git. **pipelineStatus** is a simple forge-status→`CiState`
-   `stateMap` with empty `failingJobs` (job-log extraction deferred); a `cli`
-   change-request provider is a symmetric follow-up (rest covers the forges).
+   `stateMap`; `failingJobs` job-log extraction landed in step 2.5b (`rest`,
+   paginated) and is also covered by the `cli` provider below (single-shot).
+4. **`cli` `ChangeRequestProvider`. ✅ DONE** (`HANDOVER.md` §8o). The CLI
+   symmetry of 2c: `findForBranch`/`create`/`squashMerge` (required) + optional
+   `pipelineStatus`/`failingJobs` driven by forge-CLI command templates through
+   the same scoped one-credential env (GH_TOKEN withheld, no shell). `failingJobs`
+   is single-shot (a CLI returns the whole list per invocation, so no pagination).
+   `squashMerge` is the merge-authorized route under that same boundary; the
+   orchestrator keeps the gating and all git.
 
 ## 13. Testing strategy
 

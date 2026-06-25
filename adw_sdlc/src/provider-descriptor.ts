@@ -747,3 +747,120 @@ export function parseRestChangeRequestDescriptor(slice: unknown): RestChangeRequ
   }
   return { ...base, routes };
 }
+
+// ── cli change-request descriptor ────────────────────────────────────────────
+// The CLI symmetry of the rest change-request path: a project drives the change-
+// request lifecycle through its forge CLI (`glab mr …`) by describing the command
+// templates + field maps, instead of HTTP routes. Same field grammar (scalars
+// carry transforms; `failingJobs` maps an array via `itemsPath` + a one-element
+// item template — single-shot, since a CLI returns the whole list per invocation,
+// so there is no `paginate` here). `squashMerge` is the merge-authorized route;
+// it shares the scoped one-credential env (GH_TOKEN withheld) and the no-shell
+// `capture()` boundary every cli route already uses (§8k) — the orchestrator
+// keeps the gating and all git, and the provider never receives GH_TOKEN.
+
+const rawCliCrFindRoute = z
+  .object({ command: z.array(z.string().min(1)).min(1), map: z.object({ url: z.string().min(1) }).strict() })
+  .strict();
+const rawCliCrCreateRoute = z
+  .object({
+    command: z.array(z.string().min(1)).min(1),
+    map: z.object({ number: z.string().min(1), url: z.string().min(1) }).strict(),
+  })
+  .strict();
+const rawCliCrPipelineRoute = z
+  .object({
+    command: z.array(z.string().min(1)).min(1),
+    statusPath: z.string().min(1),
+    stateMap: z.record(z.string(), z.enum(['success', 'failure', 'pending', 'none', 'unknown'])),
+  })
+  .strict();
+const rawCliCrFailingJobsRoute = z
+  .object({
+    command: z.array(z.string().min(1)).min(1),
+    itemsPath: z.string().min(1),
+    map: z.array(z.object({ name: z.string().min(1), logExcerpt: z.string().min(1) }).strict()).length(1),
+  })
+  .strict();
+
+const RawCliChangeRequestSchema = z
+  .object({
+    authEnv: z.string().min(1).optional(),
+    routes: z
+      .object({
+        findForBranch: rawCliCrFindRoute,
+        create: rawCliCrCreateRoute,
+        squashMerge: rawCommandRoute,
+        pipelineStatus: rawCliCrPipelineRoute.optional(),
+        failingJobs: rawCliCrFailingJobsRoute.optional(),
+      })
+      .strict(),
+  })
+  .strict();
+
+/** A validated, compiled cli change-request descriptor (commands + maps pre-parsed). */
+export interface CliChangeRequestDescriptor {
+  authEnv?: string;
+  routes: {
+    findForBranch: { command: string[]; url: ScalarMapping };
+    create: { command: string[]; number: ScalarMapping; url: ScalarMapping };
+    squashMerge: { command: string[] };
+    pipelineStatus?: { command: string[]; status: ScalarMapping; stateMap: Record<string, CiState> };
+    failingJobs?: { command: string[]; itemsPath: PathSegment[]; item: { name: ScalarMapping; logExcerpt: ScalarMapping } };
+  };
+}
+
+/**
+ * Validate + compile the `cli` change-request descriptor from the
+ * providers.changeRequests config slice. Throws a loud AdwError on any shape,
+ * grammar, placeholder, or credential violation — run-start fail-closed (so a
+ * --dry-run checks it too). Reuses the same CR placeholder sets as the rest path.
+ */
+export function parseCliChangeRequestDescriptor(slice: unknown): CliChangeRequestDescriptor {
+  const obj = isRecord(slice) ? slice : {};
+  const parsed = RawCliChangeRequestSchema.safeParse({ authEnv: obj['authEnv'], routes: obj['routes'] });
+  if (!parsed.success) {
+    throw new AdwError(
+      `invalid cli change-request provider: ${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
+    );
+  }
+  const raw = parsed.data;
+  if (raw.authEnv !== undefined) {
+    assertSafeAuthEnv(raw.authEnv);
+  }
+  const r = raw.routes;
+  assertPlaceholders(r.findForBranch.command, CR_FIND_PLACEHOLDERS, 'findForBranch');
+  assertPlaceholders(r.create.command, CR_CREATE_PLACEHOLDERS, 'create');
+  assertPlaceholders(r.squashMerge.command, CR_ID_PLACEHOLDERS, 'squashMerge');
+
+  const routes: CliChangeRequestDescriptor['routes'] = {
+    findForBranch: { command: r.findForBranch.command, url: compileScalar(r.findForBranch.map.url, 'findForBranch.map.url') },
+    create: {
+      command: r.create.command,
+      number: compileScalar(r.create.map.number, 'create.map.number'),
+      url: compileScalar(r.create.map.url, 'create.map.url'),
+    },
+    squashMerge: { command: r.squashMerge.command },
+  };
+  if (r.pipelineStatus !== undefined) {
+    assertPlaceholders(r.pipelineStatus.command, CR_ID_PLACEHOLDERS, 'pipelineStatus');
+    routes.pipelineStatus = {
+      command: r.pipelineStatus.command,
+      status: compileScalar(r.pipelineStatus.statusPath, 'pipelineStatus.statusPath'),
+      stateMap: r.pipelineStatus.stateMap,
+    };
+  }
+  if (r.failingJobs !== undefined) {
+    assertPlaceholders(r.failingJobs.command, CR_ID_PLACEHOLDERS, 'failingJobs');
+    const template = r.failingJobs.map[0]!;
+    routes.failingJobs = {
+      command: r.failingJobs.command,
+      itemsPath: compileItemsPath(r.failingJobs.itemsPath, 'failingJobs.itemsPath'),
+      item: {
+        name: compileScalar(template.name, 'failingJobs.map.name'),
+        logExcerpt: compileScalar(template.logExcerpt, 'failingJobs.map.logExcerpt'),
+      },
+    };
+  }
+  return { authEnv: raw.authEnv, routes };
+}

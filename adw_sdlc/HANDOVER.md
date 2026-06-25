@@ -79,6 +79,14 @@ deleted after merging. Both the commit and the merge were performed only at the
 user's explicit request (invariant §3.8 — the ADW code path runs no `git`/`gh`
 itself). No new dependency; no build artifact left behind.
 
+**This session (the `cli` change-request provider — §8o) is NOT yet committed:**
+the changes are in the working tree only. Changed files: `src/provider-
+descriptor.ts`, `src/providers-rest-cli.ts`, `src/providers.ts`, `src/index.ts`,
+`test/provider-descriptor.test.ts`, `test/providers.test.ts`, `docs/UNIVERSAL.md`,
+`docs/DESIGN-declarative-providers.md`, and this `HANDOVER.md`. No new dependency;
+no config-schema change; no build artifact left behind. Commit/merge only at the
+user's explicit request.
+
 ## 2. Session goal
 
 Make this ADW workflow universal: reusable across different repositories,
@@ -256,7 +264,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 441 tests, 32 files)
+# 3) Full test suite (current: 450 tests, 32 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -805,6 +813,66 @@ stateMap, `nextUrl` pagination followed page 1 → 2 accumulating both jobs, and
 against a concrete OAuth provider; **step 3** (out-of-process broker) stays a §10
 hard stop.
 
+## 8o. Follow-up session — declarative `cli` change-request provider (§11 #4)
+
+The CLI symmetry of the `rest` change-request path (§8m): a project drives the
+change-request lifecycle through its forge CLI (`glab mr …`) by describing command
+templates + field maps, instead of HTTP routes. **No new dependency, no code
+loading, no config-schema change, no interface change**; the github/git built-ins
+and the dry-run baseline are byte-for-byte unchanged. Completes step 2 for both
+provider roles over **both** transports (`cli` + `rest`).
+
+- `adw_sdlc/src/provider-descriptor.ts` — `parseCliChangeRequestDescriptor`
+  (+ `CliChangeRequestDescriptor`): `findForBranch`/`create`/`squashMerge`
+  required, optional `pipelineStatus` + single-shot `failingJobs` (a CLI returns
+  the whole job list per invocation, so **no `paginate`** — that is the only gap
+  vs. the rest CR provider, and an inherently rest-transport concern). Reuses the
+  same CR placeholder sets (`CR_FIND`/`CR_CREATE`/`CR_ID`), `compileScalar` (so
+  scalar maps carry 2.5a transforms), `compileItemsPath`, `assertPlaceholders`,
+  and the `assertSafeAuthEnv` one-credential guard.
+- `adw_sdlc/src/providers-rest-cli.ts` — factored a shared `makeCliRunner`
+  (scoped one-credential env, GH_TOKEN withheld, no shell) out of the cli
+  work-item provider and reused it in the new `createCliChangeRequestProvider`.
+  `create` maps `number`/`url`→`{id,number,url}` (id = number when present, else
+  the url); `pipelineStatus` maps via `stateMap` and enumerates `failingJobs`
+  only when red; `squashMerge` runs the templated command and surfaces stderr on
+  failure.
+- `adw_sdlc/src/providers.ts` — registered `cli` in `CHANGE_REQUEST_PROVIDERS`
+  (the factory reads `providers.changeRequests` through the parser, like `rest`).
+- `adw_sdlc/src/index.ts` — exports `createCliChangeRequestProvider`,
+  `parseCliChangeRequestDescriptor`, and `CliChangeRequestDescriptor`.
+- No `config.ts` change: `providers.changeRequests` already carries the loose
+  `authEnv` + `routes` the cli descriptor reads.
+- `adw_sdlc/docs/UNIVERSAL.md` — new "Declarative `cli` change requests"
+  subsection. `docs/DESIGN-declarative-providers.md` — §12 rollout item 4 marked
+  DONE (the cli CR symmetry).
+- Tests: `test/provider-descriptor.test.ts` (+3 — compile valid, optional
+  pipelineStatus + single-shot failingJobs incl. transforms, and the missing-
+  route / unknown-placeholder / reserved-authEnv rejections) and
+  `test/providers.test.ts` (+6 — create argv-substitution + scoped env
+  (GH_TOKEN withheld) + number/url/id mapping, findForBranch url|null, squashMerge
+  ok/failure, pipelineStatus stateMap-after-`| lower` + red-only failingJobs,
+  green-without-enumerating-jobs, build-via-config + fail-closed). The §8j/§8k/
+  §8l/§8m `supportedProviderTypes` snapshot updated to include CR `cli`. 441 → **450**.
+
+**`squashMerge` security review.** Same posture as §8m's: `squashMerge` is bound
+by the same scoped one-credential env (`authEnv` only, GH_TOKEN withheld) and the
+no-shell `capture()` boundary every `cli` route already uses; the orchestrator
+still gates it (merges only after review/CI pass) and owns all git. The trust is
+exactly what the `cli` work-item provider (§8k) already extends — running the
+configured forge CLI with the user's own scoped forge token; this slice adds no
+new trust surface beyond that, only the merge-authorized route under it.
+
+Verified: typecheck, `lint:env`, full suite (450), build+clean, byte-identical
+github dry-run, and a **live end-to-end run through the real ESM graph** (a glab-
+shaped descriptor: `create` mapped `iid`/`web_url`, `pipelineStatus` normalized
+`FAILED` via `| lower` to `failure`, single-shot `failingJobs` populated with the
+empty reason defaulted, `squashMerge` ok — and the injected `capture` asserted
+GH_TOKEN never reached the scoped env). Not yet committed (see §1). With this, the
+declarative driver covers work items (`cli`+`rest`) and change requests
+(`cli`+`rest`); remaining #4 surface: 2.5c token refresh (deferred, demand-gated)
+and **step 3** (out-of-process broker, a §10 hard stop).
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -949,8 +1017,10 @@ Ordered by ratio of value to risk:
    change-requests, §8m) ✅ DONE**: host-allowlisted + https-only HTTP via a
    kernel-owned inline fetch helper, percent-encoded path placeholders, templated
    JSON request bodies, configurable `authHeader`/`authScheme`, and the
-   `squashMerge` merge-authority review. Step 2 is complete for work items and
-   change requests; all of 2a–2c add no new dependency and no code loading.
+   `squashMerge` merge-authority review. The **`cli` change-request provider ✅
+   DONE (§8o)** completes the symmetry — the declarative driver now covers work
+   items (`cli`+`rest`) and change requests (`cli`+`rest`). All of these add no
+   new dependency and no code loading.
    **Step 3 (out-of-process plugin, Option C) is now SCOPED and demand-gated**
    (`docs/DESIGN-provider-plugins-out-of-process.md`): the recommendation is NOT
    to build it — a code plugin cannot enforce the host allowlist a declarative
@@ -959,9 +1029,10 @@ Ordered by ratio of value to risk:
    transform vocabulary on scalar maps, and a host-re-checked `failingJobs`
    pagination loop (`nextUrl`/`pageParam`) that populates `PipelineStatus`.
    **2.5c (token refresh) ⏸ DEFERRED** — build only against a concrete OAuth
-   provider (`docs/DESIGN-declarative-providers-extensions.md`). Also optional: a
-   `cli` change-request provider (symmetric follow-up). In-process `import` of
-   config-supplied code (Options A/D) stays a rejected non-goal.
+   provider (`docs/DESIGN-declarative-providers-extensions.md`). The `cli`
+   change-request provider (symmetric follow-up) is now **✅ DONE (§8o)**.
+   In-process `import` of config-supplied code (Options A/D) stays a rejected
+   non-goal.
 5. **Universal README at package root** — ✅ DONE (this session).
    `adw_sdlc/README.md` is now the neutral entry point: pipeline overview,
    kernel/project-pack split, quick start + key flags, the config-surface
@@ -1007,7 +1078,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **441 passing across 32 files**
+Test count baseline after this session: **450 passing across 32 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1015,7 +1086,8 @@ for custom-phase startup validation, +13 for loop/gated custom phases, +3 for
 the provider-kind registry — §8j, +15 for the declarative `cli` work-item
 provider — §8k, +10 for the declarative `rest`/HTTP work-item provider — §8l,
 +9 for the declarative `rest` change-request provider — §8m, +13 for the
-declarative primitives 2.5a transforms + 2.5b pagination — §8n). The session left
+declarative primitives 2.5a transforms + 2.5b pagination — §8n, +9 for the
+declarative `cli` change-request provider — §8o). The session left
 no build artifact, no temporary files, and no untracked binary churn. The ADW
 orchestrator code path still runs no `git`/`gh` itself; the commits and the local
 merge to `main` recorded in §1 were performed only at the user's explicit request
@@ -1023,4 +1095,5 @@ merge to `main` recorded in §1 were performed only at the user's explicit reque
 §8k/§8l/§8m declarative-provider (`cli`/`rest` work-items + `rest`
 change-requests) slices are committed as `0ac57a5` and merged to `main`
 (`07b90f6`); the §8n step-2.5a/2.5b primitives are committed as `214d3ee` and
-merged to `main` (`3199cad`). The working tree is clean.** — see §1.
+merged to `main` (`3199cad`); the §8o `cli` change-request provider is in the
+working tree, not yet committed.** — see §1.
