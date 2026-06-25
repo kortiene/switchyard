@@ -15,18 +15,48 @@ Status legend: ✅ done · ⏳ owed (human/credential-gated) · ❌ not started 
 
 ## 0. Pick the MVP definition (gates everything)
 
-The docs blur three very different bars. **Decide first** — every gate below
-depends on it.
+The docs blur three very different bars. These were the three candidate bars;
+**(A)** was chosen — see the recorded decision below.
 
 - **(A) "`claude` autonomously ships real issues reliably."** Narrowest, most
-  defensible. **Recommended MVP.**
+  defensible. **Recommended MVP — adopted.**
 - **(B) "four interchangeable runners."** PLAN.md's headline thesis — much larger.
+  **(post-MVP.)**
 - **(C) "cutover done"** — default flipped `py → ts`, py kept ≥ 1 release
-  (PLAN step 12).
+  (PLAN step 12). **(post-MVP.)**
 
-> **Decision (record here):** ☐ A ☐ B ☐ C — _unset_.
+> **Decision (recorded):** ☑ **(A)** — MVP = "`claude` autonomously ships real
+> issues reliably." **(B)** four-runner and **(C)** cutover are **post-MVP**
+> (see §2 / §3). Decided 2026-06-25.
 
-The rest of this doc assumes **(A)** and marks what **(B)/(C)** add.
+The rest of this doc adopts **(A)** and marks what **(B)/(C)** add.
+
+---
+
+## How to run a live `claude` issue
+
+The canonical batch, run-command templates (native / forced-fenced /
+subscription), failure-mode drills, and cost notes live in
+[`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md). Quick start for a single
+issue, using the **`npm run verify`** gate as the one test command:
+
+```bash
+cd adw_sdlc
+ADW_TEST_CMD="npm run verify" \
+  npx tsx src/cli.ts <ISSUE_NUMBER> --runner claude --yes \
+  --timeout 3600 --max-budget-usd 45
+```
+
+After the run, classify the artifacts (see the batch doc for the threshold):
+
+```bash
+npm run parity:rate -- agents/
+```
+
+> Use the single-command `ADW_TEST_CMD="npm run verify"` form: the orchestrator
+> shell-splits the gate and runs it without a shell, so a chained `a && b` would
+> fail. `npm run verify` already chains internally. See
+> [`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md) for the full templates.
 
 ---
 
@@ -59,7 +89,9 @@ The rest of this doc assumes **(A)** and marks what **(B)/(C)** add.
   kill-switch confirmed live; the secret boundary asserted once on a *real*
   spawned env (not only the lint + mocks); crash/cleanup behavior confirmed once.
 
-## 2. Gates that (B) — four runners — adds
+## 2. Gates that (B) — four runners — adds (post-MVP)
+
+_Post-MVP: not required for the (A) MVP. Listed for completeness._
 
 - [ ] ⏳ A live run each for **codex / opencode / pi**, OR an explicit decision to
   ship claude-only and demote the rest to post-MVP.
@@ -70,7 +102,9 @@ The rest of this doc assumes **(A)** and marks what **(B)/(C)** add.
 - [ ] ⏳ **pi needs Node ≥ 22.19** (the CI node-20 lane skips it) — bump CI or
   accept pi is unverified in CI.
 
-## 3. Gates that (C) — cutover — adds
+## 3. Gates that (C) — cutover — adds (post-MVP)
+
+_Post-MVP: not required for the (A) MVP. Listed for completeness._
 
 - [ ] ❌ **`ADW_ENGINE` py↔ts coexistence tested in the *integrated* repo.**
   The Python sibling is not bundled here, so **(C) cannot be validated from this

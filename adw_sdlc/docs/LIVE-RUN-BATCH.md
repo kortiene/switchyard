@@ -4,9 +4,10 @@ Purpose: a ready-to-create batch of small GitHub issues to drive **5–10 varied
 live `claude` ADW runs**. These satisfy the `MVP-READINESS.md` §1 gate
 ("≥ 5–10 live `claude` runs across varied `issue_class`") *and* advance the repo.
 
-> Status: **plan only.** No issues created and no live runs started from here.
-> This checkout has **no git remote** (`gh issue list` → "no git remotes found"),
-> so the batch below is described by title/class, not bound to issue numbers.
+> Status: **in progress.** Issue #1 (docs: declare Claude-only MVP scope +
+> live-run playbook) has been run live as a **forced-fenced** ADW run — the first
+> live run from this checkout and the seed of the fenced-path baseline. Issues 2–8
+> remain planned.
 
 ## Why a single `verify` gate first
 
