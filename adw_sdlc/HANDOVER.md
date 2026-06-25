@@ -1137,6 +1137,43 @@ Issue class: `feat`. Run mode: native. No kernel/runtime/prompt-pack/config chan
 Pure docs + one doc-assertion test. `docs/README.md` documentation map updated to
 include the new ledger. `docs/LIVE-RUN-BATCH.md` status updated to reflect #3 is done.
 
+## 8v. Live ADW run — issue #5 (refactor: split parity-rate classification from rendering)
+
+Behavior-preserving refactor of the parity hard-failure-rate harness (§8r). The
+pure classification/aggregation/verdict layer was extracted out of
+`tools/parity-rate.ts` into a new `tools/parity-rate-core.ts` module (no `node:fs`,
+no `process`, no I/O), so it can be unit-tested and reused without reading the disk
+or printing. The I/O + rendering + CLI shell stays in `tools/parity-rate.ts`, which
+now imports from the core and `export *`s the full surface — so all existing
+importers (the test suite, `tsx tools/parity-rate.ts`) keep their public API
+byte-identical.
+
+- `adw_sdlc/tools/parity-rate-core.ts` (new) — pure classification layer:
+  `FENCED_MARKER`, the `ContractPath`/`Outcome`/`PhaseClassification`/`RunAnalysis`/
+  `PhaseInputs`/`RunInputs`/`Bucket`/`Verdict` types, `classifyPhasePath`,
+  `classifyOutcome`, `classifyRun`, `aggregate`, `attempts`, `pct`, `verdict`,
+  `nativeAbsoluteVerdict`, and `PATHS`. No `node:fs`, no `process`, no I/O.
+- `adw_sdlc/tools/parity-rate.ts` (modified) — now the I/O + rendering + CLI
+  shell: imports the pure core and `export *`s it so all existing importers are
+  unaffected. `analyzeRun` (the on-disk loader) and `renderReport` remain here.
+  The module-level doc comment updated to describe the two-file split.
+- `adw_sdlc/test/parity-rate.test.ts` (extended) — new `describe` blocks exercise
+  the pure core directly (imported from `tools/parity-rate-core.ts`):
+  `classifyRun` (error short-circuit, alphabetical sort, `classify`/`unknown` path
+  special cases, all five outcomes), `verdict` (meets/fails/insufficient/zero-fenced
+  messages), `nativeAbsoluteVerdict` (meets/fails/insufficient line text),
+  `aggregate` (multi-run/multi-path accumulation, skipped outcomes, error runs
+  contribute nothing), `pct` and `attempts` utilities, module re-export
+  equivalence (core ≡ shell re-export for `FENCED_MARKER`, `classifyPhasePath`,
+  `classifyOutcome`), and `renderReport` (structure, error runs, absolute-bar
+  section, table row presence). The existing `FENCED_MARKER` drift guard and the
+  original `analyzeRun` end-to-end test remain intact.
+
+Issue class: `refactor`. Run mode: native. No kernel/runtime/prompt-pack/config
+change. CLI entry behavior and `npm run parity:rate` output are byte-stable; the
+`FENCED_MARKER` drift guard continues to pin the core constant to the real
+`buildFooter` output.
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -1343,7 +1380,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **482 passing across 36 files**
+Test count baseline after this session: **540 passing across 36 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1357,7 +1394,18 @@ passes added no tests — §8p removed dead code, §8q removed dead imports + en
 the unused-symbol typecheck guards and refactored 4 tests onto `withScopedEnv`;
 +4 for the parity hard-failure-rate harness — §8r, +2 for the force-fenced
 measurement mode — §8s, +16 for the observed-live ledger + cross-document sync —
-§8u). The session left
+§8u, +35 for the parity-rate-core extraction — §8v). The §8v refactor (issue #5
+— split parity-rate classification from rendering) added `tools/parity-rate-core.ts`
+(pure core module, no new test file) and extended `test/parity-rate.test.ts` with
+35 direct unit tests of the extracted core (39 tests total in the file, up from 4
+in §8r): `classifyRun` (error short-circuit, alphabetical sort, `classify`/`unknown`
+path special cases, all five outcomes), `verdict` (meets/fails/insufficient/
+zero-fenced messages), `nativeAbsoluteVerdict` (meets/fails/insufficient line text),
+`aggregate` (multi-run/multi-path accumulation, skipped outcomes, error-run
+contributions), `pct` and `attempts` utilities, module re-export equivalence
+(core ≡ shell for `FENCED_MARKER`/`classifyPhasePath`/`classifyOutcome`), and
+`renderReport` (structure, error runs, absolute-bar section, table row rendering).
+The session left
 no build artifact, no temporary files, and no untracked binary churn. The ADW
 orchestrator code path still runs no `git`/`gh` itself; the commits and the local
 merge to `main` recorded in §1 were performed only at the user's explicit request

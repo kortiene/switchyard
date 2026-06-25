@@ -21,23 +21,10 @@
  *     single nudge retry, written only when the first attempt failed to
  *     parse/validate — src/run-phase.ts).
  *
- * Classification per phase invocation:
- *   done & no retry   → clean         (parsed first try)
- *   done & retry      → nudged-ok     (one nudge, then parsed)
- *   not-done & retry  → HARD-FAIL     (nudge retry also failed → the bar's count)
- *   not-done & no retry → uncounted   (fast-fail: timeout/budget/cancel — the bar
- *                                       excludes these — or a run still in flight)
- * `classify` is the shared structuredCall path (runner-independent, its own
- * internal retry that writes no transcript-2.log); it is bucketed separately and
- * kept OUT of the native-vs-fenced comparison.
- *
- * Two verdicts:
- *   - comparative bar (default): native hard-fail rate ≤ fenced — needs both
- *     paths populated, so it stays INSUFFICIENT until a fenced-path runner runs
- *     live (`pi`, or any runner under ADW_PARITY_FORCE_FENCED_JSON — see run-phase.ts);
- *   - absolute native bar (`--max-native-rate PCT`): native hard-fail rate ≤ a
- *     target % — evaluable from claude-only runs, so the bar stops reading
- *     INSUFFICIENT the moment a few native runs exist.
+ * The pure classification/aggregation/verdict layer lives in `parity-rate-core.ts`
+ * (no `node:fs`, no `process`); this file is the I/O + rendering + CLI shell. It
+ * `export *`s the core surface so existing importers (test/parity-rate.test.ts,
+ * `tsx tools/parity-rate.ts`) keep working unchanged.
  *
  * Usage: tsx tools/parity-rate.ts [--min N] [--max-native-rate PCT] [--json] <run-dir | agents-dir> ...
  * Exit:  1 only when a configured bar is measured AND fails; 0 for meets/insufficient.
@@ -47,170 +34,71 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/**
- * Must match the fenced-JSON contract footer emitted by buildFooter() in
- * src/phases.ts when emitJsonContract is true. test/parity-rate.test.ts asserts
- * a real footer still contains this, so wording drift is caught, not silent.
- */
-export const FENCED_MARKER = 'End your reply with EXACTLY one fenced';
+import {
+  PATHS,
+  type PhaseInputs,
+  type RunAnalysis,
+  aggregate,
+  attempts,
+  classifyRun,
+  nativeAbsoluteVerdict,
+  pct,
+  verdict,
+} from './parity-rate-core.js';
+
+// Re-export the pure classifier surface so external importers and the CLI entry
+// point keep their byte-identical public API (classifyPhasePath, classifyOutcome,
+// aggregate, verdict, FENCED_MARKER, the types, classifyRun, …).
+export * from './parity-rate-core.js';
 
 const PROMPT = 'prompt.txt';
 const FIRST = 'transcript.log';
 const RETRY = 'transcript-2.log';
 
-export type ContractPath = 'native' | 'fenced' | 'classify' | 'unknown';
-export type Outcome = 'clean' | 'nudged-ok' | 'hard-fail' | 'uncounted' | 'skipped';
-
-export interface PhaseClassification {
-  phase: string;
-  path: ContractPath;
-  outcome: Outcome;
-}
-
-export interface RunAnalysis {
-  adwId: string;
-  issue: string | null;
-  runner: string | null;
-  phases: PhaseClassification[];
-  error?: string;
-}
-
-/** native iff the first prompt omits the fenced footer; `classify` is its own bucket. */
-export function classifyPhasePath(promptText: string | null, phase: string): ContractPath {
-  if (phase === 'classify') {
-    return 'classify';
-  }
-  if (promptText === null) {
-    return 'unknown';
-  }
-  return promptText.includes(FENCED_MARKER) ? 'fenced' : 'native';
-}
-
-/** Map (attempted, nudged, done) onto the bar's outcome buckets. */
-export function classifyOutcome(attempted: boolean, nudged: boolean, done: boolean): Outcome {
-  if (!attempted) {
-    return 'skipped';
-  }
-  if (done) {
-    return nudged ? 'nudged-ok' : 'clean';
-  }
-  return nudged ? 'hard-fail' : 'uncounted';
-}
-
 function readMaybe(path: string): string | null {
   return existsSync(path) ? readFileSync(path, 'utf8') : null;
 }
 
-/** Classify every phase subdir of one run workspace against its state.json. */
+/**
+ * Load one run workspace off disk into RunInputs and delegate classification to
+ * the pure `classifyRun`. A child entry is a "phase" iff it `isDirectory()` AND
+ * contains `transcript.log`; everything else (run-root files, never-ran phases)
+ * is skipped silently. An unreadable `state.json` yields an error analysis with
+ * no phases — the run still appears (as an error line) in the report.
+ */
 export function analyzeRun(runDir: string): RunAnalysis {
   const statePath = join(runDir, 'state.json');
   let state: Record<string, unknown>;
   try {
     state = JSON.parse(readFileSync(statePath, 'utf8')) as Record<string, unknown>;
   } catch (err) {
-    return { adwId: runDir, issue: null, runner: null, phases: [], error: `unreadable state.json: ${String(err)}` };
+    return classifyRun({
+      adwId: runDir,
+      issue: null,
+      runner: null,
+      completedPhases: [],
+      phases: [],
+      error: `unreadable state.json: ${String(err)}`,
+    });
   }
   const adwId = typeof state['adw_id'] === 'string' ? state['adw_id'] : runDir;
   const issue = typeof state['issue_number'] === 'string' ? state['issue_number'] : null;
   const runner = typeof state['runner'] === 'string' ? state['runner'] : null;
-  const done = new Set(Array.isArray(state['completed_phases']) ? (state['completed_phases'] as string[]) : []);
+  const completedPhases = Array.isArray(state['completed_phases']) ? (state['completed_phases'] as string[]) : [];
 
-  const phases: PhaseClassification[] = [];
+  const phases: PhaseInputs[] = [];
   for (const name of readdirSync(runDir)) {
     const phaseDir = join(runDir, name);
     if (!statSync(phaseDir).isDirectory() || !existsSync(join(phaseDir, FIRST))) {
       continue; // not a phase dir (run-root files, or a phase that never ran)
     }
-    const outcome = classifyOutcome(true, existsSync(join(phaseDir, RETRY)), done.has(name));
-    phases.push({ phase: name, path: classifyPhasePath(readMaybe(join(phaseDir, PROMPT)), name), outcome });
+    phases.push({
+      phase: name,
+      promptText: readMaybe(join(phaseDir, PROMPT)),
+      hasRetry: existsSync(join(phaseDir, RETRY)),
+    });
   }
-  phases.sort((a, b) => a.phase.localeCompare(b.phase));
-  return { adwId, issue, runner, phases };
-}
-
-export interface Bucket {
-  clean: number;
-  nudgedOk: number;
-  hardFail: number;
-  uncounted: number;
-}
-
-const PATHS: ContractPath[] = ['native', 'fenced', 'classify', 'unknown'];
-
-/** Counted structured-output attempts = clean + nudged-ok + hard-fail (excludes uncounted). */
-export function attempts(b: Bucket): number {
-  return b.clean + b.nudgedOk + b.hardFail;
-}
-
-export function aggregate(runs: RunAnalysis[]): Record<ContractPath, Bucket> {
-  const agg = Object.fromEntries(
-    PATHS.map((p) => [p, { clean: 0, nudgedOk: 0, hardFail: 0, uncounted: 0 }]),
-  ) as Record<ContractPath, Bucket>;
-  for (const run of runs) {
-    for (const { path, outcome } of run.phases) {
-      const b = agg[path];
-      if (outcome === 'clean') b.clean += 1;
-      else if (outcome === 'nudged-ok') b.nudgedOk += 1;
-      else if (outcome === 'hard-fail') b.hardFail += 1;
-      else if (outcome === 'uncounted') b.uncounted += 1;
-    }
-  }
-  return agg;
-}
-
-const pct = (n: number, d: number): string => (d === 0 ? 'n/a' : `${((100 * n) / d).toFixed(1)}%`);
-
-export interface Verdict {
-  ok: boolean | null; // true = meets, false = fails, null = insufficient
-  line: string;
-}
-
-/** The parity bar: native hard-fail rate ≤ fenced, only once both have ≥ minAttempts. */
-export function verdict(agg: Record<ContractPath, Bucket>, minAttempts: number): Verdict {
-  const n = agg.native;
-  const f = agg.fenced;
-  const na = attempts(n);
-  const fa = attempts(f);
-  if (na < minAttempts || fa < minAttempts) {
-    return {
-      ok: null,
-      line:
-        `⚠️  INSUFFICIENT DATA — native has ${na} and fenced has ${fa} counted structured-output ` +
-        `attempts; need ≥ ${minAttempts} per path before the bar can be asserted. ` +
-        `The structural argument in PARITY.md is not a substitute for this measurement` +
-        (fa === 0 ? ' (no fenced-path runs yet — e.g. the `pi` runner has not been run live).' : '.'),
-    };
-  }
-  const nr = n.hardFail / na;
-  const fr = f.hardFail / fa;
-  return nr <= fr
-    ? { ok: true, line: `✅ MEETS BAR — native ${pct(n.hardFail, na)} ≤ fenced ${pct(f.hardFail, fa)} hard-fail rate.` }
-    : { ok: false, line: `❌ FAILS BAR — native ${pct(n.hardFail, na)} > fenced ${pct(f.hardFail, fa)} hard-fail rate.` };
-}
-
-/**
- * The absolute native bar: native hard-fail rate ≤ maxRatePct. Unlike the
- * comparative bar it needs only the native path, so a claude-only sample can
- * clear it — the pragmatic gate for an (A)-MVP ("claude ships reliably") where a
- * fenced baseline does not yet exist.
- */
-export function nativeAbsoluteVerdict(
-  agg: Record<ContractPath, Bucket>,
-  minAttempts: number,
-  maxRatePct: number,
-): Verdict {
-  const n = agg.native;
-  const na = attempts(n);
-  if (na < minAttempts) {
-    return {
-      ok: null,
-      line: `⚠️  INSUFFICIENT DATA — native has ${na} counted attempts; need ≥ ${minAttempts} before the absolute bar can be asserted.`,
-    };
-  }
-  const rate = (100 * n.hardFail) / na;
-  return rate <= maxRatePct
-    ? { ok: true, line: `✅ MEETS ABSOLUTE BAR — native ${pct(n.hardFail, na)} hard-fail ≤ ${maxRatePct}% target (over ${na} attempts).` }
-    : { ok: false, line: `❌ FAILS ABSOLUTE BAR — native ${pct(n.hardFail, na)} hard-fail > ${maxRatePct}% target (over ${na} attempts).` };
+  return classifyRun({ adwId, issue, runner, completedPhases, phases });
 }
 
 export function renderReport(runs: RunAnalysis[], minAttempts: number, maxNativeRatePct?: number): string {
