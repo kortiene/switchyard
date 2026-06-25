@@ -111,5 +111,6 @@ hardcoded for security and must not be relaxed by a project pack.
 | [`PARITY.md`](./PARITY.md) | Parity checklist mapping each guarantee to the test(s) that prove it |
 | [`MEMORY_STACK.md`](./MEMORY_STACK.md) | Decision record for the deferred cross-run memory feature |
 | [`docs/DESIGN-schema-overrides.md`](./docs/DESIGN-schema-overrides.md) | Design proposal for per-phase schema overrides / custom phases (not yet implemented) |
+| [`docs/DESIGN-provider-plugins.md`](./docs/DESIGN-provider-plugins.md) | Security/sandboxing design pass for provider plugin loading (proposal; not implemented) |
 | [`HANDOVER.md`](./HANDOVER.md) | Session-to-session universalization handover and roadmap |
 | [`docs/examples/`](./docs/examples/) | Example non-HealthTech project packs |
