@@ -93,6 +93,12 @@ parity runs.
   append to this section as runs complete. So far: `claude` PR #331 hit one tests-phase contract mismatch,
   root-caused and fixed structurally in #332 (Python truthiness coercion + native-schema nudge footer);
   no recurrence on resume.
+  - **Measure it:** `npm run parity:rate -- agents/` (`tools/parity-rate.ts`) classifies every phase
+    invocation from those artifacts and reports the per-path hard-fail rate. It deliberately prints
+    **INSUFFICIENT DATA** rather than a verdict until each path has enough live attempts, so the bar is an
+    audited measurement — not the structural argument above standing in for one. Until a fenced-path runner
+    (`pi`) runs live, the fenced sample is empty and no comparison is possible: **the bar is not yet
+    measured.**
 
 ---
 
