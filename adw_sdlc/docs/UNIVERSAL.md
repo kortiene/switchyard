@@ -130,6 +130,13 @@ on it. A name colliding with a built-in phase, or a chain entry that is neither
 built-in nor registered, is rejected loudly. Loop/gated custom phases and
 overriding `classify` remain out of scope (see `DESIGN-schema-overrides.md`).
 
+The whole resolved chain is preflighted at run start: every phase must have a
+prompt template that resolves and a result schema that loads, so a custom phase
+missing its `<name>.md` template or `.adw/schemas/<name>.json` schema (or a
+broken/unsupported schema override) fails loudly up front — before any branch,
+PR, or state is created — rather than mid-chain. A `--dry-run` runs the same
+preflight, so it doubles as a config check.
+
 ## Provider-neutral public types
 
 | Old GitHub-shaped name | Provider-neutral name | Status |

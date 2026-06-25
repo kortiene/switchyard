@@ -49,6 +49,7 @@ import {
   gateConditional,
   parsePhases,
   prBodyPath,
+  validatePhaseChain,
   type AgentPhase,
 } from './phases.js';
 import { createProvidersFromConfig, providerBackedDeps, type AdwProviders, type ProviderContext } from './providers.js';
@@ -1020,6 +1021,10 @@ export async function run(
   const providers = providersForDeps(deps);
 
   const phases = parsePhases(opts.phases, config);
+  // Preflight the chain (templates + schemas) before any side effects, so a
+  // misconfigured custom phase or broken override fails at run start — and
+  // a --dry-run doubles as a config check.
+  validatePhaseChain(phases, runner.id, config);
 
   if (opts.dryRun) {
     printPlan(issue, runner, phases, opts, config);

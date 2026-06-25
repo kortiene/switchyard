@@ -203,7 +203,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 372 tests, 30 files)
+# 3) Full test suite (current: 378 tests, 30 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -383,6 +383,39 @@ appears in the plan; an unregistered name fails loudly). Tier for a custom
 phase comes from `models.phaseTiers[name]` (modelForPhase already tolerates
 unknown phases → default tier).
 
+## 8h. Follow-up session — custom-phase startup validation (§11 candidate)
+
+Hardened capability B (§8g): the resolved phase chain is now preflighted at run
+start, so a misconfigured custom phase (or broken/unsupported schema override)
+fails loudly before any side effects instead of mid-chain.
+
+- `adw_sdlc/src/phases.ts` — new `validatePhaseChain(phases, runner, config)`:
+  for each phase in the chain it asserts the prompt template resolves
+  (`templatePath` + `existsSync`, custom phases default the basename to their own
+  name) and that `resolvePhaseSchema(phase, config)` loads — which compiles an
+  override/custom schema eagerly, so a missing custom schema, a broken/
+  unsupported override, or an unknown name throws here. Built-ins without an
+  override are a no-op (their templates ship with the package).
+- `adw_sdlc/src/orchestrator.ts` — calls `validatePhaseChain(phases, runner.id,
+  config)` right after `parsePhases`, **before** the `--dry-run` branch, so a
+  dry-run doubles as a config check and a real run fails before minting any
+  branch/PR/state.
+- `adw_sdlc/docs/UNIVERSAL.md` — custom-phases section documents the preflight.
+- `adw_sdlc/docs/DESIGN-schema-overrides.md` — §9 records the follow-up.
+- Tests: `test/custom-phases.test.ts` (+5 — stock chain passes, fully-wired
+  custom phase passes, missing template / missing schema fail, unsupported
+  load-bearing override surfaced during the walk) and `test/orchestrator.test.ts`
+  (+1 dry-run preflight rejects an unwired custom phase before the plan prints).
+  The pre-existing custom-phase orchestrator test (§8g) was updated to supply a
+  real `audit.md`/`audit.json` — its config was previously invalid and only
+  passed because validation was lazy.
+
+No new dependency, no config-surface change, no provider-interface change. Built-in
+behavior is unchanged (no-op for the stock chain; the committed dry-run output is
+byte-identical). Proven end-to-end through the real CLI: a dry-run with an unwired
+custom phase fails with `phase "audit" is missing its prompt template: …`, and a
+fully-wired one shows `… implement -> audit -> review …` in the plan.
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -529,13 +562,16 @@ optional):
 
 - **Loop/gated custom phases** — the deferred remainder of capability B; let a
   custom phase opt into a resolve-style loop or a conditional gate. Needs a
-  config surface for the gate/loop predicate.
-- **Custom-phase startup validation** — fail at run start (not mid-chain) when
-  a registered custom phase is missing its `<name>.md` template or
-  `.adw/schemas/<name>.json` schema.
+  config surface for the gate/loop predicate. (Still open.)
+- **Custom-phase startup validation** — ✅ DONE (this session, §8h). The whole
+  resolved chain is preflighted at run start via `validatePhaseChain`
+  (template resolves + `resolvePhaseSchema` loads), so a missing `<name>.md`
+  template, missing `.adw/schemas/<name>.json` schema, or broken/unsupported
+  override fails loudly before any side effects; a `--dry-run` runs the same
+  check.
 - **Security design doc for #4** — draft the threat model + sandboxing options
   for provider *code* loading (the way `DESIGN-schema-overrides.md` was drafted
-  before implementing), without implementing.
+  before implementing), without implementing. (Still open.)
 
 ## 12. How to resume in a new session
 
@@ -549,9 +585,10 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **372 passing across 30 files**
+Test count baseline after this session: **378 passing across 30 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
-+10 for schema overrides capability A, +9 for custom phases capability B).
-The session left no build artifact, no temporary files, and no untracked
-binary churn. The orchestrator did not run any `git` or `gh` commands.
++10 for schema overrides capability A, +9 for custom phases capability B, +6
+for custom-phase startup validation). The session left no build artifact, no
+temporary files, and no untracked binary churn. The orchestrator did not run
+any `git` or `gh` commands.

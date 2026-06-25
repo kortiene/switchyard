@@ -123,6 +123,40 @@ export function parsePhases(
   return [...DEFAULT_PHASES];
 }
 
+/**
+ * Preflight the resolved phase chain at run start: every phase must have a
+ * prompt template that resolves AND a result schema that loads. This runs
+ * before any side effects (branch/PR/state mutation) so a misconfigured
+ * project — a custom phase missing its `<name>.md` template or
+ * `.adw/schemas/<name>.json` schema, or a broken/unsupported schema override —
+ * fails loudly up front instead of mid-chain after work has already happened.
+ *
+ * For a built-in phase with no override the template ships with the package and
+ * the schema is wired by construction, so this is a no-op for the stock chain;
+ * its value is for custom phases and overrides. Validating the whole chain
+ * (rather than just custom names) keeps the check uniform and also catches a
+ * stale committed template or a broken override of a safe built-in phase.
+ */
+export function validatePhaseChain(
+  phases: readonly string[],
+  runner: string,
+  config: AdwConfig = getAdwConfig(),
+): void {
+  for (const phase of phases) {
+    // A custom phase has no TEMPLATE entry; its basename defaults to its own
+    // name (mirrors composePhasePrompt).
+    const basename = (TEMPLATE as Record<string, string | undefined>)[phase] ?? phase;
+    const tpath = templatePath(runner, basename, config);
+    if (!existsSync(tpath)) {
+      throw new AdwError(`phase "${phase}" is missing its prompt template: ${tpath}`);
+    }
+    // Resolving the handle compiles an override/custom schema eagerly, so a
+    // missing custom schema, a broken/unsupported override, or an unknown name
+    // throws here rather than when the phase first runs.
+    resolvePhaseSchema(phase, config);
+  }
+}
+
 /** Resolve a phase template path, preferring a runner-specific configured root when present. */
 export function templatePath(runner: string, name: string, config: AdwConfig = getAdwConfig()): string {
   const roots = [config.prompts.runnerRoots[runner], config.prompts.defaultRoot].filter(

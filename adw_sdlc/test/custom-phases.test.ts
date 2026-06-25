@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { parseAdwConfig, setAdwConfigForTests } from '../src/config.js';
 import { AdwError } from '../src/errors.js';
-import { composePhasePrompt, knownPhaseNames, parsePhases } from '../src/phases.js';
+import { composePhasePrompt, knownPhaseNames, parsePhases, validatePhaseChain } from '../src/phases.js';
 import { resolvePhaseSchema } from '../src/schema-registry.js';
 import { AdwState } from '../src/state.js';
 
@@ -103,5 +103,51 @@ describe('custom phases — prompt composition', () => {
     expect(() => composePhasePrompt('audit', ['x'], new AdwState({ adwId: 'a1b2c3d4' }), 'pi', true)).toThrow(
       /prompt template not found/,
     );
+  });
+});
+
+describe('phase chain — startup validation', () => {
+  it('passes for the stock built-in chain', () => {
+    // The package ships every built-in template + schema, so the default chain
+    // is always wireable; this guards against a future drift that breaks it.
+    const config = parseAdwConfig({});
+    expect(() => validatePhaseChain(parsePhases(undefined, config), 'pi', config)).not.toThrow();
+  });
+
+  it('passes for a fully-wired custom phase', () => {
+    const config = parseAdwConfig({
+      customPhases: ['audit'],
+      prompts: { defaultRoot: dirWith({ 'audit.md': 'Audit: $1' }), runnerRoots: {} },
+      schemas: { root: dirWith({ 'audit.json': AUDIT_SCHEMA }) },
+    });
+    expect(() => validatePhaseChain(['audit'], 'pi', config)).not.toThrow();
+  });
+
+  it('fails when a custom phase is missing its template', () => {
+    const config = parseAdwConfig({
+      customPhases: ['audit'],
+      prompts: { defaultRoot: dirWith({}), runnerRoots: {} },
+      schemas: { root: dirWith({ 'audit.json': AUDIT_SCHEMA }) },
+    });
+    expect(() => validatePhaseChain(['audit'], 'pi', config)).toThrow(/missing its prompt template/);
+  });
+
+  it('fails when a custom phase is missing its schema', () => {
+    const config = parseAdwConfig({
+      customPhases: ['audit'],
+      prompts: { defaultRoot: dirWith({ 'audit.md': 'Audit: $1' }), runnerRoots: {} },
+      schemas: { root: dirWith({}) },
+    });
+    expect(() => validatePhaseChain(['audit'], 'pi', config)).toThrow(/requires a result schema/);
+  });
+
+  it('surfaces an unsupported override of a load-bearing phase during the walk', () => {
+    // The schema arm of the preflight runs resolvePhaseSchema, so an override of
+    // a load-bearing built-in phase is rejected at startup, not mid-chain.
+    const config = parseAdwConfig({
+      prompts: { defaultRoot: dirWith({ 'plan.md': 'Plan: $1' }), runnerRoots: {} },
+      schemas: { root: dirWith({ 'plan.json': AUDIT_SCHEMA }) },
+    });
+    expect(() => validatePhaseChain(['plan'], 'pi', config)).toThrow(/not supported/);
   });
 });

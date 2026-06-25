@@ -446,11 +446,25 @@ describe('run() integration', () => {
   });
 
   it('runs a registered plain custom phase through the generic path and records it', async () => {
-    // 'audit' is a project-registered custom phase placed in the chain. With a
-    // stubbed runAgentPhase the template/schema are not touched; the orchestrator
-    // must still drive it like any plain phase and mark it done.
+    // 'audit' is a project-registered custom phase placed in the chain. The
+    // startup preflight (validatePhaseChain) requires it to be fully wired, so
+    // supply a template (resolved via the claude runner root) and a schema;
+    // built-in phases still resolve from the default .pi/prompts root.
+    const promptDir = mkdtempSync(join(tmpdir(), 'adw-audit-prompt-'));
+    writeFileSync(join(promptDir, 'audit.md'), 'Audit the change: $1', 'utf8');
+    const schemaDir = mkdtempSync(join(tmpdir(), 'adw-audit-schema-'));
+    writeFileSync(
+      join(schemaDir, 'audit.json'),
+      JSON.stringify({ type: 'object', properties: { summary: { type: 'string' }, risk: { type: 'string' } }, required: ['summary'] }),
+      'utf8',
+    );
     setAdwConfigForTests(
-      parseAdwConfig({ customPhases: ['audit'], phases: ['classify', 'plan', 'implement', 'audit'] }),
+      parseAdwConfig({
+        customPhases: ['audit'],
+        phases: ['classify', 'plan', 'implement', 'audit'],
+        prompts: { defaultRoot: '.pi/prompts', runnerRoots: { claude: promptDir } },
+        schemas: { root: schemaDir },
+      }),
     );
     const order: string[] = [];
     const deps = testDeps({
@@ -864,5 +878,20 @@ describe('run() integration', () => {
     expect(resolveGhBin).not.toHaveBeenCalled();
     expect(log.mock.calls.flat().join('\n')).toContain('GH_TOKEN withheld');
     expect(readdirSync(tmp)).toEqual([]); // no workspace minted
+  });
+
+  it('rejects a misconfigured custom phase at startup, before the dry-run plan prints', async () => {
+    // 'audit' is registered and in the chain but has no template/schema. The
+    // startup preflight runs even under --dry-run (which doubles as a config
+    // check), so the chain is rejected up front rather than a plan being
+    // printed for an unwireable pipeline.
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    log.mockClear(); // a prior dry-run test may have left calls on a shared spy
+    setAdwConfigForTests(parseAdwConfig({ customPhases: ['audit'], phases: ['plan', 'implement', 'audit'] }));
+    await expect(run(5, createMockRunner(), { dryRun: true }, testDeps())).rejects.toThrow(
+      /phase "audit" is missing its prompt template/,
+    );
+    expect(log.mock.calls.flat().join('\n')).not.toContain('[dry-run]'); // preflight threw before printPlan
+    expect(readdirSync(tmp)).toEqual([]); // nothing minted
   });
 });

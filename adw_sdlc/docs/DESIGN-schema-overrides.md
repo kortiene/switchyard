@@ -282,6 +282,17 @@ shared structured call.
    landed in capability A. `test/custom-phases.test.ts` (+8) and an orchestrator
    integration test (+1). Suite: 372 passing / 30 files.
 
+**Follow-up — startup preflight (capability B hardening).** Both overrides and
+custom phases resolve their template/schema lazily, so a misconfiguration first
+surfaced mid-chain (after branches/PRs existed). `validatePhaseChain(phases,
+runner, config)` (`phases.ts`) now walks the resolved chain at run start —
+checking each phase's template resolves and `resolvePhaseSchema` loads its schema
+(compiling overrides/custom schemas eagerly) — and the orchestrator calls it
+right after `parsePhases`, before the `--dry-run` branch, so a missing template,
+missing custom schema, or broken/unsupported override fails loudly up front and a
+dry-run doubles as a config check. Built-ins without an override are a no-op.
+`test/custom-phases.test.ts` (+5) and an orchestrator dry-run preflight test (+1).
+
 Each step is independently shippable and independently verifiable against the
 full gate suite (`HANDOVER.md` §8).
 
