@@ -40,10 +40,13 @@ session can pick up where we stopped.
 
 **Repository state:** all of this session's work is **merged to `main`**
 (no remote — local merge). `main` HEAD is the merge commit
-`07b90f6 merge: provider extensibility — registry + declarative cli/rest providers (#4)`,
+`404f7e3 merge: scope #4 step 3 + spec step 2.5 (declarative primitives)`,
 with the session's commits in history:
 
 ```
+404f7e3 merge: scope #4 step 3 + spec step 2.5 (declarative primitives)
+a9d9311 docs(adw_sdlc): scope #4 step 3 (out-of-process) + spec step 2.5
+a6fb46b docs(adw_sdlc): record the merge to main in HANDOVER (#4 step 1+2)
 07b90f6 merge: provider extensibility — registry + declarative cli/rest providers (#4)
 0ac57a5 feat(adw_sdlc): provider extensibility — registry + declarative providers (§8j–§8m)
 9bbf755 docs(adw_sdlc): record the local merge to main in HANDOVER
@@ -57,10 +60,15 @@ d5ec440 feat(adw_sdlc): preflight phase chain at run start  (§8h)
 The provider-extensibility work (#4 step 1 + step 2: §8j registry, §8k/§8l/§8m
 declarative `cli`/`rest` work-item + `rest` change-request providers) is a single
 `feat` commit (`0ac57a5`) — the four slices are intertwined across the same files,
-so they were not split. The per-feature branch (`feat/provider-extensibility`,
-and the earlier `feat/custom-phase-*`, `docs/provider-plugin-security`) were
-deleted after merging; their content is preserved in `main`'s history above. The
-working tree is clean.
+so they were not split. The follow-up `docs` commit `a9d9311` then closed the #4
+design surface: **step 3 scoped** (out-of-process plugins, demand-gated, not
+built — `docs/DESIGN-provider-plugins-out-of-process.md`) and **step 2.5 spec'd**
+(declarative primitives, the recommended next build —
+`docs/DESIGN-declarative-providers-extensions.md`). The per-feature branches
+(`feat/provider-extensibility`, `docs/provider-extensibility-scoping`, and the
+earlier `feat/custom-phase-*`, `docs/provider-plugin-security`) were deleted after
+merging; their content is preserved in `main`'s history above. The working tree
+is clean.
 
 ## 2. Session goal
 
