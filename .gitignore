@@ -1,0 +1,11 @@
+# Dependencies
+node_modules/
+
+# Build output (dist/ is a build artifact; tsconfig.build.json emits it)
+dist/
+
+# ADW runtime workspaces (per-run state.json, prompts, transcripts)
+agents/
+
+# OS / editor noise
+.DS_Store

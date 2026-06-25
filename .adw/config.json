@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "project": {
+    "id": "healthtech",
+    "name": "HealthTech"
+  },
+  "prompts": {
+    "defaultRoot": ".pi/prompts",
+    "runnerRoots": {
+      "claude": ".claude/commands"
+    }
+  },
+  "providers": {
+    "cli": {
+      "type": "github"
+    },
+    "workItems": {
+      "type": "github",
+      "closedStates": ["CLOSED"],
+      "inProgressStatus": "In Progress",
+      "statusFieldName": "Status"
+    },
+    "vcs": {
+      "type": "git"
+    },
+    "changeRequests": {
+      "type": "github"
+    }
+  },
+  "progress": {
+    "tag": "[MX-ADW]"
+  },
+  "branching": {
+    "defaultPrefix": "feat",
+    "labelPrefixes": {
+      "type:bug": "fix",
+      "type:docs": "docs",
+      "type:ci": "ci",
+      "type:testing": "test",
+      "bug": "fix",
+      "docs": "docs",
+      "documentation": "docs",
+      "tech-debt": "refactor",
+      "infra": "ci",
+      "ci": "ci",
+      "test": "test",
+      "testing": "test",
+      "feature": "feat"
+    },
+    "slug": {
+      "maxLength": 40,
+      "stripDiacritics": true,
+      "stripPhaseIssuePrefix": true
+    }
+  },
+  "gates": {
+    "e2e": {
+      "hints": [
+        "ipc",
+        "daemon",
+        "matrix",
+        "signing",
+        "signed",
+        "signature",
+        "trust",
+        "policy",
+        "sandbox",
+        "pty",
+        "stream",
+        "artifact",
+        "exec",
+        "login",
+        "sync",
+        "scheduler",
+        "crypto",
+        "encryption",
+        "decryption",
+        "auth",
+        "authentication",
+        "consent",
+        "qr",
+        "offline",
+        "backup",
+        "recovery"
+      ]
+    },
+    "documentation": {
+      "hints": [
+        "cli",
+        "help",
+        "public api",
+        "protocol",
+        "schema",
+        "user-visible",
+        "user facing",
+        "user-facing",
+        "config",
+        "command",
+        "flag",
+        "endpoint",
+        "migration"
+      ],
+      "exactFiles": ["README.md"],
+      "pathPrefixes": ["docs/", "wiki/"],
+      "fileExtensions": [".md"]
+    }
+  },
+  "models": {
+    "classifyModel": "claude-haiku-4-5",
+    "defaultTier": "mid",
+    "phaseTiers": {
+      "classify": "cheap",
+      "plan": "capable",
+      "implement": "capable",
+      "tests": "mid",
+      "resolve": "mid",
+      "e2e": "mid",
+      "review": "capable",
+      "patch": "capable",
+      "document": "mid"
+    },
+    "tiers": {
+      "cheap": {
+        "claude": "claude-haiku-4-5",
+        "pi": "haiku",
+        "codex": "gpt-5.4-mini",
+        "opencode": "anthropic/claude-haiku-4-5"
+      },
+      "mid": {
+        "claude": "claude-sonnet-4-6",
+        "pi": "sonnet",
+        "codex": "gpt-5.4",
+        "opencode": "anthropic/claude-sonnet-4-6"
+      },
+      "capable": {
+        "claude": "claude-opus-4-8",
+        "pi": "opus",
+        "codex": "gpt-5.5",
+        "opencode": "anthropic/claude-opus-4-8"
+      }
+    }
+  },
+  "commands": {
+    "defaultTestCommand": "",
+    "defaultFinalizeGates": []
+  }
+}
