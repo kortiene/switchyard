@@ -25,6 +25,28 @@ session can pick up where we stopped.
 - Neutral package entry point (new): `adw_sdlc/README.md`.
 - Schema-overrides / custom-phases design + rollout (new):
   `adw_sdlc/docs/DESIGN-schema-overrides.md`.
+- Custom-phase control-flow design (new):
+  `adw_sdlc/docs/DESIGN-custom-phase-control-flow.md`.
+- Provider-plugin security design (new):
+  `adw_sdlc/docs/DESIGN-provider-plugins.md`.
+
+**Repository state:** all of this session's work is **merged to `main`**
+(no remote — local merge). `main` HEAD is the merge commit
+`3af37e3 merge: provider-plugin security design doc (#4)`, with the session's
+commits in history:
+
+```
+3af37e3 merge: provider-plugin security design doc (#4)
+9cde820 feat(adw_sdlc): loop/gated custom phases            (§8i)
+5cc4462 docs(adw_sdlc): security design pass for #4         (§11 security doc)
+d5ec440 feat(adw_sdlc): preflight phase chain at run start  (§8h)
+2892c7a feat(adw_sdlc): universalize phase chain, schema overrides, custom phases, done-status
+```
+
+The per-feature branches (`feat/custom-phase-startup-validation`,
+`feat/custom-phase-control-flow`, `docs/provider-plugin-security`) were deleted
+after merging; their content is preserved in `main`'s history above. The working
+tree is clean.
 
 ## 2. Session goal
 
@@ -610,11 +632,11 @@ optional):
   template, missing `.adw/schemas/<name>.json` schema, or broken/unsupported
   override fails loudly before any side effects; a `--dry-run` runs the same
   check.
-- **Security design doc for #4** — ✅ DONE (this session; on sibling branch
-  `docs/provider-plugin-security`). `docs/DESIGN-provider-plugins.md` drafts the
-  threat model + four isolation options for provider *code* loading and
-  recommends declarative providers + an out-of-process broker over any
-  in-process `import`. No implementation; #4 itself remains a §10 hard stop.
+- **Security design doc for #4** — ✅ DONE (this session; merged to `main` as
+  `5cc4462`). `docs/DESIGN-provider-plugins.md` drafts the threat model + four
+  isolation options for provider *code* loading and recommends declarative
+  providers + an out-of-process broker over any in-process `import`. No
+  implementation; #4 itself remains a §10 hard stop.
 
 ## 12. How to resume in a new session
 
@@ -634,4 +656,6 @@ the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
 for custom-phase startup validation, +13 for loop/gated custom phases). The
 session left no build artifact, no temporary files, and no untracked binary
-churn. The orchestrator did not run any `git` or `gh` commands.
+churn. The ADW orchestrator code path still runs no `git`/`gh` itself; the
+commits and the local merge to `main` recorded in §1 were performed only at the
+user's explicit request (there is no remote — the merge is local).
