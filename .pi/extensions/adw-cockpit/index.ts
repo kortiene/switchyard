@@ -231,6 +231,44 @@ function resumeCommandFor(run: LatestRunSummary): string | null {
 	return `cd adw_sdlc && npm run issue -- ${run.issueNumber} --resume --adw-id ${run.adwId}`;
 }
 
+type PrStatus = "merged" | "open" | "none";
+
+/**
+ * PR lifecycle for a run, derived from local state alone. A recorded `merge`
+ * phase is the kernel's own definition of "already merged" — adw_sdlc's
+ * orchestrator uses `state.isDone('merge')` as its post-merge resume guard — so
+ * a completed run reads as "merged" even though pr_url stays populated (the
+ * merged PR's URL is still valid). A pr_url with no merge phase is a genuinely
+ * open PR; no pr_url means none was opened. The dashboard render path is
+ * offline, so this never hits the network — it trusts the same signal the
+ * kernel persists.
+ */
+function prStatus(run: LatestRunSummary): PrStatus {
+	if (!run.prUrl) return "none";
+	return run.completed.includes("merge") ? "merged" : "open";
+}
+
+/** Status → display label + theme colour (merged = done, open = not yet merged). */
+function prStatusStyle(status: PrStatus): { label: string; color: "success" | "warning" | "dim" } {
+	if (status === "merged") return { label: "merged", color: "success" };
+	if (status === "open") return { label: "open", color: "warning" };
+	return { label: "none", color: "dim" };
+}
+
+/** Pre-styled `pr` value for the Latest Run panel. */
+function prCell(theme: ThemeApi, run: LatestRunSummary): string {
+	const style = prStatusStyle(prStatus(run));
+	return theme.fg(style.color, style.label);
+}
+
+/** Right-aligned PR badge for the Latest Run panel title (empty when no PR). */
+function prBadge(theme: ThemeApi, run: LatestRunSummary | null): string {
+	if (!run) return "";
+	const status = prStatus(run);
+	if (status === "none") return "";
+	return theme.fg(prStatusStyle(status).color, status === "merged" ? "MERGED" : "PR");
+}
+
 function runDetailLines(run: LatestRunSummary): string[] {
 	const completed = run.completed.length > 0 ? run.completed.join(", ") : "(none)";
 	return [
@@ -239,7 +277,7 @@ function runDetailLines(run: LatestRunSummary): string[] {
 		`runner: ${run.runner ?? "unknown"}`,
 		`branch: ${run.branchName ?? "unknown"}`,
 		`completed (${run.completed.length}): ${completed}`,
-		`pr: ${run.prUrl ?? "none"}`,
+		`pr: ${run.prUrl ? `${run.prUrl} (${prStatus(run)})` : "none"}`,
 		`cost: ${run.totalCostUsd === null ? "unknown" : `$${run.totalCostUsd.toFixed(3)}`}`,
 		`workspace: agents/${run.adwId}`,
 	];
@@ -258,7 +296,7 @@ function pickRun(ctx: ExtensionContext, runs: readonly LatestRunSummary[]): Prom
 			return {
 				value: run.adwId,
 				label: `${run.adwId}  ${run.issueNumber ? `#${run.issueNumber}` : "#?"}  ${run.runner ?? "?"}`,
-				description: `completed ${run.completed.length}${last} · ${run.prUrl ? "PR" : "no PR"}`,
+				description: `completed ${run.completed.length}${last} · ${prStatus(run) === "none" ? "no PR" : prStatus(run)}`,
 			};
 		});
 		const list = new SelectList(items, Math.min(items.length, 10), getSelectListTheme());
@@ -777,7 +815,7 @@ function renderDashboard(theme: ThemeApi, model: DashboardModel, rawWidth: numbe
 				kv(theme, "run", theme.fg("accent", run.adwId), 10),
 				kv(theme, "issue", theme.fg("text", run.issueNumber ? `#${run.issueNumber}` : "unknown"), 10),
 				kv(theme, "runner", theme.fg("text", run.runner ?? "unknown"), 10),
-				kv(theme, "pr", run.prUrl ? theme.fg("success", "open") : theme.fg("dim", "none"), 10),
+				kv(theme, "pr", prCell(theme, run), 10),
 				kv(theme, "cost", run.totalCostUsd === null ? theme.fg("dim", "unknown") : theme.fg("text", `$${run.totalCostUsd.toFixed(3)}`), 10),
 			]
 		: [
@@ -787,7 +825,7 @@ function renderDashboard(theme: ThemeApi, model: DashboardModel, rawWidth: numbe
 				kv(theme, "pr", theme.fg("dim", "—"), 10),
 				kv(theme, "cost", theme.fg("dim", "—"), 10),
 			];
-	const runTag = run?.prUrl ? theme.fg("success", "PR") : "";
+	const runTag = prBadge(theme, run);
 
 	// Top band: two panels side by side when wide enough, else stacked.
 	if (width >= 84) {
