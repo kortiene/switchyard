@@ -48,6 +48,15 @@ export interface RunAgentPhaseOptions {
   timeoutMs?: number;
   /** Forwarded to backends with native budget gating (claude). */
   maxBudgetUsd?: number;
+  /**
+   * Measurement mode (MX_AGENT_FORCE_FENCED): route a native-schema runner
+   * through the fenced-JSON contract path it would otherwise skip — the prompt
+   * carries the contract footer and no native schema is handed to the SDK. Used
+   * only to harvest a fenced-path baseline for the parity hard-failure-rate bar
+   * (tools/parity-rate.ts) from a runner that is natively native-schema; it has
+   * no effect on a runner that is already fenced (pi). Default off ⇒ unchanged.
+   */
+  forceFenced?: boolean;
 }
 
 export interface AgentPhaseOutcome<P extends SchemaPhase = SchemaPhase> {
@@ -67,7 +76,9 @@ export async function runAgentPhase<P extends SchemaPhase>(
 ): Promise<AgentPhaseOutcome<P>> {
   const { phase, state, runner } = options;
   const phaseSchema = resolvePhaseSchema(phase);
-  const emitJsonContract = !runner.caps.nativeSchema;
+  // Fenced path when the runner lacks a native schema OR measurement mode forces
+  // it; the native schema is handed to the SDK only on the (unforced) native path.
+  const emitJsonContract = !runner.caps.nativeSchema || options.forceFenced === true;
   const prompt = composePhasePrompt(
     phase as AgentPhase,
     options.templateArgs,
@@ -78,7 +89,7 @@ export async function runAgentPhase<P extends SchemaPhase>(
   const phaseDir = state.phaseDir(phase);
   writeFileSync(join(phaseDir, 'prompt.txt'), prompt, 'utf8');
   const model = modelForPhase(phase, runner.id, { cliModel: options.cliModel ?? '' });
-  const schema = runner.caps.nativeSchema ? phaseSchema.jsonSchema() : undefined;
+  const schema = emitJsonContract ? undefined : phaseSchema.jsonSchema();
 
   const invoke = async (text: string, transcriptName: string): Promise<PhaseResult> => {
     const controller = new AbortController();

@@ -110,6 +110,7 @@ hardcoded for security and must not be relaxed by a project pack.
 | [`HEALTHTECH_PORT.md`](./HEALTHTECH_PORT.md) | This repository's setup and the standalone-port deltas from upstream |
 | [`PLAN.md`](./PLAN.md) | Full migration plan and the settled D1–D6 design decisions |
 | [`PARITY.md`](./PARITY.md) | Parity checklist mapping each guarantee to the test(s) that prove it |
+| [`MVP-READINESS.md`](./MVP-READINESS.md) | Open-risk counterweight to PARITY.md: what real MVP-readiness still requires (mostly live runs) |
 | [`MEMORY_STACK.md`](./MEMORY_STACK.md) | Decision record for the deferred cross-run memory feature |
 | [`docs/DESIGN-schema-overrides.md`](./docs/DESIGN-schema-overrides.md) | Design + rollout for per-phase schema overrides / custom phases (implemented) |
 | [`docs/DESIGN-custom-phase-control-flow.md`](./docs/DESIGN-custom-phase-control-flow.md) | Design for loop/gated custom phases (custom gates + resolve-style loops; implemented) |

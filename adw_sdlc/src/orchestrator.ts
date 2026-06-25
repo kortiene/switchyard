@@ -320,6 +320,8 @@ interface AgentCtx {
   env: Record<string, string>;
   timeoutMs: number;
   maxBudgetUsd?: number;
+  /** MX_AGENT_FORCE_FENCED measurement mode — see run-phase RunAgentPhaseOptions. */
+  forceFenced?: boolean;
 }
 
 // --- helpers (unit-testable) ------------------------------------------------------
@@ -591,6 +593,7 @@ function invokeAgent<P extends 'resolve' | 'patch'>(
     env: agent.env,
     timeoutMs: agent.timeoutMs,
     ...(agent.maxBudgetUsd !== undefined ? { maxBudgetUsd: agent.maxBudgetUsd } : {}),
+    ...(agent.forceFenced ? { forceFenced: true } : {}),
   });
 }
 
@@ -1097,6 +1100,7 @@ export async function run(
     env: agentEnv,
     timeoutMs: opts.timeoutMs,
     ...(opts.maxBudgetUsd !== undefined ? { maxBudgetUsd: opts.maxBudgetUsd } : {}),
+    ...(deps.env['MX_AGENT_FORCE_FENCED'] === '1' ? { forceFenced: true } : {}),
   };
 
   // Runner lifecycle (D6): start/stop are no-ops for the in-process backends;
@@ -1187,6 +1191,7 @@ export async function run(
         env: agent.env,
         timeoutMs: agent.timeoutMs,
         ...(agent.maxBudgetUsd !== undefined ? { maxBudgetUsd: agent.maxBudgetUsd } : {}),
+        ...(agent.forceFenced ? { forceFenced: true } : {}),
       });
       recordUsage(state, outcome.usage);
       const result = outcome.data;

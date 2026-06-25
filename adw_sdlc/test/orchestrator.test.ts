@@ -432,6 +432,27 @@ describe('run() integration', () => {
     expect(state?.totalCostUsd).toBeCloseTo(0.01);
   });
 
+  it('threads MX_AGENT_FORCE_FENCED=1 to runAgentPhase as forceFenced (measurement mode)', async () => {
+    const seen: boolean[] = [];
+    const deps = testDeps({
+      env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-x', MX_AGENT_FORCE_FENCED: '1' },
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
+      fetchIssue: () => ({ title: 'T', body: 'B', labels: ['type:feature'] }),
+      classify: vi.fn(async () => ({ value: { issue_class: 'feat' as const, reason: 'r' }, usage: { costUsd: 0 } })),
+      runAgentPhase: agentStub(PHASE_RESULTS, (opts) => {
+        seen.push(opts.forceFenced === true);
+        if (opts.phase === 'review') {
+          mkdirSync(opts.state.workspace(), { recursive: true });
+          writeFileSync(commitMessagePath(opts.state), 'feat: x\n\ncloses #5', 'utf8');
+          writeFileSync(prBodyPath(opts.state), 'b', 'utf8');
+        }
+      }),
+    });
+    await run(5, createMockRunner(), { yes: true, noProgress: true }, deps);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every(Boolean)).toBe(true); // every agent phase got forceFenced:true
+  });
+
   it('moves the work item to the configured doneStatus after a verified merge', async () => {
     // GitHub auto-closes the issue via "closes #<n>", but a project may also
     // want its Projects board moved to a terminal column on merge. Opt-in via

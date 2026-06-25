@@ -96,9 +96,11 @@ parity runs.
   - **Measure it:** `npm run parity:rate -- agents/` (`tools/parity-rate.ts`) classifies every phase
     invocation from those artifacts and reports the per-path hard-fail rate. It deliberately prints
     **INSUFFICIENT DATA** rather than a verdict until each path has enough live attempts, so the bar is an
-    audited measurement — not the structural argument above standing in for one. Until a fenced-path runner
-    (`pi`) runs live, the fenced sample is empty and no comparison is possible: **the bar is not yet
-    measured.**
+    audited measurement — not the structural argument above standing in for one. The fenced sample is empty
+    until a fenced-path runner runs live, so the **comparative** bar is **not yet measured** — but two knobs
+    make it evaluable now: `--max-native-rate PCT` gates the native path's *absolute* hard-fail rate from
+    `claude`-only runs, and `MX_AGENT_FORCE_FENCED=1` harvests a fenced baseline from `claude` (routes a
+    native-schema runner through the fenced path). See `MVP-READINESS.md` for the full readiness gate.
 
 ---
 
