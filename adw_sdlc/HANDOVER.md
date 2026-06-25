@@ -19,6 +19,8 @@ session can pick up where we stopped.
   this standalone port.
 - Architectural plan & parity criteria: `adw_sdlc/PLAN.md`,
   `adw_sdlc/PARITY.md`, `adw_sdlc/HEALTHTECH_PORT.md`.
+- MVP open-risk counterweight to PARITY.md (what real readiness still requires —
+  mostly live runs): `adw_sdlc/MVP-READINESS.md` (§8s).
 - Universal architecture reference (new): `adw_sdlc/docs/UNIVERSAL.md`.
 - Example non-HealthTech project pack (new):
   `adw_sdlc/docs/examples/payments-api.config.json`.
@@ -42,10 +44,13 @@ session can pick up where we stopped.
 **Repository state:** all of this session's work is **merged to `main`**
 (no remote — local merge). `main` HEAD is the docs commit recording the merge,
 on top of the merge commit
-`3e441f8 merge: structured-output hard-failure-rate harness (§8r)`,
+`16d4333 merge: force-fenced measurement mode + MVP-readiness instrumentation (§8s)`,
 with the session's commits in history:
 
 ```
+16d4333 merge: force-fenced measurement mode + MVP-readiness instrumentation (§8s)
+6f78795 docs(adw_sdlc): add MVP-READINESS open-risk doc            (§8s)
+19c86d6 feat(adw_sdlc): force-fenced measurement mode + absolute native parity bar (§8s)
 3e441f8 merge: structured-output hard-failure-rate harness (§8r)
 92ab4a5 feat(adw_sdlc): structured-output hard-failure-rate harness (§8r)
 1070d9e merge: drop dead imports + extract withScopedEnv test helper (§8q)
@@ -113,7 +118,15 @@ Behavior-neutral (suite unchanged at 450).
 The parity hard-failure-rate harness (§8r) is the `feat` commit `92ab4a5` on the
 `feat/parity-rate-harness` branch — merged to `main` in `3e441f8`; the branch was
 deleted after merging. New tool (`tools/parity-rate.ts`) + tests (+4 → 454), no
-kernel change. This very entry is the follow-up `docs` commit recording that merge.
+kernel change.
+
+The force-fenced measurement mode + MVP-readiness instrumentation (§8s) is two
+commits on the `feat/force-fenced-and-mvp-readiness` branch — `19c86d6 feat: …
+absolute native parity bar` and `6f78795 docs: add MVP-READINESS open-risk doc`
+— merged to `main` in `16d4333`; the branch was deleted after merging. Gated
+kernel knob (`MX_AGENT_FORCE_FENCED`, default off ⇒ byte-identical) + harness
+`--max-native-rate` + the new `MVP-READINESS.md` (+2 → 456). This very entry is
+the follow-up `docs` commit recording that merge.
 
 ## 2. Session goal
 
@@ -292,7 +305,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 454 tests, 33 files)
+# 3) Full test suite (current: 456 tests, 33 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -1032,6 +1045,50 @@ synthetic `agents/` tree (native 4 clean + 1 nudged-ok, fenced 1 clean + 1
 hard-fail → `INSUFFICIENT DATA` at `--min 20`, `MEETS BAR` at `--min 2`). No kernel
 change, no new dependency. Committed `92ab4a5`, merged `3e441f8` (see §1).
 
+## 8s. Follow-up session — force-fenced mode + absolute parity bar + MVP-READINESS
+
+Closes the loop the §8r harness opened: the comparative bar (native ≤ fenced) is
+unmeasurable while the fenced sample is empty (only `pi` is fenced, and it has
+never run live). Two knobs make the bar evaluable **now** from `claude`, plus a
+doc that states the MVP-readiness gap plainly. Driven by a user challenge to the
+"essentially at MVP" framing.
+
+- `adw_sdlc/src/run-phase.ts` — `RunAgentPhaseOptions.forceFenced`. The fenced
+  decision is now `emitJsonContract = !runner.caps.nativeSchema || forceFenced`,
+  and the native schema is handed to the SDK only on the *unforced* native path
+  (`schema = emitJsonContract ? undefined : jsonSchema()`). So a native-schema
+  runner can be routed through the fenced-JSON contract path on demand.
+- `adw_sdlc/src/orchestrator.ts` — reads `MX_AGENT_FORCE_FENCED` from the control
+  env (`deps.env`, never the scoped runner env — the `MX_AGENT_*` deny prefix keeps
+  it orchestrator-only) into `AgentCtx.forceFenced`, threaded to both
+  `runAgentPhase` call sites via a **conditional spread** so the request is
+  byte-identical when off. **Default off ⇒ behavior unchanged** (dry-run identical).
+- `adw_sdlc/tools/parity-rate.ts` — `--max-native-rate PCT`: an **absolute** native
+  hard-fail gate (`nativeAbsoluteVerdict`) that needs only the native path, so a
+  `claude`-only sample clears `INSUFFICIENT DATA`. The report shows both verdicts;
+  the run exits non-zero if **either** configured bar is a measured failure.
+- `adw_sdlc/MVP-READINESS.md` (new) — the open-risk counterweight to PARITY.md:
+  forces the A/B/C MVP-definition decision, lists the concrete remaining gates per
+  definition (mostly live-run / credential-gated, incl. codex's auth blocker and
+  the universalization surface's zero live validation), the in-repo instruments,
+  and a recommended minimal path. Linked from `README.md` doc-map, `PARITY.md`,
+  and §1 here.
+- `adw_sdlc/PARITY.md` — the hard-failure-rate section documents both knobs.
+- Tests: `test/run-phase.test.ts` (+1 — forceFenced routes a native runner to the
+  fenced path: footer on, native schema withheld) and `test/orchestrator.test.ts`
+  (+1 — `MX_AGENT_FORCE_FENCED=1` threads through to `runAgentPhase` as
+  `forceFenced` on every agent phase); plus absolute-bar verdict assertions in
+  `test/parity-rate.test.ts`. 454 → **456**.
+
+The kernel change is the only structured-output-path edit in the cleanup arc; it
+is gated, byte-identical by default, reuses the existing fenced footer (no new
+LLM-facing wording, so invariant §3 #3 is untouched), and the `MX_AGENT_*` name
+keeps it off the runner subprocess env. Verified: typecheck, `lint:env`, full
+suite (**456**), build+clean (tools excluded), byte-identical github dry-run, and
+a live demo of all three verdict states (comparative INSUFFICIENT vs. absolute
+MEETS@30% / FAILS@10%+exit-1) over a synthetic claude-only `agents/` tree.
+Committed `19c86d6`/`6f78795`, merged `16d4333` (see §1).
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -1237,7 +1294,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **454 passing across 33 files**
+Test count baseline after this session: **456 passing across 33 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1249,7 +1306,8 @@ declarative primitives 2.5a transforms + 2.5b pagination — §8n, +9 for the
 declarative `cli` change-request provider — §8o; the §8p and §8q housekeeping
 passes added no tests — §8p removed dead code, §8q removed dead imports + enabled
 the unused-symbol typecheck guards and refactored 4 tests onto `withScopedEnv`;
-+4 for the parity hard-failure-rate harness — §8r). The session left
++4 for the parity hard-failure-rate harness — §8r, +2 for the force-fenced
+measurement mode — §8s). The session left
 no build artifact, no temporary files, and no untracked binary churn. The ADW
 orchestrator code path still runs no `git`/`gh` itself; the commits and the local
 merge to `main` recorded in §1 were performed only at the user's explicit request
@@ -1263,4 +1321,6 @@ stale-doc audit is committed as `110cdf1`/`b5700d1` and merged to `main`
 (`badcf50`); the §8q unused-import cleanup + test-helper extraction is committed
 as `93165ee`/`41e4111` and merged to `main` (`1070d9e`); the §8r parity
 hard-failure-rate harness is committed as `92ab4a5` and merged to `main`
-(`3e441f8`). The working tree is clean.** — see §1.
+(`3e441f8`); the §8s force-fenced mode + MVP-READINESS doc is committed as
+`19c86d6`/`6f78795` and merged to `main` (`16d4333`). The working tree is
+clean.** — see §1.
