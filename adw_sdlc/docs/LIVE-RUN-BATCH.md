@@ -8,7 +8,9 @@ live `claude` ADW runs**. These satisfy the `MVP-READINESS.md` §1 gate
 > live-run playbook) has been run live as a **forced-fenced** ADW run — the first
 > live run from this checkout and the seed of the fenced-path baseline. Issue #3
 > (feat: MVP live-run observation ledger) has been run as a **native** ADW run,
-> producing `adw_sdlc/docs/OBSERVED-LIVE-LEDGER.md`. Issues 2, 4–8 remain planned.
+> producing `adw_sdlc/docs/OBSERVED-LIVE-LEDGER.md`. Issue #4 (test: failure-drill
+> scaffold) has been run as a **native** ADW run, producing
+> `adw_sdlc/docs/FAILURE-DRILLS.md`. Issues 2, 5–8 remain planned.
 
 ## Why a single `verify` gate first
 
@@ -103,6 +105,9 @@ npm run parity:rate -- --max-native-rate 20 agents/   # 20% is a starting thresh
 
 ## Failure-mode drills (MVP-READINESS §1)
 
+Full runbook: [`FAILURE-DRILLS.md`](./FAILURE-DRILLS.md) — copy-paste commands and the exact expected
+signal for each drill. The bullets below remain a short index.
+
 Reuse a low-risk issue's run id; these need no separate GitHub issue.
 
 - **Timeout fast-fail:** add `--timeout 1`; expect fail with no nudge. Then
@@ -111,8 +116,8 @@ Reuse a low-risk issue's run id; these need no separate GitHub issue.
   resume with a normal cap.
 - **Kill/resume:** Ctrl-C mid-phase, then `--resume --adw-id <ID>`.
 - **Nudge-retry:** ⚠ hard to induce safely — do **not** instruct the agent to
-  violate the output contract on a real issue. Land issue #4's scaffold first and
-  capture it opportunistically.
+  violate the output contract on a real issue. Capture opportunistically if a real
+  run naturally produces a recoverable parse failure (see `FAILURE-DRILLS.md` §Opportunistic).
 
 ## Cost / risk
 

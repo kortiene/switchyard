@@ -58,6 +58,8 @@ Frequently used flags (`-h` / `--help` prints the full list):
 | `--phases <list>` | comma-separated phase subset/order (default: the configured chain) |
 | `--dry-run` | print the resolved phase plan and exit without running |
 | `--resume` + `--adw-id <id>` | resume a run from its saved state |
+| `--timeout <s>` | per-phase timeout in seconds; `signal:'timeout'` fast-fails with no nudge |
+| `--max-budget-usd <usd>` | native spend cap (claude only); `signal:'budget'` fast-fails with no nudge |
 | `--test-cmd <cmd>` | the test-gate command (env: `ADW_TEST_CMD`) |
 | `--repo <owner/repo>` | work-item/repo locator (env: `REPO`) |
 | `-y, --yes` | do not prompt before the irreversible squash-merge |
@@ -172,6 +174,7 @@ hardcoded for security and must not be relaxed by a project pack.
 | [`MVP-READINESS.md`](./MVP-READINESS.md) | Open-risk counterweight to PARITY.md: what real MVP-readiness still requires (mostly live runs) |
 | [`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md) | Ready-to-create issue batch + live-run command templates for the 5–10 varied `claude` runs |
 | [`docs/OBSERVED-LIVE-LEDGER.md`](./docs/OBSERVED-LIVE-LEDGER.md) | Live-run dashboard: tracks which PARITY.md Section-10 guarantees have been observed in a real `claude` run (not only under mocks) |
+| [`docs/FAILURE-DRILLS.md`](./docs/FAILURE-DRILLS.md) | Live `claude` runbook for the timeout / budget fast-fail and kill-then-`--resume` failure drills (MVP-READINESS §1 evidence) |
 | [`MEMORY_STACK.md`](./MEMORY_STACK.md) | Decision record for the deferred cross-run memory feature |
 | [`docs/DESIGN-schema-overrides.md`](./docs/DESIGN-schema-overrides.md) | Design + rollout for per-phase schema overrides / custom phases (implemented) |
 | [`docs/DESIGN-custom-phase-control-flow.md`](./docs/DESIGN-custom-phase-control-flow.md) | Design for loop/gated custom phases (custom gates + resolve-style loops; implemented) |

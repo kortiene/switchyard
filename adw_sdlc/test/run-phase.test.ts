@@ -210,6 +210,17 @@ describe('runAgentPhase', () => {
     expect(runner.requests[0]!.maxBudgetUsd).toBe(1);
   });
 
+  it('fails fast with NO nudge on a cancelled signal (operator kill)', async () => {
+    const runner = createMockRunner({
+      script: () => ({ ok: false, rc: 1, signal: 'cancelled', transcriptText: 'killed mid-phase' }),
+    });
+    await expect(
+      runAgentPhase({ phase: 'resolve', templateArgs: ['x'], state, runner, env: {} }),
+    ).rejects.toThrow(/cancelled/);
+    expect(runner.requests).toHaveLength(1); // no nudge retry
+    expect(existsSync(join(tmp, 'a1b2c3d4', 'resolve', 'transcript-2.log'))).toBe(false);
+  });
+
   it('still accepts parseable output from a timed-out run (parse first, like Python)', async () => {
     const runner = createMockRunner({
       caps: { nativeSchema: false },
