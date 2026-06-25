@@ -1091,6 +1091,24 @@ a live demo of all three verdict states (comparative INSUFFICIENT vs. absolute
 MEETS@30% / FAILS@10%+exit-1) over a synthetic claude-only `agents/` tree.
 Committed `19c86d6`/`6f78795`, merged `16d4333` (see §1).
 
+## 8t. First live ADW run — issue #1 (docs, forced-fenced)
+
+The first live `claude` ADW run from this checkout. Issue #1: "docs: declare
+Claude-only MVP scope + live-run playbook."
+
+- `adw_sdlc/MVP-READINESS.md` — §0 updated: recorded the decision (MVP = (A),
+  `claude` ships real issues reliably; (B) four-runner and (C) cutover demoted
+  to post-MVP), and a "How to run a live `claude` issue" playbook subsection
+  added, linking `docs/LIVE-RUN-BATCH.md` and the `npm run verify` gate.
+- `adw_sdlc/docs/LIVE-RUN-BATCH.md` — status updated from "plan only" to
+  "in progress" now that issue #1 has run.
+
+Run mode: **forced-fenced** (`ADW_PARITY_FORCE_FENCED_JSON=1`) — serves as the
+smoke test for the (A)-MVP gate and seeds the fenced-path baseline the
+comparative parity bar needs (see MVP-READINESS.md §1 and
+`tools/parity-rate.ts`). Issue class: `docs`. No kernel change; no code paths
+change; `npm run verify` stays green.
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
