@@ -24,6 +24,7 @@ import {
   type RestTransport,
 } from '../src/providers-rest-cli.js';
 import type { Captured } from '../src/exec.js';
+import { withScopedEnv } from './helpers.js';
 
 function fakeProviders(): AdwProviders {
   return {
@@ -116,11 +117,7 @@ describe('declarative cli work-item provider', () => {
       };
     };
 
-    const prevGitlab = process.env['GITLAB_TOKEN'];
-    const prevGh = process.env['GH_TOKEN'];
-    process.env['GITLAB_TOKEN'] = 'secret-token';
-    process.env['GH_TOKEN'] = 'gh-secret';
-    try {
+    withScopedEnv({ GITLAB_TOKEN: 'secret-token', GH_TOKEN: 'gh-secret' }, () => {
       const provider = createCliWorkItemProvider(descriptor, fakeCapture);
       expect(provider.fetch({ ghBin: null, repo: 'group/proj' }, 42)).toEqual({
         title: 'Fix login',
@@ -131,12 +128,7 @@ describe('declarative cli work-item provider', () => {
       expect(first.cmd).toEqual(['glab', 'issue', 'view', '42', '--repo', 'group/proj', '--output', 'json']);
       expect(first.env?.['GITLAB_TOKEN']).toBe('secret-token'); // one credential in
       expect(first.env?.['GH_TOKEN']).toBeUndefined(); // ambient GitHub authority withheld
-    } finally {
-      if (prevGitlab === undefined) delete process.env['GITLAB_TOKEN'];
-      else process.env['GITLAB_TOKEN'] = prevGitlab;
-      if (prevGh === undefined) delete process.env['GH_TOKEN'];
-      else process.env['GH_TOKEN'] = prevGh;
-    }
+    });
   });
 
   it('falls back to UNKNOWN state and null fetch on failure or unparseable output', () => {
@@ -203,11 +195,7 @@ describe('declarative rest work-item provider', () => {
       };
     };
 
-    const prevGitlab = process.env['GITLAB_TOKEN'];
-    const prevGh = process.env['GH_TOKEN'];
-    process.env['GITLAB_TOKEN'] = 'tok';
-    process.env['GH_TOKEN'] = 'gh-secret';
-    try {
+    withScopedEnv({ GITLAB_TOKEN: 'tok', GH_TOKEN: 'gh-secret' }, () => {
       const provider = createRestWorkItemProvider(descriptor, transport);
       expect(provider.fetch({ ghBin: null, repo: 'group/proj' }, 42)).toEqual({ title: 'T', body: 'B', labels: ['bug'] });
       const { req, env } = seen[0]!;
@@ -218,12 +206,7 @@ describe('declarative rest work-item provider', () => {
       expect(req.authScheme).toBe('Bearer');
       expect(env['GITLAB_TOKEN']).toBe('tok'); // one credential in
       expect(env['GH_TOKEN']).toBeUndefined(); // GitHub authority withheld
-    } finally {
-      if (prevGitlab === undefined) delete process.env['GITLAB_TOKEN'];
-      else process.env['GITLAB_TOKEN'] = prevGitlab;
-      if (prevGh === undefined) delete process.env['GH_TOKEN'];
-      else process.env['GH_TOKEN'] = prevGh;
-    }
+    });
   });
 
   it('returns null/UNKNOWN on non-2xx, transport error, or unparseable body', () => {
@@ -289,11 +272,7 @@ describe('declarative rest change-request provider', () => {
       seen.push({ req, env });
       return { status: 201, body: JSON.stringify({ iid: 7, web_url: 'https://gitlab.example.com/g/p/-/merge_requests/7' }) };
     };
-    const prevGitlab = process.env['GITLAB_TOKEN'];
-    const prevGh = process.env['GH_TOKEN'];
-    process.env['GITLAB_TOKEN'] = 'tok';
-    process.env['GH_TOKEN'] = 'gh-secret';
-    try {
+    withScopedEnv({ GITLAB_TOKEN: 'tok', GH_TOKEN: 'gh-secret' }, () => {
       const provider = createRestChangeRequestProvider(descriptor, transport);
       const result = provider.create({ ghBin: null, repo: 'group/proj' }, {
         branch: 'feat/7-x',
@@ -313,12 +292,7 @@ describe('declarative rest change-request provider', () => {
       expect(req.body).toEqual({ source_branch: 'feat/7-x', target_branch: 'main', title: 'My MR', description: 'desc' });
       expect(env['GITLAB_TOKEN']).toBe('tok');
       expect(env['GH_TOKEN']).toBeUndefined();
-    } finally {
-      if (prevGitlab === undefined) delete process.env['GITLAB_TOKEN'];
-      else process.env['GITLAB_TOKEN'] = prevGitlab;
-      if (prevGh === undefined) delete process.env['GH_TOKEN'];
-      else process.env['GH_TOKEN'] = prevGh;
-    }
+    });
   });
 
   it('findForBranch maps a url from the response, or null when none', () => {
@@ -406,11 +380,7 @@ describe('declarative cli change-request provider', () => {
       calls.push({ cmd, env: opts?.env });
       return { returncode: 0, stdout: JSON.stringify({ iid: 7, web_url: 'https://gitlab.example.com/g/p/-/merge_requests/7' }), stderr: '' };
     };
-    const prevGitlab = process.env['GITLAB_TOKEN'];
-    const prevGh = process.env['GH_TOKEN'];
-    process.env['GITLAB_TOKEN'] = 'tok';
-    process.env['GH_TOKEN'] = 'gh-secret';
-    try {
+    withScopedEnv({ GITLAB_TOKEN: 'tok', GH_TOKEN: 'gh-secret' }, () => {
       const result = createCliChangeRequestProvider(descriptor, fakeCapture).create(ctx, {
         branch: 'feat/7-x',
         base: 'main',
@@ -422,12 +392,7 @@ describe('declarative cli change-request provider', () => {
       expect(first.cmd).toEqual(['glab', 'mr', 'create', '--repo', 'group/proj', '--source-branch', 'feat/7-x', '--target-branch', 'main', '--title', 'My MR', '--description', 'desc', '--output', 'json']);
       expect(first.env?.['GITLAB_TOKEN']).toBe('tok'); // one credential in
       expect(first.env?.['GH_TOKEN']).toBeUndefined(); // GitHub authority withheld
-    } finally {
-      if (prevGitlab === undefined) delete process.env['GITLAB_TOKEN'];
-      else process.env['GITLAB_TOKEN'] = prevGitlab;
-      if (prevGh === undefined) delete process.env['GH_TOKEN'];
-      else process.env['GH_TOKEN'] = prevGh;
-    }
+    });
   });
 
   it('findForBranch maps a url from the response, null when none, null on failure', () => {
