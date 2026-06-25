@@ -23,8 +23,13 @@ import { safeSubprocessEnv } from './env.js';
 import {
   assertAllowedHost,
   evalArray,
+  evalItems,
   evalScalar,
+  evalScalarMapping,
+  isAllowedHost,
   type CliWorkItemDescriptor,
+  type Paginate,
+  type PathSegment,
   type RestBase,
   type RestChangeRequestDescriptor,
   type RestWorkItemDescriptor,
@@ -34,6 +39,7 @@ import type {
   CreateChangeRequestInput,
   CreateChangeRequestResult,
   OperationResult,
+  PipelineJob,
   PipelineStatus,
   ProviderContext,
   WorkItemProvider,
@@ -88,8 +94,8 @@ export function createCliWorkItemProvider(
         return null;
       }
       return {
-        title: evalScalar(data, descriptor.routes.fetch.title),
-        body: evalScalar(data, descriptor.routes.fetch.body),
+        title: evalScalarMapping(data, descriptor.routes.fetch.title),
+        body: evalScalarMapping(data, descriptor.routes.fetch.body),
         labels: evalArray(data, descriptor.routes.fetch.labels),
       };
     },
@@ -102,7 +108,7 @@ export function createCliWorkItemProvider(
       if (data === null) {
         return 'UNKNOWN';
       }
-      return evalScalar(data, descriptor.routes.state.state) || 'UNKNOWN';
+      return evalScalarMapping(data, descriptor.routes.state.state) || 'UNKNOWN';
     },
     postProgress: (ctx: ProviderContext, id, adwId, phase, message) => {
       const route = descriptor.routes.postProgress;
@@ -231,6 +237,17 @@ function substituteBody(template: unknown, vars: Record<string, string>): unknow
   return template;
 }
 
+interface RestRequester {
+  /** Send to `baseUrl + the route's templated path` (host re-asserted, https-only). */
+  request(
+    route: { method: string; path: string },
+    vars: Record<string, string>,
+    bodyTemplate?: Record<string, unknown>,
+  ): RestResponse;
+  /** Send to an already-resolved absolute URL (host re-asserted) — used by pagination. */
+  requestUrl(method: string, url: string): RestResponse;
+}
+
 /**
  * Shared rest requester for both declarative roles. Resolves `baseUrl + path`
  * (placeholders percent-encoded so they cannot change the host), RE-asserts the
@@ -238,33 +255,116 @@ function substituteBody(template: unknown, vars: Record<string, string>): unknow
  * substitutes any JSON body template (passed explicitly — a route's own `body`
  * field would collide with the work-item map's `body`), and runs the request
  * through `transport` with a scoped one-credential env (GH_TOKEN withheld).
+ * `requestUrl` issues a request to a pre-resolved absolute URL (the pagination
+ * loop follows next-page URLs) under the same host re-assertion + scoped env.
  */
-function makeRestRequester(base: RestBase, transport: RestTransport) {
+function makeRestRequester(base: RestBase, transport: RestTransport): RestRequester {
   const scopedEnv = (): Record<string, string> =>
     safeSubprocessEnv({ allowGhToken: false, extraAllow: [base.authEnv] });
-  return (
-    route: { method: string; path: string },
-    vars: Record<string, string>,
-    bodyTemplate?: Record<string, unknown>,
-  ): RestResponse => {
-    const url = base.baseUrl + substitutePath(route.path, vars);
+  const send = (method: string, url: string, body?: unknown): RestResponse => {
     assertAllowedHost(url, base.allowedHosts);
     return transport(
       {
-        method: route.method,
+        method,
         url,
         authEnv: base.authEnv,
         authHeader: base.authHeader,
         authScheme: base.authScheme,
         timeoutMs: REST_TIMEOUT_MS,
-        body: bodyTemplate !== undefined ? substituteBody(bodyTemplate, vars) : undefined,
+        body,
       },
       scopedEnv(),
     );
   };
+  return {
+    request: (route, vars, bodyTemplate) =>
+      send(
+        route.method,
+        base.baseUrl + substitutePath(route.path, vars),
+        bodyTemplate !== undefined ? substituteBody(bodyTemplate, vars) : undefined,
+      ),
+    requestUrl: (method, url) => send(method, url),
+  };
 }
 
 const restOk = (res: RestResponse): boolean => !res.error && res.status >= 200 && res.status < 300;
+
+/** Set/replace one query param on an absolute URL without touching its host. */
+function withQueryParam(url: string, param: string, value: number): string {
+  const u = new URL(url);
+  u.searchParams.set(param, String(value));
+  return u.toString();
+}
+
+/** Parse a single page response into its raw item array (best-effort ⇒ []). */
+function pageItems(res: RestResponse, itemsPath: PathSegment[]): unknown[] {
+  if (!restOk(res)) {
+    return [];
+  }
+  const data = parseJson(res.body);
+  return data === null ? [] : evalItems(data, itemsPath);
+}
+
+/**
+ * Walk a paginated list route, accumulating raw items across pages (step 2.5b).
+ *
+ * Security obligation: a next-page URL comes from the attacker-influenceable
+ * response, so EVERY followed URL is re-checked against the host allowlist — an
+ * off-allowlist next URL STOPS pagination (returns what was gathered) rather than
+ * being followed. `maxPages` is a hard cap whose hit is logged (no silent
+ * truncation); an empty/garbage page or a transport error ends the loop with the
+ * items gathered so far (best-effort, like the single-request fallbacks).
+ */
+function collectPaginated(
+  requester: RestRequester,
+  base: RestBase,
+  route: { method: string; path: string; itemsPath: PathSegment[]; paginate?: Paginate },
+  vars: Record<string, string>,
+): unknown[] {
+  const paginate = route.paginate;
+  if (!paginate) {
+    return pageItems(requester.request(route, vars), route.itemsPath);
+  }
+  const firstUrl = base.baseUrl + substitutePath(route.path, vars);
+  const items: unknown[] = [];
+  let pageParamValue = paginate.next.style === 'pageParam' ? paginate.next.start : 0;
+  let url: string | null =
+    paginate.next.style === 'pageParam' ? withQueryParam(firstUrl, paginate.next.param, pageParamValue) : firstUrl;
+  let page = 0;
+
+  while (url !== null) {
+    if (page >= paginate.maxPages) {
+      note(`pagination truncated at maxPages=${paginate.maxPages} for ${route.path}`);
+      break;
+    }
+    if (!isAllowedHost(url, base.allowedHosts)) {
+      note(`pagination stopped: next-page host is not in allowedHosts`);
+      break;
+    }
+    const res = requester.requestUrl(route.method, url);
+    if (!restOk(res)) {
+      break;
+    }
+    const data = parseJson(res.body);
+    if (data === null) {
+      break;
+    }
+    const onPage = evalItems(data, route.itemsPath);
+    if (onPage.length === 0) {
+      break;
+    }
+    items.push(...onPage);
+    page += 1;
+    if (paginate.next.style === 'nextUrl') {
+      const nextUrl = evalScalar(data, paginate.next.path);
+      url = nextUrl !== '' ? nextUrl : null;
+    } else {
+      pageParamValue += 1;
+      url = withQueryParam(firstUrl, paginate.next.param, pageParamValue);
+    }
+  }
+  return items;
+}
 
 /**
  * Build a declarative `rest` WorkItemProvider from a validated descriptor.
@@ -277,12 +377,12 @@ export function createRestWorkItemProvider(
   descriptor: RestWorkItemDescriptor,
   transport: RestTransport = restTransportViaNode,
 ): WorkItemProvider {
-  const request = makeRestRequester(descriptor, transport);
+  const requester = makeRestRequester(descriptor, transport);
   const ok = restOk;
 
   return {
     fetch: (ctx: ProviderContext, id) => {
-      const res = request(descriptor.routes.fetch, { id: String(id), repo: ctx.repo });
+      const res = requester.request(descriptor.routes.fetch, { id: String(id), repo: ctx.repo });
       if (!ok(res)) {
         return null;
       }
@@ -291,13 +391,13 @@ export function createRestWorkItemProvider(
         return null;
       }
       return {
-        title: evalScalar(data, descriptor.routes.fetch.title),
-        body: evalScalar(data, descriptor.routes.fetch.body),
+        title: evalScalarMapping(data, descriptor.routes.fetch.title),
+        body: evalScalarMapping(data, descriptor.routes.fetch.body),
         labels: evalArray(data, descriptor.routes.fetch.labels),
       };
     },
     state: (ctx: ProviderContext, id) => {
-      const res = request(descriptor.routes.state, { id: String(id), repo: ctx.repo });
+      const res = requester.request(descriptor.routes.state, { id: String(id), repo: ctx.repo });
       if (!ok(res)) {
         return 'UNKNOWN';
       }
@@ -305,7 +405,7 @@ export function createRestWorkItemProvider(
       if (data === null) {
         return 'UNKNOWN';
       }
-      return evalScalar(data, descriptor.routes.state.state) || 'UNKNOWN';
+      return evalScalarMapping(data, descriptor.routes.state.state) || 'UNKNOWN';
     },
     postProgress: () => {},
     assignSelf: () => {},
@@ -327,13 +427,28 @@ export function createRestChangeRequestProvider(
   descriptor: RestChangeRequestDescriptor,
   transport: RestTransport = restTransportViaNode,
 ): ChangeRequestProvider {
-  const request = makeRestRequester(descriptor, transport);
+  const requester = makeRestRequester(descriptor, transport);
   const ok = restOk;
   const routes = descriptor.routes;
 
+  // Populate PipelineStatus.failingJobs (step 2.5b). Fetched with the SAME {id}
+  // as pipelineStatus (the change-request id), optionally across pages, then each
+  // raw job is mapped to a PipelineJob via the route's one-element item template.
+  const collectFailingJobs = (ctx: ProviderContext, id: number | string): PipelineJob[] => {
+    const route = routes.failingJobs;
+    if (!route) {
+      return [];
+    }
+    const items = collectPaginated(requester, descriptor, route, { repo: ctx.repo, id: String(id) });
+    return items.map((item) => ({
+      name: evalScalarMapping(item, route.item.name),
+      logExcerpt: evalScalarMapping(item, route.item.logExcerpt),
+    }));
+  };
+
   return {
     findForBranch: (ctx: ProviderContext, branch) => {
-      const res = request(routes.findForBranch, { repo: ctx.repo, branch });
+      const res = requester.request(routes.findForBranch, { repo: ctx.repo, branch });
       if (!ok(res)) {
         return null;
       }
@@ -341,10 +456,10 @@ export function createRestChangeRequestProvider(
       if (data === null) {
         return null;
       }
-      return evalScalar(data, routes.findForBranch.url) || null;
+      return evalScalarMapping(data, routes.findForBranch.url) || null;
     },
     create: (ctx: ProviderContext, input: CreateChangeRequestInput): CreateChangeRequestResult => {
-      const res = request(
+      const res = requester.request(
         routes.create,
         { repo: ctx.repo, branch: input.branch, base: input.base, title: input.title, body: input.body },
         routes.create.body,
@@ -356,9 +471,9 @@ export function createRestChangeRequestProvider(
       if (data === null) {
         return { id: null, number: null, url: null, error: 'unparseable create response' };
       }
-      const numberText = evalScalar(data, routes.create.number);
+      const numberText = evalScalarMapping(data, routes.create.number);
       const number = numberText !== '' && Number.isFinite(Number(numberText)) ? Number(numberText) : null;
-      const url = evalScalar(data, routes.create.url) || null;
+      const url = evalScalarMapping(data, routes.create.url) || null;
       const id = number !== null ? String(number) : url;
       return { id, number, url, error: null };
     },
@@ -368,7 +483,7 @@ export function createRestChangeRequestProvider(
         // No pipeline route configured ⇒ nothing to gate on (treated as green).
         return { state: 'none', failingJobs: [] };
       }
-      const res = request(route, { repo: ctx.repo, id: String(id) });
+      const res = requester.request(route, { repo: ctx.repo, id: String(id) });
       if (!ok(res)) {
         return { state: 'unknown', failingJobs: [] };
       }
@@ -376,11 +491,15 @@ export function createRestChangeRequestProvider(
       if (data === null) {
         return { state: 'unknown', failingJobs: [] };
       }
-      const forgeStatus = evalScalar(data, route.status);
-      return { state: route.stateMap[forgeStatus] ?? 'unknown', failingJobs: [] };
+      const forgeStatus = evalScalarMapping(data, route.status);
+      const state = route.stateMap[forgeStatus] ?? 'unknown';
+      // Only enumerate jobs when the pipeline is red — the only state the ci-fix
+      // loop consumes them in (and it avoids an extra request on every green poll).
+      const failingJobs = state === 'failure' ? collectFailingJobs(ctx, id) : [];
+      return { state, failingJobs };
     },
     squashMerge: (ctx: ProviderContext, id): OperationResult => {
-      const res = request(routes.squashMerge, { repo: ctx.repo, id: String(id) }, routes.squashMerge.body);
+      const res = requester.request(routes.squashMerge, { repo: ctx.repo, id: String(id) }, routes.squashMerge.body);
       if (!ok(res)) {
         return { ok: false, error: res.error ?? `merge failed (status ${res.status})` };
       }

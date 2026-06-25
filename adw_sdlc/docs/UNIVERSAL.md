@@ -204,13 +204,71 @@ HTTP. It reuses the same rest base (`baseUrl`/`allowedHosts`/`authEnv`/
   `{base}`, `{title}`, `{body}`; `{id}`/`{repo}` for merge).
 - `pipelineStatus.stateMap` maps the forge's status string onto the kernel's
   `CiState` (`success`/`failure`/`pending`/`none`/`unknown`); unmapped ⇒
-  `unknown`. (Failing-job detail is not extracted in this step — `failingJobs`
-  is empty.)
+  `unknown`. Failing-job detail is populated by the optional `failingJobs` route
+  (see "Declarative provider primitives" below); without it, `failingJobs` is `[]`.
 - **`squashMerge` is the merge-authorized operation** — it is bound by the same
   host allowlist + https + scoped credential as every route, and the
   orchestrator still owns the **gating** (it merges only after the review/CI
   gates pass) and all git (branch/commit/push stay the `git` provider). A
   provider never receives `GH_TOKEN` or raw git/gh authority.
+
+### Declarative provider primitives (step 2.5)
+
+Three bounded primitives extend the declarative driver while staying **data, not
+code** — every page and value is interpreted by kernel code over project data,
+and every request still passes the host allowlist + https check. They are
+independent and additive; absent ⇒ today's behavior exactly. (Token refresh,
+2.5c, is spec'd but deferred until a concrete OAuth provider needs it —
+`docs/DESIGN-declarative-providers-extensions.md`.)
+
+**Transforms (2.5a)** — a *scalar* map value may carry a `|`-piped transform
+chain after its path. A closed, eval-free vocabulary applied to the coerced
+string after the data walk:
+
+```jsonc
+"map": { "state": "$.pipeline.status | lower" }      // normalize before a stateMap lookup
+"map": { "number": "$.iid | default:0", "title": "$.title | trim" }
+```
+
+| Transform     | Effect                                                        |
+| ------------- | ------------------------------------------------------------- |
+| `lower`       | lowercase                                                     |
+| `upper`       | uppercase                                                     |
+| `trim`        | strip surrounding whitespace                                  |
+| `default:<v>` | if the value is `""` (missing), substitute the literal `<v>`  |
+
+Chains apply left-to-right (`$.s | trim | lower`). An unknown transform, or a
+bare `default` with no argument, is a loud error at load. Array fields (`labels`)
+keep the bare `[*]` form — per-element transforms are deferred.
+
+**Pagination (2.5b)** — an optional `failingJobs` change-request route assembles
+a multi-page list, populating `PipelineStatus.failingJobs` (which the ci-fix loop
+consumes). It is fetched with the **same `{id}` as `pipelineStatus`** (the
+change-request id), only when the pipeline is red:
+
+```jsonc
+"failingJobs": {
+  "method": "GET", "path": "/projects/{repo}/merge_requests/{id}/jobs?scope=failed",
+  "itemsPath": "$.jobs",
+  "map": [ { "name": "$.name", "logExcerpt": "$.failure_reason | default:" } ],
+  "paginate": { "next": { "style": "nextUrl", "path": "$.links.next" }, "maxPages": 10 }
+}
+```
+
+- `itemsPath` locates the items array on a page (`"$"` ⇒ the body itself); `map`
+  is a **one-element array** whose object templates each `{ name, logExcerpt }`
+  job (the inner values are scalar mappings, so transforms apply).
+- `paginate` (optional; omit ⇒ a single page) walks pages by one of two cursor
+  styles: **`nextUrl`** (the next absolute URL from a body path) or
+  **`pageParam`** (`{ style: "pageParam", param: "page", start: 1 }` — increment
+  until a page yields zero items). `maxPages` is a **hard cap** (default 10) whose
+  hit is logged — never a silent truncation.
+- **Security:** a next-page URL comes from the (attacker-influenceable) response,
+  so the kernel **re-asserts the host allowlist on every followed URL** — an
+  off-allowlist next URL stops pagination (returns what was gathered) rather than
+  being followed. A garbage page or a transport error ends the loop with the
+  items gathered so far. (`Link`-header pagination is deferred — it would require
+  response headers from the one-shot fetch helper.)
 
 ## Phase chain
 

@@ -1,6 +1,8 @@
 # Spec — declarative provider primitives (step 2.5)
 
-**Status:** build spec, **recommended next build** for #4. Extends the
+**Status:** **2.5a (transforms) + 2.5b (pagination) IMPLEMENTED** (see HANDOVER
+§8n); **2.5c (token refresh) DEFERRED** (build only against a concrete OAuth
+provider — see the sub-section below and the rollout note). Extends the
 implemented step-2 declarative driver (`DESIGN-declarative-providers.md`, §8k–§8m)
 with three bounded primitives — **transforms**, **pagination**, **token
 refresh** — that close most of the long-tail provider gap **while staying data,
@@ -8,6 +10,20 @@ not code**, and keeping the kernel-enforced host allowlist intact. It is the saf
 alternative to step 3 (out-of-process code plugins,
 `DESIGN-provider-plugins-out-of-process.md`): prefer exhausting 2.5 before
 authorizing any code-loading surface.
+
+> **Implementation notes (2.5a/2.5b).** Two refinements vs. this draft, both made
+> for a well-defined non-paginated case and to avoid touching the security-reviewed
+> fetch helper:
+> - **`itemsPath` is a route-level field of `failingJobs`** (required), not nested
+>   inside `paginate`. `paginate` carries only `next` + `maxPages`, so a
+>   non-paginated single-page `failingJobs` (omit `paginate`) still has a defined
+>   place to find its items array.
+> - **`failingJobs` is fetched with the same `{id}` as `pipelineStatus`** (the
+>   change-request id) and only when the pipeline is red. Resolving a separate
+>   *pipeline* id first is a multi-step flow → step-3 territory, not this primitive.
+> - **Cursor styles implemented: `nextUrl` (body path) + `pageParam`.** `linkHeader`
+>   is deferred (it would need the fetch helper to return response headers); the
+>   "Open questions" Link-header item is resolved toward body-path `nextUrl` first.
 
 **Why 2.5 before 3:** every primitive here is interpreted by kernel code over
 project *data*; none adds a code-execution surface, and every network request
@@ -171,12 +187,16 @@ genuinely code-shaped providers.
 
 ## Rollout
 
-1. **2.5a transforms** — smallest, immediately useful (state normalization +
-   defaults). Map-value grammar + `evalScalar` application + load validation.
-2. **2.5b pagination** — unblocks `failingJobs` and list assembly. Route
-   `paginate` + the per-page host re-check + the `failingJobs` change-request
-   route.
-3. **2.5c token refresh** — own sub-step against a concrete OAuth provider.
+1. **2.5a transforms** — ✅ DONE (HANDOVER §8n). Map-value `|`-chain grammar
+   (`compileScalar`) + `evalScalarMapping` application + load-time validation;
+   scalar fields now compile to `ScalarMapping { segments, transforms }`.
+2. **2.5b pagination** — ✅ DONE (HANDOVER §8n). The `failingJobs` change-request
+   route (`itemsPath` + one-element item `map` + optional `paginate`), the
+   `nextUrl`/`pageParam` loop with the per-page host re-check (`isAllowedHost`,
+   stop-don't-throw), `maxPages` logged truncation, and `failingJobs` populated
+   into `PipelineStatus` when red.
+3. **2.5c token refresh** — ⏸ DEFERRED. Own sub-step, build only against a
+   concrete OAuth provider; the spec above stands as the build plan.
 
 Each is additive and backward-compatible (absent ⇒ unchanged behavior); the
 github/git built-ins and the dry-run baseline stay byte-identical.
