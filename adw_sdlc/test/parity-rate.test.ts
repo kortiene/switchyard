@@ -13,6 +13,7 @@ import {
   attempts,
   classifyOutcome,
   classifyPhasePath,
+  nativeAbsoluteVerdict,
   verdict,
 } from '../tools/parity-rate.js';
 
@@ -73,7 +74,13 @@ describe('analyzeRun over a synthetic workspace', () => {
     expect(agg.native).toEqual({ clean: 1, nudgedOk: 1, hardFail: 1, uncounted: 1 });
     expect(attempts(agg.native)).toBe(3); // uncounted excluded from the denominator
 
-    // Tiny sample ⇒ the bar must refuse to declare parity, not pass silently.
+    // Tiny sample ⇒ the comparative bar (no fenced data) must refuse to judge.
     expect(verdict(agg, 20).ok).toBeNull();
+
+    // Absolute native bar: 1 hard-fail / 3 attempts = 33.3% — evaluable from
+    // native-only data once it clears --min, and still INSUFFICIENT below it.
+    expect(nativeAbsoluteVerdict(agg, 20, 50).ok).toBeNull(); // 3 < 20 attempts
+    expect(nativeAbsoluteVerdict(agg, 3, 50).ok).toBe(true); // 33.3% ≤ 50%
+    expect(nativeAbsoluteVerdict(agg, 3, 10).ok).toBe(false); // 33.3% > 10%
   });
 });

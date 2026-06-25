@@ -31,8 +31,16 @@
  * internal retry that writes no transcript-2.log); it is bucketed separately and
  * kept OUT of the native-vs-fenced comparison.
  *
- * Usage: tsx tools/parity-rate.ts [--min N] [--json] <run-dir | agents-dir> ...
- * Exit:  1 only when the bar is measured AND fails; 0 for meets/insufficient.
+ * Two verdicts:
+ *   - comparative bar (default): native hard-fail rate ≤ fenced — needs both
+ *     paths populated, so it stays INSUFFICIENT until a fenced-path runner runs
+ *     live (`pi`, or any runner under MX_AGENT_FORCE_FENCED — see run-phase.ts);
+ *   - absolute native bar (`--max-native-rate PCT`): native hard-fail rate ≤ a
+ *     target % — evaluable from claude-only runs, so the bar stops reading
+ *     INSUFFICIENT the moment a few native runs exist.
+ *
+ * Usage: tsx tools/parity-rate.ts [--min N] [--max-native-rate PCT] [--json] <run-dir | agents-dir> ...
+ * Exit:  1 only when a configured bar is measured AND fails; 0 for meets/insufficient.
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -180,7 +188,32 @@ export function verdict(agg: Record<ContractPath, Bucket>, minAttempts: number):
     : { ok: false, line: `❌ FAILS BAR — native ${pct(n.hardFail, na)} > fenced ${pct(f.hardFail, fa)} hard-fail rate.` };
 }
 
-export function renderReport(runs: RunAnalysis[], minAttempts: number): string {
+/**
+ * The absolute native bar: native hard-fail rate ≤ maxRatePct. Unlike the
+ * comparative bar it needs only the native path, so a claude-only sample can
+ * clear it — the pragmatic gate for an (A)-MVP ("claude ships reliably") where a
+ * fenced baseline does not yet exist.
+ */
+export function nativeAbsoluteVerdict(
+  agg: Record<ContractPath, Bucket>,
+  minAttempts: number,
+  maxRatePct: number,
+): Verdict {
+  const n = agg.native;
+  const na = attempts(n);
+  if (na < minAttempts) {
+    return {
+      ok: null,
+      line: `⚠️  INSUFFICIENT DATA — native has ${na} counted attempts; need ≥ ${minAttempts} before the absolute bar can be asserted.`,
+    };
+  }
+  const rate = (100 * n.hardFail) / na;
+  return rate <= maxRatePct
+    ? { ok: true, line: `✅ MEETS ABSOLUTE BAR — native ${pct(n.hardFail, na)} hard-fail ≤ ${maxRatePct}% target (over ${na} attempts).` }
+    : { ok: false, line: `❌ FAILS ABSOLUTE BAR — native ${pct(n.hardFail, na)} hard-fail > ${maxRatePct}% target (over ${na} attempts).` };
+}
+
+export function renderReport(runs: RunAnalysis[], minAttempts: number, maxNativeRatePct?: number): string {
   const agg = aggregate(runs);
   const ok = runs.filter((r) => !r.error);
   const out: string[] = [];
@@ -202,10 +235,16 @@ export function renderReport(runs: RunAnalysis[], minAttempts: number): string {
   const uncounted = PATHS.reduce((s, p) => s + agg[p].uncounted, 0);
   out.push(`Uncounted (timeout/budget/cancel/in-progress — excluded from the bar per PARITY.md): **${uncounted}**`);
   out.push('');
-  out.push('## Verdict (parity bar: native hard-fail rate ≤ fenced)');
+  out.push('## Verdict — comparative bar (native hard-fail rate ≤ fenced)');
   out.push('');
   out.push(verdict(agg, minAttempts).line);
   out.push('');
+  if (maxNativeRatePct !== undefined) {
+    out.push(`## Verdict — absolute native bar (≤ ${maxNativeRatePct}%)`);
+    out.push('');
+    out.push(nativeAbsoluteVerdict(agg, minAttempts, maxNativeRatePct).line);
+    out.push('');
+  }
   out.push('## Per-run breakdown');
   for (const r of runs) {
     if (r.error) {
@@ -237,6 +276,7 @@ function findRunDirs(input: string): string[] {
 function main(argv: string[]): number {
   const inputs: string[] = [];
   let minAttempts = 20;
+  let maxNativeRatePct: number | undefined;
   let asJson = false;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -247,10 +287,16 @@ function main(argv: string[]): number {
         process.stderr.write('--min requires a positive number\n');
         return 2;
       }
+    } else if (arg === '--max-native-rate') {
+      maxNativeRatePct = Number(argv[(i += 1)]);
+      if (!Number.isFinite(maxNativeRatePct) || maxNativeRatePct < 0 || maxNativeRatePct > 100) {
+        process.stderr.write('--max-native-rate requires a percentage in [0, 100]\n');
+        return 2;
+      }
     } else if (arg !== undefined && !arg.startsWith('--')) inputs.push(arg);
   }
   if (inputs.length === 0) {
-    process.stderr.write('usage: tsx tools/parity-rate.ts [--min N] [--json] <run-dir | agents-dir> ...\n');
+    process.stderr.write('usage: tsx tools/parity-rate.ts [--min N] [--max-native-rate PCT] [--json] <run-dir | agents-dir> ...\n');
     return 2;
   }
   const runDirs = [...new Set(inputs.flatMap(findRunDirs))];
@@ -259,12 +305,15 @@ function main(argv: string[]): number {
     return 2;
   }
   const runs = runDirs.map(analyzeRun);
+  const agg = aggregate(runs);
+  const comparative = verdict(agg, minAttempts);
+  const absolute = maxNativeRatePct !== undefined ? nativeAbsoluteVerdict(agg, minAttempts, maxNativeRatePct) : null;
   if (asJson) {
-    process.stdout.write(`${JSON.stringify({ runs, aggregate: aggregate(runs), verdict: verdict(aggregate(runs), minAttempts) }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ runs, aggregate: agg, comparative, absolute }, null, 2)}\n`);
   } else {
-    process.stdout.write(`${renderReport(runs, minAttempts)}\n`);
+    process.stdout.write(`${renderReport(runs, minAttempts, maxNativeRatePct)}\n`);
   }
-  return verdict(aggregate(runs), minAttempts).ok === false ? 1 : 0;
+  return comparative.ok === false || absolute?.ok === false ? 1 : 0;
 }
 
 if (process.argv[1] !== undefined && process.argv[1] === fileURLToPath(import.meta.url)) {

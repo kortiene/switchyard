@@ -52,6 +52,28 @@ describe('runAgentPhase', () => {
     expect(readFileSync(join(tmp, 'a1b2c3d4', 'resolve', 'prompt.txt'), 'utf8')).toBe(req.prompt);
   });
 
+  it('forceFenced routes a native-schema backend through the fenced-JSON path (measurement mode)', async () => {
+    // Default mock caps are nativeSchema:true; forceFenced must flip it to the
+    // fenced path: contract footer ON, NO native schema handed to the SDK — so a
+    // parity-rate run can harvest a fenced-path baseline from claude.
+    const runner = createMockRunner({
+      script: () => ({ transcriptText: 'ok\n```json\n{"resolved": 1, "remaining": 0}\n```\n' }),
+    });
+    const outcome = await runAgentPhase({
+      phase: 'resolve',
+      templateArgs: ['test output'],
+      state,
+      runner,
+      env: {},
+      forceFenced: true,
+    });
+    expect(outcome.data.resolved).toBe(1);
+    const req = runner.requests[0]!;
+    expect(req.schema).toBeUndefined(); // native schema withheld
+    expect(req.prompt).toContain('## Required output');
+    expect(req.prompt).toContain('End your reply with EXACTLY one fenced'); // tools/parity-rate FENCED_MARKER
+  });
+
   it('parses fenced JSON from the transcript for non-native-schema backends', async () => {
     const runner = createMockRunner({
       id: 'pi',
