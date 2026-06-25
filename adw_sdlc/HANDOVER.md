@@ -32,8 +32,9 @@ session can pick up where we stopped.
 - Declarative-providers design — #4 step 2 (2a `cli` + 2b `rest` work items +
   2c `rest` change-requests implemented):
   `adw_sdlc/docs/DESIGN-declarative-providers.md`.
-- Declarative-primitives spec — #4 step 2.5, recommended next build
-  (transforms / pagination / token refresh):
+- Declarative-primitives spec — #4 step 2.5 (2.5a transforms + 2.5b pagination
+  **implemented — see §8n**; 2.5c token refresh **deferred**, build only against
+  a concrete OAuth provider):
   `adw_sdlc/docs/DESIGN-declarative-providers-extensions.md`.
 - Out-of-process plugin scoping — #4 step 3, demand-gated, not built:
   `adw_sdlc/docs/DESIGN-provider-plugins-out-of-process.md`.
@@ -67,8 +68,15 @@ built — `docs/DESIGN-provider-plugins-out-of-process.md`) and **step 2.5 spec'
 `docs/DESIGN-declarative-providers-extensions.md`). The per-feature branches
 (`feat/provider-extensibility`, `docs/provider-extensibility-scoping`, and the
 earlier `feat/custom-phase-*`, `docs/provider-plugin-security`) were deleted after
-merging; their content is preserved in `main`'s history above. The working tree
-is clean.
+merging; their content is preserved in `main`'s history above.
+
+**This session (step 2.5a/2.5b — §8n) is NOT yet committed:** the changes are in
+the working tree only. Per invariant §3.8 we run no `git`/`gh` ourselves; commit
+and merge only at the user's explicit request. Changed files: `src/provider-
+descriptor.ts`, `src/providers-rest-cli.ts`, `src/index.ts`,
+`test/provider-descriptor.test.ts`, `test/providers.test.ts`,
+`docs/UNIVERSAL.md`, `docs/DESIGN-declarative-providers-extensions.md`, and this
+`HANDOVER.md`. No new dependency; no build artifact left behind.
 
 ## 2. Session goal
 
@@ -247,7 +255,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 391 tests, 31 files)
+# 3) Full test suite (current: 441 tests, 32 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -718,6 +726,83 @@ Scope note: 2c is `rest`-only; a `cli` change-request provider (`glab mr …`) i
 symmetric follow-up (rest covers the forges). Next for #4: **step 3** the
 out-of-process plugin broker (Option C) — still a §10 hard stop for its own slice.
 
+## 8n. Follow-up session — declarative primitives 2.5a + 2.5b (§11 #4, step 2.5)
+
+The recommended next build after step 2: two of the three bounded primitives from
+`docs/DESIGN-declarative-providers-extensions.md`. Both stay **data, not code** —
+kernel code interprets project data, every request still passes the host
+allowlist + https check. **No new dependency, no code loading, no interface
+change**; the github/git built-ins and the dry-run baseline are byte-for-byte
+unchanged. **2.5c (token refresh) was deliberately deferred** — the spec gates it
+on "a concrete OAuth provider", which this repo has no consumer for; building it
+speculatively would break the project's demand-gating discipline.
+
+**2.5a — scalar transforms.** A scalar map value may carry a `|`-piped transform
+chain after its path (`"$.pipeline.status | lower"`, `"$.iid | default:0"`).
+
+- `adw_sdlc/src/provider-descriptor.ts` — closed, eval-free vocabulary
+  (`lower`/`upper`/`trim`/`default:<v>`) as a `Transform` union; scalar map values
+  now compile to `ScalarMapping { segments, transforms }` via `compileScalar`
+  (splits on `|`, parses the path part, parse-validates each transform — unknown
+  transform or bare `default` ⇒ loud `AdwError` at load). `evalScalarMapping`
+  walks the path then folds the chain left-to-right. Array fields (`labels`) keep
+  the bare `[*]` form; `arrayPath` unchanged. Every scalar field across all three
+  descriptors (cli + rest work-item `title`/`body`/`state`; rest CR
+  `findForBranch.url`/`create.number`/`create.url`/`pipelineStatus.statusPath`)
+  routes through `compileScalar`, so transforms are uniform.
+- `adw_sdlc/src/providers-rest-cli.ts` — driver scalar reads switched from
+  `evalScalar` to `evalScalarMapping` (cli + both rest providers).
+
+**2.5b — pagination + `failingJobs`.** An optional `failingJobs` change-request
+route assembles a multi-page list, populating `PipelineStatus.failingJobs` (which
+the ci-fix loop consumes).
+
+- `adw_sdlc/src/provider-descriptor.ts` — `evalItems` (wildcard-free path ⇒ raw
+  array), the `Paginate`/`PageCursor` types + `rawPaginate`/`compilePaginate`
+  (cursor styles **`nextUrl`** body-path and **`pageParam`**; `maxPages` default
+  10), the `failingJobs` route schema (route-level `itemsPath`, a one-element
+  `map` item template, optional `paginate`), and `isAllowedHost` (the
+  non-throwing predicate form of `assertAllowedHost`).
+- `adw_sdlc/src/providers-rest-cli.ts` — `makeRestRequester` now returns
+  `{ request, requestUrl }` (the latter sends to a pre-resolved absolute URL);
+  `withQueryParam`/`pageItems`/`collectPaginated` (the loop) + `collectFailingJobs`
+  in the rest CR provider. `pipelineStatus` enumerates jobs **only when red**
+  (`state === 'failure'`) to avoid an extra request per green poll.
+- **Security (the load-bearing obligation):** a next-page URL comes from the
+  attacker-influenceable response, so the loop **re-checks `isAllowedHost` on
+  every followed URL and STOPS (does not throw/follow) on an off-allowlist host**;
+  `maxPages` truncation and the off-allowlist stop are both `note()`-logged (no
+  silent cap). `Link`-header pagination is deferred (would need response headers
+  from the kernel fetch helper, which stays untouched).
+
+**Refinements vs. the 2.5 draft (documented in the design doc + UNIVERSAL.md):**
+`itemsPath` is a route-level field (not nested in `paginate`) so the
+non-paginated single-page case is well-defined; `failingJobs` is fetched with the
+same `{id}` as `pipelineStatus` (multi-step pipeline-id resolution is step-3
+territory); cursor styles are `nextUrl` + `pageParam` (`linkHeader` deferred).
+
+- `adw_sdlc/src/index.ts` — exports `evalItems`, `evalScalarMapping`,
+  `isAllowedHost`, and the `Transform`/`ScalarMapping`/`PageCursor`/`Paginate` types.
+- `adw_sdlc/docs/UNIVERSAL.md` — new "Declarative provider primitives (step 2.5)"
+  subsection (transform table + pagination shape + the security note); the rest
+  CR `pipelineStatus` note updated (failingJobs now populated via the route).
+- Tests: `test/provider-descriptor.test.ts` (3 existing compiled-shape
+  assertions updated to `ScalarMapping`; +`evalItems`, +`evalScalarMapping`
+  transform parse/apply/chain/rejection, +`isAllowedHost`, +`failingJobs`/
+  pagination compile incl. pageParam/single-page/rejections) and
+  `test/providers.test.ts` (+transform-before-stateMap, +nextUrl accumulation,
+  +pageParam-until-empty, +maxPages-logged-truncation, +off-allowlist-next-URL-
+  refused). 428 → **441**.
+
+Verified: typecheck, `lint:env`, full suite (441), build+clean, byte-identical
+github dry-run, and a **live end-to-end run through the real ESM graph** (a
+GitLab-shaped descriptor: `| lower` normalized a SCREAMING status to match the
+stateMap, `nextUrl` pagination followed page 1 → 2 accumulating both jobs, and
+`default:` filled an empty `failure_reason`). Not yet committed (see §1). Next for
+#4: a `cli` change-request provider (symmetric follow-up), or 2.5c token refresh
+against a concrete OAuth provider; **step 3** (out-of-process broker) stays a §10
+hard stop.
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -867,11 +952,13 @@ Ordered by ratio of value to risk:
    **Step 3 (out-of-process plugin, Option C) is now SCOPED and demand-gated**
    (`docs/DESIGN-provider-plugins-out-of-process.md`): the recommendation is NOT
    to build it — a code plugin cannot enforce the host allowlist a declarative
-   provider can. **Recommended next build: step 2.5** — bounded declarative
-   primitives (transforms, pagination, token refresh), spec'd in
-   `docs/DESIGN-declarative-providers-extensions.md` — closes most of the
-   long-tail gap while staying data + host-allowlisted. Also optional: a `cli`
-   change-request provider (symmetric follow-up). In-process `import` of
+   provider can. **Step 2.5 — bounded declarative primitives — IN PROGRESS:
+   2.5a (transforms) + 2.5b (pagination) ✅ DONE (§8n)**: a closed `|`-piped
+   transform vocabulary on scalar maps, and a host-re-checked `failingJobs`
+   pagination loop (`nextUrl`/`pageParam`) that populates `PipelineStatus`.
+   **2.5c (token refresh) ⏸ DEFERRED** — build only against a concrete OAuth
+   provider (`docs/DESIGN-declarative-providers-extensions.md`). Also optional: a
+   `cli` change-request provider (symmetric follow-up). In-process `import` of
    config-supplied code (Options A/D) stays a rejected non-goal.
 5. **Universal README at package root** — ✅ DONE (this session).
    `adw_sdlc/README.md` is now the neutral entry point: pipeline overview,
@@ -918,18 +1005,20 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **428 passing across 32 files**
+Test count baseline after this session: **441 passing across 32 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
 for custom-phase startup validation, +13 for loop/gated custom phases, +3 for
 the provider-kind registry — §8j, +15 for the declarative `cli` work-item
 provider — §8k, +10 for the declarative `rest`/HTTP work-item provider — §8l,
-+9 for the declarative `rest` change-request provider — §8m). The session left no
-build artifact, no temporary files, and no untracked binary churn. The ADW
++9 for the declarative `rest` change-request provider — §8m, +13 for the
+declarative primitives 2.5a transforms + 2.5b pagination — §8n). The session left
+no build artifact, no temporary files, and no untracked binary churn. The ADW
 orchestrator code path still runs no `git`/`gh` itself; the commits and the local
 merge to `main` recorded in §1 were performed only at the user's explicit request
 (there is no remote — the merge is local). **The §8j provider-registry and
 §8k/§8l/§8m declarative-provider (`cli`/`rest` work-items + `rest`
 change-requests) slices are committed as `0ac57a5` and merged to `main`
-(`07b90f6`)** — see §1. The working tree is clean.
+(`07b90f6`); the §8n step-2.5a/2.5b primitives are in the working tree, not yet
+committed** — see §1.

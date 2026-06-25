@@ -369,6 +369,175 @@ describe('declarative rest change-request provider', () => {
   });
 });
 
+describe('declarative rest provider — transforms + pagination (step 2.5)', () => {
+  const base = {
+    type: 'rest',
+    baseUrl: 'https://gitlab.example.com/api/v4',
+    allowedHosts: ['gitlab.example.com'],
+    authEnv: 'GITLAB_TOKEN',
+    routes: {
+      findForBranch: { path: '/projects/{repo}/merge_requests?source_branch={branch}', map: { url: '$[0].web_url' } },
+      create: {
+        method: 'POST',
+        path: '/projects/{repo}/merge_requests',
+        body: { source_branch: '{branch}' },
+        map: { number: '$.iid', url: '$.web_url' },
+      },
+      squashMerge: { method: 'PUT', path: '/projects/{repo}/merge_requests/{id}/merge' },
+    },
+  };
+  const ctx = { ghBin: null, repo: 'g/p' };
+  const provider = (raw: unknown, transport: RestTransport) =>
+    createRestChangeRequestProvider(parseRestChangeRequestDescriptor(raw), transport);
+
+  it('2.5a: a transform normalizes the forge status before the stateMap lookup', () => {
+    const raw = {
+      ...base,
+      routes: {
+        ...base.routes,
+        // Forge reports SCREAMING status; `| lower` makes the lowercase stateMap match.
+        pipelineStatus: {
+          path: '/projects/{repo}/merge_requests/{id}',
+          statusPath: '$.pipeline.status | lower',
+          stateMap: { success: 'success', failed: 'failure' },
+        },
+      },
+    };
+    const p = provider(raw, () => ({ status: 200, body: JSON.stringify({ pipeline: { status: 'FAILED' } }) }));
+    // failure + no failingJobs route ⇒ empty job list (the route is what populates it).
+    expect(p.pipelineStatus(ctx, 7)).toEqual({ state: 'failure', failingJobs: [] });
+  });
+
+  it('2.5b: nextUrl pagination accumulates failingJobs across pages, applying item transforms', () => {
+    const page2 = 'https://gitlab.example.com/api/v4/projects/g%2Fp/merge_requests/7/jobs?scope=failed&page=2';
+    const raw = {
+      ...base,
+      routes: {
+        ...base.routes,
+        pipelineStatus: { path: '/projects/{repo}/merge_requests/{id}', statusPath: '$.pipeline.status', stateMap: { failed: 'failure' } },
+        failingJobs: {
+          path: '/projects/{repo}/merge_requests/{id}/jobs?scope=failed',
+          itemsPath: '$.jobs',
+          map: [{ name: '$.name', logExcerpt: '$.failure_reason | default:(none)' }],
+          paginate: { next: { style: 'nextUrl', path: '$.next' } },
+        },
+      },
+    };
+    const seen: string[] = [];
+    const transport: RestTransport = (req) => {
+      seen.push(req.url);
+      if (req.url.includes('/jobs')) {
+        if (req.url.includes('page=2')) {
+          return { status: 200, body: JSON.stringify({ jobs: [{ name: 'test', failure_reason: '' }], next: '' }) };
+        }
+        return { status: 200, body: JSON.stringify({ jobs: [{ name: 'build', failure_reason: 'compile error' }], next: page2 }) };
+      }
+      return { status: 200, body: JSON.stringify({ pipeline: { status: 'failed' } }) };
+    };
+    const status = provider(raw, transport).pipelineStatus(ctx, 7);
+    expect(status.state).toBe('failure');
+    expect(status.failingJobs).toEqual([
+      { name: 'build', logExcerpt: 'compile error' },
+      { name: 'test', logExcerpt: '(none)' }, // default applied to the empty reason
+    ]);
+    expect(seen).toContain(page2); // the second page was actually followed
+  });
+
+  it('2.5b: pageParam pagination accumulates until a page yields zero items', () => {
+    const raw = {
+      ...base,
+      routes: {
+        ...base.routes,
+        pipelineStatus: { path: '/projects/{repo}/merge_requests/{id}', statusPath: '$.pipeline.status', stateMap: { failed: 'failure' } },
+        failingJobs: {
+          path: '/projects/{repo}/merge_requests/{id}/jobs',
+          itemsPath: '$',
+          map: [{ name: '$.name', logExcerpt: '$.reason' }],
+          paginate: { next: { style: 'pageParam', param: 'page', start: 1 } },
+        },
+      },
+    };
+    const transport: RestTransport = (req) => {
+      if (req.url.includes('/jobs')) {
+        if (req.url.includes('page=1')) return { status: 200, body: JSON.stringify([{ name: 'a', reason: 'r1' }]) };
+        if (req.url.includes('page=2')) return { status: 200, body: JSON.stringify([{ name: 'b', reason: 'r2' }]) };
+        return { status: 200, body: '[]' }; // page 3 ⇒ empty ⇒ stop
+      }
+      return { status: 200, body: JSON.stringify({ pipeline: { status: 'failed' } }) };
+    };
+    expect(provider(raw, transport).pipelineStatus(ctx, 7).failingJobs).toEqual([
+      { name: 'a', logExcerpt: 'r1' },
+      { name: 'b', logExcerpt: 'r2' },
+    ]);
+  });
+
+  it('2.5b: maxPages is a hard cap and the truncation is logged (no silent cap)', () => {
+    const raw = {
+      ...base,
+      routes: {
+        ...base.routes,
+        pipelineStatus: { path: '/projects/{repo}/merge_requests/{id}', statusPath: '$.pipeline.status', stateMap: { failed: 'failure' } },
+        failingJobs: {
+          path: '/projects/{repo}/merge_requests/{id}/jobs',
+          itemsPath: '$.jobs',
+          map: [{ name: '$.name', logExcerpt: '$.reason' }],
+          // next always points at a fresh allowlisted page ⇒ would loop forever without the cap.
+          paginate: { next: { style: 'nextUrl', path: '$.next' }, maxPages: 2 },
+        },
+      },
+    };
+    const nextUrl = 'https://gitlab.example.com/api/v4/projects/g%2Fp/merge_requests/7/jobs';
+    const transport: RestTransport = (req) =>
+      req.url.includes('/jobs')
+        ? { status: 200, body: JSON.stringify({ jobs: [{ name: 'j', reason: 'r' }], next: nextUrl }) }
+        : { status: 200, body: JSON.stringify({ pipeline: { status: 'failed' } }) };
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const jobs = provider(raw, transport).pipelineStatus(ctx, 7).failingJobs;
+      expect(jobs).toHaveLength(2); // capped at maxPages, not infinite
+    } finally {
+      const logged = spy.mock.calls.map((c) => String(c[0])).join('');
+      spy.mockRestore();
+      expect(logged).toMatch(/pagination truncated at maxPages=2/);
+    }
+  });
+
+  it('2.5b security: an off-allowlist next URL stops pagination instead of being followed', () => {
+    const raw = {
+      ...base,
+      routes: {
+        ...base.routes,
+        pipelineStatus: { path: '/projects/{repo}/merge_requests/{id}', statusPath: '$.pipeline.status', stateMap: { failed: 'failure' } },
+        failingJobs: {
+          path: '/projects/{repo}/merge_requests/{id}/jobs',
+          itemsPath: '$.jobs',
+          map: [{ name: '$.name', logExcerpt: '$.reason' }],
+          paginate: { next: { style: 'nextUrl', path: '$.next' } },
+        },
+      },
+    };
+    const seen: string[] = [];
+    const transport: RestTransport = (req) => {
+      seen.push(req.url);
+      if (req.url.includes('/jobs')) {
+        // page 1 points the next cursor at an OFF-allowlist host (data exfil attempt).
+        return { status: 200, body: JSON.stringify({ jobs: [{ name: 'a', reason: 'r' }], next: 'https://evil.example.com/api/v4/jobs' }) };
+      }
+      return { status: 200, body: JSON.stringify({ pipeline: { status: 'failed' } }) };
+    };
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const jobs = provider(raw, transport).pipelineStatus(ctx, 7).failingJobs;
+      expect(jobs).toEqual([{ name: 'a', logExcerpt: 'r' }]); // only the first page was kept
+    } finally {
+      const logged = spy.mock.calls.map((c) => String(c[0])).join('');
+      spy.mockRestore();
+      expect(logged).toMatch(/pagination stopped: next-page host/);
+    }
+    expect(seen.some((u) => u.includes('evil.example.com'))).toBe(false); // never fetched the evil host
+  });
+});
+
 describe('providerBackedDeps', () => {
   it('adapts provider interfaces to the legacy OrchestratorDeps effect seams', () => {
     const providers = fakeProviders();

@@ -123,6 +123,74 @@ export function evalArray(data: unknown, segments: PathSegment[]): string[] {
   });
 }
 
+/** Resolve a wildcard-free path to the array it points at (missing/non-array ⇒ []). */
+export function evalItems(data: unknown, segments: PathSegment[]): unknown[] {
+  let current: unknown = data;
+  for (const seg of segments) {
+    current = step(current, seg);
+    if (current === undefined || current === null) {
+      return [];
+    }
+  }
+  return Array.isArray(current) ? current : [];
+}
+
+// ── Scalar transforms (step 2.5a) ────────────────────────────────────────────
+// A scalar map value may carry a `|`-piped transform chain after its path, e.g.
+// "$.pipeline.status | lower" or "$.iid | default:0". The vocabulary is a closed,
+// eval-free set applied to the coerced string AFTER the data walk — pure data, no
+// expressions, no user code. Array fields (labels) keep the bare `[*]` form;
+// per-element transforms are a deliberately deferred concern.
+
+export type Transform =
+  | { kind: 'lower' }
+  | { kind: 'upper' }
+  | { kind: 'trim' }
+  | { kind: 'default'; value: string };
+
+/** A compiled scalar map value: a (wildcard-free) path plus its transform chain. */
+export interface ScalarMapping {
+  segments: PathSegment[];
+  transforms: Transform[];
+}
+
+function parseTransform(part: string, label: string): Transform {
+  const name = part.trim();
+  if (name === 'lower' || name === 'upper' || name === 'trim') {
+    return { kind: name };
+  }
+  // `default` needs an arg; `default:` (empty arg) is allowed and means "" (a no-op).
+  if (name === 'default') {
+    throw new AdwError(`${label} transform "default" requires an argument (e.g. default:0)`);
+  }
+  if (name.startsWith('default:')) {
+    return { kind: 'default', value: name.slice('default:'.length) };
+  }
+  throw new AdwError(`${label} has unknown transform "${name}" (allowed: lower, upper, trim, default:<v>)`);
+}
+
+function applyTransform(value: string, transform: Transform): string {
+  switch (transform.kind) {
+    case 'lower':
+      return value.toLowerCase();
+    case 'upper':
+      return value.toUpperCase();
+    case 'trim':
+      return value.trim();
+    case 'default':
+      return value === '' ? transform.value : value;
+  }
+}
+
+/** Resolve a compiled scalar mapping: walk the path, then apply the transform chain. */
+export function evalScalarMapping(data: unknown, mapping: ScalarMapping): string {
+  let value = evalScalar(data, mapping.segments);
+  for (const transform of mapping.transforms) {
+    value = applyTransform(value, transform);
+  }
+  return value;
+}
+
 // ── Credential guard ─────────────────────────────────────────────────────────
 // A declarative provider may name at most ONE credential, by env-var NAME. It
 // must be the provider's own forge token — never the orchestrator's GitHub
@@ -207,20 +275,34 @@ const RawCliDescriptorSchema = z
 export interface CliWorkItemDescriptor {
   authEnv?: string;
   routes: {
-    fetch: { command: string[]; title: PathSegment[]; body: PathSegment[]; labels: PathSegment[] };
-    state: { command: string[]; state: PathSegment[] };
+    fetch: { command: string[] } & FetchFieldMap;
+    state: { command: string[]; state: ScalarMapping };
     postProgress?: { command: string[] };
     assignSelf?: { command: string[] };
     setStatus?: { command: string[] };
   };
 }
 
-function scalarPath(expr: string, label: string): PathSegment[] {
-  const segments = parsePath(expr);
+function noWildcard(segments: PathSegment[], message: string): PathSegment[] {
   if (segments.some((s) => s.kind === 'wildcard')) {
-    throw new AdwError(`${label} must be a scalar path (no [*]): "${expr}"`);
+    throw new AdwError(message);
   }
   return segments;
+}
+
+/** Compile a scalar map value: a `|`-separated path + transform chain (step 2.5a). */
+function compileScalar(expr: string, label: string): ScalarMapping {
+  const parts = expr.split('|');
+  const pathExpr = (parts[0] ?? '').trim();
+  return {
+    segments: noWildcard(parsePath(pathExpr), `${label} must be a scalar path (no [*]): "${pathExpr}"`),
+    transforms: parts.slice(1).map((part) => parseTransform(part, label)),
+  };
+}
+
+/** Compile a wildcard-free path that locates an array container (e.g. paginate.itemsPath). */
+function compileItemsPath(expr: string, label: string): PathSegment[] {
+  return noWildcard(parsePath(expr), `${label} must not contain [*]: "${expr}"`);
 }
 
 function arrayPath(expr: string, label: string): PathSegment[] {
@@ -231,23 +313,23 @@ function arrayPath(expr: string, label: string): PathSegment[] {
   return segments;
 }
 
-/** Compiled `fetch` map: the three WorkItemContext field paths, pre-parsed once. */
+/** Compiled `fetch` map: the three WorkItemContext fields (scalars carry transforms). */
 export interface FetchFieldMap {
-  title: PathSegment[];
-  body: PathSegment[];
+  title: ScalarMapping;
+  body: ScalarMapping;
   labels: PathSegment[];
 }
 
 function compileFetchMap(map: { title: string; body: string; labels: string }): FetchFieldMap {
   return {
-    title: scalarPath(map.title, 'fetch.map.title'),
-    body: scalarPath(map.body, 'fetch.map.body'),
+    title: compileScalar(map.title, 'fetch.map.title'),
+    body: compileScalar(map.body, 'fetch.map.body'),
     labels: arrayPath(map.labels, 'fetch.map.labels'),
   };
 }
 
-function compileStatePath(map: { state: string }): PathSegment[] {
-  return scalarPath(map.state, 'state.map.state');
+function compileStatePath(map: { state: string }): ScalarMapping {
+  return compileScalar(map.state, 'state.map.state');
 }
 
 /**
@@ -336,6 +418,21 @@ export function assertAllowedHost(url: string, allowedHosts: readonly string[]):
   }
 }
 
+/**
+ * Boolean form of {@link assertAllowedHost}. Pagination follows a next-page URL
+ * that comes from the (attacker-influenceable) response, so it must STOP — not
+ * throw — on an off-allowlist host; this predicate lets the loop end gracefully
+ * while reusing the exact same https + allowlist check.
+ */
+export function isAllowedHost(url: string, allowedHosts: readonly string[]): boolean {
+  try {
+    assertAllowedHost(url, allowedHosts);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function resolveRestBase(raw: {
   baseUrl: string;
   allowedHosts: string[];
@@ -418,7 +515,7 @@ const RawRestWorkItemSchema = z
 export interface RestWorkItemDescriptor extends RestBase {
   routes: {
     fetch: { method: string; path: string } & FetchFieldMap;
-    state: { method: string; path: string; state: PathSegment[] };
+    state: { method: string; path: string; state: ScalarMapping };
   };
 }
 
@@ -456,6 +553,38 @@ export function parseRestWorkItemDescriptor(slice: unknown): RestWorkItemDescrip
       },
     },
   };
+}
+
+// ── Pagination (step 2.5b) ───────────────────────────────────────────────────
+// A list route (currently `failingJobs`) may span pages. The kernel fetches each
+// page, extracts `itemsPath` items, finds the next page, and stops at `maxPages`
+// (logged, never silent) — re-asserting the host allowlist on every followed URL
+// (a next-page URL comes from the attacker-influenceable response). Two cursor
+// styles only: `nextUrl` (next absolute URL from a body path) and `pageParam`
+// (increment a query param until a page yields zero items). `Link`-header
+// pagination is deferred (it would need response headers from the fetch helper).
+
+export type PageCursor =
+  | { style: 'nextUrl'; path: PathSegment[] }
+  | { style: 'pageParam'; param: string; start: number };
+
+export interface Paginate {
+  next: PageCursor;
+  maxPages: number;
+}
+
+const rawPageCursor = z.discriminatedUnion('style', [
+  z.object({ style: z.literal('nextUrl'), path: z.string().min(1) }).strict(),
+  z.object({ style: z.literal('pageParam'), param: z.string().min(1), start: z.number().int().default(1) }).strict(),
+]);
+const rawPaginate = z.object({ next: rawPageCursor, maxPages: z.number().int().positive().default(10) }).strict();
+
+function compilePaginate(raw: z.infer<typeof rawPaginate>): Paginate {
+  const next: PageCursor =
+    raw.next.style === 'nextUrl'
+      ? { style: 'nextUrl', path: compileItemsPath(raw.next.path, 'paginate.next.path') }
+      : { style: 'pageParam', param: raw.next.param, start: raw.next.start };
+  return { next, maxPages: raw.maxPages };
 }
 
 // ── rest change-request descriptor ───────────────────────────────────────────
@@ -498,6 +627,20 @@ const rawCrPipelineRoute = z
     stateMap: z.record(z.string(), z.enum(['success', 'failure', 'pending', 'none', 'unknown'])),
   })
   .strict();
+// `failingJobs` (step 2.5b): a list route. `itemsPath` locates the jobs array on
+// a page; `map` is a one-element array whose object templates each PipelineJob;
+// `paginate` (optional) walks pages. It is fetched with the same {id} as
+// pipelineStatus (the change-request id) — multi-step pipeline-id resolution is
+// step-3 territory, not this primitive.
+const rawCrFailingJobsRoute = z
+  .object({
+    method: restMethod.default('GET'),
+    path: z.string().min(1),
+    itemsPath: z.string().min(1),
+    map: z.array(z.object({ name: z.string().min(1), logExcerpt: z.string().min(1) }).strict()).length(1),
+    paginate: rawPaginate.optional(),
+  })
+  .strict();
 
 const RawRestChangeRequestSchema = z
   .object({
@@ -508,6 +651,7 @@ const RawRestChangeRequestSchema = z
         create: rawCrCreateRoute,
         squashMerge: rawCrMergeRoute,
         pipelineStatus: rawCrPipelineRoute.optional(),
+        failingJobs: rawCrFailingJobsRoute.optional(),
       })
       .strict(),
   })
@@ -516,10 +660,17 @@ const RawRestChangeRequestSchema = z
 /** A validated, compiled rest change-request descriptor (paths/maps pre-parsed). */
 export interface RestChangeRequestDescriptor extends RestBase {
   routes: {
-    findForBranch: { method: string; path: string; url: PathSegment[] };
-    create: { method: string; path: string; body?: Record<string, unknown>; number: PathSegment[]; url: PathSegment[] };
+    findForBranch: { method: string; path: string; url: ScalarMapping };
+    create: { method: string; path: string; body?: Record<string, unknown>; number: ScalarMapping; url: ScalarMapping };
     squashMerge: { method: string; path: string; body?: Record<string, unknown> };
-    pipelineStatus?: { method: string; path: string; status: PathSegment[]; stateMap: Record<string, CiState> };
+    pipelineStatus?: { method: string; path: string; status: ScalarMapping; stateMap: Record<string, CiState> };
+    failingJobs?: {
+      method: string;
+      path: string;
+      itemsPath: PathSegment[];
+      item: { name: ScalarMapping; logExcerpt: ScalarMapping };
+      paginate?: Paginate;
+    };
   };
 }
 
@@ -560,14 +711,14 @@ export function parseRestChangeRequestDescriptor(slice: unknown): RestChangeRequ
     findForBranch: {
       method: r.findForBranch.method,
       path: r.findForBranch.path,
-      url: scalarPath(r.findForBranch.map.url, 'findForBranch.map.url'),
+      url: compileScalar(r.findForBranch.map.url, 'findForBranch.map.url'),
     },
     create: {
       method: r.create.method,
       path: r.create.path,
       body: r.create.body,
-      number: scalarPath(r.create.map.number, 'create.map.number'),
-      url: scalarPath(r.create.map.url, 'create.map.url'),
+      number: compileScalar(r.create.map.number, 'create.map.number'),
+      url: compileScalar(r.create.map.url, 'create.map.url'),
     },
     squashMerge: { method: r.squashMerge.method, path: r.squashMerge.path, body: r.squashMerge.body },
   };
@@ -576,8 +727,22 @@ export function parseRestChangeRequestDescriptor(slice: unknown): RestChangeRequ
     routes.pipelineStatus = {
       method: r.pipelineStatus.method,
       path: r.pipelineStatus.path,
-      status: scalarPath(r.pipelineStatus.statusPath, 'pipelineStatus.statusPath'),
+      status: compileScalar(r.pipelineStatus.statusPath, 'pipelineStatus.statusPath'),
       stateMap: r.pipelineStatus.stateMap,
+    };
+  }
+  if (r.failingJobs !== undefined) {
+    assertRestPath(r.failingJobs.path, CR_ID_PLACEHOLDERS, 'failingJobs');
+    const template = r.failingJobs.map[0]!;
+    routes.failingJobs = {
+      method: r.failingJobs.method,
+      path: r.failingJobs.path,
+      itemsPath: compileItemsPath(r.failingJobs.itemsPath, 'failingJobs.itemsPath'),
+      item: {
+        name: compileScalar(template.name, 'failingJobs.map.name'),
+        logExcerpt: compileScalar(template.logExcerpt, 'failingJobs.map.logExcerpt'),
+      },
+      paginate: r.failingJobs.paginate ? compilePaginate(r.failingJobs.paginate) : undefined,
     };
   }
   return { ...base, routes };

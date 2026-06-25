@@ -3,7 +3,10 @@ import { describe, expect, it } from 'vitest';
 import {
   assertAllowedHost,
   evalArray,
+  evalItems,
   evalScalar,
+  evalScalarMapping,
+  isAllowedHost,
   parseCliWorkItemDescriptor,
   parsePath,
   parseRestChangeRequestDescriptor,
@@ -61,6 +64,49 @@ describe('evalScalar / evalArray', () => {
     expect(evalArray(data, parsePath('$.title[*]'))).toEqual([]); // not an array
     expect(evalArray(data, parsePath('$.missing[*]'))).toEqual([]);
   });
+
+  it('evalItems resolves a wildcard-free path to a raw array (missing/non-array ⇒ [])', () => {
+    expect(evalItems({ jobs: [{ name: 'a' }, { name: 'b' }] }, parsePath('$.jobs'))).toEqual([
+      { name: 'a' },
+      { name: 'b' },
+    ]);
+    expect(evalItems([1, 2, 3], parsePath('$'))).toEqual([1, 2, 3]); // $ ⇒ the body itself
+    expect(evalItems({ jobs: 'nope' }, parsePath('$.jobs'))).toEqual([]); // not an array
+    expect(evalItems({}, parsePath('$.missing'))).toEqual([]);
+  });
+});
+
+describe('evalScalarMapping (step 2.5a transforms)', () => {
+  // A transform chain is parsed at compile time; here we drive it through the
+  // descriptor compile + evalScalarMapping (the same path the drivers use).
+  const compileState = (expr: string) =>
+    parseCliWorkItemDescriptor({
+      type: 'cli',
+      routes: {
+        fetch: { command: ['x', '{id}'], map: { title: '$.t', body: '$.b', labels: '$.l[*]' } },
+        state: { command: ['x', '{id}'], map: { state: expr } },
+      },
+    }).routes.state.state;
+
+  it('applies lower/upper/trim and default (present vs missing)', () => {
+    expect(evalScalarMapping({ s: 'OPENED' }, compileState('$.s | lower'))).toBe('opened');
+    expect(evalScalarMapping({ s: 'opened' }, compileState('$.s | upper'))).toBe('OPENED');
+    expect(evalScalarMapping({ s: '  hi  ' }, compileState('$.s | trim'))).toBe('hi');
+    expect(evalScalarMapping({}, compileState('$.missing | default:0'))).toBe('0'); // missing ⇒ literal
+    expect(evalScalarMapping({ s: 'x' }, compileState('$.s | default:0'))).toBe('x'); // present ⇒ kept
+  });
+
+  it('chains transforms left-to-right (normalize then default)', () => {
+    expect(evalScalarMapping({ s: '  MERGED ' }, compileState('$.s | trim | lower'))).toBe('merged');
+    expect(evalScalarMapping({}, compileState('$.missing | lower | default:none'))).toBe('none');
+  });
+
+  it('rejects an unknown transform or a `default` without an argument at compile time', () => {
+    expect(() => compileState('$.s | bogus')).toThrow(/unknown transform "bogus"/);
+    expect(() => compileState('$.s | default')).toThrow(/transform "default" requires an argument/);
+    // `default:` with an empty arg is allowed (substitutes "").
+    expect(evalScalarMapping({}, compileState('$.missing | default:'))).toBe('');
+  });
 });
 
 describe('parseCliWorkItemDescriptor', () => {
@@ -83,13 +129,13 @@ describe('parseCliWorkItemDescriptor', () => {
     const d: CliWorkItemDescriptor = parseCliWorkItemDescriptor(valid);
     expect(d.authEnv).toBe('GITLAB_TOKEN');
     expect(d.routes.fetch.command).toEqual(['glab', 'issue', 'view', '{id}', '--output', 'json']);
-    expect(d.routes.fetch.title).toEqual([{ kind: 'key', key: 'title' }]);
+    expect(d.routes.fetch.title).toEqual({ segments: [{ kind: 'key', key: 'title' }], transforms: [] });
     expect(d.routes.fetch.labels).toEqual([
       { kind: 'key', key: 'labels' },
       { kind: 'wildcard' },
       { kind: 'key', key: 'name' },
     ]);
-    expect(d.routes.state.state).toEqual([{ kind: 'key', key: 'state' }]);
+    expect(d.routes.state.state).toEqual({ segments: [{ kind: 'key', key: 'state' }], transforms: [] });
   });
 
   it('keeps optional write routes when present and absent', () => {
@@ -219,6 +265,13 @@ describe('assertAllowedHost', () => {
     expect(() => assertAllowedHost('http://h.com/x', ['h.com'])).toThrow(/must be https/);
     expect(() => assertAllowedHost('https://evil.com/x', ['h.com'])).toThrow(/not in allowedHosts/);
   });
+
+  it('isAllowedHost is the non-throwing predicate form (used by pagination)', () => {
+    expect(isAllowedHost('https://h.com/x', ['h.com'])).toBe(true);
+    expect(isAllowedHost('http://h.com/x', ['h.com'])).toBe(false); // not https
+    expect(isAllowedHost('https://evil.com/x', ['h.com'])).toBe(false); // off-allowlist
+    expect(isAllowedHost('not a url', ['h.com'])).toBe(false); // unparseable
+  });
 });
 
 describe('parseRestChangeRequestDescriptor', () => {
@@ -253,7 +306,10 @@ describe('parseRestChangeRequestDescriptor', () => {
     expect(d.routes.findForBranch.method).toBe('GET'); // defaulted
     expect(d.routes.create.method).toBe('POST');
     expect(d.routes.squashMerge.method).toBe('PUT');
-    expect(d.routes.findForBranch.url).toEqual([{ kind: 'index', index: 0 }, { kind: 'key', key: 'web_url' }]);
+    expect(d.routes.findForBranch.url).toEqual({
+      segments: [{ kind: 'index', index: 0 }, { kind: 'key', key: 'web_url' }],
+      transforms: [],
+    });
     expect(d.routes.create.body).toEqual(valid.routes.create.body);
     expect(d.routes.pipelineStatus?.stateMap).toEqual({ success: 'success', failed: 'failure', running: 'pending' });
   });
@@ -276,5 +332,72 @@ describe('parseRestChangeRequestDescriptor', () => {
     expect(() => parseRestChangeRequestDescriptor({ ...valid, authEnv: 'GH_TOKEN' })).toThrow(/reserved/);
     const noCreate = { ...valid, routes: { findForBranch: valid.routes.findForBranch, squashMerge: valid.routes.squashMerge } };
     expect(() => parseRestChangeRequestDescriptor(noCreate)).toThrow(/invalid rest change-request provider/);
+  });
+
+  it('compiles an optional failingJobs route with pagination (step 2.5b)', () => {
+    const withJobs = parseRestChangeRequestDescriptor({
+      ...valid,
+      routes: {
+        ...valid.routes,
+        failingJobs: {
+          path: '/projects/{repo}/merge_requests/{id}/jobs?scope=failed',
+          itemsPath: '$',
+          map: [{ name: '$.name', logExcerpt: '$.failure_reason | default:' }],
+          paginate: { next: { style: 'nextUrl', path: '$.links.next' } },
+        },
+      },
+    });
+    const route = withJobs.routes.failingJobs!;
+    expect(route.method).toBe('GET'); // defaulted
+    expect(route.itemsPath).toEqual([]); // "$" ⇒ no segments (the body itself)
+    expect(route.item.name).toEqual({ segments: [{ kind: 'key', key: 'name' }], transforms: [] });
+    expect(route.item.logExcerpt.transforms).toEqual([{ kind: 'default', value: '' }]);
+    expect(route.paginate).toEqual({
+      next: { style: 'nextUrl', path: [{ kind: 'key', key: 'links' }, { kind: 'key', key: 'next' }] },
+      maxPages: 10, // defaulted
+    });
+  });
+
+  it('accepts pageParam pagination and a route without paginate (single page)', () => {
+    const pageParam = parseRestChangeRequestDescriptor({
+      ...valid,
+      routes: {
+        ...valid.routes,
+        failingJobs: {
+          path: '/projects/{repo}/merge_requests/{id}/jobs',
+          itemsPath: '$.jobs',
+          map: [{ name: '$.name', logExcerpt: '$.reason' }],
+          paginate: { next: { style: 'pageParam', param: 'page', start: 1 }, maxPages: 3 },
+        },
+      },
+    });
+    expect(pageParam.routes.failingJobs?.paginate).toEqual({
+      next: { style: 'pageParam', param: 'page', start: 1 },
+      maxPages: 3,
+    });
+
+    const single = parseRestChangeRequestDescriptor({
+      ...valid,
+      routes: {
+        ...valid.routes,
+        failingJobs: { path: '/x/{repo}/{id}/jobs', itemsPath: '$', map: [{ name: '$.name', logExcerpt: '$.reason' }] },
+      },
+    });
+    expect(single.routes.failingJobs?.paginate).toBeUndefined();
+  });
+
+  it('rejects a failingJobs map that is not exactly one template, a wildcard itemsPath, or a bad placeholder', () => {
+    const withJobs = (failingJobs: unknown) =>
+      parseRestChangeRequestDescriptor({ ...valid, routes: { ...valid.routes, failingJobs } });
+    expect(() =>
+      withJobs({ path: '/x/{repo}/{id}', itemsPath: '$', map: [], paginate: undefined }),
+    ).toThrow(/invalid rest change-request provider/);
+    expect(() =>
+      withJobs({ path: '/x/{repo}/{id}', itemsPath: '$.jobs[*]', map: [{ name: '$.n', logExcerpt: '$.r' }] }),
+    ).toThrow(/failingJobs\.itemsPath must not contain \[\*\]/);
+    // {branch} is not bound for failingJobs (only {repo}/{id}).
+    expect(() =>
+      withJobs({ path: '/x/{branch}', itemsPath: '$', map: [{ name: '$.n', logExcerpt: '$.r' }] }),
+    ).toThrow(/unknown placeholder \{branch\}/);
   });
 });
