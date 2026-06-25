@@ -94,13 +94,21 @@ export function postProgress(
  * (or other spawn error) maps to a synthetic exit code 127 with the error
  * text on stderr, so "command failed" and "command absent" are uniform
  * (adw/_exec.py:147-159).
+ *
+ * `opts.env`, when given, REPLACES the child's environment (spawnSync semantics)
+ * instead of inheriting the orchestrator's ambient env. Only the declarative
+ * provider drivers pass it — a scoped, one-credential env built by
+ * `safeSubprocessEnv` (env.ts) — so a project-configured CLI never sees
+ * GH_TOKEN or other ambient secrets. gh/git callers omit it and inherit as
+ * before. The parent environment is never spread in here; the only env builder
+ * remains `safeSubprocessEnv` (the lint:env gate stays green).
  */
-export function capture(cmd: readonly string[]): Captured {
+export function capture(cmd: readonly string[], opts?: { env?: Record<string, string> }): Captured {
   const [bin, ...args] = cmd;
   if (bin === undefined) {
     return { returncode: 127, stdout: '', stderr: 'empty command' };
   }
-  const result = spawnSync(bin, args, { encoding: 'utf8' });
+  const result = spawnSync(bin, args, opts?.env ? { encoding: 'utf8', env: opts.env } : { encoding: 'utf8' });
   if (result.error) {
     return { returncode: 127, stdout: result.stdout ?? '', stderr: String(result.error) };
   }

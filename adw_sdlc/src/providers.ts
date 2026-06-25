@@ -18,7 +18,18 @@ import {
   workingTreeDirty,
 } from './exec.js';
 import { DEFAULT_ADW_CONFIG, getAdwConfig, type AdwConfig } from './config.js';
+import { AdwError } from './errors.js';
 import * as git from './git.js';
+import {
+  parseCliWorkItemDescriptor,
+  parseRestChangeRequestDescriptor,
+  parseRestWorkItemDescriptor,
+} from './provider-descriptor.js';
+import {
+  createCliWorkItemProvider,
+  createRestChangeRequestProvider,
+  createRestWorkItemProvider,
+} from './providers-rest-cli.js';
 import { fetchWorkItem, setStatus, type WorkItemContext } from './work-item.js';
 
 export interface ProviderContext {
@@ -204,25 +215,81 @@ export function createGitHubChangeRequestProvider(): ChangeRequestProvider {
   };
 }
 
+// ── Provider registry ──────────────────────────────────────────────────────
+// Provider *kind* (config `type`) dispatches through these per-role tables
+// instead of a closed switch, so adding an in-tree provider (e.g. gitlab/glab)
+// is a one-line registration here — no config-schema change. The registry is
+// the single source of truth for which kinds exist and fails CLOSED (a loud
+// AdwError) on an unknown kind. This is the kernel half of the same
+// shape/membership split the phase chain uses: `config.ts` validates the
+// type's shape (a non-empty string), and the registry validates membership —
+// keeping config.ts ⇄ providers.ts acyclic (cf. parsePhases vs. AGENT_PHASES).
+//
+// VCS factories take the changed-files capture; the others are nullary.
+
+type CliFactory = () => ProviderCli;
+// Work-item factories receive the resolved config so descriptor-driven kinds
+// (cli/rest) can read providers.workItems; the github factory ignores it.
+type WorkItemFactory = (config: AdwConfig) => WorkItemProvider;
+type VcsFactory = (captureChangedFiles: (base: string) => string[]) => VcsProvider;
+// Like work items, change-request factories receive the resolved config so the
+// descriptor-driven `rest` kind can read providers.changeRequests; github ignores it.
+type ChangeRequestFactory = (config: AdwConfig) => ChangeRequestProvider;
+
+const CLI_PROVIDERS: Record<string, CliFactory> = {
+  github: createGitHubCliProvider,
+};
+const WORK_ITEM_PROVIDERS: Record<string, WorkItemFactory> = {
+  github: createGitHubWorkItemProvider,
+  cli: (config) => createCliWorkItemProvider(parseCliWorkItemDescriptor(config.providers.workItems)),
+  rest: (config) => createRestWorkItemProvider(parseRestWorkItemDescriptor(config.providers.workItems)),
+};
+const VCS_PROVIDERS: Record<string, VcsFactory> = {
+  git: createGitVcsProvider,
+};
+const CHANGE_REQUEST_PROVIDERS: Record<string, ChangeRequestFactory> = {
+  github: createGitHubChangeRequestProvider,
+  rest: (config) => createRestChangeRequestProvider(parseRestChangeRequestDescriptor(config.providers.changeRequests)),
+};
+
+function resolveProviderFactory<T>(role: string, table: Record<string, T>, type: string): T {
+  const factory = table[type];
+  if (!factory) {
+    const supported = Object.keys(table).sort().join(', ');
+    throw new AdwError(`unsupported ${role} provider type "${type}" (supported: ${supported})`);
+  }
+  return factory;
+}
+
+/** Provider kinds the kernel can build for each role (sorted; used in tests/diagnostics). */
+export function supportedProviderTypes(): {
+  cli: string[];
+  workItems: string[];
+  vcs: string[];
+  changeRequests: string[];
+} {
+  return {
+    cli: Object.keys(CLI_PROVIDERS).sort(),
+    workItems: Object.keys(WORK_ITEM_PROVIDERS).sort(),
+    vcs: Object.keys(VCS_PROVIDERS).sort(),
+    changeRequests: Object.keys(CHANGE_REQUEST_PROVIDERS).sort(),
+  };
+}
+
 export function createProvidersFromConfig(
   config: AdwConfig,
   captureChangedFiles: (base: string) => string[],
 ): AdwProviders {
-  // The schema currently allows only these built-ins. Keep the switch shape so
-  // adding gitlab/linear/jira providers later is localized here.
-  const cli = config.providers.cli.type === 'github' ? createGitHubCliProvider() : neverProvider('cli');
-  const workItems =
-    config.providers.workItems.type === 'github' ? createGitHubWorkItemProvider() : neverProvider('workItems');
-  const vcs = config.providers.vcs.type === 'git' ? createGitVcsProvider(captureChangedFiles) : neverProvider('vcs');
-  const changeRequests =
-    config.providers.changeRequests.type === 'github'
-      ? createGitHubChangeRequestProvider()
-      : neverProvider('changeRequests');
-  return { cli, workItems, vcs, changeRequests };
-}
-
-function neverProvider(name: string): never {
-  throw new Error(`unsupported provider configured for ${name}`);
+  return {
+    cli: resolveProviderFactory('cli', CLI_PROVIDERS, config.providers.cli.type)(),
+    workItems: resolveProviderFactory('workItems', WORK_ITEM_PROVIDERS, config.providers.workItems.type)(config),
+    vcs: resolveProviderFactory('vcs', VCS_PROVIDERS, config.providers.vcs.type)(captureChangedFiles),
+    changeRequests: resolveProviderFactory(
+      'changeRequests',
+      CHANGE_REQUEST_PROVIDERS,
+      config.providers.changeRequests.type,
+    )(config),
+  };
 }
 
 export function createDefaultProviders(captureChangedFiles: (base: string) => string[]): AdwProviders {

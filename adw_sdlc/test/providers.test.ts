@@ -5,9 +5,23 @@ import {
   createGitHubWorkItemProvider,
   createProvidersFromConfig,
   providerBackedDeps,
+  supportedProviderTypes,
   type AdwProviders,
 } from '../src/providers.js';
 import { parseAdwConfig } from '../src/config.js';
+import {
+  parseCliWorkItemDescriptor,
+  parseRestChangeRequestDescriptor,
+  parseRestWorkItemDescriptor,
+} from '../src/provider-descriptor.js';
+import {
+  createCliWorkItemProvider,
+  createRestChangeRequestProvider,
+  createRestWorkItemProvider,
+  type RestRequest,
+  type RestTransport,
+} from '../src/providers-rest-cli.js';
+import type { Captured } from '../src/exec.js';
 
 function fakeProviders(): AdwProviders {
   return {
@@ -49,6 +63,309 @@ describe('createProvidersFromConfig', () => {
     expect(providers.workItems.assignSelf).toBeTypeOf('function');
     expect(providers.vcs.changedFiles('main')).toEqual(['src/a.ts']);
     expect(providers.changeRequests.create).toBeTypeOf('function');
+  });
+
+  it('reports the registered built-in provider kinds', () => {
+    expect(supportedProviderTypes()).toEqual({
+      cli: ['github'],
+      workItems: ['cli', 'github', 'rest'],
+      vcs: ['git'],
+      changeRequests: ['github', 'rest'],
+    });
+  });
+
+  it('fails closed on an unknown provider kind, naming the role and supported types', () => {
+    // Config shape-validates the type string; the registry owns membership and
+    // throws a loud AdwError before any provider is built (run-start fail-closed).
+    const badVcs = parseAdwConfig({ providers: { vcs: { type: 'svn' } } });
+    expect(() => createProvidersFromConfig(badVcs, () => [])).toThrow(
+      /unsupported vcs provider type "svn" \(supported: git\)/,
+    );
+
+    const badWorkItems = parseAdwConfig({ providers: { workItems: { type: 'jira' } } });
+    expect(() => createProvidersFromConfig(badWorkItems, () => [])).toThrow(
+      /unsupported workItems provider type "jira" \(supported: cli, github, rest\)/,
+    );
+  });
+});
+
+describe('declarative cli work-item provider', () => {
+  const descriptorRaw = {
+    type: 'cli',
+    authEnv: 'GITLAB_TOKEN',
+    routes: {
+      fetch: {
+        command: ['glab', 'issue', 'view', '{id}', '--repo', '{repo}', '--output', 'json'],
+        map: { title: '$.title', body: '$.description', labels: '$.labels[*].name' },
+      },
+      state: { command: ['glab', 'issue', 'view', '{id}', '--output', 'json'], map: { state: '$.state' } },
+    },
+  };
+  const descriptor = parseCliWorkItemDescriptor(descriptorRaw);
+
+  it('substitutes placeholders, maps JSON, and scopes the env to one credential (GH_TOKEN withheld)', () => {
+    const calls: { cmd: readonly string[]; env?: Record<string, string> }[] = [];
+    const fakeCapture = (cmd: readonly string[], opts?: { env?: Record<string, string> }): Captured => {
+      calls.push({ cmd, env: opts?.env });
+      return {
+        returncode: 0,
+        stdout: JSON.stringify({ title: 'Fix login', description: 'b', state: 'opened', labels: [{ name: 'bug' }] }),
+        stderr: '',
+      };
+    };
+
+    const prevGitlab = process.env['GITLAB_TOKEN'];
+    const prevGh = process.env['GH_TOKEN'];
+    process.env['GITLAB_TOKEN'] = 'secret-token';
+    process.env['GH_TOKEN'] = 'gh-secret';
+    try {
+      const provider = createCliWorkItemProvider(descriptor, fakeCapture);
+      expect(provider.fetch({ ghBin: null, repo: 'group/proj' }, 42)).toEqual({
+        title: 'Fix login',
+        body: 'b',
+        labels: ['bug'],
+      });
+      const first = calls[0]!;
+      expect(first.cmd).toEqual(['glab', 'issue', 'view', '42', '--repo', 'group/proj', '--output', 'json']);
+      expect(first.env?.['GITLAB_TOKEN']).toBe('secret-token'); // one credential in
+      expect(first.env?.['GH_TOKEN']).toBeUndefined(); // ambient GitHub authority withheld
+    } finally {
+      if (prevGitlab === undefined) delete process.env['GITLAB_TOKEN'];
+      else process.env['GITLAB_TOKEN'] = prevGitlab;
+      if (prevGh === undefined) delete process.env['GH_TOKEN'];
+      else process.env['GH_TOKEN'] = prevGh;
+    }
+  });
+
+  it('falls back to UNKNOWN state and null fetch on failure or unparseable output', () => {
+    const fail = (): Captured => ({ returncode: 1, stdout: '', stderr: 'boom' });
+    const failing = createCliWorkItemProvider(descriptor, fail);
+    expect(failing.state({ ghBin: null, repo: '' }, 1)).toBe('UNKNOWN');
+    expect(failing.fetch({ ghBin: null, repo: '' }, 1)).toBeNull();
+
+    const garbage = (): Captured => ({ returncode: 0, stdout: 'not json', stderr: '' });
+    expect(createCliWorkItemProvider(descriptor, garbage).state({ ghBin: null, repo: '' }, 1)).toBe('UNKNOWN');
+  });
+
+  it('no-ops optional write routes that are not configured', () => {
+    let called = false;
+    const spy = (): Captured => {
+      called = true;
+      return { returncode: 0, stdout: '', stderr: '' };
+    };
+    const provider = createCliWorkItemProvider(descriptor, spy);
+    provider.postProgress({ ghBin: null, repo: '' }, 1, 'a1b2c3d4', 'plan', 'msg');
+    provider.assignSelf({ ghBin: null, repo: '' }, 1);
+    provider.setStatus({ ghBin: null, repo: '' }, 1, 'Done');
+    expect(called).toBe(false);
+  });
+
+  it('is built through createProvidersFromConfig for type: "cli"', () => {
+    const config = parseAdwConfig({ providers: { workItems: descriptorRaw } });
+    const providers = createProvidersFromConfig(config, () => []);
+    expect(providers.workItems.fetch).toBeTypeOf('function');
+    expect(providers.workItems.state).toBeTypeOf('function');
+  });
+
+  it('fails closed at construction (run start) for a misconfigured cli descriptor', () => {
+    // type: "cli" with no routes ⇒ loud AdwError from createProvidersFromConfig,
+    // i.e. before defaultDeps returns and before any side effect / dry-run.
+    const config = parseAdwConfig({ providers: { workItems: { type: 'cli' } } });
+    expect(() => createProvidersFromConfig(config, () => [])).toThrow(/invalid cli work-item provider/);
+  });
+});
+
+describe('declarative rest work-item provider', () => {
+  const raw = {
+    type: 'rest',
+    baseUrl: 'https://gitlab.example.com/api/v4',
+    allowedHosts: ['gitlab.example.com'],
+    authEnv: 'GITLAB_TOKEN',
+    routes: {
+      fetch: {
+        path: '/projects/{repo}/issues/{id}',
+        map: { title: '$.title', body: '$.description', labels: '$.labels[*].name' },
+      },
+      state: { path: '/projects/{repo}/issues/{id}', map: { state: '$.state' } },
+    },
+  };
+  const descriptor = parseRestWorkItemDescriptor(raw);
+
+  it('resolves the url with percent-encoded placeholders, maps JSON, and scopes the env', () => {
+    const seen: { req: RestRequest; env: Record<string, string> }[] = [];
+    const transport: RestTransport = (req, env) => {
+      seen.push({ req, env });
+      return {
+        status: 200,
+        body: JSON.stringify({ title: 'T', description: 'B', state: 'opened', labels: [{ name: 'bug' }] }),
+      };
+    };
+
+    const prevGitlab = process.env['GITLAB_TOKEN'];
+    const prevGh = process.env['GH_TOKEN'];
+    process.env['GITLAB_TOKEN'] = 'tok';
+    process.env['GH_TOKEN'] = 'gh-secret';
+    try {
+      const provider = createRestWorkItemProvider(descriptor, transport);
+      expect(provider.fetch({ ghBin: null, repo: 'group/proj' }, 42)).toEqual({ title: 'T', body: 'B', labels: ['bug'] });
+      const { req, env } = seen[0]!;
+      // {repo} is percent-encoded as a single path component; host is unchanged.
+      expect(req.url).toBe('https://gitlab.example.com/api/v4/projects/group%2Fproj/issues/42');
+      expect(req.authEnv).toBe('GITLAB_TOKEN');
+      expect(req.authHeader).toBe('Authorization');
+      expect(req.authScheme).toBe('Bearer');
+      expect(env['GITLAB_TOKEN']).toBe('tok'); // one credential in
+      expect(env['GH_TOKEN']).toBeUndefined(); // GitHub authority withheld
+    } finally {
+      if (prevGitlab === undefined) delete process.env['GITLAB_TOKEN'];
+      else process.env['GITLAB_TOKEN'] = prevGitlab;
+      if (prevGh === undefined) delete process.env['GH_TOKEN'];
+      else process.env['GH_TOKEN'] = prevGh;
+    }
+  });
+
+  it('returns null/UNKNOWN on non-2xx, transport error, or unparseable body', () => {
+    const p404 = createRestWorkItemProvider(descriptor, () => ({ status: 404, body: '{}' }));
+    expect(p404.fetch({ ghBin: null, repo: 'g/p' }, 1)).toBeNull();
+    expect(p404.state({ ghBin: null, repo: 'g/p' }, 1)).toBe('UNKNOWN');
+
+    const pErr = createRestWorkItemProvider(descriptor, () => ({ status: 0, body: '', error: 'network' }));
+    expect(pErr.fetch({ ghBin: null, repo: 'g/p' }, 1)).toBeNull();
+
+    const pBad = createRestWorkItemProvider(descriptor, () => ({ status: 200, body: 'not json' }));
+    expect(pBad.state({ ghBin: null, repo: 'g/p' }, 1)).toBe('UNKNOWN');
+  });
+
+  it('no-ops the write methods in 2b', () => {
+    let called = false;
+    const provider = createRestWorkItemProvider(descriptor, () => {
+      called = true;
+      return { status: 200, body: '{}' };
+    });
+    provider.postProgress({ ghBin: null, repo: '' }, 1, 'a1', 'plan', 'm');
+    provider.assignSelf({ ghBin: null, repo: '' }, 1);
+    provider.setStatus({ ghBin: null, repo: '' }, 1, 'Done');
+    expect(called).toBe(false);
+  });
+
+  it('is built through createProvidersFromConfig, and fails closed for an off-allowlist host', () => {
+    const good = parseAdwConfig({ providers: { workItems: raw } });
+    expect(createProvidersFromConfig(good, () => []).workItems.fetch).toBeTypeOf('function');
+
+    const bad = parseAdwConfig({ providers: { workItems: { ...raw, allowedHosts: ['other.example.com'] } } });
+    expect(() => createProvidersFromConfig(bad, () => [])).toThrow(/not in allowedHosts/);
+  });
+});
+
+describe('declarative rest change-request provider', () => {
+  const raw = {
+    type: 'rest',
+    baseUrl: 'https://gitlab.example.com/api/v4',
+    allowedHosts: ['gitlab.example.com'],
+    authEnv: 'GITLAB_TOKEN',
+    routes: {
+      findForBranch: { path: '/projects/{repo}/merge_requests?source_branch={branch}', map: { url: '$[0].web_url' } },
+      create: {
+        method: 'POST',
+        path: '/projects/{repo}/merge_requests',
+        body: { source_branch: '{branch}', target_branch: '{base}', title: '{title}', description: '{body}' },
+        map: { number: '$.iid', url: '$.web_url' },
+      },
+      squashMerge: { method: 'PUT', path: '/projects/{repo}/merge_requests/{id}/merge', body: { squash: true } },
+      pipelineStatus: {
+        path: '/projects/{repo}/merge_requests/{id}',
+        statusPath: '$.pipeline.status',
+        stateMap: { success: 'success', failed: 'failure', running: 'pending' },
+      },
+    },
+  };
+  const descriptor = parseRestChangeRequestDescriptor(raw);
+
+  it('create: substitutes the JSON body, maps number/url/id, and scopes the env', () => {
+    const seen: { req: RestRequest; env: Record<string, string> }[] = [];
+    const transport: RestTransport = (req, env) => {
+      seen.push({ req, env });
+      return { status: 201, body: JSON.stringify({ iid: 7, web_url: 'https://gitlab.example.com/g/p/-/merge_requests/7' }) };
+    };
+    const prevGitlab = process.env['GITLAB_TOKEN'];
+    const prevGh = process.env['GH_TOKEN'];
+    process.env['GITLAB_TOKEN'] = 'tok';
+    process.env['GH_TOKEN'] = 'gh-secret';
+    try {
+      const provider = createRestChangeRequestProvider(descriptor, transport);
+      const result = provider.create({ ghBin: null, repo: 'group/proj' }, {
+        branch: 'feat/7-x',
+        base: 'main',
+        title: 'My MR',
+        body: 'desc',
+      });
+      expect(result).toEqual({
+        id: '7',
+        number: 7,
+        url: 'https://gitlab.example.com/g/p/-/merge_requests/7',
+        error: null,
+      });
+      const { req, env } = seen[0]!;
+      expect(req.method).toBe('POST');
+      expect(req.url).toBe('https://gitlab.example.com/api/v4/projects/group%2Fproj/merge_requests');
+      expect(req.body).toEqual({ source_branch: 'feat/7-x', target_branch: 'main', title: 'My MR', description: 'desc' });
+      expect(env['GITLAB_TOKEN']).toBe('tok');
+      expect(env['GH_TOKEN']).toBeUndefined();
+    } finally {
+      if (prevGitlab === undefined) delete process.env['GITLAB_TOKEN'];
+      else process.env['GITLAB_TOKEN'] = prevGitlab;
+      if (prevGh === undefined) delete process.env['GH_TOKEN'];
+      else process.env['GH_TOKEN'] = prevGh;
+    }
+  });
+
+  it('findForBranch maps a url from the response, or null when none', () => {
+    const found = createRestChangeRequestProvider(descriptor, () => ({
+      status: 200,
+      body: JSON.stringify([{ web_url: 'https://gitlab.example.com/x/1' }]),
+    }));
+    expect(found.findForBranch({ ghBin: null, repo: 'g/p' }, 'feat/x')).toBe('https://gitlab.example.com/x/1');
+    const none = createRestChangeRequestProvider(descriptor, () => ({ status: 200, body: '[]' }));
+    expect(none.findForBranch({ ghBin: null, repo: 'g/p' }, 'feat/x')).toBeNull();
+  });
+
+  it('squashMerge issues the templated PUT and reports ok/failure', () => {
+    const seen: RestRequest[] = [];
+    const merged = createRestChangeRequestProvider(descriptor, (req) => {
+      seen.push(req);
+      return { status: 200, body: '{}' };
+    });
+    expect(merged.squashMerge({ ghBin: null, repo: 'g/p' }, 7)).toEqual({ ok: true, error: null });
+    expect(seen[0]!.method).toBe('PUT');
+    expect(seen[0]!.url).toBe('https://gitlab.example.com/api/v4/projects/g%2Fp/merge_requests/7/merge');
+    expect(seen[0]!.body).toEqual({ squash: true });
+
+    const failed = createRestChangeRequestProvider(descriptor, () => ({ status: 405, body: 'no' }));
+    expect(failed.squashMerge({ ghBin: null, repo: 'g/p' }, 7)).toEqual({ ok: false, error: 'merge failed (status 405)' });
+  });
+
+  it('pipelineStatus maps the forge status via stateMap; an absent route ⇒ none', () => {
+    const green = createRestChangeRequestProvider(descriptor, () => ({ status: 200, body: JSON.stringify({ pipeline: { status: 'success' } }) }));
+    expect(green.pipelineStatus({ ghBin: null, repo: 'g/p' }, 7)).toEqual({ state: 'success', failingJobs: [] });
+    const red = createRestChangeRequestProvider(descriptor, () => ({ status: 200, body: JSON.stringify({ pipeline: { status: 'failed' } }) }));
+    expect(red.pipelineStatus({ ghBin: null, repo: 'g/p' }, 7).state).toBe('failure');
+    const weird = createRestChangeRequestProvider(descriptor, () => ({ status: 200, body: JSON.stringify({ pipeline: { status: 'wat' } }) }));
+    expect(weird.pipelineStatus({ ghBin: null, repo: 'g/p' }, 7).state).toBe('unknown'); // unmapped ⇒ unknown
+
+    const noPipe = parseRestChangeRequestDescriptor({
+      ...raw,
+      routes: { findForBranch: raw.routes.findForBranch, create: raw.routes.create, squashMerge: raw.routes.squashMerge },
+    });
+    const provider = createRestChangeRequestProvider(noPipe, () => ({ status: 500, body: '' }));
+    expect(provider.pipelineStatus({ ghBin: null, repo: 'g/p' }, 7)).toEqual({ state: 'none', failingJobs: [] });
+  });
+
+  it('is built through createProvidersFromConfig, and fails closed for an off-allowlist host', () => {
+    const good = parseAdwConfig({ providers: { changeRequests: raw } });
+    expect(createProvidersFromConfig(good, () => []).changeRequests.squashMerge).toBeTypeOf('function');
+
+    const bad = parseAdwConfig({ providers: { changeRequests: { ...raw, allowedHosts: ['other.example.com'] } } });
+    expect(() => createProvidersFromConfig(bad, () => [])).toThrow(/not in allowedHosts/);
   });
 });
 
