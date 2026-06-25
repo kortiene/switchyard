@@ -307,7 +307,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 466 tests, 35 files)
+# 3) Full test suite (current: 546 tests, 39 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -1173,6 +1173,23 @@ Issue class: `refactor`. Run mode: native. No kernel/runtime/prompt-pack/config
 change. CLI entry behavior and `npm run parity:rate` output are byte-stable; the
 `FENCED_MARKER` drift guard continues to pin the core constant to the real
 `buildFooter` output.
+
+## 8w. Live ADW run — issue #6 (fix: drift guard for ADW_* env naming in docs/prompts)
+
+Regression-prevention guard for the `MX_AGENT_*` → `ADW_*` env rename. No
+production-code change; the alias machinery in `src/env-vars.ts` is untouched.
+
+- `adw_sdlc/test/env-naming-drift.test.ts` (new, +6) — vitest drift guard.
+  Scans every `src/**/*.ts` file (except the sanctioned `src/env-vars.ts`) for
+  bare bracket/dot reads of `MX_AGENT_*` keys. Fails with `file:line` detail if
+  any are found. Ships with a detector self-test (positive + negative fixtures)
+  and a source-of-truth coverage check tied directly to `ENV_ALIASES` and
+  `modelEnvAlias`, so adding a new alias automatically extends the guard's intent.
+  Comment-stripping (strip `//`-to-EOL before matching) prevents false positives
+  from commented-out examples.
+
+Issue class: `fix`. Run mode: native. No kernel/runtime/prompt-pack/config
+change. `npm run verify` stays green (546 tests, 39 files).
 
 ## 9. Files created/modified this session
 
