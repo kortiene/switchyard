@@ -42,10 +42,12 @@ session can pick up where we stopped.
 **Repository state:** all of this session's work is **merged to `main`**
 (no remote — local merge). `main` HEAD is the docs commit recording the merge,
 on top of the merge commit
-`1070d9e merge: drop dead imports + extract withScopedEnv test helper (§8q)`,
+`3e441f8 merge: structured-output hard-failure-rate harness (§8r)`,
 with the session's commits in history:
 
 ```
+3e441f8 merge: structured-output hard-failure-rate harness (§8r)
+92ab4a5 feat(adw_sdlc): structured-output hard-failure-rate harness (§8r)
 1070d9e merge: drop dead imports + extract withScopedEnv test helper (§8q)
 41e4111 test(adw_sdlc): extract withScopedEnv helper               (§8q)
 93165ee refactor(adw_sdlc): drop dead imports, enable unused-symbol guards (§8q)
@@ -106,8 +108,12 @@ The unused-imports cleanup + test-helper extraction (§8q) is two commits on the
 `chore/unused-imports-and-test-helper` branch — `93165ee refactor: drop dead
 imports, enable unused-symbol guards` and `41e4111 test: extract withScopedEnv
 helper` — merged to `main` in `1070d9e`; the branch was deleted after merging.
-Behavior-neutral (suite unchanged at 450). This very entry is the follow-up `docs`
-commit recording that merge.
+Behavior-neutral (suite unchanged at 450).
+
+The parity hard-failure-rate harness (§8r) is the `feat` commit `92ab4a5` on the
+`feat/parity-rate-harness` branch — merged to `main` in `3e441f8`; the branch was
+deleted after merging. New tool (`tools/parity-rate.ts`) + tests (+4 → 454), no
+kernel change. This very entry is the follow-up `docs` commit recording that merge.
 
 ## 2. Session goal
 
@@ -286,7 +292,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 450 tests, 32 files)
+# 3) Full test suite (current: 454 tests, 33 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -979,6 +985,53 @@ decision, not cleanup). Verified: typecheck (with the new guards), `lint:env`,
 full suite (**450**, unchanged), build+clean, byte-identical github dry-run. No
 new dependency, no behavior change.
 
+## 8r. Follow-up session — parity hard-failure-rate harness (MVP-readiness instrumentation)
+
+Came out of an explicit **challenge to the "essentially at MVP" claim**. The MVP
+bar is the `claude` cutover gate (PLAN step 12); PARITY.md reports it green, but
+verification showed the **entire 450-test suite is mocked** (no test spawns a real
+process or hits a real network) and the only live evidence is **one** `claude` run
+(PR #331) — which itself surfaced a parity bug (#332). Critically, PARITY.md's
+defining metric — a native-schema backend's structured-output hard-failure rate ≤
+the fenced-JSON+nudge path — is **argued structurally, not measured** ("Rate (live,
+owed)"). This slice builds the missing measurement so the bar stops being a
+self-attestation.
+
+- `adw_sdlc/tools/parity-rate.ts` (new) — a recorder that classifies every phase
+  invocation in completed run workspaces (`agents/{adw_id}/`) and reports the
+  per-path hard-fail rate. **Purely artifact-based** (no kernel runtime, no SDK,
+  no network — runs against any archived run): per phase it reads `prompt.txt` (the
+  fenced contract footer ⇒ native vs fenced path — the same `emitJsonContract`
+  signal `buildFooter` writes), `transcript-2.log` presence (the single nudge
+  fired), and `completed_phases` in `state.json` (success). Outcome matrix:
+  done+no-retry=clean, done+retry=nudged-ok, **not-done+retry=hard-fail** (the
+  bar's numerator), not-done+no-retry=uncounted (fast-fail timeout/budget, or
+  in-flight — excluded per the bar). `classify` (the shared `structuredCall` path,
+  no `transcript-2.log`) is bucketed separately and **kept out of the comparison**.
+  It **refuses to declare the bar met on a thin sample** — prints `INSUFFICIENT
+  DATA` until each path has ≥ `--min` (default 20) counted attempts — and exits
+  non-zero only on a *measured* failure. `npm run parity:rate -- agents/`.
+- `adw_sdlc/test/parity-rate.test.ts` (new, +4) — a **drift guard** pinning
+  `FENCED_MARKER` to the real `buildFooter(…, true)` output (so wording drift can't
+  silently misclassify every fenced run as native), the path/outcome classification
+  matrix, and an end-to-end parse of a synthetic workspace incl. the
+  insufficient-sample verdict.
+- `adw_sdlc/tsconfig.json` — added `tools/` to `include` so typecheck + the §8q
+  `noUnused*` guards cover it; `tsconfig.build.json` stays `src`-only, so the tool
+  **never ships to `dist`** (verified: `dist/` has no `tools/` / `parity-rate.js`).
+- `adw_sdlc/package.json` — `parity:rate` script.
+- `adw_sdlc/PARITY.md` — the "Structured-output hard-failure rate" section now
+  points at the tool and records that, with no fenced-path (`pi`) live run yet, the
+  **bar is not yet measured**.
+
+Honest framing this hard-codes into the repo: until a fenced-path runner runs live,
+the tool says the parity bar is **unmeasured** — the structural argument is not a
+substitute. Verified: typecheck (tools/ now in scope), `lint:env`, full suite
+(**454**, +4), build+clean (tools excluded), and a live end-to-end run over a
+synthetic `agents/` tree (native 4 clean + 1 nudged-ok, fenced 1 clean + 1
+hard-fail → `INSUFFICIENT DATA` at `--min 20`, `MEETS BAR` at `--min 2`). No kernel
+change, no new dependency. Committed `92ab4a5`, merged `3e441f8` (see §1).
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -1184,7 +1237,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **450 passing across 32 files**
+Test count baseline after this session: **454 passing across 33 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1195,8 +1248,8 @@ provider — §8k, +10 for the declarative `rest`/HTTP work-item provider — §
 declarative primitives 2.5a transforms + 2.5b pagination — §8n, +9 for the
 declarative `cli` change-request provider — §8o; the §8p and §8q housekeeping
 passes added no tests — §8p removed dead code, §8q removed dead imports + enabled
-the unused-symbol typecheck guards and refactored 4 tests onto `withScopedEnv` —
-so the count is unchanged). The session left
+the unused-symbol typecheck guards and refactored 4 tests onto `withScopedEnv`;
++4 for the parity hard-failure-rate harness — §8r). The session left
 no build artifact, no temporary files, and no untracked binary churn. The ADW
 orchestrator code path still runs no `git`/`gh` itself; the commits and the local
 merge to `main` recorded in §1 were performed only at the user's explicit request
@@ -1208,5 +1261,6 @@ merged to `main` (`3199cad`); the §8o `cli` change-request provider is committe
 as `a6c49a2` and merged to `main` (`d5f2588`); the §8p dead-code cleanup +
 stale-doc audit is committed as `110cdf1`/`b5700d1` and merged to `main`
 (`badcf50`); the §8q unused-import cleanup + test-helper extraction is committed
-as `93165ee`/`41e4111` and merged to `main` (`1070d9e`). The working tree is
-clean.** — see §1.
+as `93165ee`/`41e4111` and merged to `main` (`1070d9e`); the §8r parity
+hard-failure-rate harness is committed as `92ab4a5` and merged to `main`
+(`3e441f8`). The working tree is clean.** — see §1.
