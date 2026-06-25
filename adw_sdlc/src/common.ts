@@ -3,9 +3,10 @@
  * Pi-style positional substitutions both template trees use) and the
  * fence/prose-tolerant JSON parser behind the fenced-JSON output contract.
  *
- * The templates under .pi/prompts/ and .claude/commands/ are SHARED VERBATIM
- * with the Python pipeline (PLAN.md D4) — this module must keep rendering them
- * byte-for-byte the way adw/common.py does.
+ * Project-pack prompt templates (for this standalone repo, .adw/prompts/) and
+ * the neutral fallback command roots (.pi/prompts/ and .claude/commands/) share
+ * the same Pi-style positional substitution contract — this module must keep
+ * rendering them byte-for-byte the way adw/common.py does.
  */
 
 import { readFileSync } from 'node:fs';
@@ -17,7 +18,7 @@ import { AdwError } from './errors.js';
 /**
  * Repository root. Both src/ and dist/ sit directly under adw_sdlc/, so two
  * levels up is the repo root (HealthTech/) from either layout — the directory
- * holding .adw/config.json, .claude/commands, .pi/prompts,
+ * holding .adw/config.json, .adw/prompts, .claude/commands, .pi/prompts,
  * adw/state.schema.json, and agents/.
  */
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');

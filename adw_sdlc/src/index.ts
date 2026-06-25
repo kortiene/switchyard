@@ -191,6 +191,26 @@ export {
   type StructuredCallResult,
 } from './structured-call.js';
 export {
+  buildMetaprompt,
+  checkPack,
+  contextHeaderFor,
+  DEFAULT_PACK_DIR,
+  DEFAULT_PROFILE_PATH,
+  DEFAULT_TEMPLATES_DIR,
+  generatePack,
+  injectContextHeader,
+  listTemplates,
+  loadPackProfile,
+  PackProfileSchema,
+  renderPack,
+  renderPackPrompt,
+  type CheckResult,
+  type GenerateOptions,
+  type GenerateResult,
+  type PackProfile,
+  type RenderedFile,
+} from './pack-generator.js';
+export {
   DEFAULT_FINALIZE_GATES,
   DEFAULT_TEST_CMD,
   MAX_OUTPUT_CHARS,

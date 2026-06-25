@@ -490,7 +490,7 @@ describe('run() integration', () => {
     // 'audit' is a project-registered custom phase placed in the chain. The
     // startup preflight (validatePhaseChain) requires it to be fully wired, so
     // supply a template (resolved via the claude runner root) and a schema;
-    // built-in phases still resolve from the default .pi/prompts root.
+    // built-in phases still resolve from the configured default prompt root.
     const promptDir = mkdtempSync(join(tmpdir(), 'adw-audit-prompt-'));
     writeFileSync(join(promptDir, 'audit.md'), 'Audit the change: $1', 'utf8');
     const schemaDir = mkdtempSync(join(tmpdir(), 'adw-audit-schema-'));

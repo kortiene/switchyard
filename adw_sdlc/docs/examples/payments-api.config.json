@@ -6,9 +6,7 @@
   },
   "prompts": {
     "defaultRoot": ".adw/prompts",
-    "runnerRoots": {
-      "claude": ".claude/commands"
-    }
+    "runnerRoots": {}
   },
   "phases": [
     "classify",

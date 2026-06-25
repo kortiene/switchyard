@@ -71,7 +71,7 @@ The validated surface (see `src/config.ts` for the authoritative Zod schema):
 | Section | Configures |
 | --- | --- |
 | `project` | id / display name |
-| `prompts` | template `defaultRoot` + per-runner roots |
+| `prompts` | template `defaultRoot` + per-runner roots. This repo points the HealthTech project pack at `../.adw/prompts`; `.pi/prompts` and `.claude/commands` are neutral fallback command templates. |
 | `phases` | optional ordered agent-phase chain (reorder/drop known phases) |
 | `schemas` | optional per-phase JSON Schema overrides for `tests`/`e2e`/`document` (`root` dir + `overrides` map) |
 | `customPhases` | optional new phase names (each needs a `<name>.md` template + `.adw/schemas/<name>.json`); may opt into a `gates.custom` gate and/or a `loops` loop |
@@ -85,7 +85,36 @@ The validated surface (see `src/config.ts` for the authoritative Zod schema):
 
 A non-HealthTech example pack lives at
 [`docs/examples/payments-api.config.json`](./docs/examples/payments-api.config.json).
-This repository's committed pack is at `../.adw/config.json`.
+This repository's committed pack is at `../.adw/config.json` with HealthTech
+prompt templates under `../.adw/prompts`.
+
+### Prompt-pack generation
+
+Runtime prompts under `../.adw/prompts` are generated, not hand-maintained. The
+neutral source templates live in `../.pi/prompts` (mirrored byte-for-byte in
+`../.claude/commands`) and the project profile lives at
+`../.adw/pack.profile.json`.
+
+```bash
+npm run pack:generate       # regenerate ../.adw/prompts from templates + profile
+npm run pack:check          # CI drift guard; fails if prompts are stale
+npm run pack:generate -- --dry-run
+```
+
+The generator intentionally uses `{{var}}` and
+`<!-- adw:block NAME -->…<!-- adw:endblock -->` so it cannot collide with the
+runtime `$1` / `$ARGUMENTS` prompt-argument substitution. It also injects the
+profile's project-context header after YAML frontmatter, with per-phase
+exclusions such as `classify`.
+
+An optional build-time metaprompt pass is available:
+
+```bash
+npm run pack:generate -- --llm --model claude-sonnet-4-6
+```
+
+This is for reviewed/offline prompt authoring only. The ADW runtime never calls
+the metaprompt generator; it consumes the committed `.adw/prompts/*.md` files.
 
 ## Development
 
@@ -93,6 +122,7 @@ This repository's committed pack is at `../.adw/config.json`.
 npm run typecheck     # tsc --noEmit
 npm run lint:env      # static secret-boundary lint (fail-closed)
 npm test              # vitest suite
+npm run pack:check    # generated prompt-pack drift guard
 npm run build         # tsc -p tsconfig.build.json  (dist/ is a build artifact)
 ```
 

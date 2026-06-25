@@ -4,8 +4,12 @@
  * native-schema backends).
  */
 
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
+import { REPO_ROOT } from '../src/common.js';
 import { parseAdwConfig } from '../src/config.js';
 import { AdwError } from '../src/errors.js';
 import {
@@ -81,10 +85,26 @@ describe('conditional gates', () => {
 });
 
 describe('templatePath', () => {
-  it('prefers .claude/commands for the claude runner, else .pi/prompts', () => {
-    expect(templatePath('claude', 'classify')).toContain('.claude/commands/classify.md');
-    expect(templatePath('pi', 'classify')).toContain('.pi/prompts/classify.md');
-    expect(templatePath('codex', 'classify')).toContain('.pi/prompts/classify.md');
+  it('uses the configured project-pack prompt root for every runner by default', () => {
+    expect(templatePath('claude', 'classify')).toContain('.adw/prompts/classify.md');
+    expect(templatePath('pi', 'classify')).toContain('.adw/prompts/classify.md');
+    expect(templatePath('codex', 'classify')).toContain('.adw/prompts/classify.md');
+  });
+
+  it('keeps fallback command prompts neutral and byte-identical across runner roots', () => {
+    const piRoot = join(REPO_ROOT, '.pi', 'prompts');
+    const claudeRoot = join(REPO_ROOT, '.claude', 'commands');
+    const files = readdirSync(piRoot).filter((f) => f.endsWith('.md')).sort();
+    expect(files.length).toBeGreaterThan(0);
+    expect(readdirSync(claudeRoot).filter((f) => f.endsWith('.md')).sort()).toEqual(files);
+
+    const projectSpecific = /HealthTech|PRD_HealthTech|zero-knowledge|AES-256|ARTCI|Côte|Ivoire|crypto-core|app-patient|app-medecin/i;
+    for (const file of files) {
+      const piText = readFileSync(join(piRoot, file), 'utf8');
+      const claudeText = readFileSync(join(claudeRoot, file), 'utf8');
+      expect(claudeText).toBe(piText);
+      expect(piText).not.toMatch(projectSpecific);
+    }
   });
 });
 

@@ -17,17 +17,56 @@ A project adopts ADW by adding:
 ```
 .adw/
   config.json     # provider selection, phase chain, branching, gates, model tiers, …
-  prompts/        # optional override prompts (default reads .pi/prompts)
+  prompts/        # project-pack prompts when config.prompts.defaultRoot points here
   schemas/        # optional per-phase schema overrides
 ```
 
 No edits to `adw_sdlc/src` are required. The kernel will:
 
-1. Load `.adw/config.json` (or fall back to the built-in HealthTech defaults).
+1. Load `.adw/config.json` (or fall back to the built-in defaults).
 2. Resolve providers via `createProvidersFromConfig(config, …)`.
 3. Use those providers for work-item/VCS/change-request/CI effects.
 4. Compose prompts using `config.prompts.defaultRoot` and any
    runner-specific roots (e.g. `claude` → `.claude/commands`).
+
+This repository's active HealthTech pack points `config.prompts.defaultRoot` at
+`.adw/prompts`. The top-level `.pi/prompts` and `.claude/commands` directories
+are kept as neutral, byte-identical fallback command templates; they are not the
+HealthTech project pack.
+
+### Prompt-pack generator
+
+Project packs can generate their runtime prompts instead of hand-maintaining a
+fork of every neutral template:
+
+```
+.pi/prompts/*.md              # neutral source templates
+.claude/commands/*.md         # byte-identical mirror for Claude command UX
+.adw/pack.profile.json        # project identity, context header, blocks, vars
+.adw/prompts/*.md             # generated runtime pack consumed by ADW
+```
+
+Run:
+
+```bash
+cd adw_sdlc
+npm run pack:generate
+npm run pack:check
+```
+
+Template conventions deliberately avoid the runtime `$` argument syntax:
+
+- `{{var}}` — inline profile variable substitution.
+- `<!-- adw:block NAME -->default<!-- adw:endblock -->` — named neutral block,
+  replaceable by `profile.blocks.NAME`.
+- `contextHeader` in the profile — injected after YAML frontmatter, with
+  per-phase exclusions.
+
+Generation is fail-closed: undefined variables, malformed block markers, and
+leftover template markers raise an error rather than emitting partial prompts.
+`pack:check` is the CI drift guard. The optional `--llm` mode is a build-time
+metaprompt refinement pass only; generated prompts remain committed artifacts,
+and the ADW runtime never calls the metaprompt generator.
 
 ## Provider boundary
 

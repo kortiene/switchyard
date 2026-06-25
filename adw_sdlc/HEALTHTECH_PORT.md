@@ -29,7 +29,7 @@ The original was a pnpm-workspace member with a sibling Python `adw/` engine. Th
 | Branch slugs | ASCII only | **de-accented** (French issue titles slug cleanly) |
 | Phase preamble | "mx-agent ADW pipeline… Python performs all git/gh" | engine-neutral ("the ADW pipeline… the orchestrator performs all git/gh") |
 | Conditional-gate hints | mx-agent vocab (ipc, daemon, matrix…) | + HealthTech domain (crypto, encryption, auth, consent, qr, offline…) |
-| Prompt templates (`.claude/commands`, `.pi/prompts`) | Rust/Cargo + Matrix/daemon context | rewritten for HealthTech (local-first / zero-knowledge, AES-256-GCM, ARTCI, ≤500 KB, PRD/BACKLOG context) |
+| Prompt templates | Rust/Cargo + Matrix/daemon context in shared command roots | HealthTech prompts live in the project pack at `.adw/prompts` (local-first / zero-knowledge, AES-256-GCM, ARTCI, ≤500 KB, PRD/BACKLOG context); `.claude/commands` and `.pi/prompts` are neutral byte-identical fallback command templates |
 | Universalization config | no standalone project-pack seam | `.adw/config.json` now expresses the current project pack: prompt roots, branch label mapping, e2e/doc gate hints, model tiers, progress tag, and default gate commands; missing config falls back to the same defaults |
 | Provider seam | GitHub/git effects wired directly into orchestration deps | `src/providers.ts` defines provider interfaces for CLI resolution, work items, VCS, and change requests/CI, plus behavior-preserving Git/GitHub adapters; `run()` now uses providers directly, with legacy `OrchestratorDeps` seams kept only as an adapter for tests/incremental migration |
 | Provider selection | implicit GitHub/git defaults in code | `.adw/config.json` explicitly selects the built-in providers (`github` for CLI/work-items/change-requests, `git` for VCS); `createProvidersFromConfig()` is the future plugin switchpoint |
@@ -42,7 +42,7 @@ The **cross-language state contract** is preserved at `../adw/state.schema.json`
 ## Status
 
 - `npm install && npm run typecheck` → clean.
-- `npm test` → **450 tests pass** (32 files).
+- `npm test` → **462 tests pass** (34 files).
 - `npm run lint:env` → secret-withholding lint gate passes.
 
 ## Usage
@@ -63,8 +63,8 @@ Requires `gh` authenticated for the `kortiene/HealthTech` repo. Optionally set `
 so the setup phase can move the issue's card on the GitHub Project board.
 
 Project-specific policy is loaded from `.adw/config.json` when present. The committed HealthTech config is
-behavior-preserving and currently covers prompt roots, provider selection, branch prefixes, conditional-gate
-hints, model-tier routing, progress-comment tag, and default test/finalize gates. Git/GitHub effects now have a
+behavior-preserving and currently covers prompt roots (`.adw/prompts`), provider selection, branch prefixes,
+conditional-gate hints, model-tier routing, progress-comment tag, and default test/finalize gates. Git/GitHub effects now have a
 first provider boundary in `src/providers.ts`; `run()` uses providers directly while the legacy `OrchestratorDeps`
 shape is preserved as an adapter for test parity and incremental migration. Run state now records provider-neutral
 `work_item`/`change_request` metadata additively alongside the compatibility `issue_*`/`pr_*` fields. CLI/help and
@@ -85,6 +85,11 @@ status field name is configurable via `providers.workItems.statusFieldName` (def
 notes live in `docs/UNIVERSAL.md`, and `docs/examples/payments-api.config.json` shows a non-HealthTech project pack. The
 secret boundary remains hardcoded in `src/env.ts` and guarded by `npm run lint:env`; do not make runner env inheritance
 project-configurable.
+
+HealthTech prompts are now generated from neutral source templates plus
+`.adw/pack.profile.json`: run `npm run pack:generate` to refresh
+`.adw/prompts`, and `npm run pack:check` as the drift guard. The optional
+`--llm` metaprompt pass is build-time only; runtime uses committed prompt files.
 
 ### Auth — API key *or* Anthropic subscription
 

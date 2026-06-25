@@ -45,7 +45,7 @@ abbreviated.
 |---|---|---|---|
 | 1 | Section 10 checklist passes for `ts` with ≥ the `claude` runner | ✅ mocked | the table above (all boxes green for `claude`) |
 | 2 | **State equivalence** — a `ts` run's `state.json` (i) validates against the schema, (ii) is loadable+resumable by Python `adw/` and vice-versa, (iii) matches v1 fields modulo additive keys | ✅ mocked **(this PR)** | `adw/test_cross_language_state.py` + `cross-language-state.test.ts` prove (i)/(ii)/(iii) directly; a completed live `claude` run (PR #331) produced a real such `state.json` |
-| 3 | Templates byte-identical and shared (drift test green) | ✅ mocked | `phases.test.ts` *templatePath prefers .claude/commands… else .pi/prompts* (no fork); 14 shared basenames |
+| 3 | Templates resolve through the project-pack root; neutral fallback command roots stay byte-identical | ✅ mocked | `phases.test.ts` *templatePath uses .adw/prompts for the committed project pack*; `.pi/prompts` and `.claude/commands` remain byte-identical neutral fallback templates |
 | 4 | **Secret-withholding proven per shipped runner** on the observable spawned env (codex asserted after the SDK builds the child env) | ✅ mocked | secret-withholding row above; `runner-codex-spawn.test.ts` drives the real 0.139.0 SDK over a mocked `spawn` |
 | 5 | Squash-merge stays gated behind explicit confirmation in the `ts` path | ✅ mocked | `orchestrator.test.ts` *confirmMerge*; `cli.test.ts` flag plumbing |
 | 6 | Python `adw/` suite stays green (only `schema_version` delta) | ✅ | `pytest adw/` green; production delta is the additive field only |

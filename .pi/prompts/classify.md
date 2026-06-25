@@ -1,10 +1,10 @@
 ---
-description: Classify a GitHub issue into a change type for the phased ADW pipeline
-argument-hint: "<issue-number> <issue-context>"
+description: Classify a work item into a change type for the phased ADW pipeline
+argument-hint: "<work-item-id> <work-item-context>"
 ---
-Classify GitHub issue #$1 into a single change type for branch naming and commit prefixing.
+Classify work item #$1 into a single change type for branch naming and commit prefixing.
 
-Issue context (title, body, labels):
+Work item context (title, body, labels):
 
 $ARGUMENTS
 
@@ -18,5 +18,5 @@ $ARGUMENTS
   - `ci` — CI/build/workflow change.
   - `test` — test-only change.
   - `refactor` — internal restructuring with no behavior change.
-- Prefer the issue's `type:*` label when one is present; otherwise infer from the title and body.
-- Do not examine the codebase. Decide only from the context above.
+- Prefer the narrowest truthful classification.
+- If labels and body disagree, classify by the actual requested change.

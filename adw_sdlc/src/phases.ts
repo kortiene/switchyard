@@ -1,10 +1,12 @@
 /**
  * Phase catalog, conditional gates, and phased prompt composition, ported
- * from adw/_phases.py. The orchestrator drives this catalog; templates under
- * .pi/prompts/ and .claude/commands/ are shared verbatim with the Python
- * pipeline (PLAN.md D4), so the composed prompt must match adw/ byte for
- * byte — except the fenced-JSON output-contract footer, which is gated off
- * for native-schema backends (PLAN.md Section 7).
+ * from adw/_phases.py. The orchestrator drives this catalog; templates are
+ * resolved from the configured project pack (for this repo, .adw/prompts/) with
+ * optional runner-specific roots. The neutral .pi/prompts/ and .claude/commands/
+ * trees remain byte-identical fallback command templates. The composed prompt
+ * must keep the same substitution semantics as adw/ — except the fenced-JSON
+ * output-contract footer, which is gated off for native-schema backends
+ * (PLAN.md Section 7).
  *
  * Model-tier routing lives in models.ts; per-phase result schemas (the
  * to_result analogue) live in schemas.ts.

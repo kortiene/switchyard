@@ -13,6 +13,8 @@
     "test": "vitest run",
     "lint:env": "bash ../scripts/check-adw-sdlc-env.sh",
     "issue": "tsx src/cli.ts",
+    "pack:generate": "tsx tools/pack-generate.ts",
+    "pack:check": "tsx tools/pack-generate.ts --check",
     "parity:rate": "tsx tools/parity-rate.ts"
   },
   "dependencies": {

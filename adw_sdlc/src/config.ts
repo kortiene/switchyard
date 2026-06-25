@@ -224,10 +224,8 @@ export const DEFAULT_ADW_CONFIG: AdwConfig = {
   version: 1,
   project: { id: 'healthtech', name: 'HealthTech' },
   prompts: {
-    defaultRoot: '.pi/prompts',
-    runnerRoots: {
-      claude: '.claude/commands',
-    },
+    defaultRoot: '.adw/prompts',
+    runnerRoots: {},
   },
   providers: {
     cli: { type: 'github' },

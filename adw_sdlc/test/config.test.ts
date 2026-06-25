@@ -19,12 +19,12 @@ function tempJson(value: unknown): string {
 }
 
 describe('ADW config', () => {
-  it('loads the committed .adw/config.json and preserves current defaults', () => {
+  it('loads the committed .adw/config.json project pack', () => {
     const config = loadAdwConfig();
     expect(config.version).toBe(1);
     expect(config.project).toEqual({ id: 'healthtech', name: 'HealthTech' });
-    expect(config.prompts.defaultRoot).toBe('.pi/prompts');
-    expect(config.prompts.runnerRoots['claude']).toBe('.claude/commands');
+    expect(config.prompts.defaultRoot).toBe('.adw/prompts');
+    expect(config.prompts.runnerRoots).toEqual({});
     expect(config.progress.tag).toBe('[MX-ADW]');
     expect(config.providers).toEqual(DEFAULT_ADW_CONFIG.providers);
     expect(config.branching.labelPrefixes).toEqual(DEFAULT_ADW_CONFIG.branching.labelPrefixes);

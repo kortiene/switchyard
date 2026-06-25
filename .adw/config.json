@@ -5,10 +5,8 @@
     "name": "HealthTech"
   },
   "prompts": {
-    "defaultRoot": ".pi/prompts",
-    "runnerRoots": {
-      "claude": ".claude/commands"
-    }
+    "defaultRoot": ".adw/prompts",
+    "runnerRoots": {}
   },
   "providers": {
     "cli": {
