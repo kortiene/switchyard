@@ -35,10 +35,13 @@ session can pick up where we stopped.
 
 **Repository state:** all of this session's work is **merged to `main`**
 (no remote — local merge). `main` HEAD is the merge commit
-`3af37e3 merge: provider-plugin security design doc (#4)`, with the session's
-commits in history:
+`07b90f6 merge: provider extensibility — registry + declarative cli/rest providers (#4)`,
+with the session's commits in history:
 
 ```
+07b90f6 merge: provider extensibility — registry + declarative cli/rest providers (#4)
+0ac57a5 feat(adw_sdlc): provider extensibility — registry + declarative providers (§8j–§8m)
+9bbf755 docs(adw_sdlc): record the local merge to main in HANDOVER
 3af37e3 merge: provider-plugin security design doc (#4)
 9cde820 feat(adw_sdlc): loop/gated custom phases            (§8i)
 5cc4462 docs(adw_sdlc): security design pass for #4         (§11 security doc)
@@ -46,10 +49,13 @@ d5ec440 feat(adw_sdlc): preflight phase chain at run start  (§8h)
 2892c7a feat(adw_sdlc): universalize phase chain, schema overrides, custom phases, done-status
 ```
 
-The per-feature branches (`feat/custom-phase-startup-validation`,
-`feat/custom-phase-control-flow`, `docs/provider-plugin-security`) were deleted
-after merging; their content is preserved in `main`'s history above. The working
-tree is clean.
+The provider-extensibility work (#4 step 1 + step 2: §8j registry, §8k/§8l/§8m
+declarative `cli`/`rest` work-item + `rest` change-request providers) is a single
+`feat` commit (`0ac57a5`) — the four slices are intertwined across the same files,
+so they were not split. The per-feature branch (`feat/provider-extensibility`,
+and the earlier `feat/custom-phase-*`, `docs/provider-plugin-security`) were
+deleted after merging; their content is preserved in `main`'s history above. The
+working tree is clean.
 
 ## 2. Session goal
 
@@ -518,9 +524,8 @@ Because providers are built at run start (`defaultDeps` → `createProvidersFrom
 before the dry-run branch and `validatePhaseChain`), an unknown kind is caught up
 front, even on `--dry-run`. Verified: typecheck, `lint:env`, full suite (394),
 build+clean, and a CLI dry-run (byte-identical to the documented baseline — the
-committed `github`/`git` config still prints the full plan). **This slice is in
-the working tree, not committed** — committing/merging is left to the user (per
-§3.8, this session runs no `git`/`gh`).
+committed `github`/`git` config still prints the full plan). Committed and merged
+to `main` in `0ac57a5` (see §1).
 
 Next for #4: **step 2 — the declarative `rest`/`cli` driver (Option B)**. Its
 concrete design is in `docs/DESIGN-declarative-providers.md` (sub-steps 2a `cli`
@@ -576,8 +581,8 @@ the descriptor before the dry-run branch and any side effect, so a misconfigured
 `cli` provider fails on `--dry-run` too. Verified end-to-end through the real
 ESM graph (acyclic load; config → registry → mapped `WorkItemContext`;
 `authEnv: "GH_TOKEN"` rejected), plus typecheck, `lint:env`, full suite (409),
-build+clean, and the byte-identical github dry-run. **This slice is uncommitted
-in the working tree** (per §3.8, this session runs no `git`/`gh`).
+build+clean, and the byte-identical github dry-run. Committed and merged to
+`main` in `0ac57a5` (see §1).
 
 Next for #4: **2b — the declarative `rest`/HTTP provider** (per-provider host
 allowlist + the kernel-owned one-shot fetch helper) — **now implemented, see
@@ -634,8 +639,8 @@ properties, no path-resolution/build-copy concern.
 Verified: typecheck, `lint:env`, full suite (419), build+clean, byte-identical
 github dry-run, and a **live two-process loopback roundtrip** of the real
 transport (helper read the token from its scoped env and sent
-`Authorization: Bearer <token>`; status 200; body mapped). **Uncommitted in the
-working tree** (per §3.8, this session runs no `git`/`gh`).
+`Authorization: Bearer <token>`; status 200; body mapped). Committed and merged
+to `main` in `0ac57a5` (see §1).
 
 Next for #4: **2c — declarative change-requests** — **now implemented, see §8m**;
 then **step 3** the out-of-process plugin broker (Option C, still a §10 hard stop).
@@ -694,7 +699,7 @@ Verified: typecheck, `lint:env`, full suite (428), build+clean, byte-identical
 github dry-run, and a **live two-process loopback roundtrip** of the real
 transport doing a `create`-shaped **POST with a templated JSON body** —
 the server received `Authorization: Bearer <token>` (from the child's scoped env)
-and the substituted body. **Uncommitted in the working tree** (per §3.8).
+and the substituted body. Committed and merged to `main` in `0ac57a5` (see §1).
 
 Scope note: 2c is `rest`-only; a `cli` change-request provider (`glab mr …`) is a
 symmetric follow-up (rest covers the forges). Next for #4: **step 3** the
@@ -901,5 +906,5 @@ orchestrator code path still runs no `git`/`gh` itself; the commits and the loca
 merge to `main` recorded in §1 were performed only at the user's explicit request
 (there is no remote — the merge is local). **The §8j provider-registry and
 §8k/§8l/§8m declarative-provider (`cli`/`rest` work-items + `rest`
-change-requests) slices are uncommitted in the working tree** — committing/
-merging is left to the user.
+change-requests) slices are committed as `0ac57a5` and merged to `main`
+(`07b90f6`)** — see §1. The working tree is clean.
