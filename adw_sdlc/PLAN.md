@@ -1,5 +1,21 @@
 # ADW → adw_sdlc Migration Plan (TypeScript, four interchangeable runners)
 
+> **Reading note — this is the original migration plan, not a current-state doc.**
+> It records the settled D1–D6 design decisions as planned. The standalone
+> `adw_sdlc` port has since diverged from a few choices below; where the body and
+> the code disagree, the code (and the current-state docs) win:
+> - **Tooling is npm + `package-lock.json`**, not pnpm / `pnpm-workspace.yaml` /
+>   `pnpm-lock.yaml` (the move is recorded in `HEALTHTECH_PORT.md`). Read the
+>   `pnpm …` invocations below as their `npm …` equivalents.
+> - The contingency files sketched in the `src/` tree — `src/tools.ts` and
+>   `src/child/spawn-child.ts` — were **never added**; per-phase tool grants live
+>   inside the runner adapters (`src/runners/*.ts`).
+> - The provider boundary later grew a fail-closed **registry** plus declarative
+>   `cli`/`rest` providers (work items + change requests) — see `docs/UNIVERSAL.md`.
+>
+> For the current architecture and status, read `HEALTHTECH_PORT.md`,
+> `docs/UNIVERSAL.md`, and `HANDOVER.md`.
+
 Re-architect the CLI-subprocess ADW pipeline (`adw/`, Python) into a new **TypeScript/Node** package
 (`adw_sdlc/`) that drives the agentic phases through **one common `AgentRunner` interface** backed by
 **four interchangeable runners** — `claude` (Claude Agent SDK), `pi` (pi-node), `codex` (OpenAI Codex

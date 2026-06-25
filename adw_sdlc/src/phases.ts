@@ -14,7 +14,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { renderPromptFile } from './common.js';
-import { DEFAULT_ADW_CONFIG, getAdwConfig, resolveRepoPath, type AdwConfig } from './config.js';
+import { getAdwConfig, resolveRepoPath, type AdwConfig } from './config.js';
 import { AdwError } from './errors.js';
 import { resolvePhaseSchema } from './schema-registry.js';
 import type { AdwState } from './state.js';
@@ -217,16 +217,6 @@ export function templatePath(runner: string, name: string, config: AdwConfig = g
 
 // --- conditional gates -----------------------------------------------------------
 
-// Whole words in the change signal (issue text + changed paths) that mean a
-// change crosses a user-visible boundary worth end-to-end coverage. Matched on
-// word boundaries (see hintIn), so the helper file path adw/_exec.py does NOT
-// trip "exec" and "design"/"assignee" do NOT trip a signing hint. Ambiguous
-// short stems are spelled out as their meaningful forms for the same reason.
-export const CROSS_BOUNDARY_HINTS: readonly string[] = DEFAULT_ADW_CONFIG.gates.e2e.hints;
-
-// Whole words meaning the change is user-visible / API / protocol and warrants docs.
-export const DOC_HINTS: readonly string[] = DEFAULT_ADW_CONFIG.gates.documentation.hints;
-
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -234,7 +224,10 @@ function escapeRegExp(text: string): string {
 /**
  * Return the first hint that occurs as a whole word in `text`, else null.
  * Word-boundary matching (not bare substring) prevents incidental-substring
- * false positives (adw/_phases.py:151-162).
+ * false positives (adw/_phases.py:151-162): the helper path adw/_exec.py does
+ * NOT trip "exec", and "design"/"assignee" do NOT trip a signing hint — which is
+ * also why the configured hint lists (config.gates.*.hints) spell ambiguous short
+ * stems out as their meaningful forms.
  */
 function hintIn(text: string, hints: readonly string[]): string | null {
   for (const hint of hints) {

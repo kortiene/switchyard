@@ -14,7 +14,7 @@ import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
-import { DEFAULT_ADW_CONFIG, getAdwConfig } from './config.js';
+import { getAdwConfig } from './config.js';
 
 /** Result shape mirroring Python's CompletedProcess slice we use. */
 export interface Captured {
@@ -49,12 +49,6 @@ export function confirm(prompt: string): Promise<boolean> {
 }
 
 // --- issue progress comments ---------------------------------------------------
-
-/**
- * Tag stamped on every ADW-authored issue comment so any future trigger can
- * skip the tool's own comments and avoid feedback loops (adw/_exec.py:58).
- */
-export const MX_ADW_BOT_TAG = DEFAULT_ADW_CONFIG.progress.tag;
 
 /**
  * Format a run-tagged progress line for a GitHub issue comment. Built only

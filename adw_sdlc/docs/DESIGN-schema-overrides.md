@@ -1,9 +1,11 @@
 # Design proposal — per-phase schema overrides (§11 #2)
 
-**Status:** proposal, not implemented. This is the dedicated design pass the
-handover (`HANDOVER.md` §10/§11) requires before touching the structured-output
-path. It exists so the work can start from a settled shape rather than a
-judgement call mid-implementation.
+**Status:** ✅ implemented (all rollout steps — see §9). This was the dedicated
+design pass the handover (`HANDOVER.md` §10/§11) required before touching the
+structured-output path; it let the work start from a settled shape rather than a
+judgement call mid-implementation. The capabilities it designs — per-phase schema
+overrides and custom phases (incl. loop/gated) — now ship; this doc is retained as
+the design record (see §9 for the per-step rollout and `HANDOVER.md` §8e–§8i).
 
 **Author context:** follows the universalization slices already landed —
 configurable phase chain (§11 #1, `HANDOVER.md` §8b) and the terminal
@@ -26,11 +28,14 @@ distinct capabilities fall under this heading; they have very different risk:
 
 ## 2. Non-goals
 
-- **Not** loop or conditional-gated custom phases. The `resolve`/`patch` bounded
-  loops and the `e2e`/`document` gates are kernel control flow keyed to phase
-  name (`orchestrator.ts` `LOOP_PHASES`/`CONDITIONAL_PHASES` handling); a
-  config-injected new phase cannot acquire those without code. v1 supports only
-  **plain, sequential, non-loop, non-gated** new phases.
+- **Not** loop or conditional-gated custom phases *in this (v1) design*. The
+  `resolve`/`patch` bounded loops and the `e2e`/`document` gates are kernel
+  control flow keyed to phase name (`orchestrator.ts`
+  `LOOP_PHASES`/`CONDITIONAL_PHASES` handling); a config-injected new phase
+  cannot acquire those without code. v1 supports only **plain, sequential,
+  non-loop, non-gated** new phases. *(Lifted in a follow-up — loop/gated custom
+  phases were later designed in `docs/DESIGN-custom-phase-control-flow.md` and
+  shipped; see `HANDOVER.md` §8i.)*
 - **Not** changing the 9 built-in phases' parity with the Python engine.
 - **Not** provider/plugin *code* loading (that is §11 #4, an explicit hard stop).
 
