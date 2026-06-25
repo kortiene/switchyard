@@ -1,58 +1,58 @@
 {
   "project": {
-    "id": "healthtech",
-    "name": "HealthTech"
+    "id": "switchyard",
+    "name": "Switchyard"
   },
   "vars": {
-    "project_name": "HealthTech",
+    "project_name": "Switchyard",
     "pack_generation_model": "claude-sonnet-4-6"
   },
   "blocks": {},
   "contextHeader": {
     "enabled": true,
-    "title": "HealthTech project context",
+    "title": "Switchyard ADW project context",
     "exclude": ["classify"],
     "sections": [
       {
         "heading": "Repository context to read",
-        "body": "- `PRD_HealthTech.md` — product requirements, personas, epics/user stories, security spec, and NFRs.\n- `BACKLOG.md` — milestones M0–M4, issues #1–#31, dependency graph, and recommended implementation order.\n- The specific GitHub issue being worked (`kortiene/HealthTech`) and its acceptance criteria.\n- The existing source tree as it actually exists now. This project began greenfield; do not assume an app, backend, test command, or stack exists until you verify it on disk."
+        "body": "- `README.md` at the repository root, if present, for top-level project context.\n- `adw_sdlc/README.md` — package overview, commands, config surface, and documentation map.\n- `adw_sdlc/HANDOVER.md` — current architecture, operational invariants, and session-to-session state.\n- `adw_sdlc/MVP-READINESS.md` and `adw_sdlc/PARITY.md` — MVP gates, live-run evidence, and parity criteria.\n- `adw_sdlc/docs/LIVE-RUN-BATCH.md` — planned live `claude` issues and run-command templates.\n- The specific GitHub issue being worked (`kortiene/switchyard`) and its acceptance criteria.\n- The existing source tree and tests as they actually exist now; verify before assuming behavior."
       },
       {
-        "heading": "Product summary",
-        "body": "`HealthTech` is a decentralized, local-first / zero-knowledge digital health platform for Côte d'Ivoire, serving patients and health professionals. The patient carries their medical record on their smartphone and grants ephemeral, controlled access to professionals via a dynamic QR code, without depending on permanent internet connectivity. The cloud stores only opaque encrypted blobs keyed by anonymous UUIDs and must never read or decrypt medical data."
+        "heading": "Project summary",
+        "body": "`Switchyard` contains the ADW SDLC TypeScript control plane and related project-pack / Pi cockpit tooling. The control plane drives one work item through deterministic phases (`setup → classify → plan → implement → tests → resolve → e2e → review → patch → document → finalize → ci-fix → merge → report`) while runner adapters (`claude`, `codex`, `opencode`, `pi`) perform only the agentic code-editing phases. The near-term MVP goal is audited live reliability for the `claude` runner."
       },
       {
-        "heading": "Target component map",
-        "body": "- Patient app: mobile-first, Android focus on entry-level devices; local account creation, master-key generation, record encryption, QR generation, zero-knowledge cloud backup, key recovery.\n- Health-professional interface: web/PWA + mobile; QR scan, RAM-only decryption, note/prescription editing, end-of-session re-encryption + cloud sync + RAM wipe, offline queue.\n- Zero-knowledge backend: minimal blob store (`PUT/GET /blob/{uuid}`), hosted on Ivorian soil; never sees plaintext or keys.\n- Shared crypto core: AES-256-GCM authenticated encryption, master-key management, PBKDF2 key derivation/recovery.\n- Infra/compliance: sovereign hosting, secrets management, CI/CD, ARTCI homologation artifacts."
+        "heading": "Component map",
+        "body": "- `adw_sdlc/src/orchestrator.ts`, `run-phase.ts`, `phases.ts`, `state.ts` — deterministic phase control, prompt composition, structured-output handling, and persisted run state.\n- `adw_sdlc/src/runners/` and `invoker.ts` — runner adapters and the shared `AgentRunner.runPhase()` seam.\n- `adw_sdlc/src/env.ts`, `env-vars.ts`, `exec.ts` — secret-boundary env allowlist, canonical `ADW_*` control-plane env aliases, and subprocess helpers.\n- `adw_sdlc/src/providers*.ts`, `provider-descriptor.ts` — GitHub/git built-ins plus declarative `cli`/`rest` provider support.\n- `adw_sdlc/tools/` — prompt-pack generation and parity-rate measurement.\n- `.adw/config.json`, `.adw/pack.profile.json`, `.adw/prompts/` — project pack and generated runtime prompt templates.\n- `.pi/extensions/adw-cockpit/` and `adw_sdlc/docs/PI-UI-EXTENSION-BACKLOG.md` — optional Pi TUI cockpit surface."
       },
       {
-        "heading": "Security and privacy constraints",
-        "body": "- Local-first / zero-knowledge is non-negotiable: the medical record is encrypted client-side with AES-256-GCM before any network transit.\n- Never weaken cryptography; never log or persist plaintext medical data, encryption keys, or PII.\n- Access is ephemeral and patient-controlled: QR codes expire around 120 seconds; professionals decrypt in RAM only; sessions are wiped on end/inactivity.\n- Data residency: data must stay hosted on Ivorian soil to satisfy ARTCI / loi n°2013-450.\n- Degraded-network resilience: tolerate power/network cuts; support offline queueing; plaintext record stays <= 500 KB; heavy medical images are never stored on the patient device, only ephemeral URLs.\n- The master key is generated on-device and sealed in the hardware keystore; it is never exported in clear."
+        "heading": "Security and operational invariants",
+        "body": "- The orchestrator owns all git/gh operations; ADW phases must not ask the coding agent to run git or gh.\n- Runner child environments are deny-by-default: `GH_TOKEN`, `MATRIX_*`, canonical `ADW_*`, and legacy `MX_AGENT_*` control variables must not reach agents.\n- Do not spread `process.env` into runner processes; `npm run lint:env` guards this boundary.\n- Opencode integration must use the approved v2 client path and avoid factory calls that inherit parent env.\n- Treat `PHASE_PREAMBLE_SHARED` and prompt contract wording as behavior-affecting; change only with explicit care and tests.\n- State-schema fields used for cross-language compatibility must remain additive/non-breaking."
       },
       {
         "heading": "Current status and assumptions",
-        "body": "HealthTech started as a greenfield project. Verify the current state from the repository before acting. If the stack or test command is still unset, do not assume Cargo/Rust, npm, Flutter, backend language, object storage, or CI conventions. Work from the PRD, BACKLOG, and the specific issue."
+        "body": "The package is TypeScript/Node and uses npm. Canonical runtime env knobs use `ADW_*` names, with deprecated `MX_AGENT_*` compatibility aliases. The canonical local gate is `npm run verify`, which runs typecheck, env lint, prompt-pack drift check, tests, build, and removes `dist/`. A live-run issue batch (#1–#8) exists to collect MVP evidence, but do not start costly live `claude` runs unless explicitly asked."
       },
       {
         "heading": "Working rules",
-        "body": "- Identify the owning component before editing.\n- Respect BACKLOG dependency order; crypto core (#10) and zero-knowledge backend (#9) gate much downstream work; the consultation loop (#16→#19) is core demonstrable value.\n- Preserve the zero-knowledge boundary and local-first/offline-resilient design in every change.\n- Keep changes focused, idiomatic, testable, and production-minded.\n- Update relevant docs, ADRs, schemas, threat-model, or compliance artifacts when behavior changes.\n- The orchestrator owns all git/gh operations; do not run git or gh yourself inside ADW phases."
+        "body": "- Keep changes scoped to the GitHub issue and acceptance criteria.\n- Prefer small, auditable changes with focused tests over broad rewrites.\n- Update docs and prompt-pack sources when behavior or operator guidance changes.\n- If `.adw/pack.profile.json` changes, regenerate `.adw/prompts` with `npm run pack:generate` and verify with `npm run pack:check`.\n- Use `ADW_TEST_CMD=\"npm run verify\"` for live ADW runs; do not chain multiple commands directly in `ADW_TEST_CMD`."
       },
       {
         "heading": "Verification guidance",
-        "body": "Run the project's configured test gate when available (`ADW_TEST_CMD`) plus any format/lint/build checks the repo defines. If no test command is configured, state that clearly and recommend the exact command(s) to run once the stack lands; do not invent a toolchain."
+        "body": "Run `npm run verify` from `adw_sdlc/` for the full local gate. For narrow changes, run the most relevant focused test first, then the full gate before reporting. If a check cannot be run, state exactly why and what command should be run by the maintainer."
       }
     ]
   },
   "metaprompt": {
     "enabled": false,
-    "instructions": "Refine the deterministic ADW phase prompt into a HealthTech-specific runtime prompt. Preserve YAML frontmatter exactly. Preserve all runtime argument tokens exactly (`$1`, `$2`, `$ARGUMENTS`, `$@`, `${@:2}`, etc.). Preserve ADW phase boundaries, required output/artifact instructions, and orchestrator-owned git/gh rules. Improve clarity and phase-specific guidance using only the profile data; do not invent implemented features, stack choices, test commands, or compliance claims.",
+    "instructions": "Refine the deterministic ADW phase prompt into a Switchyard-specific runtime prompt. Preserve YAML frontmatter exactly. Preserve all runtime argument tokens exactly (`$1`, `$2`, `$ARGUMENTS`, `$@`, `${@:2}`, etc.). Preserve ADW phase boundaries, required output/artifact instructions, and orchestrator-owned git/gh rules. Improve clarity and phase-specific guidance using only the profile data; do not invent implemented features, runner capabilities, provider support, or live-run evidence.",
     "phaseGuidance": {
-      "plan": "Emphasize PRD/BACKLOG reading, dependency order, security/privacy constraints, implementation roadmap, test strategy, and acceptance criteria. Do not implement.",
-      "implement": "Emphasize scoped production-grade implementation, preserving zero-knowledge and local-first constraints, and verifying against the configured gate.",
-      "tests": "Emphasize deterministic non-e2e tests, security/privacy regressions, and avoiding live infrastructure/hardware unless the repo already provides a harness.",
-      "e2e_tests": "Emphasize cross-boundary flows such as QR access, session lifecycle, offline/sync, crypto boundaries, and patient/professional interactions.",
-      "review_phase": "Emphasize blocker-grade review of security/privacy, zero-knowledge boundaries, acceptance criteria, and test/documentation adequacy.",
-      "document": "Emphasize updating broader project docs, ADRs, compliance/threat-model artifacts, and developer guidance only when warranted."
+      "plan": "Emphasize reading current ADW docs and source, identifying the affected subsystem, respecting operational invariants, and producing a small implementation plan with tests.",
+      "implement": "Emphasize scoped production-grade changes, maintaining the secret boundary and state compatibility, and verifying with the configured gate.",
+      "tests": "Emphasize deterministic unit tests around orchestration seams, provider descriptors, env isolation, prompt-pack generation, and parity tooling; avoid real network or runner spend in tests.",
+      "e2e_tests": "Emphasize end-to-end control-plane flows using mocks or dry-run artifacts unless a real live-run drill is explicitly requested.",
+      "review_phase": "Emphasize blocker-grade review of secret-boundary regressions, git/gh ownership, structured-output contracts, resume/state compatibility, docs drift, and test adequacy.",
+      "document": "Emphasize updating operator docs, readiness docs, and prompt-pack guidance when behavior or run procedure changes."
     }
   }
 }

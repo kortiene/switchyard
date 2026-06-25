@@ -35,7 +35,9 @@ The rest of this doc assumes **(A)** and marks what **(B)/(C)** add.
 - [ ] ⏳ **≥ 5–10 live `claude` runs across varied `issue_class`** (feat / fix /
   docs / refactor / ci / test). One green run is an anecdote; different classes
   exercise the e2e/document gates and the resolve/patch loops. Feed each to
-  `npm run parity:rate -- agents/`.
+  `npm run parity:rate -- agents/`. A ready-to-create issue batch + run-command
+  templates for exactly this gate live in
+  [`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md).
 - [ ] 🔧/⏳ **The hard-failure bar is *measured*, not argued.** PARITY's bar is
   native ≤ fenced, but there is **no fenced sample** yet. Two ways to close it,
   both now wired:

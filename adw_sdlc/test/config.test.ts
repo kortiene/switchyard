@@ -22,7 +22,7 @@ describe('ADW config', () => {
   it('loads the committed .adw/config.json project pack', () => {
     const config = loadAdwConfig();
     expect(config.version).toBe(1);
-    expect(config.project).toEqual({ id: 'healthtech', name: 'HealthTech' });
+    expect(config.project).toEqual({ id: 'switchyard', name: 'Switchyard' });
     expect(config.prompts.defaultRoot).toBe('.adw/prompts');
     expect(config.prompts.runnerRoots).toEqual({});
     expect(config.progress.tag).toBe('[MX-ADW]');

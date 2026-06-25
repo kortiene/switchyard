@@ -2,54 +2,58 @@
 description: Resolve failing repository checks reported by the phased ADW test gate
 argument-hint: "<failing-output-and-context>"
 ---
-## HealthTech project context
+## Switchyard ADW project context
 
 <!-- Generated project context. Edit .adw/pack.profile.json and run `npm run pack:generate`; do not hand-edit this block in .adw/prompts. -->
 
 ### Repository context to read
 
-- `PRD_HealthTech.md` — product requirements, personas, epics/user stories, security spec, and NFRs.
-- `BACKLOG.md` — milestones M0–M4, issues #1–#31, dependency graph, and recommended implementation order.
-- The specific GitHub issue being worked (`kortiene/HealthTech`) and its acceptance criteria.
-- The existing source tree as it actually exists now. This project began greenfield; do not assume an app, backend, test command, or stack exists until you verify it on disk.
+- `README.md` at the repository root, if present, for top-level project context.
+- `adw_sdlc/README.md` — package overview, commands, config surface, and documentation map.
+- `adw_sdlc/HANDOVER.md` — current architecture, operational invariants, and session-to-session state.
+- `adw_sdlc/MVP-READINESS.md` and `adw_sdlc/PARITY.md` — MVP gates, live-run evidence, and parity criteria.
+- `adw_sdlc/docs/LIVE-RUN-BATCH.md` — planned live `claude` issues and run-command templates.
+- The specific GitHub issue being worked (`kortiene/switchyard`) and its acceptance criteria.
+- The existing source tree and tests as they actually exist now; verify before assuming behavior.
 
-### Product summary
+### Project summary
 
-`HealthTech` is a decentralized, local-first / zero-knowledge digital health platform for Côte d'Ivoire, serving patients and health professionals. The patient carries their medical record on their smartphone and grants ephemeral, controlled access to professionals via a dynamic QR code, without depending on permanent internet connectivity. The cloud stores only opaque encrypted blobs keyed by anonymous UUIDs and must never read or decrypt medical data.
+`Switchyard` contains the ADW SDLC TypeScript control plane and related project-pack / Pi cockpit tooling. The control plane drives one work item through deterministic phases (`setup → classify → plan → implement → tests → resolve → e2e → review → patch → document → finalize → ci-fix → merge → report`) while runner adapters (`claude`, `codex`, `opencode`, `pi`) perform only the agentic code-editing phases. The near-term MVP goal is audited live reliability for the `claude` runner.
 
-### Target component map
+### Component map
 
-- Patient app: mobile-first, Android focus on entry-level devices; local account creation, master-key generation, record encryption, QR generation, zero-knowledge cloud backup, key recovery.
-- Health-professional interface: web/PWA + mobile; QR scan, RAM-only decryption, note/prescription editing, end-of-session re-encryption + cloud sync + RAM wipe, offline queue.
-- Zero-knowledge backend: minimal blob store (`PUT/GET /blob/{uuid}`), hosted on Ivorian soil; never sees plaintext or keys.
-- Shared crypto core: AES-256-GCM authenticated encryption, master-key management, PBKDF2 key derivation/recovery.
-- Infra/compliance: sovereign hosting, secrets management, CI/CD, ARTCI homologation artifacts.
+- `adw_sdlc/src/orchestrator.ts`, `run-phase.ts`, `phases.ts`, `state.ts` — deterministic phase control, prompt composition, structured-output handling, and persisted run state.
+- `adw_sdlc/src/runners/` and `invoker.ts` — runner adapters and the shared `AgentRunner.runPhase()` seam.
+- `adw_sdlc/src/env.ts`, `env-vars.ts`, `exec.ts` — secret-boundary env allowlist, canonical `ADW_*` control-plane env aliases, and subprocess helpers.
+- `adw_sdlc/src/providers*.ts`, `provider-descriptor.ts` — GitHub/git built-ins plus declarative `cli`/`rest` provider support.
+- `adw_sdlc/tools/` — prompt-pack generation and parity-rate measurement.
+- `.adw/config.json`, `.adw/pack.profile.json`, `.adw/prompts/` — project pack and generated runtime prompt templates.
+- `.pi/extensions/adw-cockpit/` and `adw_sdlc/docs/PI-UI-EXTENSION-BACKLOG.md` — optional Pi TUI cockpit surface.
 
-### Security and privacy constraints
+### Security and operational invariants
 
-- Local-first / zero-knowledge is non-negotiable: the medical record is encrypted client-side with AES-256-GCM before any network transit.
-- Never weaken cryptography; never log or persist plaintext medical data, encryption keys, or PII.
-- Access is ephemeral and patient-controlled: QR codes expire around 120 seconds; professionals decrypt in RAM only; sessions are wiped on end/inactivity.
-- Data residency: data must stay hosted on Ivorian soil to satisfy ARTCI / loi n°2013-450.
-- Degraded-network resilience: tolerate power/network cuts; support offline queueing; plaintext record stays <= 500 KB; heavy medical images are never stored on the patient device, only ephemeral URLs.
-- The master key is generated on-device and sealed in the hardware keystore; it is never exported in clear.
+- The orchestrator owns all git/gh operations; ADW phases must not ask the coding agent to run git or gh.
+- Runner child environments are deny-by-default: `GH_TOKEN`, `MATRIX_*`, canonical `ADW_*`, and legacy `MX_AGENT_*` control variables must not reach agents.
+- Do not spread `process.env` into runner processes; `npm run lint:env` guards this boundary.
+- Opencode integration must use the approved v2 client path and avoid factory calls that inherit parent env.
+- Treat `PHASE_PREAMBLE_SHARED` and prompt contract wording as behavior-affecting; change only with explicit care and tests.
+- State-schema fields used for cross-language compatibility must remain additive/non-breaking.
 
 ### Current status and assumptions
 
-HealthTech started as a greenfield project. Verify the current state from the repository before acting. If the stack or test command is still unset, do not assume Cargo/Rust, npm, Flutter, backend language, object storage, or CI conventions. Work from the PRD, BACKLOG, and the specific issue.
+The package is TypeScript/Node and uses npm. Canonical runtime env knobs use `ADW_*` names, with deprecated `MX_AGENT_*` compatibility aliases. The canonical local gate is `npm run verify`, which runs typecheck, env lint, prompt-pack drift check, tests, build, and removes `dist/`. A live-run issue batch (#1–#8) exists to collect MVP evidence, but do not start costly live `claude` runs unless explicitly asked.
 
 ### Working rules
 
-- Identify the owning component before editing.
-- Respect BACKLOG dependency order; crypto core (#10) and zero-knowledge backend (#9) gate much downstream work; the consultation loop (#16→#19) is core demonstrable value.
-- Preserve the zero-knowledge boundary and local-first/offline-resilient design in every change.
-- Keep changes focused, idiomatic, testable, and production-minded.
-- Update relevant docs, ADRs, schemas, threat-model, or compliance artifacts when behavior changes.
-- The orchestrator owns all git/gh operations; do not run git or gh yourself inside ADW phases.
+- Keep changes scoped to the GitHub issue and acceptance criteria.
+- Prefer small, auditable changes with focused tests over broad rewrites.
+- Update docs and prompt-pack sources when behavior or operator guidance changes.
+- If `.adw/pack.profile.json` changes, regenerate `.adw/prompts` with `npm run pack:generate` and verify with `npm run pack:check`.
+- Use `ADW_TEST_CMD="npm run verify"` for live ADW runs; do not chain multiple commands directly in `ADW_TEST_CMD`.
 
 ### Verification guidance
 
-Run the project's configured test gate when available (`ADW_TEST_CMD`) plus any format/lint/build checks the repo defines. If no test command is configured, state that clearly and recommend the exact command(s) to run once the stack lands; do not invent a toolchain.
+Run `npm run verify` from `adw_sdlc/` for the full local gate. For narrow changes, run the most relevant focused test first, then the full gate before reporting. If a check cannot be run, state exactly why and what command should be run by the maintainer.
 
 The repository's test or verification gate is failing. Fix the failures.
 
