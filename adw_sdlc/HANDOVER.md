@@ -41,10 +41,13 @@ session can pick up where we stopped.
 
 **Repository state:** all of this session's work is **merged to `main`**
 (no remote — local merge). `main` HEAD is the merge commit
-`404f7e3 merge: scope #4 step 3 + spec step 2.5 (declarative primitives)`,
+`3199cad merge: declarative primitives — transforms + pagination (#4 step 2.5a/2.5b)`,
 with the session's commits in history:
 
 ```
+3199cad merge: declarative primitives — transforms + pagination (#4 step 2.5a/2.5b)
+214d3ee feat(adw_sdlc): declarative primitives — transforms + pagination (§8n)
+8d444d5 docs(adw_sdlc): record the step-3 scoping / step-2.5 spec merge in HANDOVER
 404f7e3 merge: scope #4 step 3 + spec step 2.5 (declarative primitives)
 a9d9311 docs(adw_sdlc): scope #4 step 3 (out-of-process) + spec step 2.5
 a6fb46b docs(adw_sdlc): record the merge to main in HANDOVER (#4 step 1+2)
@@ -70,13 +73,11 @@ built — `docs/DESIGN-provider-plugins-out-of-process.md`) and **step 2.5 spec'
 earlier `feat/custom-phase-*`, `docs/provider-plugin-security`) were deleted after
 merging; their content is preserved in `main`'s history above.
 
-**This session (step 2.5a/2.5b — §8n) is NOT yet committed:** the changes are in
-the working tree only. Per invariant §3.8 we run no `git`/`gh` ourselves; commit
-and merge only at the user's explicit request. Changed files: `src/provider-
-descriptor.ts`, `src/providers-rest-cli.ts`, `src/index.ts`,
-`test/provider-descriptor.test.ts`, `test/providers.test.ts`,
-`docs/UNIVERSAL.md`, `docs/DESIGN-declarative-providers-extensions.md`, and this
-`HANDOVER.md`. No new dependency; no build artifact left behind.
+The step-2.5a/2.5b primitives (§8n) are the `feat` commit `214d3ee`, merged to
+`main` in `3199cad`; the per-feature branch (`feat/declarative-primitives`) was
+deleted after merging. Both the commit and the merge were performed only at the
+user's explicit request (invariant §3.8 — the ADW code path runs no `git`/`gh`
+itself). No new dependency; no build artifact left behind.
 
 ## 2. Session goal
 
@@ -798,7 +799,8 @@ Verified: typecheck, `lint:env`, full suite (441), build+clean, byte-identical
 github dry-run, and a **live end-to-end run through the real ESM graph** (a
 GitLab-shaped descriptor: `| lower` normalized a SCREAMING status to match the
 stateMap, `nextUrl` pagination followed page 1 → 2 accumulating both jobs, and
-`default:` filled an empty `failure_reason`). Not yet committed (see §1). Next for
+`default:` filled an empty `failure_reason`). Committed as `214d3ee` and merged to
+`main` (`3199cad`) — see §1. Next for
 #4: a `cli` change-request provider (symmetric follow-up), or 2.5c token refresh
 against a concrete OAuth provider; **step 3** (out-of-process broker) stays a §10
 hard stop.
@@ -1020,5 +1022,5 @@ merge to `main` recorded in §1 were performed only at the user's explicit reque
 (there is no remote — the merge is local). **The §8j provider-registry and
 §8k/§8l/§8m declarative-provider (`cli`/`rest` work-items + `rest`
 change-requests) slices are committed as `0ac57a5` and merged to `main`
-(`07b90f6`); the §8n step-2.5a/2.5b primitives are in the working tree, not yet
-committed** — see §1.
+(`07b90f6`); the §8n step-2.5a/2.5b primitives are committed as `214d3ee` and
+merged to `main` (`3199cad`). The working tree is clean.** — see §1.
