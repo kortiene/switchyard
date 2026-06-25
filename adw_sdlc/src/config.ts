@@ -107,10 +107,21 @@ export const AdwConfigSchema = z.object({
    * whose result schema omits `resolved`.
    */
   loops: z.record(z.string(), CustomLoopSchema).default({}),
+  /**
+   * Provider selection. Each role's `type` is validated here for SHAPE only (a
+   * non-empty string); which kinds actually exist is the provider registry's
+   * job (`createProvidersFromConfig` in providers.ts), which fails closed with a
+   * loud AdwError on an unknown kind. This is the same shape/membership split
+   * the `phases` chain uses (config shape vs. kernel `AGENT_PHASES` membership)
+   * and it deliberately avoids a config.ts ⇄ providers.ts import cycle: a future
+   * in-tree provider (e.g. gitlab/glab) registers in the kernel without any
+   * change to this schema. Built-in kinds: `github` (cli/workItems/
+   * changeRequests) and `git` (vcs).
+   */
   providers: z.object({
-    cli: z.object({ type: z.literal('github') }),
+    cli: z.object({ type: z.string().min(1) }),
     workItems: z.object({
-      type: z.literal('github'),
+      type: z.string().min(1),
       /** Provider state values that count as terminal/closed for the verify gate. */
       closedStates: z.array(z.string().min(1)).default(['CLOSED']),
       /** Status applied to a work item when its phased run starts (provider-neutral name). */
@@ -127,9 +138,38 @@ export const AdwConfigSchema = z.object({
       doneStatus: z.string().min(1).optional(),
       /** Provider field name carrying the workflow status (GitHub Projects default: 'Status'). */
       statusFieldName: z.string().min(1).default('Status'),
+      /**
+       * Declarative-provider descriptor fields (for `type: "cli"` and `"rest"`).
+       * OPTIONAL and preserved here as loose shape only — the route/map grammar,
+       * the placeholder check, the host allowlist / https guard, and the
+       * one-named-credential guard are validated in provider-descriptor.ts at
+       * provider construction (run start, fail-closed), keeping descriptor
+       * semantics out of this schema the way schema-override.ts owns JSON-Schema
+       * overrides. Ignored by the `github` built-in. See
+       * docs/DESIGN-declarative-providers.md.
+       */
+      authEnv: z.string().min(1).optional(),
+      routes: z.record(z.string(), z.unknown()).optional(),
+      // rest-only descriptor fields (loose shape; validated by the rest loader).
+      baseUrl: z.string().min(1).optional(),
+      allowedHosts: z.array(z.string().min(1)).optional(),
+      authHeader: z.string().min(1).optional(),
+      authScheme: z.string().optional(),
     }),
-    vcs: z.object({ type: z.literal('git') }),
-    changeRequests: z.object({ type: z.literal('github') }),
+    vcs: z.object({ type: z.string().min(1) }),
+    changeRequests: z.object({
+      type: z.string().min(1),
+      // Declarative `rest` change-request descriptor (loose shape; the routes,
+      // body templating, host allowlist / https guard, and one-named-credential
+      // guard are validated in provider-descriptor.ts at construction). Ignored
+      // by the `github` built-in. See docs/DESIGN-declarative-providers.md.
+      baseUrl: z.string().min(1).optional(),
+      allowedHosts: z.array(z.string().min(1)).optional(),
+      authEnv: z.string().min(1).optional(),
+      authHeader: z.string().min(1).optional(),
+      authScheme: z.string().optional(),
+      routes: z.record(z.string(), z.unknown()).optional(),
+    }),
   }),
   progress: z.object({
     /** Marker used on orchestrator-authored progress comments. */

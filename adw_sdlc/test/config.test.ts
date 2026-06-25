@@ -70,7 +70,16 @@ describe('ADW config', () => {
   it('fails loudly for invalid config', () => {
     expect(() => loadAdwConfig(tempJson({ version: 2 }))).toThrow(/invalid/);
     expect(() => parseAdwConfig({ branching: { slug: { maxLength: 0 } } })).toThrow(/maxLength/);
-    expect(() => parseAdwConfig({ providers: { vcs: { type: 'svn' } } })).toThrow(/providers.vcs.type/);
+    // Provider type is shape-validated: a blank type is rejected at load.
+    expect(() => parseAdwConfig({ providers: { vcs: { type: '' } } })).toThrow(/providers.vcs.type/);
+  });
+
+  it('shape-validates provider type, deferring kind membership to the registry', () => {
+    // A non-empty unknown type PARSES — membership (which kinds the kernel can
+    // actually build) is the provider registry's job, the same shape/membership
+    // split the phase chain uses. createProvidersFromConfig fails closed later.
+    expect(parseAdwConfig({ providers: { vcs: { type: 'gitlab' } } }).providers.vcs.type).toBe('gitlab');
+    expect(parseAdwConfig({ providers: { workItems: { type: 'jira' } } }).providers.workItems.type).toBe('jira');
   });
 
   it('accepts an optional ordered phase chain, validated for shape only', () => {

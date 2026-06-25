@@ -29,6 +29,9 @@ session can pick up where we stopped.
   `adw_sdlc/docs/DESIGN-custom-phase-control-flow.md`.
 - Provider-plugin security design (new):
   `adw_sdlc/docs/DESIGN-provider-plugins.md`.
+- Declarative-providers design — #4 step 2 (2a `cli` + 2b `rest` work items +
+  2c `rest` change-requests implemented):
+  `adw_sdlc/docs/DESIGN-declarative-providers.md`.
 
 **Repository state:** all of this session's work is **merged to `main`**
 (no remote — local merge). `main` HEAD is the merge commit
@@ -476,6 +479,227 @@ gated+looped custom phase shows `… implement -> verify -> review …` in the p
 Loop/gated custom phases are no longer a non-goal. Still out of scope:
 `patch`-style findings loops and overriding `classify`.
 
+## 8j. Follow-up session — provider-kind registry (§11 #4, rollout step 1)
+
+First implementation slice of **#4 (provider plugin loading)**, following the
+agreed staged path in `docs/DESIGN-provider-plugins.md` §5. **Step 1: open the
+factory switch internally** — the design's explicitly safe, no-new-trust-surface
+first step. Pure kernel work; no new dependency; **no code loading** (the §10
+hard stop / Options A/D are untouched). Behavior-preserving for the `github`/
+`git` built-ins.
+
+- `adw_sdlc/src/config.ts` — provider `type` fields (cli / workItems / vcs /
+  changeRequests) widened from `z.literal('github'|'git')` to `z.string().min(1)`
+  (**shape** only). A doc comment records that membership is the provider
+  registry's job — the same shape/membership split the `phases` chain uses, and
+  it keeps `config.ts` ⇄ `providers.ts` acyclic. Defaults unchanged (github/git).
+- `adw_sdlc/src/providers.ts` — replaced the closed if/else in
+  `createProvidersFromConfig` with a per-role registry (`CLI_PROVIDERS`,
+  `WORK_ITEM_PROVIDERS`, `VCS_PROVIDERS`, `CHANGE_REQUEST_PROVIDERS`) + a generic
+  `resolveProviderFactory` that **fails closed** with a loud `AdwError`
+  (`unsupported <role> provider type "<x>" (supported: …)`). Removed
+  `neverProvider` (plain `Error`). Added/exported `supportedProviderTypes()`
+  (read-only introspection of registered kinds per role). Adding an in-tree
+  provider later is now a one-line map entry + factory — no config-schema change.
+- `adw_sdlc/src/index.ts` — exports `supportedProviderTypes`.
+- `adw_sdlc/docs/UNIVERSAL.md` — new "Provider registry (open switch, fail
+  closed)" subsection under the provider boundary.
+- `adw_sdlc/docs/DESIGN-provider-plugins.md` — header status → "staged rollout
+  underway"; §5 step 1 marked DONE (the in-tree GitLab/Gitea *adapters* it
+  mentioned are deferred to step 2's declarative driver / their own slice; the
+  seam now exists).
+- Tests: `test/providers.test.ts` (+2 — `supportedProviderTypes` snapshot;
+  unknown kind fails closed naming role + supported types) and
+  `test/config.test.ts` (+1 — provider `type` shape-validates, a non-empty
+  unknown kind parses; the prior `svn` parse-rejection became a blank-type shape
+  guard). 391 → **394**.
+
+Because providers are built at run start (`defaultDeps` → `createProvidersFromConfig`,
+before the dry-run branch and `validatePhaseChain`), an unknown kind is caught up
+front, even on `--dry-run`. Verified: typecheck, `lint:env`, full suite (394),
+build+clean, and a CLI dry-run (byte-identical to the documented baseline — the
+committed `github`/`git` config still prints the full plan). **This slice is in
+the working tree, not committed** — committing/merging is left to the user (per
+§3.8, this session runs no `git`/`gh`).
+
+Next for #4: **step 2 — the declarative `rest`/`cli` driver (Option B)**. Its
+concrete design is in `docs/DESIGN-declarative-providers.md` (sub-steps 2a `cli`
+→ 2b `rest` → 2c change-requests); **2a is now implemented — see §8k**.
+
+## 8k. Follow-up session — declarative `cli` work-item provider (§11 #4, step 2a)
+
+First implementation slice of **step 2** (the declarative driver, Option B),
+per `docs/DESIGN-declarative-providers.md` §12 sub-step 2a. A project can back
+its work items with a non-GitHub forge by *describing* the provider — command
+templates + field mappings — instead of shipping code. **No new dependency, no
+code loading**; the built-in `github`/`git` paths and the dry-run baseline are
+byte-for-byte unchanged.
+
+- `adw_sdlc/src/provider-descriptor.ts` (new) — the lone interpreter of
+  descriptor *data*: a strict Zod descriptor schema, a **dependency-free** path
+  mini-language (`parsePath`/`evalScalar`/`evalArray` over `$.a.b`, `$.a[0]`,
+  `$.a[*]`, `$.a[*].name`), placeholder validation, and the credential guard
+  (`authEnv` rejected if `GH_TOKEN`/`GH_BIN`, deny-prefixed, or a model
+  credential — built from `ENV_DENY_PREFIXES` + `RUNNER_ENV_ALLOW`). Imports
+  only zod/errors/env + the `WorkItemContext` type — no config/providers edge.
+- `adw_sdlc/src/providers-rest-cli.ts` (new) — `createCliWorkItemProvider(descriptor,
+  captureFn?)`: substitutes `{id}`/`{repo}`/… into the route argv, runs it via
+  `capture()` with a **scoped one-credential env** from `safeSubprocessEnv({
+  allowGhToken: false, extraAllow: [authEnv] })`, and maps JSON →
+  `WorkItemContext`. `fetch`/`state` required (`state` ⇒ `UNKNOWN` on
+  failure); `postProgress`/`assignSelf`/`setStatus` optional no-op routes. The
+  back-edge to `providers.ts` is type-only (erased) → graph stays acyclic.
+- `adw_sdlc/src/exec.ts` — `capture(cmd, { env })` optional param (spawnSync
+  `env` replace semantics). Only the declarative driver passes it; gh/git
+  callers inherit as before. No parent-env spread (lint:env stays green).
+- `adw_sdlc/src/providers.ts` — registered `cli` in `WORK_ITEM_PROVIDERS`; the
+  work-item factory type now receives the resolved `config` (github ignores it,
+  cli reads `providers.workItems` through `parseCliWorkItemDescriptor`).
+- `adw_sdlc/src/config.ts` — optional loose `authEnv` / `routes` on
+  `providers.workItems` (preserved as shape; semantics validated in
+  provider-descriptor.ts at construction). Defaults unchanged.
+- `adw_sdlc/src/index.ts` — exports `createCliWorkItemProvider`,
+  `parseCliWorkItemDescriptor`, `parsePath`, `evalScalar`, `evalArray`, and the
+  `CliWorkItemDescriptor`/`PathSegment` types.
+- `adw_sdlc/docs/UNIVERSAL.md` — new "Declarative `cli` work items" subsection.
+- Tests: `test/provider-descriptor.test.ts` (new, +10 — path grammar, evaluator,
+  and the descriptor guards: missing/extra fields, scalar/array mismatch,
+  unknown placeholder, reserved `authEnv`) and `test/providers.test.ts` (+5 —
+  cli build via `createProvidersFromConfig`, fetch mapping with the scoped env
+  asserting `GITLAB_TOKEN` in / `GH_TOKEN` withheld, `UNKNOWN`/null fallbacks,
+  write-route no-op, and fail-closed-at-construction). The §8j
+  `supportedProviderTypes` snapshot + fail-closed message were updated to
+  include `cli`. 394 → **409**.
+
+Fail-closed at run start: `defaultDeps` → `createProvidersFromConfig` validates
+the descriptor before the dry-run branch and any side effect, so a misconfigured
+`cli` provider fails on `--dry-run` too. Verified end-to-end through the real
+ESM graph (acyclic load; config → registry → mapped `WorkItemContext`;
+`authEnv: "GH_TOKEN"` rejected), plus typecheck, `lint:env`, full suite (409),
+build+clean, and the byte-identical github dry-run. **This slice is uncommitted
+in the working tree** (per §3.8, this session runs no `git`/`gh`).
+
+Next for #4: **2b — the declarative `rest`/HTTP provider** (per-provider host
+allowlist + the kernel-owned one-shot fetch helper) — **now implemented, see
+§8l**; then **2c —** declarative change-requests (the merge-authorized path).
+Step 3 (out-of-process plugin, Option C) remains a §10 hard stop.
+
+## 8l. Follow-up session — declarative `rest`/HTTP work-item provider (§11 #4, step 2b)
+
+Second implementation slice of step 2: the declarative driver over HTTP, for
+forges without a CLI. Read routes (`fetch`/`state`) only; **no new dependency,
+no code loading, no interface change**; built-ins and the dry-run baseline
+unchanged.
+
+- `adw_sdlc/src/provider-descriptor.ts` — added `parseRestWorkItemDescriptor`
+  (+ `RestWorkItemDescriptor`): a strict Zod descriptor, reusing the shared
+  `fetch`/`state` map schemas + compile helpers factored out of the cli path.
+  New guards: `assertAllowedHost(url, allowedHosts)` (https + exact host[:port]
+  allowlist), `assertRestPath` (plain `/path`, no scheme/authority, only
+  `{id}`/`{repo}`), bare-host validation, and the shared `assertSafeAuthEnv`
+  (now required for `rest`). `authHeader` (default `Authorization`) + `authScheme`
+  (default `Bearer`, `""` ⇒ raw token) cover forge auth variants.
+- `adw_sdlc/src/providers-rest-cli.ts` — `createRestWorkItemProvider(descriptor,
+  transport?)`: resolves `baseUrl + path` with **percent-encoded** placeholders
+  (so `{repo}`/`{id}` cannot alter the host), **re-asserts** host+https per call
+  (defense in depth), maps JSON → `WorkItemContext`, `UNKNOWN`/null on
+  non-2xx/error/garbage. Default `restTransportViaNode` spawns a **kernel-owned
+  inline `node -e` one-shot fetch** (`REST_FETCH_SCRIPT`) via `spawnSync` with a
+  scoped one-credential env + the request on **stdin**; the token is read by
+  **name inside the child** (never argv). `RestRequest`/`RestResponse`/
+  `RestTransport` are exported (transport is an injectable test seam). Write
+  methods no-op in 2b (rest body templating deferred to 2c).
+- `adw_sdlc/src/providers.ts` — registered `rest` in `WORK_ITEM_PROVIDERS`.
+- `adw_sdlc/src/config.ts` — added loose `baseUrl`/`allowedHosts`/`authHeader`/
+  `authScheme` to `providers.workItems` (validated by the rest loader).
+- `adw_sdlc/src/index.ts` — exports the rest provider, transport, descriptor
+  parser, `assertAllowedHost`, and the new types.
+- `adw_sdlc/docs/UNIVERSAL.md` — new "Declarative `rest` (HTTP) work items"
+  subsection. `docs/DESIGN-declarative-providers.md` — status + the two
+  implementation refinements (configurable `authHeader`; inline helper vs. a
+  shipped `.mjs`).
+- Tests: `test/provider-descriptor.test.ts` (+6 — rest compile/defaults,
+  authHeader override, https/host rejection, path rejection, missing/reserved/
+  malformed, plus `assertAllowedHost`) and `test/providers.test.ts` (+4 — rest
+  driver url-encoding + scoped env (GH_TOKEN withheld), non-2xx/error/garbage
+  fallbacks, write no-ops, build-via-config + off-allowlist fail-closed). The
+  §8j/§8k snapshots were updated to include `rest`. 409 → **419**.
+
+Two refinements vs. the design draft (both documented): the auth **header** is
+configurable (not just the scheme), needed for GitLab PAT (`PRIVATE-TOKEN`) vs.
+GitHub/Gitea (`token`) vs. Bearer; and the fetch helper is an **inline `node -e`
+script** (kernel constant) rather than a shipped `.mjs` asset — same security
+properties, no path-resolution/build-copy concern.
+
+Verified: typecheck, `lint:env`, full suite (419), build+clean, byte-identical
+github dry-run, and a **live two-process loopback roundtrip** of the real
+transport (helper read the token from its scoped env and sent
+`Authorization: Bearer <token>`; status 200; body mapped). **Uncommitted in the
+working tree** (per §3.8, this session runs no `git`/`gh`).
+
+Next for #4: **2c — declarative change-requests** — **now implemented, see §8m**;
+then **step 3** the out-of-process plugin broker (Option C, still a §10 hard stop).
+
+## 8m. Follow-up session — declarative `rest` change-request provider (§11 #4, step 2c)
+
+The merge-authorized declarative path, completing step 2 for both provider roles
+over `rest`. A non-GitHub forge (GitLab/Gitea MRs, …) can now back the change-
+request lifecycle as validated data. **No new dependency, no code loading, no
+interface change**; the orchestrator keeps the gating and all git. Built-ins and
+the dry-run baseline unchanged.
+
+- `adw_sdlc/src/provider-descriptor.ts` — factored a shared rest **base**
+  (`restBaseFields`/`RestBase`/`resolveRestBase`) out of the 2b work-item path;
+  parameterized `assertRestPath` by allowed placeholders; added
+  **request-body placeholder validation** (`assertBodyPlaceholders` over a JSON
+  template's string leaves). New `parseRestChangeRequestDescriptor` +
+  `RestChangeRequestDescriptor`: `findForBranch`/`create`/`squashMerge` required,
+  `pipelineStatus` optional with a forge-status→`CiState` `stateMap`. Per-route
+  placeholder sets (create gets `{branch,base,title,body,repo}`; merge/pipeline
+  get `{id,repo}` — `{id}` is intentionally NOT bound at create time).
+- `adw_sdlc/src/providers-rest-cli.ts` — `createRestChangeRequestProvider`
+  (+ `substituteBody` deep JSON templating, a shared `makeRestRequester`
+  reused by both rest roles). `create` substitutes/sends the JSON body and maps
+  `number`/`url`→`{id,number,url}`; `squashMerge` issues the templated write and
+  reports ok/failure; `pipelineStatus` maps via `stateMap` (absent route ⇒
+  `none`, fetch failure ⇒ `unknown`, `failingJobs: []`); `findForBranch` →
+  url|null. `RestRequest` gained an optional JSON `body`; the inline `node -e`
+  helper now sends it with `content-type: application/json`.
+- `adw_sdlc/src/providers.ts` — registered `rest` in `CHANGE_REQUEST_PROVIDERS`
+  (factory now receives the resolved `config`, like work items).
+- `adw_sdlc/src/config.ts` — loose `baseUrl`/`allowedHosts`/`authEnv`/
+  `authHeader`/`authScheme`/`routes` on `providers.changeRequests`.
+- `adw_sdlc/src/index.ts` — exports the CR provider/parser + `RestBase`/
+  `RestChangeRequestDescriptor`.
+- `adw_sdlc/docs/UNIVERSAL.md` — new "Declarative `rest` change requests"
+  subsection. `docs/DESIGN-declarative-providers.md` — status + rollout 2c done.
+- Tests: `test/provider-descriptor.test.ts` (+4 — CR compile/defaults, optional
+  pipelineStatus, body/path placeholder rejection, https/host/credential/
+  required-route guards) and `test/providers.test.ts` (+5 — create body
+  substitution + number/url/id mapping + scoped env (GH_TOKEN withheld),
+  findForBranch url|null, squashMerge templated PUT ok/failure, pipelineStatus
+  stateMap + absent⇒none, build-via-config + off-allowlist fail-closed). The
+  §8j/§8k/§8l snapshot updated to include CR `rest`. 419 → **428**.
+
+**`squashMerge` security review (the merge-authorized op):** it is bound by the
+same host allowlist + https + scoped one-credential env as every rest route; the
+provider never receives `GH_TOKEN` or raw git/gh. The worst a hostile descriptor
+can do is one templated request to its own allowlisted forge host with the user's
+own scoped forge token — the trust the user already extends by configuring the
+provider (the same posture as `gh` + `GH_TOKEN` for the github built-in). The
+orchestrator still calls `squashMerge` only after the review/CI gates pass, and
+all git (branch/commit/push) stays the built-in `git` VcsProvider.
+
+Verified: typecheck, `lint:env`, full suite (428), build+clean, byte-identical
+github dry-run, and a **live two-process loopback roundtrip** of the real
+transport doing a `create`-shaped **POST with a templated JSON body** —
+the server received `Authorization: Bearer <token>` (from the child's scoped env)
+and the substituted body. **Uncommitted in the working tree** (per §3.8).
+
+Scope note: 2c is `rest`-only; a `cli` change-request provider (`glab mr …`) is a
+symmetric follow-up (rest covers the forges). Next for #4: **step 3** the
+out-of-process plugin broker (Option C) — still a §10 hard stop for its own slice.
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -602,10 +826,23 @@ Ordered by ratio of value to risk:
    `orchestrator.ts`). Unset by default, so GitHub (which auto-closes via
    "closes #N") is unchanged; non-GitHub providers set `doneStatus` and add
    it to `closedStates` for the verify gate. See §8c.
-4. **Provider plugin loading (security-reviewed)**. Once #1–#3 land,
-   design the plugin-loading boundary so projects can register custom
-   `WorkItemProvider`/`ChangeRequestProvider` implementations without
-   forking the kernel.
+4. **Provider plugin loading (security-reviewed)** — 🚧 IN PROGRESS (staged).
+   Design done (`docs/DESIGN-provider-plugins.md`; step-2 detail in
+   `docs/DESIGN-declarative-providers.md`). **Step 1 (open the factory switch
+   internally) ✅ DONE (§8j)**: a fail-closed per-role provider registry with a
+   config shape/registry-membership split. **Step 2 (declarative driver) IN
+   PROGRESS — sub-step 2a (`cli` work-item provider) ✅ DONE (§8k)**: descriptor
+   data + a dependency-free response-mapping mini-language + a scoped
+   one-credential env. **Sub-steps 2b (`rest` work items, §8l) and 2c (`rest`
+   change-requests, §8m) ✅ DONE**: host-allowlisted + https-only HTTP via a
+   kernel-owned inline fetch helper, percent-encoded path placeholders, templated
+   JSON request bodies, configurable `authHeader`/`authScheme`, and the
+   `squashMerge` merge-authority review. Step 2 is complete for work items and
+   change requests; all of 2a–2c add no new dependency and no code loading.
+   Remaining: an optional `cli` change-request provider (symmetric follow-up),
+   then **step 3** the out-of-process plugin broker (Option C) — still a §10 hard
+   stop for its own slice. In-process `import` of config-supplied code (Options
+   A/D) stays a rejected non-goal.
 5. **Universal README at package root** — ✅ DONE (this session).
    `adw_sdlc/README.md` is now the neutral entry point: pipeline overview,
    kernel/project-pack split, quick start + key flags, the config-surface
@@ -614,11 +851,12 @@ Ordered by ratio of value to risk:
    `docs/UNIVERSAL.md`, `HEALTHTECH_PORT.md`, `PLAN.md`, `PARITY.md`,
    `MEMORY_STACK.md`, and `HANDOVER.md`. Pure docs; no code/test changes.
 
-**Status:** #1, #2, #3, #5 are all done. The only original roadmap item left
-is **#4 (provider plugin loading)** — still a §10 hard stop needing its own
-security/sandboxing design pass, not an autonomous continuation slice. New
-candidate slices identified while landing #2 (none on the original list, all
-optional):
+**Status:** #1, #2, #3, #5 are done. **#4 (provider plugin loading) is now in
+progress** — its security design landed earlier (`5cc4462`) and **step 1 of the
+staged rollout (the fail-closed provider registry) shipped this session (§8j)**.
+Steps 2–3 (declarative `rest`/`cli` driver, then the out-of-process plugin
+broker) remain; step 3 is still a §10 hard stop for its own slice. New candidate
+slices identified while landing #2 (none on the original list, all optional):
 
 - **Loop/gated custom phases** — ✅ DONE (this session, §8i). A registered custom
   phase may opt into a conditional gate (`gates.custom.<phase>`) and/or a
@@ -650,12 +888,18 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **391 passing across 31 files**
+Test count baseline after this session: **428 passing across 32 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
-for custom-phase startup validation, +13 for loop/gated custom phases). The
-session left no build artifact, no temporary files, and no untracked binary
-churn. The ADW orchestrator code path still runs no `git`/`gh` itself; the
-commits and the local merge to `main` recorded in §1 were performed only at the
-user's explicit request (there is no remote — the merge is local).
+for custom-phase startup validation, +13 for loop/gated custom phases, +3 for
+the provider-kind registry — §8j, +15 for the declarative `cli` work-item
+provider — §8k, +10 for the declarative `rest`/HTTP work-item provider — §8l,
++9 for the declarative `rest` change-request provider — §8m). The session left no
+build artifact, no temporary files, and no untracked binary churn. The ADW
+orchestrator code path still runs no `git`/`gh` itself; the commits and the local
+merge to `main` recorded in §1 were performed only at the user's explicit request
+(there is no remote — the merge is local). **The §8j provider-registry and
+§8k/§8l/§8m declarative-provider (`cli`/`rest` work-items + `rest`
+change-requests) slices are uncommitted in the working tree** — committing/
+merging is left to the user.

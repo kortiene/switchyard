@@ -130,6 +130,7 @@ export {
   createGitVcsProvider,
   createProvidersFromConfig,
   providerBackedDeps,
+  supportedProviderTypes,
   type AdwProviders,
   type ChangeRequest,
   type ChangeRequestProvider,
@@ -148,6 +149,30 @@ export {
   type VcsProvider,
   type WorkItemProvider,
 } from './providers.js';
+export {
+  assertAllowedHost,
+  evalArray,
+  evalScalar,
+  parseCliWorkItemDescriptor,
+  parsePath,
+  parseRestChangeRequestDescriptor,
+  parseRestWorkItemDescriptor,
+  type CliWorkItemDescriptor,
+  type FetchFieldMap,
+  type PathSegment,
+  type RestBase,
+  type RestChangeRequestDescriptor,
+  type RestWorkItemDescriptor,
+} from './provider-descriptor.js';
+export {
+  createCliWorkItemProvider,
+  createRestChangeRequestProvider,
+  createRestWorkItemProvider,
+  restTransportViaNode,
+  type RestRequest,
+  type RestResponse,
+  type RestTransport,
+} from './providers-rest-cli.js';
 export { NUDGE, runAgentPhase, type AgentPhaseOutcome, type RunAgentPhaseOptions } from './run-phase.js';
 export {
   structuredCall,
