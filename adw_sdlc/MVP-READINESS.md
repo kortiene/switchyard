@@ -43,7 +43,7 @@ The rest of this doc assumes **(A)** and marks what **(B)/(C)** add.
     — evaluable from native runs alone, so the bar stops reading INSUFFICIENT the
     moment a few claude runs exist. Pick `<PCT>` as the MVP threshold.
   - **Comparative gate (literal bar):** harvest a fenced baseline from claude with
-    `MX_AGENT_FORCE_FENCED=1` (routes the native runner through the fenced path),
+    `ADW_PARITY_FORCE_FENCED_JSON=1` (routes the native runner through the fenced path),
     then the comparative verdict becomes computable without waiting on `pi`.
 - [ ] ⏳ **Failure modes observed live, not just mocked.** Induce and confirm each
   once: a real nudge-retry that recovers, a `--timeout`-tripped fast-fail, a tiny
@@ -70,7 +70,7 @@ The rest of this doc assumes **(A)** and marks what **(B)/(C)** add.
 
 ## 3. Gates that (C) — cutover — adds
 
-- [ ] ❌ **`MX_AGENT_ENGINE` py↔ts coexistence tested in the *integrated* repo.**
+- [ ] ❌ **`ADW_ENGINE` py↔ts coexistence tested in the *integrated* repo.**
   The Python sibling is not bundled here, so **(C) cannot be validated from this
   standalone port** — it needs the combined environment.
 - [ ] ❌ Rollback plan: keep py ≥ 1 release, with a documented revert path.
@@ -94,7 +94,7 @@ GitLab). **Decide scope:**
   invocation from run artifacts and reports the per-path hard-failure rate;
   refuses to declare the bar met on a thin sample. Comparative bar by default;
   `--max-native-rate PCT` for the absolute gate.
-- `MX_AGENT_FORCE_FENCED=1` — routes a native-schema runner through the fenced
+- `ADW_PARITY_FORCE_FENCED_JSON=1` — routes a native-schema runner through the fenced
   path so a fenced baseline can be harvested from `claude` (no `pi` needed).
   Default off ⇒ behavior unchanged.
 
@@ -111,7 +111,7 @@ GitLab). **Decide scope:**
 
 1. Declare MVP = (A); demote (B)/(C) in the docs.
 2. Set the MVP threshold and make the bar computable (`--max-native-rate`, and/or
-   a `MX_AGENT_FORCE_FENCED` baseline).
+   an `ADW_PARITY_FORCE_FENCED_JSON` baseline).
 3. Run ~5–10 varied `claude` issues → `parity:rate` clears the threshold.
 4. Induce + observe the four failure modes live.
 5. Confirm the cost envelope + secret boundary live once.

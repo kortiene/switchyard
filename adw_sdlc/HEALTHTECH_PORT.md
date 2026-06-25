@@ -23,8 +23,8 @@ The original was a pnpm-workspace member with a sibling Python `adw/` engine. Th
 | Area | Upstream (mx-agent) | HealthTech port |
 | --- | --- | --- |
 | Default engine | `--engine py` (delegates to `python3 adw/issue.py`) | **`--engine ts`** (the Python sibling is not bundled; `py` stays selectable but fails loudly) |
-| Test gate (`DEFAULT_TEST_CMD`) | `cargo test --all` | **empty** — skipped until configured (set `MX_AGENT_TEST_CMD`) |
-| Pre-merge gates (`DEFAULT_FINALIZE_GATES`) | hardcoded `cargo fmt/clippy/build` | **empty/configurable** via `MX_AGENT_FINALIZE_GATES` (newline-separated); empty repo can merge |
+| Test gate (`DEFAULT_TEST_CMD`) | `cargo test --all` | **empty** — skipped until configured (set `ADW_TEST_CMD`) |
+| Pre-merge gates (`DEFAULT_FINALIZE_GATES`) | hardcoded `cargo fmt/clippy/build` | **empty/configurable** via `ADW_FINALIZE_GATES` (newline-separated); empty repo can merge |
 | Branch prefixes (`TYPE_PREFIX`) | `type:bug`/`type:docs`/… | also maps HealthTech's plain labels (`bug`, `docs`, `tech-debt`, `infra`, …), case-insensitive |
 | Branch slugs | ASCII only | **de-accented** (French issue titles slug cleanly) |
 | Phase preamble | "mx-agent ADW pipeline… Python performs all git/gh" | engine-neutral ("the ADW pipeline… the orchestrator performs all git/gh") |
@@ -42,7 +42,7 @@ The **cross-language state contract** is preserved at `../adw/state.schema.json`
 ## Status
 
 - `npm install && npm run typecheck` → clean.
-- `npm test` → **462 tests pass** (34 files).
+- `npm test` → **466 tests pass** (35 files).
 - `npm run lint:env` → secret-withholding lint gate passes.
 
 ## Usage
@@ -55,15 +55,16 @@ npm install
 npx tsx src/cli.ts <N> --dry-run
 
 # Run the full pipeline on issue #N with the claude runner:
-MX_AGENT_TEST_CMD="<your test command>" \
+ADW_TEST_CMD="<your test command>" \
   npx tsx src/cli.ts <N> --runner claude --yes
 ```
 
 Requires `gh` authenticated for the `kortiene/HealthTech` repo. Optionally set `PROJECT_NUMBER=2`
 so the setup phase can move the issue's card on the GitHub Project board.
 
-Project-specific policy is loaded from `.adw/config.json` when present. The committed HealthTech config is
-behavior-preserving and currently covers prompt roots (`.adw/prompts`), provider selection, branch prefixes,
+Project-specific policy is loaded from `.adw/config.json` when present. Runtime env knobs use the canonical
+`ADW_*` namespace; inherited `MX_AGENT_*` names are still accepted as deprecated compatibility aliases.
+The committed HealthTech config is behavior-preserving and currently covers prompt roots (`.adw/prompts`), provider selection, branch prefixes,
 conditional-gate hints, model-tier routing, progress-comment tag, and default test/finalize gates. Git/GitHub effects now have a
 first provider boundary in `src/providers.ts`; `run()` uses providers directly while the legacy `OrchestratorDeps`
 shape is preserved as an adapter for test parity and incremental migration. Run state now records provider-neutral
@@ -100,7 +101,7 @@ The `claude` runner works with either:
 - **Claude Pro/Max subscription:** run `claude login` once (credentials in `~/.claude`), or
   `export CLAUDE_CODE_OAUTH_TOKEN=…`. **No API key needed.** When `ANTHROPIC_API_KEY` is unset, the
   pipeline auto-routes `classify` through the runner (the Claude Code executable honors the
-  subscription) instead of the API SDK — no flag required. `MX_AGENT_CLASSIFY_ON_RUNNER=1` forces
+  subscription) instead of the API SDK — no flag required. `ADW_CLASSIFY_ON_RUNNER=1` forces
   this routing even when a key is present.
 
 The subscription token / on-disk login reach the runner child through the env allowlist
@@ -110,7 +111,7 @@ The subscription token / on-disk login reach the runner child through the env al
 
 Backlog #1 (stack, see `docs/adr/`) and #2 (scaffold) are done. The pipeline test gate is:
 
-- **`MX_AGENT_TEST_CMD="just test"`** — a root `justfile` target aggregating `cargo test --workspace`
+- **`ADW_TEST_CMD="just test"`** — a root `justfile` target aggregating `cargo test --workspace`
   + the web `vitest` + the Flutter `flutter test`. Run from the repo root, e.g. `just issue <N> …`.
-- **`MX_AGENT_FINALIZE_GATES`** (newline-separated) for extra pre-merge gates, e.g.
+- **`ADW_FINALIZE_GATES`** (newline-separated) for extra pre-merge gates, e.g.
   `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo deny check`.

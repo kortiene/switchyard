@@ -1,8 +1,8 @@
 /**
  * Engine/runner selection wiring (PLAN.md roadmap step 10, D4): the CLI must
- * resolve MX_AGENT_ENGINE / --engine (default ts in this standalone port),
+ * resolve ADW_ENGINE / --engine (default ts in this standalone port),
  * delegate py runs to adw/issue.py verbatim, and on the ts engine validate
- * MX_AGENT_RUNNER / --runner over the four-runner registry and bind the
+ * ADW_RUNNER / --runner over the four-runner registry and bind the
  * loaded adapter into orchestrator.run. Unknown engine/runner values throw,
  * mirroring adw/_orchestrator.py:557-559.
  */
@@ -83,7 +83,7 @@ describe('splitPassthru / extractEngineFlag', () => {
     expect(extractEngineFlag(['5'])).toEqual({ rest: ['5'] });
   });
 
-  it('rejects a dangling or empty --engine (must not mask MX_AGENT_ENGINE)', () => {
+  it('rejects a dangling or empty --engine (must not mask ADW_ENGINE)', () => {
     expect(() => extractEngineFlag(['5', '--engine'])).toThrow(/--engine requires a value/);
     expect(() => extractEngineFlag(['5', '--engine='])).toThrow(/--engine requires a value/);
     expect(() => extractEngineFlag(['5', '--engine', ''])).toThrow(/--engine requires a value/);
@@ -175,12 +175,12 @@ describe('parseCliArgs', () => {
   });
 
   it('defaults --test-cmd and --repo from the environment like adw/issue.py', () => {
-    const parsed = parseCliArgs(['5'], { MX_AGENT_TEST_CMD: 'cargo test -p y', REPO: 'a/b' });
+    const parsed = parseCliArgs(['5'], { ADW_TEST_CMD: 'cargo test -p y', REPO: 'a/b' });
     expect(parsed.options.testCmd).toBe('cargo test -p y');
     expect(parsed.options.repo).toBe('a/b');
     // An explicit flag still wins over the env default.
     const explicit = parseCliArgs(['5', '--test-cmd', 'x', '--repo', 'c/d'], {
-      MX_AGENT_TEST_CMD: 'cargo test -p y',
+      ADW_TEST_CMD: 'cargo test -p y',
       REPO: 'a/b',
     });
     expect(explicit.options.testCmd).toBe('x');
@@ -204,7 +204,7 @@ describe('parseCliArgs', () => {
     expect(parseCliArgs(['5', '--max-resolve', '-1']).options.maxResolve).toBe(-1);
   });
 
-  it('rejects an explicit empty --runner (must not mask MX_AGENT_RUNNER)', () => {
+  it('rejects an explicit empty --runner (must not mask ADW_RUNNER)', () => {
     expect(() => parseCliArgs(['5', '--runner='])).toThrow(/--runner requires a non-empty value/);
     expect(() => parseCliArgs(['5', '--runner', ''])).toThrow(/--runner requires a non-empty value/);
   });
@@ -302,22 +302,22 @@ describe('main — engine dispatch', () => {
     expect(options).toEqual({ yes: true, timeoutMs: 30_000 });
   });
 
-  it('honors MX_AGENT_ENGINE and MX_AGENT_RUNNER from the environment', async () => {
-    const deps = cliDeps({ env: { MX_AGENT_ENGINE: 'ts', MX_AGENT_RUNNER: 'codex' } });
+  it('honors ADW_ENGINE and ADW_RUNNER from the environment', async () => {
+    const deps = cliDeps({ env: { ADW_ENGINE: 'ts', ADW_RUNNER: 'codex' } });
     await main(['5', '--yes'], deps);
     expect(deps.loadRunner).toHaveBeenCalledWith('codex');
     expect(deps.runPyEngine).not.toHaveBeenCalled();
   });
 
   it('lets flags win over the environment for both selectors', async () => {
-    const deps = cliDeps({ env: { MX_AGENT_ENGINE: 'py', MX_AGENT_RUNNER: 'codex' } });
+    const deps = cliDeps({ env: { ADW_ENGINE: 'py', ADW_RUNNER: 'codex' } });
     await main(['--engine', 'ts', '5', '--runner', 'pi', '--yes'], deps);
     expect(deps.runPyEngine).not.toHaveBeenCalled();
     expect(deps.loadRunner).toHaveBeenCalledWith('pi');
   });
 
   it('defaults the ts runner to claude (the cutover-gate runner)', async () => {
-    const deps = cliDeps({ env: { MX_AGENT_ENGINE: 'ts' } });
+    const deps = cliDeps({ env: { ADW_ENGINE: 'ts' } });
     await main(['5', '--yes'], deps);
     expect(deps.loadRunner).toHaveBeenCalledWith('claude');
   });
@@ -327,14 +327,14 @@ describe('main — engine dispatch', () => {
     const deps = cliDeps();
     expect(await main(['--engine', 'rust', '5'], deps)).toBe(1);
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining("unknown engine: 'rust'"));
-    expect(await main(['5'], cliDeps({ env: { MX_AGENT_ENGINE: 'go' } }))).toBe(1);
+    expect(await main(['5'], cliDeps({ env: { ADW_ENGINE: 'go' } }))).toBe(1);
     expect(deps.runPyEngine).not.toHaveBeenCalled();
     expect(deps.runIssue).not.toHaveBeenCalled();
   });
 
   it('fails loud on an unknown runner under the ts engine', async () => {
     const stderr = muteStderr();
-    const deps = cliDeps({ env: { MX_AGENT_ENGINE: 'ts' } });
+    const deps = cliDeps({ env: { ADW_ENGINE: 'ts' } });
     expect(await main(['5', '--runner', 'gemini'], deps)).toBe(1);
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining("unknown runner: 'gemini'"));
     expect(deps.loadRunner).not.toHaveBeenCalled();
@@ -342,7 +342,7 @@ describe('main — engine dispatch', () => {
 
   it('rejects runner passthru flags on the ts engine (no runner command line)', async () => {
     muteStderr();
-    const deps = cliDeps({ env: { MX_AGENT_ENGINE: 'ts' } });
+    const deps = cliDeps({ env: { ADW_ENGINE: 'ts' } });
     expect(await main(['5', '--yes', '--', '--permission-mode', 'acceptEdits'], deps)).toBe(1);
     expect(deps.runIssue).not.toHaveBeenCalled();
   });
@@ -350,7 +350,7 @@ describe('main — engine dispatch', () => {
   it('surfaces RunnerNotInstalledError as a friendly rc-1 failure', async () => {
     const stderr = muteStderr();
     const deps = cliDeps({
-      env: { MX_AGENT_ENGINE: 'ts' },
+      env: { ADW_ENGINE: 'ts' },
       loadRunner: vi.fn(async () => {
         throw new RunnerNotInstalledError('codex', '@openai/codex-sdk');
       }),
@@ -362,7 +362,7 @@ describe('main — engine dispatch', () => {
   it('maps AdwError from the run itself to rc 1 but lets bugs propagate', async () => {
     muteStderr();
     const adwFail = cliDeps({
-      env: { MX_AGENT_ENGINE: 'ts' },
+      env: { ADW_ENGINE: 'ts' },
       runIssue: vi.fn(async () => {
         throw new AdwError('working tree is dirty');
       }),
@@ -370,7 +370,7 @@ describe('main — engine dispatch', () => {
     expect(await main(['5', '--yes'], adwFail)).toBe(1);
 
     const bug = cliDeps({
-      env: { MX_AGENT_ENGINE: 'ts' },
+      env: { ADW_ENGINE: 'ts' },
       runIssue: vi.fn(async () => {
         throw new TypeError('boom');
       }),
@@ -379,19 +379,19 @@ describe('main — engine dispatch', () => {
   });
 
   it('returns the orchestrator rc unchanged', async () => {
-    const deps = cliDeps({ env: { MX_AGENT_ENGINE: 'ts' }, runIssue: vi.fn(async () => 2) });
+    const deps = cliDeps({ env: { ADW_ENGINE: 'ts' }, runIssue: vi.fn(async () => 2) });
     expect(await main(['5', '--yes'], deps)).toBe(2);
   });
 
   it('prints usage and exits 0 on --help under the ts engine (argparse parity)', async () => {
     const stdout = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const deps = cliDeps({ env: { MX_AGENT_ENGINE: 'ts' } });
+    const deps = cliDeps({ env: { ADW_ENGINE: 'ts' } });
     expect(await main(['--help'], deps)).toBe(0);
     expect(stdout).toHaveBeenCalledWith(expect.stringContaining('usage: adw-sdlc issue'));
     expect(deps.loadRunner).not.toHaveBeenCalled();
     expect(deps.runIssue).not.toHaveBeenCalled();
     // …while a py-engine --help is delegated, so Python prints its own help.
-    const py = cliDeps({ env: { MX_AGENT_ENGINE: 'py' } });
+    const py = cliDeps({ env: { ADW_ENGINE: 'py' } });
     expect(await main(['--help'], py)).toBe(0);
     expect(py.runPyEngine).toHaveBeenCalledWith(['--help']);
   });
@@ -402,7 +402,7 @@ describe('main — engine dispatch', () => {
     });
     const runIssue = vi.fn(async () => 0);
     const deps = cliDeps({
-      env: { MX_AGENT_ENGINE: 'ts' },
+      env: { ADW_ENGINE: 'ts' },
       loadRunner: loadRunner as unknown as CliDeps['loadRunner'],
       runIssue,
     });
@@ -422,12 +422,12 @@ describe('main — engine dispatch', () => {
 
   it('notes (rather than silently drops) PI_THINKING on the ts engine', async () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    const deps = cliDeps({ env: { MX_AGENT_ENGINE: 'ts', PI_THINKING: 'high' } });
+    const deps = cliDeps({ env: { ADW_ENGINE: 'ts', PI_THINKING: 'high' } });
     expect(await main(['5', '--yes'], deps)).toBe(0);
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('PI_THINKING is ignored by the ts engine'));
     // No note when the knob is not set.
     stderr.mockClear();
-    await main(['5', '--yes'], cliDeps({ env: { MX_AGENT_ENGINE: 'ts' } }));
+    await main(['5', '--yes'], cliDeps({ env: { ADW_ENGINE: 'ts' } }));
     expect(stderr).not.toHaveBeenCalled();
   });
 });

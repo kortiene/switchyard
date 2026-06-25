@@ -15,6 +15,7 @@ import { delimiter, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 import { getAdwConfig } from './config.js';
+import { ENV_ALIASES, readEnvFlag } from './env-vars.js';
 
 /** Result shape mirroring Python's CompletedProcess slice we use. */
 export interface Captured {
@@ -30,9 +31,9 @@ export function note(message: string): void {
   process.stderr.write(`>> ${message}\n`);
 }
 
-/** Whether confirmation prompts should be skipped (flag or MX_AGENT_YES=1). */
+/** Whether confirmation prompts should be skipped (flag or ADW_ASSUME_YES=1). */
 export function assumeYes(flag: boolean, env: Record<string, string | undefined> = process.env): boolean {
-  return flag || env['MX_AGENT_YES'] === '1';
+  return flag || readEnvFlag(env, ENV_ALIASES.assumeYes);
 }
 
 /** Write a prompt to stderr and read a yes/no answer from stdin. */

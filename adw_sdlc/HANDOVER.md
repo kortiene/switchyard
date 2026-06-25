@@ -124,7 +124,7 @@ The force-fenced measurement mode + MVP-readiness instrumentation (§8s) is two
 commits on the `feat/force-fenced-and-mvp-readiness` branch — `19c86d6 feat: …
 absolute native parity bar` and `6f78795 docs: add MVP-READINESS open-risk doc`
 — merged to `main` in `16d4333`; the branch was deleted after merging. Gated
-kernel knob (`MX_AGENT_FORCE_FENCED`, default off ⇒ byte-identical) + harness
+kernel knob (`ADW_PARITY_FORCE_FENCED_JSON`, default off ⇒ byte-identical) + harness
 `--max-native-rate` + the new `MVP-READINESS.md` (+2 → 456). This very entry is
 the follow-up `docs` commit recording that merge.
 
@@ -149,7 +149,7 @@ These cross-cut everything. Any future session should refuse to touch them
 without an explicit security/LLM/API-break review.
 
 1. **Secret boundary in `src/env.ts`** — `BASE_ENV_ALLOW`,
-   `ENV_DENY_PREFIXES = ['MATRIX_', 'MX_AGENT_']`, and `RUNNER_ENV_ALLOW`
+   `ENV_DENY_PREFIXES = ['MATRIX_', 'MX_AGENT_', 'ADW_']`, and `RUNNER_ENV_ALLOW`
    are NOT project-configurable.
 2. **Static lint gate** — `scripts/check-adw-sdlc-env.sh` (run via
    `npm run lint:env`) enforces:
@@ -162,8 +162,10 @@ without an explicit security/LLM/API-break review.
    suite cannot detect.
 4. **CLI command name `issue`** is documented as a backward-compatible
    GitHub alias and must not be renamed.
-5. **`MX_AGENT_*` env var prefixes** are load-bearing in `ENV_DENY_PREFIXES`
-   and the static lint; renaming them weakens the secret boundary.
+5. **Control-plane env prefixes** are load-bearing in `ENV_DENY_PREFIXES`
+   and the static lint. Canonical env knobs use `ADW_*`; inherited `MX_AGENT_*`
+   aliases remain denied for compatibility. Removing or rebranding a denied
+   prefix needs a separate security/API-break review.
 6. **State v1 fields** (`issue_number`, `pr_number`, `pr_url`, etc.)
    remain canonical for resume and cross-language interoperability with
    the Python `adw/` reader. New fields must be additive and
@@ -305,7 +307,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 456 tests, 33 files)
+# 3) Full test suite (current: 466 tests, 35 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -1058,9 +1060,9 @@ doc that states the MVP-readiness gap plainly. Driven by a user challenge to the
   and the native schema is handed to the SDK only on the *unforced* native path
   (`schema = emitJsonContract ? undefined : jsonSchema()`). So a native-schema
   runner can be routed through the fenced-JSON contract path on demand.
-- `adw_sdlc/src/orchestrator.ts` — reads `MX_AGENT_FORCE_FENCED` from the control
-  env (`deps.env`, never the scoped runner env — the `MX_AGENT_*` deny prefix keeps
-  it orchestrator-only) into `AgentCtx.forceFenced`, threaded to both
+- `adw_sdlc/src/orchestrator.ts` — reads `ADW_PARITY_FORCE_FENCED_JSON` from the control
+  env (`deps.env`, never the scoped runner env — the denied `ADW_*` control-plane
+  prefix keeps it orchestrator-only) into `AgentCtx.forceFenced`, threaded to both
   `runAgentPhase` call sites via a **conditional spread** so the request is
   byte-identical when off. **Default off ⇒ behavior unchanged** (dry-run identical).
 - `adw_sdlc/tools/parity-rate.ts` — `--max-native-rate PCT`: an **absolute** native
@@ -1076,13 +1078,13 @@ doc that states the MVP-readiness gap plainly. Driven by a user challenge to the
 - `adw_sdlc/PARITY.md` — the hard-failure-rate section documents both knobs.
 - Tests: `test/run-phase.test.ts` (+1 — forceFenced routes a native runner to the
   fenced path: footer on, native schema withheld) and `test/orchestrator.test.ts`
-  (+1 — `MX_AGENT_FORCE_FENCED=1` threads through to `runAgentPhase` as
+  (+1 — `ADW_PARITY_FORCE_FENCED_JSON=1` threads through to `runAgentPhase` as
   `forceFenced` on every agent phase); plus absolute-bar verdict assertions in
   `test/parity-rate.test.ts`. 454 → **456**.
 
 The kernel change is the only structured-output-path edit in the cleanup arc; it
 is gated, byte-identical by default, reuses the existing fenced footer (no new
-LLM-facing wording, so invariant §3 #3 is untouched), and the `MX_AGENT_*` name
+LLM-facing wording, so invariant §3 #3 is untouched), and the denied env prefix
 keeps it off the runner subprocess env. Verified: typecheck, `lint:env`, full
 suite (**456**), build+clean (tools excluded), byte-identical github dry-run, and
 a live demo of all three verdict states (comparative INSUFFICIENT vs. absolute
@@ -1178,8 +1180,9 @@ plausible slices each cross a real boundary:
    in-process `import` (Option A) or a `vm` shim (Option D).
 2. **Phase preamble wording changes** — LLM-facing prompt content;
    rewording risks behavior drift the suite cannot detect.
-3. **`MX_AGENT_*` env var rebranding** — load-bearing in
-   `ENV_DENY_PREFIXES` and the static lint; weakens the secret boundary.
+3. **Control-plane env-prefix rebranding** — canonical `ADW_*` names now exist
+   with deprecated `MX_AGENT_*` aliases. Removing either denied prefix still
+   needs a separate security/API-break review.
 4. **CLI command rename (`issue` → `work-item`)** — documented backward
    compatibility alias; rename would break downstream and the Python
    engine handoff.
@@ -1294,7 +1297,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **456 passing across 33 files**
+Test count baseline after this session: **466 passing across 35 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6

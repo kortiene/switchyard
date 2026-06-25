@@ -3,7 +3,7 @@
  * "mock the AgentRunner interface, not the SDK"). Tests script per-call
  * outcomes and inspect the exact PhaseRequests the control plane built —
  * including the env allowlist, which must never carry GH_TOKEN or any
- * MATRIX_-/MX_AGENT_-prefixed key in phased mode.
+ * MATRIX_-/ADW_-/MX_AGENT_-prefixed key in phased mode.
  */
 
 import type {

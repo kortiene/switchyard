@@ -161,6 +161,7 @@ describe('the spawn (the load-bearing D5 boundary)', () => {
   it('passes EXACTLY the request env — never an inherit/merge of process.env', async () => {
     vi.stubEnv('GH_TOKEN', 'leak-gh');
     vi.stubEnv('MATRIX_TOKEN', 'leak-matrix');
+    vi.stubEnv('ADW_SECRET', 'leak-adw');
     vi.stubEnv('MX_AGENT_SECRET', 'leak-agent');
     vi.stubEnv('ANTHROPIC_API_KEY', 'leak-unforwarded-key');
     try {
@@ -176,6 +177,7 @@ describe('the spawn (the load-bearing D5 boundary)', () => {
       expect(options.env).toBe(req.env); // the allowlist object, verbatim
       expect(options.env['GH_TOKEN']).toBeUndefined();
       expect(options.env['MATRIX_TOKEN']).toBeUndefined();
+      expect(options.env['ADW_SECRET']).toBeUndefined();
       expect(options.env['MX_AGENT_SECRET']).toBeUndefined();
       expect(options.env['ANTHROPIC_API_KEY']).toBeUndefined();
       expect(options.cwd).toBe(req.cwd);

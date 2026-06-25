@@ -12,6 +12,9 @@
 >   inside the runner adapters (`src/runners/*.ts`).
 > - The provider boundary later grew a fail-closed **registry** plus declarative
 >   `cli`/`rest` providers (work items + change requests) — see `docs/UNIVERSAL.md`.
+> - Runtime control-plane env vars are now canonicalized under `ADW_*`; the
+>   historical `MX_AGENT_*` names below are deprecated compatibility aliases and
+>   remain denied from runner subprocesses.
 >
 > For the current architecture and status, read `HEALTHTECH_PORT.md`,
 > `docs/UNIVERSAL.md`, and `HANDOVER.md`.

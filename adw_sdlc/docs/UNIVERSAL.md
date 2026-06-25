@@ -173,7 +173,7 @@ project's forge CLI through a **scoped, one-credential env**:
 - The CLI runs via `safeSubprocessEnv({ allowGhToken: false, extraAllow: [authEnv] })`:
   it gets `PATH`/`HOME` plus its one named token and **never `GH_TOKEN`** —
   tighter than the GitHub built-in, which inherits the ambient env. `authEnv`
-  rejecting `GH_TOKEN`, deny-prefixed (`MATRIX_`/`MX_AGENT_`), or a model
+  rejecting `GH_TOKEN`, deny-prefixed (`MATRIX_`/`ADW_`/legacy `MX_AGENT_`), or a model
   credential is enforced at load. With `authEnv` omitted, a CLI that stored its
   own auth under `~/.config/<tool>` (e.g. after `glab auth login`) still works
   (`HOME` is allowed).
@@ -514,7 +514,7 @@ fields are non-load-bearing for resume; v1 fields stay canonical.
 The deny-by-default env allowlist in `src/env.ts` and the static lint gate
 `scripts/check-adw-sdlc-env.sh` are NOT project-configurable. They guarantee:
 
-- `GH_TOKEN`, `MATRIX_*`, `MX_AGENT_*` keys are withheld from runner children
+- `GH_TOKEN`, `MATRIX_*`, `ADW_*`, and legacy `MX_AGENT_*` keys are withheld from runner children
 - No source file spreads `...process.env`
 - The opencode SDK is reachable only via `@opencode-ai/sdk/v2/client`
 

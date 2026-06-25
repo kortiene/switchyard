@@ -12,7 +12,7 @@
 # Checks (all fail-closed; any hit exits non-zero):
 #   1. No source file spreads `...process.env` — the deny-by-default allowlist
 #      in env.ts is the ONLY sanctioned way to build a runner-child env, so a
-#      spread would re-leak GH_TOKEN / MATRIX_* / MX_AGENT_* / future secrets
+#      spread would re-leak GH_TOKEN / MATRIX_* / ADW_* / MX_AGENT_* / future secrets
 #      (PLAN.md:142). Note: a plain `env: process.env` (orchestrator-owned
 #      git/gh subprocesses, never a runner child) is NOT a spread and is allowed.
 #   2. No banned @opencode-ai/sdk factory CALLS — createOpencodeServer /

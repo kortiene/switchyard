@@ -184,7 +184,7 @@ as the runner seam, which already proves this model. Critically, the kernel
 spawns it through the **existing `safeSubprocessEnv` allowlist** (`env.ts`) with a
 provider-specific `extraAllow` of *only* that provider's credential — so the
 plugin process never receives `GH_TOKEN`, `ANTHROPIC_*`, `MATRIX_*`, or
-`MX_AGENT_*` (the deny-prefixes already guarantee the last two). The plugin gets
+`ADW_*` or legacy `MX_AGENT_*` (the deny-prefixes already guarantee those). The plugin gets
 scoped I/O but not ambient secrets; it cannot merge because it has no git/gh
 authority (the orchestrator still owns all VCS effects — invariant §3.7). Cost:
 protocol design, lifecycle/timeout management, and serialization of the provider

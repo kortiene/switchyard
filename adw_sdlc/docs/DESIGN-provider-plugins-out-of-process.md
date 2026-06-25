@@ -94,7 +94,7 @@ with a **scoped env from `safeSubprocessEnv`** — except the spawned program is
 ## 4. The security trade-off vs declarative (the load-bearing finding)
 
 Process + env isolation protects the **high-value assets**: a plugin never sees
-`GH_TOKEN`, `ANTHROPIC_*`, `MATRIX_*`, `MX_AGENT_*` (scoped `extraAllow` +
+`GH_TOKEN`, `ANTHROPIC_*`, `MATRIX_*`, `ADW_*`, legacy `MX_AGENT_*` (scoped `extraAllow` +
 deny-prefixes), cannot touch the orchestrator's heap, and has no merge/push
 authority. That part is solid.
 

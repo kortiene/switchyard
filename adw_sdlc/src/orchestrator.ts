@@ -11,7 +11,7 @@
  * Differences from the Python driver are exactly the planned ones:
  * - phases run through runner.runPhase via run-phase.ts (not a CLI spawn);
  * - classify runs on the shared Anthropic-SDK structured call by default
- *   (opt-out MX_AGENT_CLASSIFY_ON_RUNNER=1 routes it through the runner);
+ *   (opt-out ADW_CLASSIFY_ON_RUNNER=1 routes it through the runner);
  * - per-phase cost/usage is accumulated additively into state.
  *
  * Every external effect is injected via OrchestratorDeps (defaulting to the
@@ -24,6 +24,7 @@ import { join } from 'node:path';
 
 import { shellSplit } from './common.js';
 import { DEFAULT_ADW_CONFIG, getAdwConfig, isClosedWorkItemState, type AdwConfig } from './config.js';
+import { ENV_ALIASES, readEnvAlias, readEnvFlag } from './env-vars.js';
 import { AdwError } from './errors.js';
 import { safeSubprocessEnv } from './env.js';
 import { assumeYes, capture, confirm, note, postProgress, type Captured } from './exec.js';
@@ -68,7 +69,7 @@ const NO_CHECKS_SETTLE_POLLS = 3;
 /**
  * Default test gate. Empty in this standalone port — HealthTech has not yet
  * chosen its stack/test command (backlog #1), so nothing is assumed. Configure
- * a real command via `--test-cmd` / `MX_AGENT_TEST_CMD` once the stack lands;
+ * a real command via `--test-cmd` / `ADW_TEST_CMD` once the stack lands;
  * an empty gate is skipped (treated as green) rather than run.
  */
 export const DEFAULT_TEST_CMD = DEFAULT_ADW_CONFIG.commands.defaultTestCommand;
@@ -76,7 +77,7 @@ export const DEFAULT_TEST_CMD = DEFAULT_ADW_CONFIG.commands.defaultTestCommand;
 /**
  * Extra pre-merge verification gates beyond the test gate (e.g. format/lint/
  * build). Empty by default — no toolchain is assumed. Populate at runtime via
- * `MX_AGENT_FINALIZE_GATES` (newline-separated) in finalizeAndMerge.
+ * `ADW_FINALIZE_GATES` (newline-separated) in finalizeAndMerge.
  */
 export const DEFAULT_FINALIZE_GATES: readonly string[] = DEFAULT_ADW_CONFIG.commands.defaultFinalizeGates;
 
@@ -91,7 +92,7 @@ export interface RunOptions {
   noProgress?: boolean;
   /**
    * EXPLICIT OPT-OUT of the D5 secret boundary: forwards the FULL parent
-   * environment — including GH_TOKEN and MATRIX_*-/MX_AGENT_*-prefixed
+   * environment — including GH_TOKEN and MATRIX_*-/ADW_-/MX_AGENT_*-prefixed
    * secrets — to the runner child. The faithful port of Python's
    * --inherit-env (adw/_orchestrator.py:594, env=None → full inherit),
    * documented there as "less isolated". Never set this in unattended runs.
@@ -103,7 +104,7 @@ export interface RunOptions {
   ciPollIntervalMs?: number;
   ciMaxPolls?: number;
   testCmd?: string;
-  /** --model override; per-phase MX_AGENT_MODEL_<PHASE> still applies under it. */
+  /** --model override; per-phase ADW_MODEL_<PHASE> still applies under it. */
   model?: string;
   repo?: string;
   /** Per-phase runner timeout in milliseconds (0 = none). */
@@ -320,7 +321,7 @@ interface AgentCtx {
   env: Record<string, string>;
   timeoutMs: number;
   maxBudgetUsd?: number;
-  /** MX_AGENT_FORCE_FENCED measurement mode — see run-phase RunAgentPhaseOptions. */
+  /** ADW_PARITY_FORCE_FENCED_JSON measurement mode — see run-phase RunAgentPhaseOptions. */
   forceFenced?: boolean;
 }
 
@@ -338,7 +339,7 @@ export function truncate(text: string, limit: number = MAX_OUTPUT_CHARS): string
 /**
  * Gate the irreversible squash-merge; throws AdwError to abort. When stdin
  * is not a terminal and the run was not pre-authorized (--yes /
- * MX_AGENT_YES=1), refuse rather than silently merge.
+ * ADW_ASSUME_YES=1), refuse rather than silently merge.
  */
 export async function confirmMerge(options: {
   yes: boolean;
@@ -350,7 +351,7 @@ export async function confirmMerge(options: {
     return;
   }
   if (!options.isatty) {
-    throw new AdwError('refusing to merge unattended without --yes / MX_AGENT_YES=1');
+    throw new AdwError('refusing to merge unattended without --yes / ADW_ASSUME_YES=1');
   }
   const label = options.changeRequestLabel ?? 'PR';
   if (!(await options.confirm(`>> About to squash-merge this ${label} to main. Continue? [y/N] `))) {
@@ -782,7 +783,7 @@ function transitionToDone(
  * Pre-merge gate commands: the test gate (when configured) followed by any
  * extra quality gates. An empty `testCmd` contributes no test gate (the
  * standalone port assumes no toolchain until one is configured); `extraGates`
- * are additional format/lint/build commands sourced from MX_AGENT_FINALIZE_GATES.
+ * are additional format/lint/build commands sourced from ADW_FINALIZE_GATES.
  */
 export function finalizeGates(
   testCmd: string,
@@ -829,9 +830,9 @@ async function finalizeAndMerge(
   }
 
   // Final verification gates (orchestrator-owned). Merge only on green.
-  // Extra (non-test) gates are configured per-repo via MX_AGENT_FINALIZE_GATES
+  // Extra (non-test) gates are configured per-repo via ADW_FINALIZE_GATES
   // (newline-separated); empty by default so a freshly-ported repo can merge.
-  const extraGates = (process.env['MX_AGENT_FINALIZE_GATES'] ?? '')
+  const extraGates = (readEnvAlias(deps.env, ENV_ALIASES.finalizeGates) ?? '')
     .split('\n')
     .map((g) => g.trim())
     .filter((g) => g.length > 0);
@@ -1100,7 +1101,7 @@ export async function run(
     env: agentEnv,
     timeoutMs: opts.timeoutMs,
     ...(opts.maxBudgetUsd !== undefined ? { maxBudgetUsd: opts.maxBudgetUsd } : {}),
-    ...(deps.env['MX_AGENT_FORCE_FENCED'] === '1' ? { forceFenced: true } : {}),
+    ...(readEnvFlag(deps.env, ENV_ALIASES.forceFenced) ? { forceFenced: true } : {}),
   };
 
   // Runner lifecycle (D6): start/stop are no-ops for the in-process backends;
@@ -1158,9 +1159,9 @@ export async function run(
       // API does not accept a Claude subscription OAuth token), so when no API
       // key is configured we auto-route classify through the selected runner —
       // the Claude Code executable honors a `claude login` / CLAUDE_CODE_OAUTH_TOKEN
-      // subscription. MX_AGENT_CLASSIFY_ON_RUNNER=1 forces the runner regardless.
+      // subscription. ADW_CLASSIFY_ON_RUNNER=1 forces the runner regardless.
       const classifyOnSharedSdk =
-        deps.env['MX_AGENT_CLASSIFY_ON_RUNNER'] !== '1' &&
+        !readEnvFlag(deps.env, ENV_ALIASES.classifyOnRunner) &&
         (deps.env['ANTHROPIC_API_KEY'] ?? '').trim() !== '';
       if (phase === 'classify' && classifyOnSharedSdk) {
         const prompt = composePhasePrompt(phase, phaseArgs(phase, issue, state, ctx, files, itemLabel), state, runner.id, false);
@@ -1178,7 +1179,7 @@ export async function run(
         continue;
       }
 
-      // Normal agent phase (including classify when MX_AGENT_CLASSIFY_ON_RUNNER=1,
+      // Normal agent phase (including classify when ADW_CLASSIFY_ON_RUNNER=1,
       // and any plain project-registered custom phase). The cast carries a custom
       // phase name through the SchemaPhase-typed seam; run-phase resolves its
       // template (<name>.md) and schema (.adw/schemas/<name>.json) by name.

@@ -6,8 +6,8 @@
  * ONLY environment any runner child may receive — passed as claude
  * options.env / codex CodexOptions.env (verified replace semantics) or as the
  * spawn env for opencode/pi. The parent environment is NEVER copied
- * wholesale, so GH_TOKEN, Matrix tokens, device keys, and any future secret
- * are withheld by default. Runner modules must never spread process.env
+ * wholesale, so GH_TOKEN, Matrix tokens, device keys, ADW control-plane knobs,
+ * and any future secret are withheld by default. Runner modules must never spread process.env
  * (enforced by scripts/check-adw-sdlc-env.sh and the env-isolation tests).
  */
 
@@ -36,7 +36,7 @@ export const BASE_ENV_ALLOW = [
 ] as const;
 
 /** Never forwarded to the agent, even via extraAllow (adw/_exec.py:115). */
-export const ENV_DENY_PREFIXES = ['MATRIX_', 'MX_AGENT_'] as const;
+export const ENV_DENY_PREFIXES = ['MATRIX_', 'MX_AGENT_', 'ADW_'] as const;
 
 /**
  * Per-runner credential/config keys layered on top of the base allowlist

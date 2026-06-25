@@ -40,7 +40,7 @@ describe('spawnPyEngine (the real py delegation, no injected seam)', () => {
   it('spawns python3 adw/issue.py from REPO_ROOT with the FULL parent env', async () => {
     spawnMock.mockImplementation(() => scriptChild((c) => c.emit('exit', 0, null)));
 
-    const rc = await main(['5', '--yes'], { env: { GH_TOKEN: 'x', MX_AGENT_ENGINE: 'py' } });
+    const rc = await main(['5', '--yes'], { env: { GH_TOKEN: 'x', ADW_ENGINE: 'py' } });
     expect(rc).toBe(0);
 
     expect(spawnMock).toHaveBeenCalledTimes(1);
@@ -58,16 +58,16 @@ describe('spawnPyEngine (the real py delegation, no injected seam)', () => {
 
   it('maps the child exit code through, and a signal death to rc 1', async () => {
     spawnMock.mockImplementation(() => scriptChild((c) => c.emit('exit', 3, null)));
-    expect(await main(['5'], { env: { MX_AGENT_ENGINE: 'py' } })).toBe(3);
+    expect(await main(['5'], { env: { ADW_ENGINE: 'py' } })).toBe(3);
 
     spawnMock.mockImplementation(() => scriptChild((c) => c.emit('exit', null, 'SIGTERM')));
-    expect(await main(['5'], { env: { MX_AGENT_ENGINE: 'py' } })).toBe(1);
+    expect(await main(['5'], { env: { ADW_ENGINE: 'py' } })).toBe(1);
   });
 
   it('maps a spawn failure (python3 missing) to a friendly rc-1 AdwError', async () => {
     const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
     spawnMock.mockImplementation(() => scriptChild((c) => c.emit('error', new Error('spawn python3 ENOENT'))));
-    expect(await main(['5'], { env: { MX_AGENT_ENGINE: 'py' } })).toBe(1);
+    expect(await main(['5'], { env: { ADW_ENGINE: 'py' } })).toBe(1);
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('could not launch the py engine'));
   });
 });

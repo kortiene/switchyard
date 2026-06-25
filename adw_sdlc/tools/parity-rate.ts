@@ -34,7 +34,7 @@
  * Two verdicts:
  *   - comparative bar (default): native hard-fail rate ≤ fenced — needs both
  *     paths populated, so it stays INSUFFICIENT until a fenced-path runner runs
- *     live (`pi`, or any runner under MX_AGENT_FORCE_FENCED — see run-phase.ts);
+ *     live (`pi`, or any runner under ADW_PARITY_FORCE_FENCED_JSON — see run-phase.ts);
  *   - absolute native bar (`--max-native-rate PCT`): native hard-fail rate ≤ a
  *     target % — evaluable from claude-only runs, so the bar stops reading
  *     INSUFFICIENT the moment a few native runs exist.

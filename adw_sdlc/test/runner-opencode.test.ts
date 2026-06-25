@@ -135,6 +135,7 @@ describe('server spawn (the D5 boundary)', () => {
     const poisoned = {
       GH_TOKEN: 'leak-gh',
       MATRIX_TOKEN: 'leak-matrix',
+      ADW_SECRET: 'leak-adw',
       MX_AGENT_SECRET: 'leak-agent',
       ANTHROPIC_API_KEY: 'sk-ant',
       OPENCODE_BIN: join(tmp, 'opencode'),
@@ -163,6 +164,7 @@ describe('server spawn (the D5 boundary)', () => {
     expect(options.env['GH_TOKEN']).toBeUndefined();
     for (const key of Object.keys(options.env)) {
       expect(key.startsWith('MATRIX_'), key).toBe(false);
+      expect(key.startsWith('ADW_'), key).toBe(false);
       expect(key.startsWith('MX_AGENT_'), key).toBe(false);
     }
     // The only key beyond the allowlist is the config the adapter authors.

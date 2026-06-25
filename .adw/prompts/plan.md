@@ -49,7 +49,7 @@ HealthTech started as a greenfield project. Verify the current state from the re
 
 ### Verification guidance
 
-Run the project's configured test gate when available (`MX_AGENT_TEST_CMD`) plus any format/lint/build checks the repo defines. If no test command is configured, state that clearly and recommend the exact command(s) to run once the stack lands; do not invent a toolchain.
+Run the project's configured test gate when available (`ADW_TEST_CMD`) plus any format/lint/build checks the repo defines. If no test command is configured, state that clearly and recommend the exact command(s) to run once the stack lands; do not invent a toolchain.
 
 Create a detailed implementation specification for this request:
 

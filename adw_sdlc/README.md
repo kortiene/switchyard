@@ -13,7 +13,7 @@ setup → classify → plan → implement → tests → resolve(loop) → e2e(ga
 
 Four runner backends sit behind a single `AgentRunner.runPhase()` seam —
 `claude` (Claude Agent SDK) · `codex` (OpenAI Codex SDK) · `opencode`
-(sst/opencode) · `pi` (pi-node) — selected with `--runner` / `MX_AGENT_RUNNER`.
+(sst/opencode) · `pi` (pi-node) — selected with `--runner` / `ADW_RUNNER`.
 
 The **orchestrator owns all git and GitHub work** and withholds secrets from
 the runner (a deny-by-default env allowlist): in phased mode the coding agent
@@ -54,13 +54,20 @@ Frequently used flags (`-h` / `--help` prints the full list):
 
 | Flag | Meaning |
 | --- | --- |
-| `--runner <id>` | `claude` (default) `\| codex \| opencode \| pi` (env: `MX_AGENT_RUNNER`) |
+| `--runner <id>` | `claude` (default) `\| codex \| opencode \| pi` (env: `ADW_RUNNER`) |
 | `--phases <list>` | comma-separated phase subset/order (default: the configured chain) |
 | `--dry-run` | print the resolved phase plan and exit without running |
 | `--resume` + `--adw-id <id>` | resume a run from its saved state |
-| `--test-cmd <cmd>` | the test-gate command (env: `MX_AGENT_TEST_CMD`) |
+| `--test-cmd <cmd>` | the test-gate command (env: `ADW_TEST_CMD`) |
 | `--repo <owner/repo>` | work-item/repo locator (env: `REPO`) |
 | `-y, --yes` | do not prompt before the irreversible squash-merge |
+
+Control-plane env vars are canonicalized under `ADW_*` (for example
+`ADW_RUNNER`, `ADW_TEST_CMD`, `ADW_ASSUME_YES`, and
+`ADW_PARITY_FORCE_FENCED_JSON`). The inherited `MX_AGENT_*` names remain as
+deprecated compatibility aliases; if both names are set with different values,
+the CLI fails loudly. Both `ADW_*` and legacy `MX_AGENT_*` are withheld from
+runner subprocesses.
 
 ## Configuration
 

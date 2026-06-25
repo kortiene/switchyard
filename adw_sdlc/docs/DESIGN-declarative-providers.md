@@ -226,7 +226,7 @@ extraAllow: [authEnv] })`, or into the `rest` helper's `Authorization` header
 
 - `authEnv` MUST NOT be `GH_TOKEN` or `GH_BIN` (the orchestrator's GitHub
   authority is never handed to a declarative provider — invariant §3.7).
-- `authEnv` MUST NOT match `ENV_DENY_PREFIXES` (`MATRIX_`, `MX_AGENT_`).
+- `authEnv` MUST NOT match `ENV_DENY_PREFIXES` (`MATRIX_`, `ADW_`, legacy `MX_AGENT_`).
   `safeSubprocessEnv` already drops deny-prefixed `extraAllow` keys; we *also*
   reject them at load so the descriptor fails loudly rather than silently.
 - `authEnv` MUST NOT be one of the runner credential keys (`ANTHROPIC_*`,

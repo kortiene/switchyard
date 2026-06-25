@@ -33,7 +33,7 @@ const ADAPTERS: Record<RunnerId, AdapterSpec> = {
 };
 
 /**
- * Validate a `--runner` / `MX_AGENT_RUNNER` value. Unset/empty falls back to
+ * Validate a `--runner` / `ADW_RUNNER` value. Unset/empty falls back to
  * the default; anything unknown throws (mirroring the Python validation at
  * adw/_orchestrator.py:557-559 — fail loud, never guess).
  */

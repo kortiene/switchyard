@@ -38,7 +38,7 @@ export interface RunAgentPhaseOptions {
   templateArgs: readonly string[];
   state: AdwState;
   runner: AgentRunner;
-  /** --model override; per-phase MX_AGENT_MODEL_<PHASE> still applies under it. */
+  /** --model override; per-phase ADW_MODEL_<PHASE> still applies under it. */
   cliModel?: string;
   /** The allowlist env the orchestrator built (safeSubprocessEnv). */
   env: Record<string, string>;
@@ -49,7 +49,7 @@ export interface RunAgentPhaseOptions {
   /** Forwarded to backends with native budget gating (claude). */
   maxBudgetUsd?: number;
   /**
-   * Measurement mode (MX_AGENT_FORCE_FENCED): route a native-schema runner
+   * Measurement mode (ADW_PARITY_FORCE_FENCED_JSON): route a native-schema runner
    * through the fenced-JSON contract path it would otherwise skip — the prompt
    * carries the contract footer and no native schema is handed to the SDK. Used
    * only to harvest a fenced-path baseline for the parity hard-failure-rate bar

@@ -186,6 +186,7 @@ describe('env isolation (PLAN.md Section 10)', () => {
     const poisoned = {
       GH_TOKEN: 'leak-gh',
       MATRIX_TOKEN: 'leak-matrix',
+      ADW_SECRET: 'leak-adw',
       MX_AGENT_SECRET: 'leak-agent',
       CODEX_API_KEY: 'sk-codex',
       HOME: join(tmp, 'home'),
@@ -201,6 +202,7 @@ describe('env isolation (PLAN.md Section 10)', () => {
     expect(env['GH_TOKEN']).toBeUndefined();
     for (const key of Object.keys(env)) {
       expect(key.startsWith('MATRIX_'), key).toBe(false);
+      expect(key.startsWith('ADW_'), key).toBe(false);
       expect(key.startsWith('MX_AGENT_'), key).toBe(false);
     }
   });

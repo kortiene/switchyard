@@ -85,6 +85,7 @@ beforeEach(() => {
   // Poison the REAL parent env: none of these may reach the spawned child.
   vi.stubEnv('GH_TOKEN', 'leak-gh');
   vi.stubEnv('MATRIX_TOKEN', 'leak-matrix');
+  vi.stubEnv('ADW_SECRET', 'leak-adw');
   vi.stubEnv('MX_AGENT_SECRET', 'leak-agent');
   vi.stubEnv('OPENAI_API_KEY', 'leak-unrequested-key');
 });
@@ -128,6 +129,7 @@ describe('the SDK-built child env (the load-bearing boundary)', () => {
         CODEX_BIN: '/fake/codex',
         GH_TOKEN: 'leak-gh',
         MATRIX_TOKEN: 'leak-matrix',
+        ADW_SECRET: 'leak-adw',
         MX_AGENT_SECRET: 'leak-agent',
       },
     });
@@ -137,6 +139,7 @@ describe('the SDK-built child env (the load-bearing boundary)', () => {
     expect(env['GH_TOKEN']).toBeUndefined();
     for (const key of Object.keys(env)) {
       expect(key.startsWith('MATRIX_'), key).toBe(false);
+      expect(key.startsWith('ADW_'), key).toBe(false);
       expect(key.startsWith('MX_AGENT_'), key).toBe(false);
     }
     expect(env['CODEX_API_KEY']).toBe('sk-requested');

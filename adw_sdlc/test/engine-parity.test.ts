@@ -125,6 +125,7 @@ const POISONED_ENV = {
   HOME: '/home/u',
   GH_TOKEN: 'ghp_secret',
   MATRIX_TOKEN: 'x',
+  ADW_FOO: 'x',
   MX_AGENT_FOO: 'x',
   // Present so classify uses the shared-SDK path (the parity tests assert that
   // path's cost/usage). With no key, classify auto-routes through the runner —
@@ -270,7 +271,7 @@ describe('ts engine end-to-end with the REAL claude adapter (mocked SDK)', () =>
     const rc = await main(
       ['5', '--adw-id', adwId, '--yes', '--no-progress'],
       {
-        env: { ...POISONED_ENV, MX_AGENT_ENGINE: 'ts', MX_AGENT_RUNNER: 'claude' },
+        env: { ...POISONED_ENV, ADW_ENGINE: 'ts', ADW_RUNNER: 'claude' },
         loadRunner, // the REAL registry: dynamic-imports runner-claude.js
         runIssue: (issue, runner, options) => {
           // The wiring under test hands the registry-loaded adapter through.
@@ -288,7 +289,7 @@ describe('ts engine end-to-end with the REAL claude adapter (mocked SDK)', () =>
     for (const env of seenEnvs) {
       expect(env).toBeDefined();
       expect(env).not.toHaveProperty('GH_TOKEN');
-      expect(Object.keys(env!).some((k) => k.startsWith('MATRIX_') || k.startsWith('MX_AGENT_'))).toBe(false);
+      expect(Object.keys(env!).some((k) => k.startsWith('MATRIX_') || k.startsWith('ADW_') || k.startsWith('MX_AGENT_'))).toBe(false);
     }
 
     const doc = loadStateDoc(adwId);

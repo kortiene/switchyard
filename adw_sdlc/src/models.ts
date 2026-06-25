@@ -2,10 +2,11 @@
  * Tier→model routing per runner (PLAN.md Section 6), ported from
  * adw/_phases.py:55-71 (PHASE_TIER / TIER_MODELS) and model_for_phase
  * (adw/_phases.py:88-97). Override precedence is preserved verbatim:
- * --model > MX_AGENT_MODEL_<PHASE> > tier default.
+ * --model > ADW_MODEL_<PHASE> > tier default.
  */
 
 import { DEFAULT_ADW_CONFIG, getAdwConfig, type AdwConfig } from './config.js';
+import { modelEnvAlias, readEnvAlias } from './env-vars.js';
 import type { RunnerId } from './invoker.js';
 
 export type Tier = 'cheap' | 'mid' | 'capable';
@@ -18,7 +19,7 @@ export const PHASE_TIER: Record<string, Tier> = DEFAULT_ADW_CONFIG.models.phaseT
  *
  * - claude: exact current Claude IDs (PLAN.md Section 6).
  * - pi: bare model names, matching the Python TIER_MODELS verbatim — pi
- *   accepts them and users override via --model / MX_AGENT_MODEL_<PHASE>.
+ *   accepts them and users override via --model / ADW_MODEL_<PHASE>.
  * - codex: verified current in roadmap step 7 (Codex models endpoint cache
  *   of 2026-05-31 + the OpenAI pricing docs): gpt-5.4-mini / gpt-5.4 /
  *   gpt-5.5, all supported_in_api with effort low|medium|high|xhigh. The
@@ -62,19 +63,19 @@ export function classifyModel(config: AdwConfig = getAdwConfig()): string {
 export interface ModelOverrides {
   /** --model: applies to every phase when set. */
   cliModel?: string;
-  /** Environment for MX_AGENT_MODEL_<PHASE> lookups; defaults to process.env. */
+  /** Environment for ADW_MODEL_<PHASE> lookups; defaults to process.env. */
   env?: Record<string, string | undefined>;
   /** Project config; defaults to the loaded .adw/config.json/defaults. */
   config?: AdwConfig;
 }
 
-/** Resolve the model for `phase` on `runner`: --model > MX_AGENT_MODEL_<PHASE> > tier default. */
+/** Resolve the model for `phase` on `runner`: --model > ADW_MODEL_<PHASE> > tier default. */
 export function modelForPhase(phase: string, runner: RunnerId, overrides: ModelOverrides = {}): string {
   if (overrides.cliModel) {
     return overrides.cliModel;
   }
   const env = overrides.env ?? process.env;
-  const envOverride = env[`MX_AGENT_MODEL_${phase.toUpperCase()}`];
+  const envOverride = readEnvAlias(env, modelEnvAlias(phase));
   if (envOverride) {
     return envOverride;
   }

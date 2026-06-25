@@ -2,7 +2,7 @@
 
 This is the materialized **Section 10 parity checklist** and the **Section 8 cutover criteria** from
 `adw_sdlc/PLAN.md`, with every box mapped to the test(s) that prove it. It exists so the cutover decision
-(flip `MX_AGENT_ENGINE` default `py → ts`, roadmap step 12) is an audit against named, green tests rather
+(flip `ADW_ENGINE` default `py → ts`, roadmap step 12) is an audit against named, green tests rather
 than a judgement call.
 
 Two kinds of evidence are distinguished:
@@ -24,12 +24,12 @@ abbreviated.
 | Box | Status | Proven by |
 |---|---|---|
 | **Phase order & gating** — 9 agent phases + setup/finalize/ci-fix/merge/report in order; `e2e`/`document` conditional gates fire identically | ✅ mocked | `orchestrator.test.ts` *run() runs phases in order…*; `phases.test.ts` *conditional gates* (e2e whole-word hints, document doc-like files), *gateConditional fails loudly*; `engine-parity.test.ts` full chain ×4 runners |
-| **Per-phase model routing** — exact tier ID per runner; `--model` > `MX_AGENT_MODEL_<PHASE>` > tier | ✅ mocked | `models-pricing.test.ts` *resolves tier defaults per runner*, *honors precedence*, *every runner has a complete tier map and classify stays on haiku* |
+| **Per-phase model routing** — exact tier ID per runner; `--model` > `ADW_MODEL_<PHASE>` > tier | ✅ mocked | `models-pricing.test.ts` *resolves tier defaults per runner*, *honors precedence*, *every runner has a complete tier map and classify stays on haiku* |
 | **Selected runner edits the worktree unattended (capability parity)** — file/edit capability, `cwd=worktree`, edits-allowed mode | ✅ mocked | `runner-claude.test.ts` *tool grants + acceptEdits*; `runner-codex.test.ts` *coarse sandbox grants* (`workspace-write`/`never`); `runner-opencode.test.ts` *permission config*; `runner-pi.test.ts` request shape |
 | **Structured output** — every phase yields a Zod-validated result; native-schema + fenced-JSON paths both validated; hard-failure ≤ fenced-JSON path | ✅ mocked / ⏳ live rate | `run-phase.test.ts` *native structured output*, *parses fenced JSON*, *nudges once then succeeds*, *retries native-schema WITH the contract it never saw*, *fails after the second parse failure*; `schemas.test.ts`; `phases.test.ts` *contract drift guard*. **Comparative hard-failure rate is a live metric** — see [methodology](#structured-output-hard-failure-rate). |
-| **Secret withholding (fail-closed) — load-bearing, per runner** — child's observable spawned env excludes `GH_TOKEN`/`MATRIX_*`/`MX_AGENT_*`; new parent secret absent by default | ✅ mocked | `env.test.ts` *withholds GH_TOKEN and every deny-prefixed key*, *base ∪ runner row aligned with adw/_exec.py*; `runner-claude.test.ts` *only the allowlist when parent env poisoned*; `runner-codex-spawn.test.ts` *…NOTHING from the poisoned parent* + *no apiKey side door* (asserted on the **SDK-built child env**); `runner-opencode.test.ts` *never process.env*; `runner-pi.test.ts` *EXACTLY the request env*; lint gate `scripts/check-adw-sdlc-env.sh` |
+| **Secret withholding (fail-closed) — load-bearing, per runner** — child's observable spawned env excludes `GH_TOKEN`/`MATRIX_*`/`ADW_*`/legacy `MX_AGENT_*`; new parent secret absent by default | ✅ mocked | `env.test.ts` *withholds GH_TOKEN and every deny-prefixed key*, *base ∪ runner row aligned with adw/_exec.py*; `runner-claude.test.ts` *only the allowlist when parent env poisoned*; `runner-codex-spawn.test.ts` *…NOTHING from the poisoned parent* + *no apiKey side door* (asserted on the **SDK-built child env**); `runner-opencode.test.ts` *never process.env*; `runner-pi.test.ts` *EXACTLY the request env*; lint gate `scripts/check-adw-sdlc-env.sh` |
 | **Sandboxed-to-worktree (per runner)** — cwd/sandbox bound to worktree; per-tool veto only where `caps.perToolHook` | ✅ mocked | `runner-claude.test.ts` *denyGitGh (caps.perToolHook)* — git/gh denied, benign Bash allowed, fails closed outside grant; `runner-codex.test.ts` `workspace-write`; `runner-opencode.test.ts` *denies bash git/gh, never 'ask'*; matrix documents codex/opencode/pi as non-`perToolHook` |
-| **Gated squash-merge** — `confirmMerge` refuses unattended without `--yes`/`MX_AGENT_YES=1` | ✅ mocked | `orchestrator.test.ts` *confirmMerge*: passes with `--yes`, *aborts unattended without --yes*, *honors an interactive yes/no* |
+| **Gated squash-merge** — `confirmMerge` refuses unattended without `--yes`/`ADW_ASSUME_YES=1` | ✅ mocked | `orchestrator.test.ts` *confirmMerge*: passes with `--yes`, *aborts unattended without --yes*, *honors an interactive yes/no* |
 | **Bounded loops + no-retry-on-timeout** — `resolveLoop`/`patchLoop`/`ciFixLoop` cap attempts, stop on no-progress; timeout → `signal:'timeout'`, budget → `signal:'budget'`, both fail fast with no nudge | ✅ mocked | `orchestrator.test.ts` *resolveLoop* (caps attempts, stops on no progress), *patchLoop* (breaks on no progress), *ciFixLoop* (settles/exhausts/stops-on-no-change); `run-phase.test.ts` *fails fast with NO nudge on timeout*, *…on native budget signal*, *still accepts parseable output from a timed-out run* |
 | **Resume** — `--adw-id --resume` skips done phases, reconstructs review findings for patch, short-circuits after merge; equivalent `state.json` | ✅ mocked | `orchestrator.test.ts` *resumes by skipping completed phases*, *short-circuits finalize after a recorded merge*, *recovers persisted review findings for the patch phase on resume*, *requires --adw-id with --resume*, *rejects resuming a run that belongs to a different issue* |
 | **Artifacts** — `review`/`document` write `commit_message.txt`/`pr_body.md`, absorbed into state | ✅ mocked | `orchestrator.test.ts` *…absorbs artifacts…*; `phases.test.ts` *keeps artifact-file instructions on BOTH output paths* |
@@ -65,7 +65,7 @@ runnable.
 
 | Runner | Live status | Detail / how to unblock |
 |---|---|---|
-| **claude** | ✅ done | Issue #304 → PR #331 (squash-merged), parity bug fixed in #332. Cost ≈ $34.76, run `007fd5ba`. On a box with no `ANTHROPIC_API_KEY` (CLI-OAuth only), the D1 default classify path fails — run with `MX_AGENT_CLASSIFY_ON_RUNNER=1`. |
+| **claude** | ✅ done | Issue #304 → PR #331 (squash-merged), parity bug fixed in #332. Cost ≈ $34.76, run `007fd5ba`. On a box with no `ANTHROPIC_API_KEY` (CLI-OAuth only), the D1 default classify path fails — run with `ADW_CLASSIFY_ON_RUNNER=1`. |
 | **codex** | ⛔ blocked | Live phase dies at classify: `refresh token was revoked` (OAuth access token expires ~1h; the refresh token comes back revoked server-side). `codex login status` reports success on local-file presence only. **Unblock:** `export OPENAI_API_KEY=…` (codex `RUNNER_ENV_ALLOW` already passes it; API-key mode skips the OAuth refresh entirely), or `codex logout && codex login` then run codex **immediately** (no long run in between). If a fresh token is also revoked within hours it is account-level — resolve with OpenAI. The transport is verified live (binary spawn, JSONL stream, `turn.failed` mapping); only the credential blocks a real phase. |
 | **opencode** | ⏳ owed | Adapter + native-schema route verified live against the real 1.17.3 binary via a local stub provider (no credential) in step 8. A real-issue run needs a real provider key on `OPENCODE`'s allowlist row. |
 | **pi** | ⏳ owed | Adapter + `--mode json` stream verified live against the real 0.79.1 binary via a scrubbed-agentDir stub provider (no credential) in step 9. A real-issue run needs a real provider key + Node ≥ 22.19 (the pi npm engines floor; the CI node-20 lane skips pi). |
@@ -99,7 +99,7 @@ parity runs.
     audited measurement — not the structural argument above standing in for one. The fenced sample is empty
     until a fenced-path runner runs live, so the **comparative** bar is **not yet measured** — but two knobs
     make it evaluable now: `--max-native-rate PCT` gates the native path's *absolute* hard-fail rate from
-    `claude`-only runs, and `MX_AGENT_FORCE_FENCED=1` harvests a fenced baseline from `claude` (routes a
+    `claude`-only runs, and `ADW_PARITY_FORCE_FENCED_JSON=1` harvests a fenced baseline from `claude` (routes a
     native-schema runner through the fenced path). See `MVP-READINESS.md` for the full readiness gate.
 
 ---

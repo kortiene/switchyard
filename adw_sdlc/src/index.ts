@@ -90,6 +90,7 @@ export {
   safeSubprocessEnv,
   type SafeEnvOptions,
 } from './env.js';
+export { ENV_ALIASES, modelEnvAlias, readEnvAlias, readEnvFlag, type EnvAlias } from './env-vars.js';
 export {
   AdwState,
   STATE_FILENAME,

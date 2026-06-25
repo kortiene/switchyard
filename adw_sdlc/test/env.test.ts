@@ -1,7 +1,7 @@
 /**
  * Env-isolation tests (PLAN.md Section 10, "highest severity"): with a
  * poisoned parent env, the allowlist the orchestrator hands a runner child
- * must never contain GH_TOKEN or any MATRIX_-/MX_AGENT_-prefixed key.
+ * must never contain GH_TOKEN or any MATRIX_-/ADW_-/MX_AGENT_-prefixed key.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -22,8 +22,9 @@ const POISONED: Record<string, string> = {
   GH_BIN: '/bin/gh',
   MATRIX_TOKEN: 'syt_secret',
   MATRIX_DEVICE_KEY: 'device',
+  ADW_FOO: 'x',
+  ADW_ASSUME_YES: '1',
   MX_AGENT_FOO: 'x',
-  MX_AGENT_YES: '1',
   RANDOM_SECRET: 'leakme',
 };
 
@@ -56,6 +57,7 @@ describe('safeSubprocessEnv', () => {
     expect(env['GH_BIN']).toBe('/bin/gh');
     // Deny prefixes still hold even in one-shot mode.
     expect(env).not.toHaveProperty('MATRIX_TOKEN');
+    expect(env).not.toHaveProperty('ADW_ASSUME_YES');
     expect(env).not.toHaveProperty('MX_AGENT_FOO');
   });
 
@@ -96,9 +98,10 @@ describe('safeSubprocessEnv', () => {
   it('silently drops deny-prefixed keys requested via extraAllow', () => {
     const env = safeSubprocessEnv({
       allowGhToken: false,
-      extraAllow: ['MX_AGENT_FOO', 'MATRIX_TOKEN', 'RANDOM_SECRET'],
+      extraAllow: ['ADW_FOO', 'MX_AGENT_FOO', 'MATRIX_TOKEN', 'RANDOM_SECRET'],
       source: POISONED,
     });
+    expect(env).not.toHaveProperty('ADW_FOO');
     expect(env).not.toHaveProperty('MX_AGENT_FOO');
     expect(env).not.toHaveProperty('MATRIX_TOKEN');
     expect(env['RANDOM_SECRET']).toBe('leakme'); // explicit, non-denied extra is honored

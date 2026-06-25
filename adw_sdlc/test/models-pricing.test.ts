@@ -12,8 +12,8 @@ describe('modelForPhase', () => {
     expect(modelForPhase('implement', 'pi', { env: {} })).toBe('opus'); // bare names, Python TIER_MODELS verbatim
   });
 
-  it('honors precedence: --model > MX_AGENT_MODEL_<PHASE> > tier', () => {
-    const env = { MX_AGENT_MODEL_IMPLEMENT: 'env-model' };
+  it('honors precedence: --model > ADW_MODEL_<PHASE> > tier', () => {
+    const env = { ADW_MODEL_IMPLEMENT: 'env-model' };
     expect(modelForPhase('implement', 'claude', { cliModel: 'cli-model', env })).toBe('cli-model');
     expect(modelForPhase('implement', 'claude', { env })).toBe('env-model');
     expect(modelForPhase('review', 'claude', { env })).toBe('claude-opus-4-8'); // override is per-phase

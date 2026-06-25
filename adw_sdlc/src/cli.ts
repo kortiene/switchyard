@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * The /issue entry point that wires MX_AGENT_ENGINE + MX_AGENT_RUNNER
+ * The /issue entry point that wires ADW_ENGINE + ADW_RUNNER
  * selection (PLAN.md roadmap step 10, D4).
  *
- * `MX_AGENT_ENGINE={py|ts}` (default `ts` in this standalone port, flag
+ * `ADW_ENGINE={py|ts}` (default `ts` in this standalone port, flag
  * `--engine`) picks which language drives the run, orthogonal to the runner
  * choice:
  *
@@ -14,7 +14,7 @@
  *   boundary (adw/_exec.py safe_subprocess_env), exactly as a direct
  *   invocation would.
  * - `ts` — parse the phased flags (mirroring adw/issue.py build_parser),
- *   resolve `--runner`/`MX_AGENT_RUNNER` over the four-runner registry, and
+ *   resolve `--runner`/`ADW_RUNNER` over the four-runner registry, and
  *   bind the loaded adapter into `orchestrator.run()`.
  *
  * Unknown engine or runner values throw, mirroring the Python validation at
@@ -26,6 +26,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { REPO_ROOT } from './common.js';
+import { ENV_ALIASES, readEnvAlias } from './env-vars.js';
 import { AdwError } from './errors.js';
 import { note } from './exec.js';
 import type { AgentRunner, RunnerId } from './invoker.js';
@@ -40,14 +41,14 @@ export type EngineId = (typeof ENGINE_IDS)[number];
 /**
  * Standalone HealthTech port: the cutover (PLAN.md roadmap step 12) is done —
  * `ts` is the default. The `py` engine is still selectable via
- * `--engine py` / `MX_AGENT_ENGINE=py`, but it delegates to a Python `adw/`
+ * `--engine py` / `ADW_ENGINE=py`, but it delegates to a Python `adw/`
  * sibling that is NOT included in this standalone port, so it will fail loudly
  * unless that sibling is added.
  */
 export const DEFAULT_ENGINE: EngineId = 'ts';
 
 /**
- * Validate a `--engine` / `MX_AGENT_ENGINE` value. Unset/empty falls back to
+ * Validate a `--engine` / `ADW_ENGINE` value. Unset/empty falls back to
  * the default; anything unknown throws (the engine analogue of
  * registry.resolveRunnerId).
  */
@@ -92,7 +93,7 @@ export function extractEngineFlag(args: readonly string[]): { engine?: string; r
     } else if (arg.startsWith('--engine=')) {
       engine = arg.slice('--engine='.length);
       if (engine === '') {
-        // An explicit-but-empty flag must fail loud, not mask MX_AGENT_ENGINE
+        // An explicit-but-empty flag must fail loud, not mask ADW_ENGINE
         // and silently pick the built-in default.
         throw new AdwError('--engine requires a value (py or ts)');
       }
@@ -115,7 +116,7 @@ export interface ParsedCli {
   /** Free-form notes after the work item id (accepted for CLI parity; the
    * phased pipeline derives context from the work item itself, as in Python). */
   notes: string[];
-  /** Raw --runner value; undefined falls back to MX_AGENT_RUNNER/default. */
+  /** Raw --runner value; undefined falls back to ADW_RUNNER/default. */
   runner?: string;
   options: RunOptions;
 }
@@ -181,13 +182,13 @@ function parseFloatFlag(flag: string, value: string): number {
 export const CLI_USAGE = `usage: adw-sdlc issue [--engine {py,ts}] <work-item-id> [notes...] [flags]
 
 Run the phased work-item delivery workflow (the "issue" command name is kept as a
-backward-compatible GitHub alias). --engine / MX_AGENT_ENGINE picks the
-driving language (default: ts). --engine py delegates to a python3 adw/issue.py
+backward-compatible GitHub alias). --engine / ADW_ENGINE (deprecated alias:
+MX_AGENT_ENGINE) picks the driving language (default: ts). --engine py delegates to a python3 adw/issue.py
 sibling, which is NOT bundled in this standalone port. Flags below apply to the
 ts engine:
 
   --runner <id>            agent runner: claude (default) | codex | opencode | pi
-                           Env: MX_AGENT_RUNNER
+                           Env: ADW_RUNNER (deprecated alias: MX_AGENT_RUNNER)
   --phases <list>          comma-separated phase subset/order (default: full chain)
   --adw-id <id>            reuse/resume a run by its 8-char id
   --resume                 resume from saved state (requires --adw-id)
@@ -198,7 +199,7 @@ ts engine:
   --max-ci-fix <n>         max CI-fix attempts (default: 3)
   --ci-poll-interval <s>   seconds between CI polls (default: 30)
   --ci-max-polls <n>       max CI status polls (default: 40)
-  --test-cmd <cmd>         test gate command. Env: MX_AGENT_TEST_CMD
+  --test-cmd <cmd>         test gate command. Env: ADW_TEST_CMD (deprecated alias: MX_AGENT_TEST_CMD)
   --model <id>             model override (overrides per-phase routing)
   --repo <owner/repo>      provider repo/project locator for work-item lookups. Env: REPO
   --base <branch>          base branch to fork from / merge into (default: main)
@@ -214,7 +215,7 @@ ts engine:
 /**
  * Parse the ts-engine argv (post `--engine` extraction, pre `--` split) into
  * the issue number plus orchestrator RunOptions. Defaults mirror
- * adw/issue.py build_parser, including the MX_AGENT_TEST_CMD / REPO env
+ * adw/issue.py build_parser, including the ADW_TEST_CMD / REPO env
  * fallbacks; second-based CLI flags become the milliseconds RunOptions uses.
  */
 export function parseCliArgs(
@@ -250,7 +251,7 @@ export function parseCliArgs(
       return { help: true, issue: 0, workItem: 0, notes: [], options: {} };
     }
     if (PY_ONLY_FLAGS.has(name)) {
-      throw new AdwError(`${name} is a py-engine option; rerun with --engine py (or MX_AGENT_ENGINE=py)`);
+      throw new AdwError(`${name} is a py-engine option; rerun with --engine py (or ADW_ENGINE=py)`);
     }
     if (BOOLEAN_FLAGS.has(name)) {
       if (eq !== -1) {
@@ -276,7 +277,7 @@ export function parseCliArgs(
       }
       if (name === '--runner' && value === '') {
         // Loudness parity with adw/issue.py ("unknown --runner: ''"); an
-        // empty flag must not mask MX_AGENT_RUNNER and default silently.
+        // empty flag must not mask ADW_RUNNER and default silently.
         throw new AdwError('--runner requires a non-empty value');
       }
       flags.set(name, value);
@@ -299,7 +300,7 @@ export function parseCliArgs(
   };
   const has = (name: string): boolean => flags.has(name);
 
-  const testCmd = str('--test-cmd') ?? env['MX_AGENT_TEST_CMD'];
+  const testCmd = str('--test-cmd') ?? readEnvAlias(env, ENV_ALIASES.testCmd);
   const repo = str('--repo') ?? env['REPO'];
   const maxResolve = str('--max-resolve');
   const maxPatch = str('--max-patch');
@@ -426,7 +427,7 @@ export async function main(argv: readonly string[], depsOverride: Partial<CliDep
   try {
     const [ours, passthru] = splitPassthru(argv);
     const { engine: engineFlag, rest } = extractEngineFlag(ours);
-    const engine = resolveEngineId(engineFlag ?? deps.env['MX_AGENT_ENGINE']);
+    const engine = resolveEngineId(engineFlag ?? readEnvAlias(deps.env, ENV_ALIASES.engine));
 
     if (engine === 'py') {
       const forwarded = passthru.length > 0 ? [...rest, '--', ...passthru] : rest;
@@ -451,7 +452,7 @@ export async function main(argv: readonly string[], depsOverride: Partial<CliDep
       // silently dropping the knob.
       note('PI_THINKING is ignored by the ts engine (phased model routing applies); use --engine py for pi --thinking');
     }
-    const runnerId = resolveRunnerId(parsed.runner ?? deps.env['MX_AGENT_RUNNER']);
+    const runnerId = resolveRunnerId(parsed.runner ?? readEnvAlias(deps.env, ENV_ALIASES.runner));
     const runner =
       parsed.options.dryRun === true ? dryRunRunner(runnerId) : await deps.loadRunner(runnerId);
     const dispatch = deps.runWorkItem ?? deps.runIssue;

@@ -378,7 +378,7 @@ describe('run() integration', () => {
 
   it('runs phases in order, withholds GH_TOKEN, absorbs artifacts, and merges', async () => {
     const order: string[] = [];
-    const poisoned = { GH_TOKEN: 'ghp_secret', PATH: '/bin', MATRIX_TOKEN: 'x', MX_AGENT_FOO: 'x', ANTHROPIC_API_KEY: 'sk-ant-x' };
+    const poisoned = { GH_TOKEN: 'ghp_secret', PATH: '/bin', MATRIX_TOKEN: 'x', ADW_FOO: 'x', MX_AGENT_FOO: 'x', ANTHROPIC_API_KEY: 'sk-ant-x' };
     const issueStates = vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED');
     const classify = vi.fn(async (prompt: string) => {
       order.push('classify');
@@ -394,9 +394,7 @@ describe('run() integration', () => {
         order.push(opts.phase);
         // The phased agent env must never carry GH_TOKEN or denied prefixes.
         expect(opts.env).not.toHaveProperty('GH_TOKEN');
-        expect(Object.keys(opts.env).some((k) => k.startsWith('MATRIX_') || k.startsWith('MX_AGENT_'))).toBe(
-          false,
-        );
+        expect(Object.keys(opts.env).some((k) => k.startsWith('MATRIX_') || k.startsWith('ADW_') || k.startsWith('MX_AGENT_'))).toBe(false);
         if (opts.phase === 'review') {
           // Simulate the agent authoring commit/PR text to workspace files.
           mkdirSync(opts.state.workspace(), { recursive: true });
@@ -432,10 +430,10 @@ describe('run() integration', () => {
     expect(state?.totalCostUsd).toBeCloseTo(0.01);
   });
 
-  it('threads MX_AGENT_FORCE_FENCED=1 to runAgentPhase as forceFenced (measurement mode)', async () => {
+  it('threads ADW_PARITY_FORCE_FENCED_JSON=1 to runAgentPhase as forceFenced (measurement mode)', async () => {
     const seen: boolean[] = [];
     const deps = testDeps({
-      env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-x', MX_AGENT_FORCE_FENCED: '1' },
+      env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-x', ADW_PARITY_FORCE_FENCED_JSON: '1' },
       issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
       fetchIssue: () => ({ title: 'T', body: 'B', labels: ['type:feature'] }),
       classify: vi.fn(async () => ({ value: { issue_class: 'feat' as const, reason: 'r' }, usage: { costUsd: 0 } })),
@@ -877,27 +875,23 @@ describe('run() integration', () => {
   });
 
   it('aborts before merge when a finalize gate fails', async () => {
-    // Extra (non-test) pre-merge gates are configured via MX_AGENT_FINALIZE_GATES
+    // Extra (non-test) pre-merge gates are configured via ADW_FINALIZE_GATES
     // in the standalone port; one that returns non-zero must block the merge.
-    process.env['MX_AGENT_FINALIZE_GATES'] = 'check:fmt';
-    try {
-      const runCmd = vi.fn((cmd: readonly string[]) =>
-        cmd.join(' ') === 'check:fmt' ? { rc: 1, output: 'fmt diff' } : { rc: 0, output: '' },
-      );
-      const squashMerge = vi.fn(() => ({ ok: true, error: null }));
-      const deps = testDeps({
-        issueState: vi.fn().mockReturnValue('OPEN'),
-        runCmd,
-        git: { squashMerge },
-        runAgentPhase: agentStub(PHASE_RESULTS),
-      });
-      await expect(run(5, createMockRunner(), { yes: true, noProgress: true }, deps)).rejects.toThrow(
-        /pre-merge gate failed: check:fmt/,
-      );
-      expect(squashMerge).not.toHaveBeenCalled();
-    } finally {
-      delete process.env['MX_AGENT_FINALIZE_GATES'];
-    }
+    const runCmd = vi.fn((cmd: readonly string[]) =>
+      cmd.join(' ') === 'check:fmt' ? { rc: 1, output: 'fmt diff' } : { rc: 0, output: '' },
+    );
+    const squashMerge = vi.fn(() => ({ ok: true, error: null }));
+    const deps = testDeps({
+      env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-test', ADW_FINALIZE_GATES: 'check:fmt' },
+      issueState: vi.fn().mockReturnValue('OPEN'),
+      runCmd,
+      git: { squashMerge },
+      runAgentPhase: agentStub(PHASE_RESULTS),
+    });
+    await expect(run(5, createMockRunner(), { yes: true, noProgress: true }, deps)).rejects.toThrow(
+      /pre-merge gate failed: check:fmt/,
+    );
+    expect(squashMerge).not.toHaveBeenCalled();
   });
 
   it('persists classify prompt.txt and transcript.log on the structured-call path', async () => {
@@ -914,11 +908,11 @@ describe('run() integration', () => {
     });
   });
 
-  it('routes classify through the runner when MX_AGENT_CLASSIFY_ON_RUNNER=1', async () => {
+  it('routes classify through the runner when ADW_CLASSIFY_ON_RUNNER=1', async () => {
     const order: string[] = [];
     const classify = vi.fn(async () => ({ value: { issue_class: 'feat' as const, reason: 'r' }, usage: {} }));
     const deps = testDeps({
-      env: { PATH: '/bin', MX_AGENT_CLASSIFY_ON_RUNNER: '1' },
+      env: { PATH: '/bin', ADW_CLASSIFY_ON_RUNNER: '1' },
       issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
       classify,
       runAgentPhase: agentStub(
@@ -939,7 +933,7 @@ describe('run() integration', () => {
     const deps = testDeps({
       // No ANTHROPIC_API_KEY → the shared-SDK classify path is unavailable, so
       // classify must fall back to the selected runner (the subscription path),
-      // without the operator needing to set MX_AGENT_CLASSIFY_ON_RUNNER=1.
+      // without the operator needing to set ADW_CLASSIFY_ON_RUNNER=1.
       env: { PATH: '/bin' },
       issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
       classify,
@@ -956,7 +950,7 @@ describe('run() integration', () => {
   });
 
   it('inheritEnv is an explicit opt-out that forwards the full parent env (Python --inherit-env parity)', async () => {
-    const poisoned = { GH_TOKEN: 'ghp_secret', PATH: '/bin', MX_AGENT_FOO: 'x', ANTHROPIC_API_KEY: 'sk-ant-x' };
+    const poisoned = { GH_TOKEN: 'ghp_secret', PATH: '/bin', ADW_FOO: 'x', MX_AGENT_FOO: 'x', ANTHROPIC_API_KEY: 'sk-ant-x' };
     const seenEnvs: Array<Record<string, string>> = [];
     const deps = testDeps({
       env: poisoned,
