@@ -40,11 +40,15 @@ session can pick up where we stopped.
   `adw_sdlc/docs/DESIGN-provider-plugins-out-of-process.md`.
 
 **Repository state:** all of this session's work is **merged to `main`**
-(no remote — local merge). `main` HEAD is the merge commit
-`3199cad merge: declarative primitives — transforms + pagination (#4 step 2.5a/2.5b)`,
+(no remote — local merge). `main` HEAD is the docs commit recording the merge,
+on top of the merge commit
+`d5f2588 merge: declarative cli change-request provider (#4 step 2 — cli CR)`,
 with the session's commits in history:
 
 ```
+d5f2588 merge: declarative cli change-request provider (#4 step 2 — cli CR)
+a6c49a2 feat(adw_sdlc): declarative cli change-request provider (§8o)
+c4aa31f docs(adw_sdlc): record the 2.5a/2.5b merge to main in HANDOVER (§8n)
 3199cad merge: declarative primitives — transforms + pagination (#4 step 2.5a/2.5b)
 214d3ee feat(adw_sdlc): declarative primitives — transforms + pagination (§8n)
 8d444d5 docs(adw_sdlc): record the step-3 scoping / step-2.5 spec merge in HANDOVER
@@ -79,13 +83,11 @@ deleted after merging. Both the commit and the merge were performed only at the
 user's explicit request (invariant §3.8 — the ADW code path runs no `git`/`gh`
 itself). No new dependency; no build artifact left behind.
 
-**This session (the `cli` change-request provider — §8o) is NOT yet committed:**
-the changes are in the working tree only. Changed files: `src/provider-
-descriptor.ts`, `src/providers-rest-cli.ts`, `src/providers.ts`, `src/index.ts`,
-`test/provider-descriptor.test.ts`, `test/providers.test.ts`, `docs/UNIVERSAL.md`,
-`docs/DESIGN-declarative-providers.md`, and this `HANDOVER.md`. No new dependency;
-no config-schema change; no build artifact left behind. Commit/merge only at the
-user's explicit request.
+The `cli` change-request provider (§8o) is the `feat` commit `a6c49a2`, merged to
+`main` in `d5f2588`; the per-feature branch (`feat/cli-change-request`) was deleted
+after merging. Both the commit and the merge were performed only at the user's
+explicit request (invariant §3.8 — the ADW code path runs no `git`/`gh` itself).
+No new dependency; no config-schema change; no build artifact left behind.
 
 ## 2. Session goal
 
@@ -868,7 +870,8 @@ github dry-run, and a **live end-to-end run through the real ESM graph** (a glab
 shaped descriptor: `create` mapped `iid`/`web_url`, `pipelineStatus` normalized
 `FAILED` via `| lower` to `failure`, single-shot `failingJobs` populated with the
 empty reason defaulted, `squashMerge` ok — and the injected `capture` asserted
-GH_TOKEN never reached the scoped env). Not yet committed (see §1). With this, the
+GH_TOKEN never reached the scoped env). Committed as `a6c49a2` and merged to `main`
+(`d5f2588`) — see §1. With this, the
 declarative driver covers work items (`cli`+`rest`) and change requests
 (`cli`+`rest`); remaining #4 surface: 2.5c token refresh (deferred, demand-gated)
 and **step 3** (out-of-process broker, a §10 hard stop).
@@ -1095,5 +1098,5 @@ merge to `main` recorded in §1 were performed only at the user's explicit reque
 §8k/§8l/§8m declarative-provider (`cli`/`rest` work-items + `rest`
 change-requests) slices are committed as `0ac57a5` and merged to `main`
 (`07b90f6`); the §8n step-2.5a/2.5b primitives are committed as `214d3ee` and
-merged to `main` (`3199cad`); the §8o `cli` change-request provider is in the
-working tree, not yet committed.** — see §1.
+merged to `main` (`3199cad`); the §8o `cli` change-request provider is committed
+as `a6c49a2` and merged to `main` (`d5f2588`). The working tree is clean.** — see §1.
