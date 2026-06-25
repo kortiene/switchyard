@@ -111,8 +111,10 @@ hardcoded for security and must not be relaxed by a project pack.
 | [`PLAN.md`](./PLAN.md) | Full migration plan and the settled D1–D6 design decisions |
 | [`PARITY.md`](./PARITY.md) | Parity checklist mapping each guarantee to the test(s) that prove it |
 | [`MEMORY_STACK.md`](./MEMORY_STACK.md) | Decision record for the deferred cross-run memory feature |
-| [`docs/DESIGN-schema-overrides.md`](./docs/DESIGN-schema-overrides.md) | Design proposal for per-phase schema overrides / custom phases (not yet implemented) |
-| [`docs/DESIGN-custom-phase-control-flow.md`](./docs/DESIGN-custom-phase-control-flow.md) | Design for loop/gated custom phases (custom gates + resolve-style loops) |
-| [`docs/DESIGN-provider-plugins.md`](./docs/DESIGN-provider-plugins.md) | Security/sandboxing design pass for provider plugin loading (proposal; not implemented) |
+| [`docs/DESIGN-schema-overrides.md`](./docs/DESIGN-schema-overrides.md) | Design + rollout for per-phase schema overrides / custom phases (implemented) |
+| [`docs/DESIGN-custom-phase-control-flow.md`](./docs/DESIGN-custom-phase-control-flow.md) | Design for loop/gated custom phases (custom gates + resolve-style loops; implemented) |
+| [`docs/DESIGN-provider-plugins.md`](./docs/DESIGN-provider-plugins.md) | Security/sandboxing design pass for provider plugin loading (registry + declarative `cli`/`rest` providers implemented; out-of-process code plugins deferred) |
+| [`docs/DESIGN-declarative-providers.md`](./docs/DESIGN-declarative-providers.md) | Declarative `cli`/`rest` work-item and change-request providers (implemented) |
+| [`docs/DESIGN-declarative-providers-extensions.md`](./docs/DESIGN-declarative-providers-extensions.md) | Declarative primitives — transforms + pagination (implemented); token refresh (deferred) |
 | [`HANDOVER.md`](./HANDOVER.md) | Session-to-session universalization handover and roadmap |
 | [`docs/examples/`](./docs/examples/) | Example non-HealthTech project packs |

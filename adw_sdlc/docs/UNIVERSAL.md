@@ -42,6 +42,9 @@ Built-in providers:
 
 - **GitHub** (via `gh`) for work items and change requests
 - **Git** for VCS
+- **Declarative `cli` and `rest`** work-item *and* change-request providers — a
+  non-GitHub forge backed by command templates or host-allowlisted HTTP, as data
+  (no code). See the "Declarative …" sections below.
 
 These are selected through `.adw/config.json`:
 
@@ -84,11 +87,18 @@ This keeps `config.ts` ⇄ `providers.ts` acyclic and means the secret boundary 
 never weakened to add provider coverage: the registry only maps a name to an
 **in-tree, reviewed** factory — it does not load project-supplied code.
 `supportedProviderTypes()` reports the registered kinds per role. Built-in kinds
-today: `github` (cli / workItems / changeRequests), `git` (vcs), and `cli` (a
-declarative work-item provider, below). The staged path for genuinely external
-providers (a declarative `rest`/`cli` driver, then an out-of-process plugin
-broker) is designed in `docs/DESIGN-provider-plugins.md`; in-process loading of
-config-supplied code is a rejected non-goal there.
+today:
+
+- **cli** (ProviderCli): `github`
+- **workItems**: `github`, `cli`, `rest`
+- **vcs**: `git`
+- **changeRequests**: `github`, `cli`, `rest`
+
+The declarative `cli`/`rest` drivers (work items and change requests, documented
+below) are implemented and registered. The only remaining staged step for
+genuinely external providers is an **out-of-process plugin broker** (designed in
+`docs/DESIGN-provider-plugins.md`, demand-gated and not built); in-process loading
+of config-supplied code is a rejected non-goal there.
 
 ### Declarative `cli` work items (no code)
 

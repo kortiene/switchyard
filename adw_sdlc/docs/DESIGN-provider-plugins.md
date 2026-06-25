@@ -14,15 +14,17 @@ Rollout progress against §5:
   shape-validates the `type` string while the registry owns membership and
   fails closed with a loud `AdwError`. Pure kernel work, no new dependency, no
   code-loading surface — behavior-preserving for the `github`/`git` built-ins.
-- **Step 2 — declarative `rest`/`cli` driver (Option B): in progress.** Concrete
+- **Step 2 — declarative `rest`/`cli` driver (Option B): ✅ DONE.** Concrete
   design in `docs/DESIGN-declarative-providers.md` (descriptor schema, a
   dependency-free response-mapping mini-language, the one-named-credential
   boundary via `safeSubprocessEnv`, a per-provider host allowlist, and a
   kernel-owned synchronous fetch helper; resolves the four §8 open questions).
-  **Sub-steps 2a (`cli`) + 2b (`rest`) work-item providers and 2c (`rest`
-  change-requests) are landed** (`HANDOVER.md` §8k, §8l, §8m). Step 2 is
-  complete for work items and change requests; a `cli` change-request provider
-  is an optional symmetric follow-up.
+  **All sub-steps landed**: 2a (`cli`) + 2b (`rest`) work-item providers and 2c
+  (`rest`) change-requests (`HANDOVER.md` §8k, §8l, §8m), the `cli`
+  change-request provider (`HANDOVER.md` §8o), and the step-2.5 primitives —
+  transforms + pagination (`HANDOVER.md` §8n). Step 2 is complete for work items
+  and change requests across **both** `cli` and `rest`; only step-2.5c token
+  refresh remains deferred.
 - **Step 3 — out-of-process plugin (Option C): scoped, demand-gated, NOT built.**
   Scoping in `docs/DESIGN-provider-plugins-out-of-process.md`. Recommendation:
   do not build it yet — step 2 covers the realistic provider space, and a code
@@ -52,10 +54,12 @@ Let a project register its own `WorkItemProvider` / `ChangeRequestProvider` /
 items, Linear, a Phabricator/Gerrit change-request flow — **without forking the
 kernel**, by pointing `.adw/config.json` at a project-supplied module.
 
-Today `createProvidersFromConfig` (`providers.ts:207`) is a closed switch over
-`type: 'github' | 'git'`; adding a provider means editing that switch in-tree.
-The plugin goal is to make the switch open: `type: 'plugin'` + a module path the
-kernel imports at runtime.
+`createProvidersFromConfig` (`providers.ts`) was originally a closed switch over
+`type: 'github' | 'git'`; step 1 (§5) has since opened it into a fail-closed
+per-role **registry** of in-tree factories (now also `cli`/`rest`). The remaining
+plugin goal is the one piece a registry cannot give: loading a *project-supplied*
+provider — `type: 'plugin'` + a module path — without an in-tree edit. That code
+path is the demand-gated, still-unbuilt step 3.
 
 ## 2. Why this is a hard stop, not a slice
 

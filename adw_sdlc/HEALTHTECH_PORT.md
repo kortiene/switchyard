@@ -42,7 +42,7 @@ The **cross-language state contract** is preserved at `../adw/state.schema.json`
 ## Status
 
 - `npm install && npm run typecheck` → clean.
-- `npm test` → **343 tests pass** (27 files).
+- `npm test` → **450 tests pass** (32 files).
 - `npm run lint:env` → secret-withholding lint gate passes.
 
 ## Usage
