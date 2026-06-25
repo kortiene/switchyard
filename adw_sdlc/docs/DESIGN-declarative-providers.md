@@ -2,7 +2,12 @@
 
 **Status:** sub-steps **2a (`cli`), 2b (`rest` work items), and 2c (`rest`
 change-requests) implemented** (`HANDOVER.md` §8k, §8l, §8m); step 2 (declarative
-driver) is complete for work items and change requests over `cli`/`rest`. This is the concrete design
+driver) is complete for work items and change requests over `cli`/`rest`. The
+**recommended next build is step 2.5** — bounded declarative primitives
+(transforms, pagination, token refresh) spec'd in
+`docs/DESIGN-declarative-providers-extensions.md` — preferred over the
+out-of-process code plugins of step 3 (`docs/DESIGN-provider-plugins-out-of-process.md`).
+This is the concrete design
 for **step 2** of the staged provider-extensibility rollout in
 `DESIGN-provider-plugins.md` §5 ("ship the declarative `rest`/`cli` driver,
 Option B"). Step 1 — the fail-closed provider registry — shipped earlier
