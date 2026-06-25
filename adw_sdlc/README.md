@@ -74,11 +74,12 @@ The validated surface (see `src/config.ts` for the authoritative Zod schema):
 | `prompts` | template `defaultRoot` + per-runner roots |
 | `phases` | optional ordered agent-phase chain (reorder/drop known phases) |
 | `schemas` | optional per-phase JSON Schema overrides for `tests`/`e2e`/`document` (`root` dir + `overrides` map) |
-| `customPhases` | optional new plain phase names (each needs a `<name>.md` template + `.adw/schemas/<name>.json`) |
+| `customPhases` | optional new phase names (each needs a `<name>.md` template + `.adw/schemas/<name>.json`); may opt into a `gates.custom` gate and/or a `loops` loop |
+| `loops` | optional resolve-style loops for custom phases (`{ command, maxAttempts }`); the schema must declare `resolved` |
 | `providers` | work-item / VCS / change-request / CLI provider selection, plus `closedStates`, `inProgressStatus`, and an optional terminal `doneStatus` |
 | `progress` | the progress-comment tag |
 | `branching` | branch prefix, label→prefix map, slug rules |
-| `gates` | `e2e` and `documentation` conditional-gate hints / file rules |
+| `gates` | `e2e` / `documentation` conditional-gate hints / file rules, plus `custom` per-custom-phase gates |
 | `models` | classify model, default tier, per-phase tiers, tier→runner→model map |
 | `commands` | default test command and pre-merge finalize gates |
 
@@ -111,5 +112,6 @@ hardcoded for security and must not be relaxed by a project pack.
 | [`PARITY.md`](./PARITY.md) | Parity checklist mapping each guarantee to the test(s) that prove it |
 | [`MEMORY_STACK.md`](./MEMORY_STACK.md) | Decision record for the deferred cross-run memory feature |
 | [`docs/DESIGN-schema-overrides.md`](./docs/DESIGN-schema-overrides.md) | Design proposal for per-phase schema overrides / custom phases (not yet implemented) |
+| [`docs/DESIGN-custom-phase-control-flow.md`](./docs/DESIGN-custom-phase-control-flow.md) | Design for loop/gated custom phases (custom gates + resolve-style loops) |
 | [`HANDOVER.md`](./HANDOVER.md) | Session-to-session universalization handover and roadmap |
 | [`docs/examples/`](./docs/examples/) | Example non-HealthTech project packs |

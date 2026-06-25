@@ -45,8 +45,8 @@ import { deriveBranch, fetchIssue, setStatus, type WorkItemContext } from './wor
 import {
   commitMessagePath,
   composePhasePrompt,
-  CONDITIONAL_PHASES,
   gateConditional,
+  isConditionalPhase,
   parsePhases,
   prBodyPath,
   validatePhaseChain,
@@ -413,11 +413,14 @@ function recordUsage(state: AdwState, usage: PhaseUsage): void {
 export async function resolveLoop(
   state: AdwState,
   agent: AgentCtx,
-  config: { testCmd: string; maxAttempts: number; progress: ProgressFn },
+  config: { testCmd: string; maxAttempts: number; progress: ProgressFn; phase?: string },
   deps: OrchestratorDeps,
 ): Promise<boolean> {
+  // Built-in resolve passes no `phase`; a custom loop phase passes its own name
+  // so the loop drives that phase's agent and tags progress under it.
+  const phase = config.phase ?? 'resolve';
   if (config.testCmd.trim() === '') {
-    config.progress('resolve', 'no test command configured; skipping test gate');
+    config.progress(phase, 'no test command configured; skipping test gate');
     return true;
   }
   const gate = shellSplit(config.testCmd);
@@ -425,19 +428,22 @@ export async function resolveLoop(
   for (;;) {
     const { rc, output } = deps.runCmd(gate);
     if (rc === 0) {
-      config.progress('resolve', 'test gate is green');
+      config.progress(phase, 'test gate is green');
       return true;
     }
     if (attempt >= config.maxAttempts) {
-      config.progress('resolve', `test gate still failing after ${config.maxAttempts} attempt(s)`);
+      config.progress(phase, `test gate still failing after ${config.maxAttempts} attempt(s)`);
       return false;
     }
     attempt += 1;
-    config.progress('resolve', `test gate failed; resolve attempt ${attempt}/${config.maxAttempts}`);
-    const outcome = await invokeAgent(deps, 'resolve', [truncate(output)], state, agent);
+    config.progress(phase, `test gate failed; ${phase} attempt ${attempt}/${config.maxAttempts}`);
+    // Cast: a custom loop name flows to runAgentPhase at runtime (resolving its
+    // own template/schema); typing it as 'resolve' here gives `data.resolved`,
+    // which the custom schema is validated to declare (validatePhaseChain).
+    const outcome = await invokeAgent(deps, phase as 'resolve', [truncate(output)], state, agent);
     recordUsage(state, outcome.usage);
     if (outcome.data.resolved === 0) {
-      config.progress('resolve', 'agent resolved nothing; stopping');
+      config.progress(phase, 'agent resolved nothing; stopping');
       return false;
     }
   }
@@ -1116,8 +1122,8 @@ export async function run(
         continue;
       }
 
-      if (CONDITIONAL_PHASES.has(phase)) {
-        const { runIt, reason } = gateConditional(phase, signal, files);
+      if (isConditionalPhase(phase, config)) {
+        const { runIt, reason } = gateConditional(phase, signal, files, config);
         if (!runIt) {
           progress(phase, `skipped: ${reason}`);
           state.markDone(phase);
@@ -1126,11 +1132,17 @@ export async function run(
         }
       }
 
-      if (phase === 'resolve') {
+      // Built-in resolve loop, or a custom phase configured as a resolve-style
+      // loop (config.loops). A custom loop targets its own agent/command; the
+      // built-in passes no `phase`, so resolve is unchanged.
+      const customLoop = config.loops[phase];
+      if (phase === 'resolve' || customLoop !== undefined) {
         await resolveLoop(
           state,
           agent,
-          { testCmd: opts.testCmd, maxAttempts: opts.maxResolve, progress },
+          customLoop !== undefined
+            ? { testCmd: customLoop.command, maxAttempts: customLoop.maxAttempts, progress, phase }
+            : { testCmd: opts.testCmd, maxAttempts: opts.maxResolve, progress },
           deps,
         );
         state.markDone(phase);

@@ -87,6 +87,29 @@ describe('ADW config', () => {
     expect(() => parseAdwConfig({ phases: [''] })).toThrow(/invalid/);
   });
 
+  it('accepts optional custom gates and loops, defaulting empty', () => {
+    // Absent by default — no custom control flow for the committed config.
+    const d = parseAdwConfig({});
+    expect(d.gates.custom).toEqual({});
+    expect(d.loops).toEqual({});
+    // Provided entries fill their own defaults (gate matchers empty, loop maxAttempts 3).
+    const c = parseAdwConfig({
+      customPhases: ['audit', 'verify'],
+      gates: { custom: { audit: { hints: ['payment'] } } },
+      loops: { verify: { command: 'npm run verify' } },
+    });
+    expect(c.gates.custom['audit']).toEqual({
+      hints: ['payment'],
+      exactFiles: [],
+      pathPrefixes: [],
+      fileExtensions: [],
+    });
+    expect(c.loops['verify']).toEqual({ command: 'npm run verify', maxAttempts: 3 });
+    // Shape failures: a blank loop command, or a non-positive maxAttempts.
+    expect(() => parseAdwConfig({ loops: { verify: { command: '' } } })).toThrow(/invalid/);
+    expect(() => parseAdwConfig({ loops: { verify: { command: 'x', maxAttempts: 0 } } })).toThrow(/invalid/);
+  });
+
   it('lets projects state the built-in provider selections explicitly', () => {
     const config = parseAdwConfig({
       providers: {

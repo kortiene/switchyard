@@ -203,7 +203,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 378 tests, 30 files)
+# 3) Full test suite (current: 391 tests, 31 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -416,6 +416,44 @@ byte-identical). Proven end-to-end through the real CLI: a dry-run with an unwir
 custom phase fails with `phase "audit" is missing its prompt template: …`, and a
 fully-wired one shows `… implement -> audit -> review …` in the plan.
 
+## 8i. Follow-up session — loop/gated custom phases (§11 candidate)
+
+The deferred remainder of capability B: a registered custom phase may now opt
+into a conditional gate or a resolve-style loop. Design doc:
+`docs/DESIGN-custom-phase-control-flow.md`.
+
+- `adw_sdlc/src/config.ts` — optional `gates.custom` (record → gate predicate,
+  same shape as the `documentation` gate) and top-level `loops` (record →
+  `{ command, maxAttempts=3 }`), both defaulting to `{}`. Default config carries
+  the empty maps; existing configs are unaffected.
+- `adw_sdlc/src/phases.ts` — `gateCustom` (factored from `gateDocument`'s
+  matching) + `CustomGateRule`; `gateConditional` dispatches `e2e`/`document`/
+  custom; `isConditionalPhase(phase, config)`; `validatePhaseChain` extended:
+  control-flow keys must target a registered custom phase (built-in/unregistered
+  rejected, key check runs first for precise messages), a custom gate needs ≥1
+  matcher, and a custom loop phase's schema must declare `resolved`.
+- `adw_sdlc/src/orchestrator.ts` — `resolveLoop`'s config gains an optional
+  `phase` (default `'resolve'`), used for its progress tags and to pick which
+  agent to invoke (one documented `phase as 'resolve'` cast carries a custom name
+  through, reading the `resolved` field the schema is validated to declare); the
+  gate check uses `isConditionalPhase` + passes `config`; the loop dispatch runs
+  the generalized loop for `loops[phase]` custom phases. Built-in `resolve`/gates
+  pass no new params → byte-for-byte unchanged.
+- Docs: `docs/UNIVERSAL.md` (new "Custom-phase control flow" section), README
+  config table + doc map.
+- Tests: `test/custom-phase-control-flow.test.ts` (new, +9 — gate matching/
+  dispatch, `isConditionalPhase`, and the four startup-validation rejections),
+  `test/config.test.ts` (+1 — gates.custom/loops parsing + shape failures),
+  `test/orchestrator.test.ts` (+3 — `resolveLoop` phase override, a gated phase
+  skipping/running by signal, a looped phase red→green).
+
+Proven end-to-end through the real CLI: a loop on a built-in fails with
+`custom loop for "tests" is not allowed: built-in phases own their control flow`;
+a custom loop phase whose schema omits `resolved` fails loudly; a fully-wired
+gated+looped custom phase shows `… implement -> verify -> review …` in the plan.
+Loop/gated custom phases are no longer a non-goal. Still out of scope:
+`patch`-style findings loops and overriding `classify`.
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -560,18 +598,23 @@ security/sandboxing design pass, not an autonomous continuation slice. New
 candidate slices identified while landing #2 (none on the original list, all
 optional):
 
-- **Loop/gated custom phases** — the deferred remainder of capability B; let a
-  custom phase opt into a resolve-style loop or a conditional gate. Needs a
-  config surface for the gate/loop predicate. (Still open.)
+- **Loop/gated custom phases** — ✅ DONE (this session, §8i). A registered custom
+  phase may opt into a conditional gate (`gates.custom.<phase>`) and/or a
+  resolve-style loop (`loops.<phase>`), reusing the `gateDocument` matching and
+  the generalized `resolveLoop`. Built-in control flow is unchanged.
+  `docs/DESIGN-custom-phase-control-flow.md`. Still out of scope: `patch`-style
+  findings loops and overriding `classify`.
 - **Custom-phase startup validation** — ✅ DONE (this session, §8h). The whole
   resolved chain is preflighted at run start via `validatePhaseChain`
   (template resolves + `resolvePhaseSchema` loads), so a missing `<name>.md`
   template, missing `.adw/schemas/<name>.json` schema, or broken/unsupported
   override fails loudly before any side effects; a `--dry-run` runs the same
   check.
-- **Security design doc for #4** — draft the threat model + sandboxing options
-  for provider *code* loading (the way `DESIGN-schema-overrides.md` was drafted
-  before implementing), without implementing. (Still open.)
+- **Security design doc for #4** — ✅ DONE (this session; on sibling branch
+  `docs/provider-plugin-security`). `docs/DESIGN-provider-plugins.md` drafts the
+  threat model + four isolation options for provider *code* loading and
+  recommends declarative providers + an out-of-process broker over any
+  in-process `import`. No implementation; #4 itself remains a §10 hard stop.
 
 ## 12. How to resume in a new session
 
@@ -585,10 +628,10 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **378 passing across 30 files**
+Test count baseline after this session: **391 passing across 31 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
-for custom-phase startup validation). The session left no build artifact, no
-temporary files, and no untracked binary churn. The orchestrator did not run
-any `git` or `gh` commands.
+for custom-phase startup validation, +13 for loop/gated custom phases). The
+session left no build artifact, no temporary files, and no untracked binary
+churn. The orchestrator did not run any `git` or `gh` commands.

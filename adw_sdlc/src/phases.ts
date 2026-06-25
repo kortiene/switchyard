@@ -142,6 +142,10 @@ export function validatePhaseChain(
   runner: string,
   config: AdwConfig = getAdwConfig(),
 ): void {
+  // Validate control-flow config keys first, so a loop/gate on a built-in name
+  // gets the precise "built-in phases own their control flow" message rather
+  // than tripping the per-phase resolved-field check below.
+  validateControlFlowKeys(config);
   for (const phase of phases) {
     // A custom phase has no TEMPLATE entry; its basename defaults to its own
     // name (mirrors composePhasePrompt).
@@ -153,7 +157,47 @@ export function validatePhaseChain(
     // Resolving the handle compiles an override/custom schema eagerly, so a
     // missing custom schema, a broken/unsupported override, or an unknown name
     // throws here rather than when the phase first runs.
-    resolvePhaseSchema(phase, config);
+    const handle = resolvePhaseSchema(phase, config);
+    // A custom loop phase reads `outcome.data.resolved` to detect no-progress,
+    // so its result schema must declare `resolved`.
+    if (config.loops[phase] !== undefined && !handle.requiredKeys().includes('resolved')) {
+      throw new AdwError(
+        `custom loop phase "${phase}" must declare "resolved" in its result schema ` +
+          `(.adw/schemas/${phase}.json); the loop reads it to detect no-progress`,
+      );
+    }
+  }
+}
+
+/**
+ * Control-flow config (`gates.custom` / `loops`) may only target a registered
+ * custom phase — never a built-in (whose control flow the kernel owns) and never
+ * an unregistered name (a typo). A custom gate must also have at least one
+ * matcher, else its phase could never run. Fails loudly at startup.
+ */
+function validateControlFlowKeys(config: AdwConfig): void {
+  const builtins = new Set<string>(AGENT_PHASES);
+  const custom = new Set(config.customPhases ?? []);
+  const entries: ReadonlyArray<[string, 'gate' | 'loop']> = [
+    ...Object.keys(config.gates.custom).map((n): [string, 'gate' | 'loop'] => [n, 'gate']),
+    ...Object.keys(config.loops).map((n): [string, 'gate' | 'loop'] => [n, 'loop']),
+  ];
+  for (const [name, kind] of entries) {
+    if (builtins.has(name)) {
+      throw new AdwError(`custom ${kind} for "${name}" is not allowed: built-in phases own their control flow`);
+    }
+    if (!custom.has(name)) {
+      throw new AdwError(
+        `custom ${kind} for "${name}" names an unregistered phase; add it to config.customPhases`,
+      );
+    }
+  }
+  for (const [name, rule] of Object.entries(config.gates.custom)) {
+    if (rule.hints.length + rule.exactFiles.length + rule.pathPrefixes.length + rule.fileExtensions.length === 0) {
+      throw new AdwError(
+        `custom gate for "${name}" has no matchers (hints/exactFiles/pathPrefixes/fileExtensions); it could never run`,
+      );
+    }
   }
 }
 
@@ -240,6 +284,40 @@ export function gateDocument(
   return { runIt: false, reason: 'internal-only change; no docs update needed' };
 }
 
+/** A project-supplied conditional-gate predicate for a custom phase. */
+export type CustomGateRule = AdwConfig['gates']['custom'][string];
+
+/**
+ * Decide a custom phase's gate: run when the change signal matches any hint
+ * (whole-word) OR a changed file matches any file rule — the same matching as
+ * the built-in `document` gate, with project-supplied lists.
+ */
+export function gateCustom(
+  rule: CustomGateRule,
+  signal: string,
+  changedFiles: readonly string[] = [],
+): GateDecision {
+  const fileMatch = changedFiles.some(
+    (f) =>
+      rule.exactFiles.includes(f) ||
+      rule.pathPrefixes.some((prefix) => f.startsWith(prefix)) ||
+      rule.fileExtensions.some((ext) => f.endsWith(ext)),
+  );
+  if (fileMatch) {
+    return { runIt: true, reason: 'matched a configured changed-file rule' };
+  }
+  const hit = hintIn((signal || '').toLowerCase(), rule.hints);
+  if (hit !== null) {
+    return { runIt: true, reason: `change signal matched a configured hint (${hit})` };
+  }
+  return { runIt: false, reason: 'no configured signal/file match' };
+}
+
+/** True when `phase` runs behind a conditional gate (built-in e2e/document or a custom gate). */
+export function isConditionalPhase(phase: string, config: AdwConfig = getAdwConfig()): boolean {
+  return CONDITIONAL_PHASES.has(phase) || config.gates.custom[phase] !== undefined;
+}
+
 /**
  * Decide a conditional phase via its gate. Throws AdwError for any
  * non-conditional phase so a miswired caller fails loudly instead of
@@ -256,6 +334,10 @@ export function gateConditional(
   }
   if (phase === 'document') {
     return gateDocument(signal, changedFiles, config);
+  }
+  const custom = config.gates.custom[phase];
+  if (custom !== undefined) {
+    return gateCustom(custom, signal, changedFiles);
   }
   throw new AdwError(`not a conditional phase: ${phase}`);
 }

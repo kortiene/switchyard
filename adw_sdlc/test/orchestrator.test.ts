@@ -215,6 +215,26 @@ describe('resolveLoop', () => {
     expect(ok).toBe(false);
   });
 
+  it('drives a custom phase agent (and reads its resolved) when given a phase override', async () => {
+    const runCmd = vi
+      .fn()
+      .mockReturnValueOnce({ rc: 1, output: 'fail' })
+      .mockReturnValueOnce({ rc: 0, output: '' });
+    const calls: string[] = [];
+    const deps = testDeps({
+      runCmd,
+      runAgentPhase: agentStub({ verify: { resolved: 1, remaining: 0 } }, (o) => calls.push(o.phase)),
+    });
+    const ok = await resolveLoop(
+      state5(),
+      agentCtx(createMockRunner()),
+      { testCmd: 'npm run verify', maxAttempts: 3, progress: noop, phase: 'verify' },
+      deps,
+    );
+    expect(ok).toBe(true);
+    expect(calls).toEqual(['verify']); // the custom phase's agent, not 'resolve'
+  });
+
   it('caps attempts (initial gate + one per resolve)', async () => {
     const runCmd = vi.fn(() => ({ rc: 1, output: 'fail' }));
     let agentCalls = 0;
@@ -478,6 +498,84 @@ describe('run() integration', () => {
     // classify runs on the shared SDK path; plan/implement/audit through the runner.
     expect(order).toEqual(['plan', 'implement', 'audit']);
     expect(AdwState.load(loadedId())?.completedPhases).toContain('audit');
+  });
+
+  /** Wire a custom phase's template (claude runner root) + schema for run() tests. */
+  function customPhaseDirs(name: string, schema: Record<string, unknown>): { promptDir: string; schemaDir: string } {
+    const promptDir = mkdtempSync(join(tmpdir(), 'adw-cf-prompt-'));
+    writeFileSync(join(promptDir, `${name}.md`), `${name}: $1`, 'utf8');
+    const schemaDir = mkdtempSync(join(tmpdir(), 'adw-cf-schema-'));
+    writeFileSync(join(schemaDir, `${name}.json`), JSON.stringify(schema), 'utf8');
+    return { promptDir, schemaDir };
+  }
+
+  it('skips a gated custom phase when the change signal misses, runs it when it hits', async () => {
+    const { promptDir, schemaDir } = customPhaseDirs('audit', {
+      type: 'object',
+      properties: { summary: { type: 'string' } },
+      required: ['summary'],
+    });
+    const mkConfig = () =>
+      parseAdwConfig({
+        customPhases: ['audit'],
+        phases: ['classify', 'plan', 'implement', 'audit'],
+        prompts: { defaultRoot: '.pi/prompts', runnerRoots: { claude: promptDir } },
+        schemas: { root: schemaDir },
+        gates: { custom: { audit: { hints: ['payment'] } } },
+      });
+
+    // (1) signal misses → audit gated out (recorded done, agent never called).
+    setAdwConfigForTests(mkConfig());
+    const missOrder: string[] = [];
+    const rcMiss = await run(5, createMockRunner(), { yes: true, noProgress: true }, testDeps({
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
+      fetchIssue: () => ({ title: 'unrelated change', body: 'b', labels: [] }),
+      runAgentPhase: agentStub({ ...PHASE_RESULTS, audit: { summary: 'x' } }, (o) => missOrder.push(o.phase)),
+    }));
+    expect(rcMiss).toBe(0);
+    expect(missOrder).not.toContain('audit');
+    expect(AdwState.load(loadedId())?.completedPhases).toContain('audit'); // recorded as skipped
+
+    // (2) signal hits ("payment" in the title) → audit runs. (loadedId() above
+    // already asserted exactly one run dir before this second run is minted.)
+    setAdwConfigForTests(mkConfig());
+    const hitOrder: string[] = [];
+    const rcHit = await run(7, createMockRunner(), { yes: true, noProgress: true }, testDeps({
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
+      fetchIssue: () => ({ title: 'payment flow update', body: 'b', labels: [] }),
+      runAgentPhase: agentStub({ ...PHASE_RESULTS, audit: { summary: 'x' } }, (o) => hitOrder.push(o.phase)),
+    }));
+    expect(rcHit).toBe(0);
+    expect(hitOrder).toContain('audit');
+  });
+
+  it('runs a looped custom phase: red command then green', async () => {
+    const { promptDir, schemaDir } = customPhaseDirs('verify', {
+      type: 'object',
+      properties: { resolved: { type: 'integer' }, remaining: { type: 'integer' } },
+      required: ['resolved'],
+    });
+    setAdwConfigForTests(
+      parseAdwConfig({
+        customPhases: ['verify'],
+        phases: ['classify', 'plan', 'implement', 'verify'],
+        prompts: { defaultRoot: '.pi/prompts', runnerRoots: { claude: promptDir } },
+        schemas: { root: schemaDir },
+        loops: { verify: { command: 'npm run verify', maxAttempts: 3 } },
+      }),
+    );
+    // First run of the verify command fails, the agent "fixes", the rerun is green.
+    const runCmd = vi.fn().mockReturnValueOnce({ rc: 1, output: 'verify failed' }).mockReturnValue({ rc: 0, output: '' });
+    const order: string[] = [];
+    const rc = await run(5, createMockRunner(), { yes: true, noProgress: true }, testDeps({
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
+      runCmd,
+      runAgentPhase: agentStub({ ...PHASE_RESULTS, verify: { resolved: 1, remaining: 0 } }, (o) => order.push(o.phase)),
+    }));
+    expect(rc).toBe(0);
+    expect(order).toContain('verify'); // the loop invoked the verify agent to fix the red command
+    expect(runCmd).toHaveBeenCalledWith(['npm', 'run', 'verify']);
+    expect(AdwState.load(loadedId())?.completedPhases).toContain('verify');
   });
 
   it('uses first-class providers when supplied, not the legacy provider-shaped seams', async () => {

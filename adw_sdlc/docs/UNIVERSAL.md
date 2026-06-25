@@ -124,11 +124,12 @@ gate) and place them in the `phases` chain:
 
 Each custom phase needs a prompt template at `<name>.md` (under the prompt
 roots) and a result schema at `.adw/schemas/<name>.json`; its model tier comes
-from `models.phaseTiers[<name>]` (else the default tier). It runs as a plain
-sequential agent phase — its result is recorded but the kernel never branches
-on it. A name colliding with a built-in phase, or a chain entry that is neither
-built-in nor registered, is rejected loudly. Loop/gated custom phases and
-overriding `classify` remain out of scope (see `DESIGN-schema-overrides.md`).
+from `models.phaseTiers[<name>]` (else the default tier). By default it runs as a
+plain sequential agent phase — its result is recorded but the kernel never
+branches on it — unless it opts into a gate or loop (below). A name colliding
+with a built-in phase, or a chain entry that is neither built-in nor registered,
+is rejected loudly. Overriding `classify` remains out of scope (see
+`DESIGN-schema-overrides.md`).
 
 The whole resolved chain is preflighted at run start: every phase must have a
 prompt template that resolves and a result schema that loads, so a custom phase
@@ -136,6 +137,42 @@ missing its `<name>.md` template or `.adw/schemas/<name>.json` schema (or a
 broken/unsupported schema override) fails loudly up front — before any branch,
 PR, or state is created — rather than mid-chain. A `--dry-run` runs the same
 preflight, so it doubles as a config check.
+
+## Custom-phase control flow (gates and loops)
+
+A registered custom phase may opt into the two control-flow shapes that
+generalize cleanly from the built-ins (see `DESIGN-custom-phase-control-flow.md`):
+
+```json
+"customPhases": ["audit", "verify"],
+"phases": ["classify", "plan", "implement", "audit", "verify", "review"],
+"gates": {
+  "custom": {
+    "audit": { "hints": ["auth", "payment"], "pathPrefixes": ["src/billing/"] }
+  }
+},
+"loops": {
+  "verify": { "command": "npm run verify", "maxAttempts": 3 }
+}
+```
+
+- A **custom gate** (`gates.custom.<phase>`) runs the phase only when the change
+  signal matches a `hints` word **or** a changed file matches an
+  `exactFiles`/`pathPrefixes`/`fileExtensions` rule — the same matching as the
+  built-in `document` gate. An empty predicate (the phase could never run) is
+  rejected at startup.
+- A **custom loop** (`loops.<phase>`) is resolve-style: the orchestrator runs
+  `command`; a non-zero exit invokes the phase's agent (with the command output)
+  to fix it and retries up to `maxAttempts` (default 3), stopping early if the
+  agent reports `resolved: 0`. The loop command is run by the orchestrator with
+  its own environment — the agent still receives no secrets — exactly like the
+  built-in `--test-cmd` gate. The phase's result schema must declare `resolved`.
+
+Both compose (a phase may be gated *and* looped). Control-flow config may target
+**only** a registered custom phase: an entry on a built-in name (whose control
+flow the kernel owns) or an unregistered name is rejected at startup. Built-in
+`resolve`/`patch` loops and `e2e`/`document` gates are unchanged and keep their
+own knobs (`--test-cmd`/`maxResolve`, `gates.e2e`/`gates.documentation`).
 
 ## Provider-neutral public types
 

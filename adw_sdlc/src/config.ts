@@ -27,6 +27,31 @@ const RunnerModelMapSchema = z
   })
   .catchall(z.string().min(1));
 
+/**
+ * A conditional-gate predicate for a custom phase: the phase runs when the
+ * change signal matches any `hints` (whole-word) OR a changed file matches any
+ * of the file rules — the same matching as the built-in `documentation` gate.
+ * All lists default empty; an entirely empty predicate is rejected at startup
+ * (the phase could never run). Only custom phases may carry one.
+ */
+const CustomGateSchema = z.object({
+  hints: z.array(z.string().min(1)).default([]),
+  exactFiles: z.array(z.string().min(1)).default([]),
+  pathPrefixes: z.array(z.string().min(1)).default([]),
+  fileExtensions: z.array(z.string().min(1)).default([]),
+});
+
+/**
+ * A resolve-style loop for a custom phase: the orchestrator runs `command`;
+ * a non-zero exit invokes the phase's agent to fix it and retries up to
+ * `maxAttempts`. The phase's result schema must declare `resolved` (checked at
+ * startup). Only custom phases may carry one.
+ */
+const CustomLoopSchema = z.object({
+  command: z.string().min(1),
+  maxAttempts: z.number().int().positive().default(3),
+});
+
 export const AdwConfigSchema = z.object({
   version: z.literal(1),
   project: z.object({
@@ -74,6 +99,14 @@ export const AdwConfigSchema = z.object({
    * built-in phase is rejected. See docs/DESIGN-schema-overrides.md (capability B).
    */
   customPhases: z.array(z.string().min(1)).optional(),
+  /**
+   * Resolve-style loops for custom phases (see
+   * docs/DESIGN-custom-phase-control-flow.md). Keyed by a registered custom
+   * phase name. Optional; default empty (no custom loops). A key naming a
+   * built-in or unregistered phase is rejected at startup, as is a loop phase
+   * whose result schema omits `resolved`.
+   */
+  loops: z.record(z.string(), CustomLoopSchema).default({}),
   providers: z.object({
     cli: z.object({ type: z.literal('github') }),
     workItems: z.object({
@@ -121,6 +154,13 @@ export const AdwConfigSchema = z.object({
       pathPrefixes: z.array(z.string().min(1)),
       fileExtensions: z.array(z.string().min(1)),
     }),
+    /**
+     * Per-custom-phase conditional gates (see
+     * docs/DESIGN-custom-phase-control-flow.md). Keyed by a registered custom
+     * phase name. Optional; default empty. A key naming a built-in or
+     * unregistered phase, or a predicate with no matchers, is rejected at startup.
+     */
+    custom: z.record(z.string(), CustomGateSchema).default({}),
   }),
   models: z.object({
     classifyModel: z.string().min(1),
@@ -235,7 +275,9 @@ export const DEFAULT_ADW_CONFIG: AdwConfig = {
       pathPrefixes: ['docs/', 'wiki/'],
       fileExtensions: ['.md'],
     },
+    custom: {},
   },
+  loops: {},
   models: {
     classifyModel: 'claude-haiku-4-5',
     defaultTier: 'mid',
