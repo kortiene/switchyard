@@ -6,7 +6,18 @@ import {
 	type ExtensionContext,
 	getSelectListTheme,
 } from "@earendil-works/pi-coding-agent";
-import { Container, type SelectItem, SelectList, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	type AutocompleteItem,
+	type AutocompleteProvider,
+	type AutocompleteSuggestions,
+	Container,
+	fuzzyFilter,
+	type SelectItem,
+	SelectList,
+	Text,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -314,7 +325,7 @@ const CONFIG_DOCS = {
 	universal: "adw_sdlc/docs/UNIVERSAL.md",
 } as const;
 
-interface ConfigSection {
+interface BrowserSection {
 	id: string;
 	title: string;
 	/** Plain-text one-line summary shown in the section list. */
@@ -378,7 +389,7 @@ function renderJsonLines(theme: ThemeApi, value: unknown, indent = 0): string[] 
  * or malformed) collapses to a single readable "Status" error section so the
  * overlay still renders a clear message rather than failing.
  */
-function buildConfigSections(config: Record<string, unknown> | null, cwd: string): ConfigSection[] {
+function buildConfigSections(config: Record<string, unknown> | null, cwd: string): BrowserSection[] {
 	if (!config) {
 		return [
 			{
@@ -395,7 +406,7 @@ function buildConfigSections(config: Record<string, unknown> | null, cwd: string
 		];
 	}
 
-	const sections: ConfigSection[] = [];
+	const sections: BrowserSection[] = [];
 	const project = recordAt(config, "project");
 	sections.push({
 		id: "project",
@@ -512,8 +523,17 @@ function buildConfigSections(config: Record<string, unknown> | null, cwd: string
 	return sections;
 }
 
-/** Live master/detail config overlay. Resolves to null when closed (read-only). */
-function showConfigInspector(ctx: ExtensionContext, sections: readonly ConfigSection[]): Promise<null> {
+/**
+ * Live master/detail browser overlay (read-only) shared by /adw-config and
+ * /adw-mvp: a section list whose highlighted entry live-renders its themed
+ * detail lines. Resolves to null when closed.
+ */
+function showSectionBrowser(
+	ctx: ExtensionContext,
+	heading: string,
+	subtitle: string,
+	sections: readonly BrowserSection[],
+): Promise<null> {
 	const byId = new Map(sections.map((s) => [s.id, s]));
 	const MAX_DETAIL = 14;
 	return ctx.ui.custom<null>((tui, theme, _keybindings, done) => {
@@ -535,7 +555,7 @@ function showConfigInspector(ctx: ExtensionContext, sections: readonly ConfigSec
 			render: (width: number): string[] => {
 				const w = Math.max(20, width);
 				const out: string[] = [rule(w)];
-				out.push(`${theme.fg("accent", theme.bold("ADW CONFIG"))} ${theme.fg("dim", "\u00b7 .adw/config.json")}`);
+				out.push(`${theme.fg("accent", theme.bold(heading))} ${theme.fg("dim", subtitle)}`);
 				out.push(...list.render(w));
 				out.push(rule(w));
 				const sel = list.getSelectedItem();
@@ -545,7 +565,7 @@ function showConfigInspector(ctx: ExtensionContext, sections: readonly ConfigSec
 					const detail = section.detail(theme);
 					for (const line of detail.slice(0, MAX_DETAIL)) out.push(`  ${line}`);
 					if (detail.length > MAX_DETAIL) {
-						out.push(`  ${theme.fg("dim", `\u2026 ${detail.length - MAX_DETAIL} more \u2014 see .adw/config.json`)}`);
+						out.push(`  ${theme.fg("dim", `\u2026 ${detail.length - MAX_DETAIL} more`)}`);
 					}
 					if (section.docs.length > 0) {
 						out.push(`  ${theme.fg("dim", "docs: ")}${theme.fg("muted", section.docs.join("  "))}`);
@@ -881,11 +901,11 @@ function commandHintWidget() {
 		const cmd = (name: string, desc: string) =>
 			`${theme.fg("dim", "▸ ")}${theme.bold(theme.fg("accent", name))} ${theme.fg("dim", desc)}`;
 		const hint = [
+			cmd("/adw-menu", "palette"),
 			cmd("/adw-runs", "inspect"),
 			cmd("/adw-config", "config"),
-			cmd("/adw-dry-run <id>", "preview"),
-			cmd("/adw-check all", "validate"),
-			cmd("/adw-footer", "toggle"),
+			cmd("/adw-mvp", "readiness"),
+			cmd("/adw-run <id>", "guarded"),
 		].join(theme.fg("dim", "   "));
 		return new Text(hint, 1, 0);
 	};
@@ -1093,19 +1113,376 @@ function parseWorkItemId(args: string): string | null {
 	return /^\d+$/.test(id) ? id : null;
 }
 
+// --- Phase 5: workflow assistant --------------------------------------------
+
+/** MVP-readiness docs summarised by the /adw-mvp panel. */
+const MVP_DOCS = ["PARITY.md", "MVP-READINESS.md", "HANDOVER.md"] as const;
+
+/** Read the three MVP docs from adw_sdlc/ into browser sections (status tallies + headings). */
+function buildMvpSections(cwd: string): BrowserSection[] {
+	return MVP_DOCS.map((file) => {
+		const id = file.replace(/\.md$/, "");
+		const docPath = join(cwd, "adw_sdlc", file);
+		let text: string | null = null;
+		try {
+			text = existsSync(docPath) ? readFileSync(docPath, "utf8") : null;
+		} catch {
+			text = null;
+		}
+		if (text === null) {
+			return {
+				id,
+				title: id,
+				summary: "missing",
+				warn: true,
+				docs: [`adw_sdlc/${file}`],
+				detail: (theme) => [theme.fg("warning", `Not found: adw_sdlc/${file}`)],
+			};
+		}
+		const body = text;
+		const lines = body.split("\n");
+		const title = (lines.find((l) => l.startsWith("# ")) ?? file).replace(/^#\s*/, "");
+		const tally = (re: RegExp) => (body.match(re) ?? []).length;
+		const done = tally(/\u2705/g);
+		const owed = tally(/\u23f3/g);
+		const notStarted = tally(/\u274c/g);
+		const auto = tally(/\ud83d\udd27/g);
+		const headings = lines.filter((l) => /^##\s/.test(l)).map((l) => l.replace(/^##\s*/, "")).slice(0, 8);
+		return {
+			id,
+			title: id,
+			summary: `\u2705${done} \u23f3${owed} \u274c${notStarted}${auto ? ` \ud83d\udd27${auto}` : ""} \u00b7 ${lines.length} ln`,
+			warn: owed > 0 || notStarted > 0,
+			docs: [`adw_sdlc/${file}`],
+			detail: (theme) => [
+				`${theme.fg("dim", "title".padEnd(8))}${theme.fg("dim", ": ")}${theme.fg("text", title)}`,
+				`${theme.fg("dim", "status".padEnd(8))}${theme.fg("dim", ": ")}${theme.fg("success", `\u2705 ${done} done`)}  ${theme.fg("warning", `\u23f3 ${owed} owed`)}  ${theme.fg("error", `\u274c ${notStarted}`)}  ${theme.fg("accent", `\ud83d\udd27 ${auto}`)}`,
+				`${theme.fg("dim", "lines".padEnd(8))}${theme.fg("dim", ": ")}${theme.fg("text", String(lines.length))}`,
+				theme.fg("dim", "sections:"),
+				...headings.map((h) => `  ${theme.fg("text", h)}`),
+			],
+		};
+	});
+}
+
+// --- shared flows (callable from both a command and the /adw-menu palette) ---
+
+async function configFlow(ctx: ExtensionContext): Promise<void> {
+	// parseJsonObject returns null for a missing OR malformed file; the builder
+	// turns that into a single readable error section.
+	const config = parseJsonObject(join(ctx.cwd, ".adw", "config.json"));
+	const sections = buildConfigSections(config, ctx.cwd);
+	if (ctx.mode !== "tui") {
+		if (!config) {
+			ctx.ui.notify("No readable .adw/config.json (missing or malformed).", "warning");
+			return;
+		}
+		const warnings = sections.filter((s) => s.warn).map((s) => s.title);
+		ctx.ui.notify(
+			`ADW config: ${sections.length} sections (${sections.map((s) => s.title).join(", ")}).` +
+				`${warnings.length ? ` Warnings: ${warnings.join(", ")}.` : ""} Open in TUI to browse.`,
+			warnings.length ? "warning" : "info",
+		);
+		return;
+	}
+	await showSectionBrowser(ctx, "ADW CONFIG", "\u00b7 .adw/config.json", sections);
+}
+
+async function mvpFlow(ctx: ExtensionContext): Promise<void> {
+	const sections = buildMvpSections(ctx.cwd);
+	if (ctx.mode !== "tui") {
+		const summary = sections.map((s) => `${s.title} ${s.summary}`).join(" \u00b7 ");
+		ctx.ui.notify(`ADW MVP readiness \u2014 ${summary}. Open in TUI to browse.`, sections.some((s) => s.warn) ? "warning" : "info");
+		return;
+	}
+	await showSectionBrowser(ctx, "ADW MVP READINESS", "\u00b7 adw_sdlc/", sections);
+}
+
+async function runsFlow(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+	// Non-TUI UI modes (rpc/json/print) cannot host a custom overlay; fall back
+	// to a one-line summary notification instead of failing.
+	if (ctx.mode !== "tui") {
+		const runs = listRuns(ctx.cwd);
+		if (runs.length === 0) {
+			ctx.ui.notify("No ADW runs found under agents/", "info");
+			return;
+		}
+		const latest = runs[0]!;
+		ctx.ui.notify(
+			`ADW runs: ${runs.length}; latest ${latest.adwId}${latest.issueNumber ? ` (#${latest.issueNumber})` : ""}. Open in TUI to browse.`,
+			"info",
+		);
+		return;
+	}
+	// TUI flow: list -> detail -> (optional) insert resume command. Re-reads runs
+	// each pass so "Back to run list" reflects the latest state.
+	void pi;
+	for (;;) {
+		const runs = listRuns(ctx.cwd);
+		if (runs.length === 0) {
+			ctx.ui.notify("No ADW runs found under agents/", "info");
+			return;
+		}
+		const runId = await pickRun(ctx, runs);
+		if (!runId) return;
+		const run = runs.find((r) => r.adwId === runId);
+		if (!run) return;
+		const action = await showRunDetail(ctx, run);
+		if (action === "back") continue;
+		if (action === "insert") {
+			const cmd = resumeCommandFor(run);
+			if (!cmd) {
+				ctx.ui.notify(`Run ${run.adwId} has no recorded issue number; cannot build a resume command`, "warning");
+				return;
+			}
+			ctx.ui.setEditorText(cmd);
+			ctx.ui.notify("Resume command inserted into the editor (not executed)", "info");
+			return;
+		}
+		return;
+	}
+}
+
+// --- command cores (flag-free; callers handle widget/footer refresh) --------
+
+async function execDryRun(pi: ExtensionAPI, ctx: ExtensionContext, workItemId: string): Promise<void> {
+	const summary = await runAndRecord(pi, ctx, `dry-run #${workItemId}`, "npx", ["tsx", "src/cli.ts", workItemId, "--dry-run"], {
+		cwd: adwPackageDir(ctx),
+		timeout: 60_000,
+	});
+	notifyCommandResult(ctx, summary);
+}
+
+async function execChecks(pi: ExtensionAPI, ctx: ExtensionContext, requested: string): Promise<void> {
+	// Accept the npm-script spellings (`lint:env`, `pack:check`) as aliases.
+	const normalized = requested === "lint:env" ? "lint-env" : requested === "pack:check" ? "pack-check" : requested;
+	const names: CheckName[] = normalized === "all" ? ["typecheck", "lint-env", "pack-check", "test", "build"] : [normalized as CheckName];
+	if (names.some((name) => CHECKS[name] === undefined)) {
+		ctx.ui.notify("Usage: /adw-check typecheck|lint-env|pack-check|test|build|all", "warning");
+		return;
+	}
+	const summaries: CommandSummary[] = [];
+	for (const name of names) {
+		const check = CHECKS[name];
+		const summary = await runAndRecord(pi, ctx, check.label, check.command, check.args, {
+			cwd: adwPackageDir(ctx),
+			timeout: check.timeout,
+		});
+		summaries.push(summary);
+		if (summary.code !== 0 || summary.killed) break;
+	}
+	const failed = summaries.find((summary) => summary.code !== 0 || summary.killed);
+	if (normalized === "all") {
+		const label = failed ? `all stopped at ${failed.label}` : "all checks";
+		lastCommandSummary = {
+			label,
+			command: summaries.map((summary) => summary.command).join(" && "),
+			code: failed?.code ?? 0,
+			killed: failed?.killed ?? false,
+			durationMs: summaries.reduce((total, summary) => total + summary.durationMs, 0),
+			timestamp: Date.now(),
+			stdout: summaries.map((summary) => `# ${summary.label}\n${summary.stdout}`).join("\n"),
+			stderr: summaries.map((summary) => `# ${summary.label}\n${summary.stderr}`).join("\n"),
+		};
+		notifyCommandResult(ctx, lastCommandSummary);
+	} else if (summaries[0]) {
+		notifyCommandResult(ctx, summaries[0]);
+	}
+}
+
+/**
+ * The one mutating affordance: start a REAL ADW run. Requires an explicit
+ * confirmation that spells out the git/gh/network/PR side effects, and only
+ * ever executes from an explicit command/menu action (never an ambient refresh).
+ * Non-TUI modes (which cannot host the confirm dialog safely) refuse to run and
+ * stage the command instead.
+ */
+async function execGuardedRun(pi: ExtensionAPI, ctx: ExtensionContext, workItemId: string): Promise<void> {
+	const shell = `cd adw_sdlc && npm run issue -- ${workItemId}`;
+	if (ctx.mode !== "tui") {
+		ctx.ui.notify(`A real ADW run is not started from non-TUI mode. Run it yourself: ${shell}`, "warning");
+		return;
+	}
+	const proceed = await ctx.ui.confirm(
+		`Start a real ADW run for #${workItemId}?`,
+		`This starts the ADW orchestrator (${shell}).\n\n` +
+			"It performs REAL, mutating work: it creates and pushes a git branch, runs agents (model spend), " +
+			"and opens a GitHub pull request \u2014 using git, gh, and the network. This is the only cockpit " +
+			"command that changes state. Continue?",
+	);
+	if (!proceed) {
+		ctx.ui.notify(`ADW run for #${workItemId} cancelled`, "info");
+		return;
+	}
+	const summary = await runAndRecord(pi, ctx, `run #${workItemId}`, "npm", ["run", "issue", "--", workItemId], {
+		cwd: adwPackageDir(ctx),
+		timeout: 1_800_000,
+	});
+	notifyCommandResult(ctx, summary);
+}
+
+/** Command palette overlay. Resolves to an action id, or null on cancel. */
+function pickMenuAction(ctx: ExtensionContext, footerOn: boolean): Promise<string | null> {
+	return ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
+		const items: SelectItem[] = [
+			{ value: "refresh", label: "Refresh cockpit", description: "re-read repo state (read-only)" },
+			{ value: "runs", label: "Browse runs", description: "recent ADW runs; insert a resume command" },
+			{ value: "config", label: "Inspect config", description: ".adw/config.json by section (read-only)" },
+			{ value: "mvp", label: "MVP readiness", description: "PARITY / MVP-READINESS / HANDOVER (read-only)" },
+			{ value: "check", label: "Run checks", description: "typecheck \u2192 lint:env \u2192 pack:check \u2192 test \u2192 build" },
+			{ value: "dryrun", label: "Dry-run a work item", description: "preview the plan; no runner, no mutation" },
+			{ value: "run", label: "Start a run  \u26a0", description: "REAL git/gh/network \u2014 branch + PR (guarded)" },
+			{ value: "footer", label: footerOn ? "Hide status bar" : "Show status bar", description: "toggle the /adw-footer bar" },
+		];
+		const list = new SelectList(items, Math.min(items.length, 10), getSelectListTheme());
+		list.onSelect = (item) => done(item.value);
+		list.onCancel = () => done(null);
+		const rule = (w: number) => theme.fg("border", BOX.h.repeat(Math.max(1, w)));
+		return {
+			invalidate: () => list.invalidate(),
+			handleInput: (d: string) => {
+				list.handleInput(d);
+				tui.requestRender();
+			},
+			render: (width: number): string[] => {
+				const w = Math.max(20, width);
+				return [
+					rule(w),
+					`${theme.fg("accent", theme.bold("ADW MENU"))} ${theme.fg("dim", "\u00b7 command palette")}`,
+					...list.render(w),
+					rule(w),
+					theme.fg("dim", "\u2191\u2193 navigate \u00b7 enter select \u00b7 esc cancel"),
+				];
+			},
+		};
+	});
+}
+
+// --- #issue autocomplete (ported from Pi's github-issue-autocomplete example) -
+
+interface GitHubIssue {
+	number: number;
+	title: string;
+	state: string;
+}
+
+const ISSUE_MAX = 100;
+const ISSUE_MAX_SUGGESTIONS = 20;
+
+function extractIssueToken(textBeforeCursor: string): string | undefined {
+	const match = textBeforeCursor.match(/(?:^|[ \t])#([^\s#]*)$/);
+	return match?.[1];
+}
+
+function parseGitHubRepo(remoteUrl: string): string | undefined {
+	const ssh = remoteUrl.match(/^git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/);
+	if (ssh) return ssh[1];
+	const https = remoteUrl.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?$/);
+	return https ? https[1] : undefined;
+}
+
+async function resolveGitHubRepo(pi: ExtensionAPI, cwd: string): Promise<string | undefined> {
+	try {
+		const result = await pi.exec("git", ["remote", "-v"], { cwd, timeout: 5_000 });
+		if (result.code !== 0) return undefined;
+		for (const line of result.stdout.split("\n")) {
+			const remoteUrl = line.trim().split(/\s+/)[1];
+			if (!remoteUrl) continue;
+			const repo = parseGitHubRepo(remoteUrl);
+			if (repo) return repo;
+		}
+	} catch {
+		return undefined;
+	}
+	return undefined;
+}
+
+function formatIssueItem(issue: GitHubIssue): AutocompleteItem {
+	return { value: `#${issue.number}`, label: `#${issue.number}`, description: `[${issue.state.toLowerCase()}] ${issue.title}` };
+}
+
+function filterIssues(issues: GitHubIssue[], query: string): AutocompleteItem[] {
+	if (!query.trim()) return issues.slice(0, ISSUE_MAX_SUGGESTIONS).map(formatIssueItem);
+	if (/^\d+$/.test(query)) {
+		const numeric = issues.filter((i) => String(i.number).startsWith(query)).slice(0, ISSUE_MAX_SUGGESTIONS).map(formatIssueItem);
+		if (numeric.length > 0) return numeric;
+	}
+	return fuzzyFilter(issues, query, (i) => `${i.number} ${i.title}`).slice(0, ISSUE_MAX_SUGGESTIONS).map(formatIssueItem);
+}
+
+function createIssueAutocompleteProvider(
+	current: AutocompleteProvider,
+	getIssues: () => Promise<GitHubIssue[] | undefined>,
+	isEnabled: () => boolean,
+): AutocompleteProvider {
+	return {
+		async getSuggestions(lines, cursorLine, cursorCol, options): Promise<AutocompleteSuggestions | null> {
+			const fallback = () => current.getSuggestions(lines, cursorLine, cursorCol, options);
+			if (!isEnabled()) return fallback();
+			const token = extractIssueToken((lines[cursorLine] ?? "").slice(0, cursorCol));
+			if (token === undefined) return fallback();
+			const issues = await getIssues();
+			if (options.signal.aborted || !issues || issues.length === 0) return fallback();
+			const suggestions = filterIssues(issues, token);
+			return suggestions.length === 0 ? fallback() : { items: suggestions, prefix: `#${token}` };
+		},
+		applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+			return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+		},
+		shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+			return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
+		},
+	};
+}
+
+/**
+ * Register the #issue autocomplete provider for this session. It is lazy and
+ * opt-in: no GitHub/network call happens until the provider is enabled (via
+ * /adw-issues on) AND the user types a `#` token. Best-effort — a non-GitHub
+ * repo or a `gh` failure simply yields no suggestions (no error spam).
+ */
+function setupIssueAutocomplete(pi: ExtensionAPI, ctx: ExtensionContext, isEnabled: () => boolean): void {
+	let repoPromise: Promise<string | undefined> | undefined;
+	let issuesPromise: Promise<GitHubIssue[] | undefined> | undefined;
+	const getIssues = async (): Promise<GitHubIssue[] | undefined> => {
+		repoPromise ||= resolveGitHubRepo(pi, ctx.cwd);
+		const repo = await repoPromise;
+		if (!repo) return undefined;
+		issuesPromise ||= (async () => {
+			try {
+				const result = await pi.exec(
+					"gh",
+					["issue", "list", "--repo", repo, "--state", "open", "--limit", String(ISSUE_MAX), "--json", "number,title,state"],
+					{ cwd: ctx.cwd, timeout: 5_000 },
+				);
+				if (result.code !== 0) return undefined;
+				return JSON.parse(result.stdout) as GitHubIssue[];
+			} catch {
+				return undefined;
+			}
+		})();
+		return issuesPromise;
+	};
+	ctx.ui.addAutocompleteProvider((current) => createIssueAutocompleteProvider(current, getIssues, isEnabled));
+}
+
 export default function adwCockpitExtension(pi: ExtensionAPI): void {
 	let enabled = true;
 	let footerEnabled = false;
+	let issuesEnabled = false;
+	const postCmd = (ctx: ExtensionContext) => {
+		if (enabled) refresh(ctx);
+		if (footerEnabled) applyFooter(ctx, true);
+	};
 
 	pi.on("session_start", (_event, ctx) => {
 		if (enabled) refresh(ctx);
 		if (footerEnabled) applyFooter(ctx, true);
+		// Lazy, opt-in #issue autocomplete (TUI only; no network until enabled + '#').
+		if (ctx.mode === "tui") setupIssueAutocomplete(pi, ctx, () => issuesEnabled);
 	});
 
-	pi.on("agent_end", (_event, ctx) => {
-		if (enabled) refresh(ctx);
-		if (footerEnabled) applyFooter(ctx, true);
-	});
+	pi.on("agent_end", (_event, ctx) => postCmd(ctx));
 
 	pi.registerCommand("adw", {
 		description: "Toggle the read-only ADW Cockpit widget (args: on/show/off/hide/toggle)",
@@ -1155,6 +1532,68 @@ export default function adwCockpitExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("adw-menu", {
+		description: "Open the ADW command palette",
+		handler: async (_args, ctx) => {
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify(
+					"ADW: /adw /adw-refresh /adw-runs /adw-config /adw-mvp /adw-dry-run <id> /adw-check all /adw-run <id> /adw-footer /adw-issues",
+					"info",
+				);
+				return;
+			}
+			const action = await pickMenuAction(ctx, footerEnabled);
+			if (!action) return;
+			switch (action) {
+				case "refresh":
+					enabled = true;
+					refresh(ctx);
+					ctx.ui.notify("ADW Cockpit refreshed", "info");
+					break;
+				case "runs":
+					await runsFlow(pi, ctx);
+					break;
+				case "config":
+					await configFlow(ctx);
+					break;
+				case "mvp":
+					await mvpFlow(ctx);
+					break;
+				case "check":
+					await execChecks(pi, ctx, "all");
+					postCmd(ctx);
+					break;
+				case "dryrun": {
+					const input = await ctx.ui.input("Dry-run which work item?", "issue number");
+					const id = input ? parseWorkItemId(input) : null;
+					if (!id) {
+						ctx.ui.notify("Dry-run needs a numeric work-item id", "warning");
+						break;
+					}
+					await execDryRun(pi, ctx, id);
+					postCmd(ctx);
+					break;
+				}
+				case "run": {
+					const input = await ctx.ui.input("Start a REAL ADW run for which work item?", "issue number");
+					const id = input ? parseWorkItemId(input) : null;
+					if (!id) {
+						ctx.ui.notify("A run needs a numeric work-item id", "warning");
+						break;
+					}
+					await execGuardedRun(pi, ctx, id);
+					postCmd(ctx);
+					break;
+				}
+				case "footer":
+					footerEnabled = !footerEnabled;
+					applyFooter(ctx, footerEnabled);
+					ctx.ui.notify(footerEnabled ? "ADW footer enabled" : "ADW footer restored to default", "info");
+					break;
+			}
+		},
+	});
+
 	pi.registerCommand("adw-dry-run", {
 		description: "Run an ADW CLI dry-run for a work item (read-only preview; does not invoke a runner)",
 		handler: async (args, ctx) => {
@@ -1163,142 +1602,70 @@ export default function adwCockpitExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify("Usage: /adw-dry-run <work-item-id>", "warning");
 				return;
 			}
-			const summary = await runAndRecord(
-				pi,
-				ctx,
-				`dry-run #${workItemId}`,
-				"npx",
-				["tsx", "src/cli.ts", workItemId, "--dry-run"],
-				{ cwd: adwPackageDir(ctx), timeout: 60_000 },
-			);
-			notifyCommandResult(ctx, summary);
-			if (enabled) refresh(ctx);
-			if (footerEnabled) applyFooter(ctx, true);
+			await execDryRun(pi, ctx, workItemId);
+			postCmd(ctx);
+		},
+	});
+
+	pi.registerCommand("adw-run", {
+		description: "Start a REAL, guarded ADW run for a work item (mutates git/forge; asks to confirm)",
+		handler: async (args, ctx) => {
+			const workItemId = parseWorkItemId(args);
+			if (!workItemId) {
+				ctx.ui.notify("Usage: /adw-run <work-item-id>", "warning");
+				return;
+			}
+			await execGuardedRun(pi, ctx, workItemId);
+			postCmd(ctx);
 		},
 	});
 
 	pi.registerCommand("adw-check", {
 		description: "Run an explicit ADW package check: typecheck | lint-env | pack-check | test | build | all",
 		handler: async (args, ctx) => {
-			const requested = args.trim() || "typecheck";
-			// Accept the npm-script spellings (`lint:env`, `pack:check`) as aliases.
-			const normalized = requested === "lint:env" ? "lint-env" : requested === "pack:check" ? "pack-check" : requested;
-			const names: CheckName[] = normalized === "all"
-				? ["typecheck", "lint-env", "pack-check", "test", "build"]
-				: [normalized as CheckName];
-
-			if (names.some((name) => CHECKS[name] === undefined)) {
-				ctx.ui.notify("Usage: /adw-check typecheck|lint-env|pack-check|test|build|all", "warning");
-				return;
-			}
-
-			const summaries: CommandSummary[] = [];
-			for (const name of names) {
-				const check = CHECKS[name];
-				const summary = await runAndRecord(pi, ctx, check.label, check.command, check.args, {
-					cwd: adwPackageDir(ctx),
-					timeout: check.timeout,
-				});
-				summaries.push(summary);
-				if (summary.code !== 0 || summary.killed) break;
-			}
-
-			const failed = summaries.find((summary) => summary.code !== 0 || summary.killed);
-			if (requested === "all") {
-				const label = failed ? `all stopped at ${failed.label}` : "all checks";
-				lastCommandSummary = {
-					label,
-					command: summaries.map((summary) => summary.command).join(" && "),
-					code: failed?.code ?? 0,
-					killed: failed?.killed ?? false,
-					durationMs: summaries.reduce((total, summary) => total + summary.durationMs, 0),
-					timestamp: Date.now(),
-					stdout: summaries.map((summary) => `# ${summary.label}\n${summary.stdout}`).join("\n"),
-					stderr: summaries.map((summary) => `# ${summary.label}\n${summary.stderr}`).join("\n"),
-				};
-				notifyCommandResult(ctx, lastCommandSummary);
-			} else if (summaries[0]) {
-				notifyCommandResult(ctx, summaries[0]);
-			}
-			if (enabled) refresh(ctx);
-			if (footerEnabled) applyFooter(ctx, true);
+			await execChecks(pi, ctx, args.trim() || "typecheck");
+			postCmd(ctx);
 		},
 	});
 
 	pi.registerCommand("adw-config", {
 		description: "Inspect .adw/config.json by section (read-only overlay)",
 		handler: async (_args, ctx) => {
-			// parseJsonObject returns null for both a missing file and malformed JSON;
-			// buildConfigSections turns that into a single readable error section.
-			const config = parseJsonObject(join(ctx.cwd, ".adw", "config.json"));
-			const sections = buildConfigSections(config, ctx.cwd);
+			await configFlow(ctx);
+		},
+	});
 
-			if (ctx.mode !== "tui") {
-				if (!config) {
-					ctx.ui.notify("No readable .adw/config.json (missing or malformed).", "warning");
-					return;
-				}
-				const warnings = sections.filter((s) => s.warn).map((s) => s.title);
-				ctx.ui.notify(
-					`ADW config: ${sections.length} sections (${sections.map((s) => s.title).join(", ")}).` +
-						`${warnings.length ? ` Warnings: ${warnings.join(", ")}.` : ""} Open in TUI to browse.`,
-					warnings.length ? "warning" : "info",
-				);
-				return;
-			}
-			await showConfigInspector(ctx, sections);
+	pi.registerCommand("adw-mvp", {
+		description: "Summarize MVP-readiness docs (PARITY/MVP-READINESS/HANDOVER; read-only)",
+		handler: async (_args, ctx) => {
+			await mvpFlow(ctx);
 		},
 	});
 
 	pi.registerCommand("adw-runs", {
 		description: "Browse recent ADW runs (read-only); can insert a resume command into the editor",
 		handler: async (_args, ctx) => {
-			// Non-TUI UI modes (rpc/json/print) cannot host a custom overlay; fall
-			// back to a one-line summary notification instead of failing.
-			if (ctx.mode !== "tui") {
-				const runs = listRuns(ctx.cwd);
-				if (runs.length === 0) {
-					ctx.ui.notify("No ADW runs found under agents/", "info");
-					return;
-				}
-				const latest = runs[0]!;
-				ctx.ui.notify(
-					`ADW runs: ${runs.length}; latest ${latest.adwId}${latest.issueNumber ? ` (#${latest.issueNumber})` : ""}. Open in TUI to browse.`,
-					"info",
-				);
+			await runsFlow(pi, ctx);
+		},
+	});
+
+	pi.registerCommand("adw-issues", {
+		description: "Toggle #issue autocomplete (uses gh + the network when on)",
+		handler: async (args, ctx) => {
+			const action = args.trim().toLowerCase();
+			if (action === "on" || action === "show") issuesEnabled = true;
+			else if (action === "off" || action === "hide") issuesEnabled = false;
+			else if (action === "" || action === "toggle") issuesEnabled = !issuesEnabled;
+			else {
+				ctx.ui.notify("Usage: /adw-issues [on|off|toggle]", "warning");
 				return;
 			}
-
-			// TUI flow: list -> detail -> (optional) insert resume command. The loop
-			// re-reads runs each pass so "Back to run list" reflects the latest state.
-			for (;;) {
-				const runs = listRuns(ctx.cwd);
-				if (runs.length === 0) {
-					ctx.ui.notify("No ADW runs found under agents/", "info");
-					return;
-				}
-				const runId = await pickRun(ctx, runs);
-				if (!runId) return; // esc/cancel closes the browser
-				const run = runs.find((r) => r.adwId === runId);
-				if (!run) return;
-
-				const action = await showRunDetail(ctx, run);
-				if (action === "back") continue;
-				if (action === "insert") {
-					const cmd = resumeCommandFor(run);
-					if (!cmd) {
-						ctx.ui.notify(
-							`Run ${run.adwId} has no recorded issue number; cannot build a resume command`,
-							"warning",
-						);
-						return;
-					}
-					ctx.ui.setEditorText(cmd);
-					ctx.ui.notify("Resume command inserted into the editor (not executed)", "info");
-					return;
-				}
-				return; // "close" or cancel
-			}
+			ctx.ui.notify(
+				issuesEnabled
+					? "Issue autocomplete on \u2014 typing '#' queries open GitHub issues via gh (network)."
+					: "Issue autocomplete off.",
+				"info",
+			);
 		},
 	});
 }

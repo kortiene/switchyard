@@ -330,29 +330,65 @@ models   gates      branching prompts   schemas
 - The phase section reflects `config.phases` when present, else the built-in
   default catalog, and lists `customPhases`.
 
-## Phase 5 — Workflow assistant
+## Phase 5 — Workflow assistant (implemented)
 
 ### Scope
 
-Add higher-level workflow affordances after the read-only and safe-command
-surfaces are proven.
+Higher-level workflow affordances on top of the read-only and safe-command
+surfaces — a palette, a guarded real run, an MVP-readiness panel, and `#issue`
+autocomplete.
 
-### Candidate features
+### Commands
 
-- Issue autocomplete for `#123` references using `gh issue list`, modeled after
-  Pi's `github-issue-autocomplete.ts` example.
-- `/adw-menu` command palette with common actions.
-- Guarded `/adw-run <work-item-id>` that requires an explicit confirmation and
-  clearly states that real git/forge operations will happen.
-- MVP readiness panel that summarizes `PARITY.md`, `MVP-READINESS.md`, and
-  `HANDOVER.md`.
+```text
+/adw-menu                command palette (dispatches every action below)
+/adw-run <work-item-id>  start a REAL, guarded ADW run (mutates git/forge)
+/adw-mvp                 summarize PARITY / MVP-READINESS / HANDOVER
+/adw-issues [on|off]     toggle #issue autocomplete (gh + network when on)
+```
+
+### Behaviour
+
+- **`/adw-menu`** opens a `SelectList` palette: Refresh, Browse runs, Inspect
+  config, MVP readiness, Run checks, Dry-run, **Start a run ⚠**, and the
+  status-bar toggle. Arg-taking actions prompt via `ctx.ui.input`; the run
+  action is clearly marked as the only mutating one.
+- **`/adw-run`** is the single mutating affordance. It requires an explicit
+  `ctx.ui.confirm` that spells out the side effects (creates/pushes a branch,
+  runs agents with model spend, opens a PR — using git, gh, and the network),
+  and only ever runs from an explicit command/menu action — never an ambient
+  refresh. Non-TUI modes refuse and print the shell command instead.
+- **`/adw-mvp`** reuses the master/detail browser to summarize the three docs
+  (title, `✅/⏳/❌/🔧` status tallies, line count, section headings); read-only.
+- **`#issue` autocomplete** is ported from Pi's `github-issue-autocomplete.ts`,
+  but **lazy and opt-in**: no GitHub/network call happens until it is enabled
+  (`/adw-issues on`) *and* the user types a `#` token. A non-GitHub repo or a
+  `gh` failure simply yields no suggestions (no error spam).
 
 ### Acceptance criteria
 
-- [ ] Potentially mutating operations require confirmation.
-- [ ] Real ADW runs are never started from ambient widget refresh.
-- [ ] The extension explains when a command will use git, gh, or the network.
-- [ ] The extension remains optional and project-local.
+- [x] Potentially mutating operations require confirmation. (`/adw-run` →
+      `ctx.ui.confirm` before any execution.)
+- [x] Real ADW runs are never started from ambient widget refresh. (Only the
+      explicit `/adw-run` command or the menu's "Start a run" action can start
+      one; `session_start`/`agent_end` only refresh read-only state.)
+- [x] The extension explains when a command will use git, gh, or the network.
+      (The run confirm dialog, and the `/adw-issues` on-notification, say so.)
+- [x] The extension remains optional and project-local. (`/adw-footer` and
+      `/adw-issues` are off by default; everything lives under
+      `.pi/extensions/adw-cockpit/`.)
+
+### Implementation notes
+
+- The `/adw-menu` handler closes over the `enabled`/`footerEnabled`/
+  `issuesEnabled` flags and dispatches to shared, flag-free cores
+  (`execDryRun`/`execChecks`/`execGuardedRun`) and flows
+  (`runsFlow`/`configFlow`/`mvpFlow`), which the thin command handlers also
+  call — so palette and command paths stay in lockstep.
+- `/adw-config` and `/adw-mvp` share one `showSectionBrowser` master/detail
+  overlay.
+- Autocomplete is registered once per session in `session_start` (TUI only);
+  the provider passes through to the current provider until enabled.
 
 ## Risks and mitigations
 
@@ -440,7 +476,12 @@ palette.
 
 ## Current status
 
-Phases **1–4 are implemented**:
+**All phases (1–5) are implemented.** Commands: `/adw`, `/adw-refresh`,
+`/adw-menu`, `/adw-runs`, `/adw-config`, `/adw-mvp`, `/adw-dry-run`,
+`/adw-check`, `/adw-run` (guarded), `/adw-footer`, `/adw-issues`.
+
+The surface stays read-only by default; the only state-mutating path is the
+explicitly-confirmed `/adw-run`. Highlights:
 
 - **Phase 1** — passive cockpit, now a **mission-control dashboard** custom
   component: numbered box panels (`1. OVERVIEW`/`2. LATEST RUN`/`3. PIPELINE`,
@@ -451,11 +492,13 @@ Phases **1–4 are implemented**:
 - **Phase 3** — `/adw-dry-run` and `/adw-check typecheck|lint-env|pack-check|
   test|build|all` safe helpers.
 - **Phase 4** — `/adw-config` live master/detail config inspector.
+- **Phase 5** — `/adw-menu` palette, guarded `/adw-run`, `/adw-mvp` readiness
+  panel, and lazy/opt-in `#issue` autocomplete (`/adw-issues`).
 - **Cross-phase** — a below-editor command hint, an optional mission-control
   `/adw-footer` status bar (off by default), a `✓`/`✗` status language, and a
   prompt-pack sync (`prompts` row, `pack ✓` tag, `pack-check`).
 
 The aesthetic direction is recorded in `.impeccable.md`; colour is theme-token
-only so the cockpit honours the user's terminal theme. **Phase 5** (workflow
-assistant — `/adw-menu`, guarded `/adw-run`, issue autocomplete, MVP-readiness
-panel) remains the only backlog item.
+only so the cockpit honours the user's terminal theme. The backlog is now
+fully implemented; future work would be incremental polish rather than new
+phases.
