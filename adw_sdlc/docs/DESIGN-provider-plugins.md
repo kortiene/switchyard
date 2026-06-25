@@ -23,8 +23,14 @@ Rollout progress against §5:
   change-requests) are landed** (`HANDOVER.md` §8k, §8l, §8m). Step 2 is
   complete for work items and change requests; a `cli` change-request provider
   is an optional symmetric follow-up.
-- **Step 3 — out-of-process plugin (Option C): not started; still a §10 hard
-  stop needing its own slice.**
+- **Step 3 — out-of-process plugin (Option C): scoped, demand-gated, NOT built.**
+  Scoping in `docs/DESIGN-provider-plugins-out-of-process.md`. Recommendation:
+  do not build it yet — step 2 covers the realistic provider space, and a code
+  plugin cannot enforce the host allowlist a declarative provider can (it does
+  its own egress; §4 there). Prefer extending the declarative descriptor first
+  (**step 2.5**, `docs/DESIGN-declarative-providers-extensions.md`: transforms,
+  pagination, token refresh — all still data). Reserve step 3 for genuinely
+  code-shaped providers (GraphQL, request signing, branching flows).
 
 The code-loading boundary (Options A/D) remains rejected; nothing below it ships
 until the boundary is implemented as designed.
@@ -213,6 +219,11 @@ door shut until it is genuinely required:
    capability-scoped RPC surface (no raw git/gh — the orchestrator brokers VCS),
    per-call timeouts, and a `lint:env`-style static check that the plugin host
    never widens the allowlist. **Never Option A; never Option D for secrets.**
+   This step is now scoped in `docs/DESIGN-provider-plugins-out-of-process.md`,
+   which (a) recommends **not** building it until a concrete provider forces it,
+   (b) records the egress asymmetry — a code plugin cannot be held to the host
+   allowlist a declarative provider is — and (c) routes most remaining demand to
+   **step 2.5** (`docs/DESIGN-declarative-providers-extensions.md`) first.
 
 This ordering means the *secret boundary is never weakened to gain provider
 coverage* — (1) and (2) are the 90% case and add zero code-execution surface, and

@@ -32,6 +32,11 @@ session can pick up where we stopped.
 - Declarative-providers design — #4 step 2 (2a `cli` + 2b `rest` work items +
   2c `rest` change-requests implemented):
   `adw_sdlc/docs/DESIGN-declarative-providers.md`.
+- Declarative-primitives spec — #4 step 2.5, recommended next build
+  (transforms / pagination / token refresh):
+  `adw_sdlc/docs/DESIGN-declarative-providers-extensions.md`.
+- Out-of-process plugin scoping — #4 step 3, demand-gated, not built:
+  `adw_sdlc/docs/DESIGN-provider-plugins-out-of-process.md`.
 
 **Repository state:** all of this session's work is **merged to `main`**
 (no remote — local merge). `main` HEAD is the merge commit
@@ -784,7 +789,14 @@ plausible slices each cross a real boundary:
 
 1. **External provider plugin loading from a config-supplied module path**
    — would introduce a new code-loading attack surface on the
-   secrets-owning CLI. Needs its own security/sandboxing design.
+   secrets-owning CLI. Now **scoped** (out-of-process, Option C) in
+   `docs/DESIGN-provider-plugins-out-of-process.md`; the recommendation there is
+   to **not build it** — step 2's declarative providers cover the realistic
+   space, a code plugin cannot enforce the host allowlist a declarative provider
+   can, and most remaining demand should go to step 2.5
+   (`docs/DESIGN-declarative-providers-extensions.md`) first. Still a hard stop:
+   only build against a concrete declarative-impossible provider, never via
+   in-process `import` (Option A) or a `vm` shim (Option D).
 2. **Phase preamble wording changes** — LLM-facing prompt content;
    rewording risks behavior drift the suite cannot detect.
 3. **`MX_AGENT_*` env var rebranding** — load-bearing in
@@ -844,10 +856,15 @@ Ordered by ratio of value to risk:
    JSON request bodies, configurable `authHeader`/`authScheme`, and the
    `squashMerge` merge-authority review. Step 2 is complete for work items and
    change requests; all of 2a–2c add no new dependency and no code loading.
-   Remaining: an optional `cli` change-request provider (symmetric follow-up),
-   then **step 3** the out-of-process plugin broker (Option C) — still a §10 hard
-   stop for its own slice. In-process `import` of config-supplied code (Options
-   A/D) stays a rejected non-goal.
+   **Step 3 (out-of-process plugin, Option C) is now SCOPED and demand-gated**
+   (`docs/DESIGN-provider-plugins-out-of-process.md`): the recommendation is NOT
+   to build it — a code plugin cannot enforce the host allowlist a declarative
+   provider can. **Recommended next build: step 2.5** — bounded declarative
+   primitives (transforms, pagination, token refresh), spec'd in
+   `docs/DESIGN-declarative-providers-extensions.md` — closes most of the
+   long-tail gap while staying data + host-allowlisted. Also optional: a `cli`
+   change-request provider (symmetric follow-up). In-process `import` of
+   config-supplied code (Options A/D) stays a rejected non-goal.
 5. **Universal README at package root** — ✅ DONE (this session).
    `adw_sdlc/README.md` is now the neutral entry point: pipeline overview,
    kernel/project-pack split, quick start + key flags, the config-surface
