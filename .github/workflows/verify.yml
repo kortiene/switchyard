@@ -1,0 +1,52 @@
+name: verify
+
+# Server-side quality gate for switchyard. Runs the same single command the ADW
+# orchestrator runs locally before it squash-merges (ADW_TEST_CMD="npm run
+# verify"): typecheck -> lint:env -> pack:check -> test -> build -> clean.
+#
+# Wired as a REQUIRED status check on `main`, so no PR (autonomous ADW run or
+# manual) can merge red. The ADW orchestrator already polls PR checks before
+# merging (ciPollIntervalMs 30s x ciMaxPolls 40 = ~20 min budget), so this job
+# integrates with the existing flow rather than fighting it.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# One in-flight run per ref; a newer push cancels the stale one.
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # The npm package lives in adw_sdlc/; `lint:env` shells out to the
+        # repo-root scripts/ via ../scripts, so the full repo must be checked out.
+        working-directory: adw_sdlc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the package engines floor (>=20.19) and local dev (22.x).
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: adw_sdlc/package-lock.json
+
+      # Reproducible install from the committed lockfile. Optional SDK deps
+      # (claude/codex/opencode/pi) install too; the test suite is fully mocked,
+      # so no API keys or network are needed.
+      - name: Install (npm ci)
+        run: npm ci
+
+      # typecheck -> lint:env -> pack:check -> test -> build -> rm -rf dist
+      - name: Verify
+        run: npm run verify
