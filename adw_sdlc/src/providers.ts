@@ -21,6 +21,7 @@ import { DEFAULT_ADW_CONFIG, getAdwConfig, type AdwConfig } from './config.js';
 import { AdwError } from './errors.js';
 import * as git from './git.js';
 import {
+  assertStatusTransitionRoutable,
   parseCliChangeRequestDescriptor,
   parseCliWorkItemDescriptor,
   parseRestChangeRequestDescriptor,
@@ -243,8 +244,16 @@ const CLI_PROVIDERS: Record<string, CliFactory> = {
 };
 const WORK_ITEM_PROVIDERS: Record<string, WorkItemFactory> = {
   github: createGitHubWorkItemProvider,
-  cli: (config) => createCliWorkItemProvider(parseCliWorkItemDescriptor(config.providers.workItems)),
-  rest: (config) => createRestWorkItemProvider(parseRestWorkItemDescriptor(config.providers.workItems)),
+  cli: (config) => {
+    const d = parseCliWorkItemDescriptor(config.providers.workItems);
+    assertStatusTransitionRoutable(config.providers.workItems.doneStatus, d.routes.setStatus !== undefined, 'cli');
+    return createCliWorkItemProvider(d);
+  },
+  rest: (config) => {
+    const d = parseRestWorkItemDescriptor(config.providers.workItems);
+    assertStatusTransitionRoutable(config.providers.workItems.doneStatus, d.routes.setStatus !== undefined, 'rest');
+    return createRestWorkItemProvider(d);
+  },
 };
 const VCS_PROVIDERS: Record<string, VcsFactory> = {
   git: createGitVcsProvider,

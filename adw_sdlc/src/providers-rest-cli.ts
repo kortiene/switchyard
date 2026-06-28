@@ -374,8 +374,13 @@ function collectPaginated(
  * Build a declarative `rest` WorkItemProvider from a validated descriptor.
  * `transport` is an injectable seam; production spawns the kernel helper.
  *
- * Step 2b ships read routes only (`fetch`/`state`); the write methods are no-ops
- * here pending request-body templating (used by the change-request provider).
+ * The write methods (`postProgress`/`assignSelf`/`setStatus`) honor an optional
+ * route via the same templated-body mechanism as the change-request provider —
+ * unrouted ⇒ best-effort no-op (mirroring the cli work-item provider). The
+ * loss-bearing case (a configured `doneStatus` with no `setStatus` route) is
+ * caught loudly at construction by `assertStatusTransitionRoutable` (providers.ts),
+ * because a throw from `setStatus` here would be swallowed by the orchestrator's
+ * best-effort `transitionToDone`.
  */
 export function createRestWorkItemProvider(
   descriptor: RestWorkItemDescriptor,
@@ -411,9 +416,39 @@ export function createRestWorkItemProvider(
       }
       return evalScalarMapping(data, descriptor.routes.state.state) || 'UNKNOWN';
     },
-    postProgress: () => {},
-    assignSelf: () => {},
-    setStatus: () => {},
+    postProgress: (ctx: ProviderContext, id, adwId, phase, message) => {
+      const route = descriptor.routes.postProgress;
+      if (!route) {
+        return; // best-effort: unrouted ⇒ no-op (matches the cli provider / github-without-gh)
+      }
+      const res = requester.request(
+        route,
+        { id: String(id), repo: ctx.repo, body: formatProgress(adwId, phase, message) },
+        route.body,
+      );
+      if (!ok(res)) {
+        note(`could not post progress comment for #${id} (${phase})`);
+      }
+    },
+    assignSelf: (ctx: ProviderContext, id) => {
+      const route = descriptor.routes.assignSelf;
+      if (!route) {
+        return;
+      }
+      requester.request(route, { id: String(id), repo: ctx.repo }, route.body);
+    },
+    setStatus: (ctx: ProviderContext, id, status) => {
+      const route = descriptor.routes.setStatus;
+      if (!route) {
+        // doneStatus-without-route is made loud at construction (assertStatusTransitionRoutable);
+        // any other unrouted status write stays best-effort.
+        return;
+      }
+      const res = requester.request(route, { id: String(id), repo: ctx.repo, status }, route.body);
+      if (!ok(res)) {
+        note(`could not update status for #${id} to "${status}"`);
+      }
+    },
   };
 }
 

@@ -215,9 +215,29 @@ credential as a header value:
   `"authScheme": "token"`; Bearer is the default.
 - Transport is a **kernel-owned synchronous one-shot fetch** (a fixed `node -e`
   helper spawned with a scoped env; the token is read by name inside the child,
-  never on argv). No new dependency, no project code. Read routes only in this
-  step (`fetch`/`state`); progress/assignment/status are not yet posted over
-  `rest`.
+  never on argv). No new dependency, no project code.
+- Beyond the required read routes (`fetch`/`state`), three **optional write
+  routes** — `postProgress`, `assignSelf`, `setStatus` — post progress /
+  assignment / status over `rest` using a templated JSON `body` (the same
+  host-allowlist, https, and scoped one-credential guard as every rest route).
+  Each binds only its own placeholders: `postProgress` `{id}`/`{repo}`/`{body}`,
+  `assignSelf` `{id}`/`{repo}`, `setStatus` `{id}`/`{repo}`/`{status}`. An
+  unrouted write is a best-effort no-op (as with `github` without `gh`):
+
+  ```jsonc
+  "setStatus": {
+    "method": "PUT",
+    "path": "/projects/{repo}/issues/{id}",
+    "body": { "state_event": "{status}" }
+  }
+  ```
+
+- **Fail-closed on a loss-bearing transition:** because `doneStatus` is an opt-in
+  terminal board write the operator explicitly asked for, configuring it on a
+  `rest` (or `cli`) work-item provider that has **no `setStatus` route** raises a
+  loud `AdwError` at run start rather than silently dropping the transition — add
+  a `setStatus` route or remove `doneStatus`. (For the post-merge verify gate to
+  treat the new status as terminal, also include it in `closedStates`.)
 
 ### Declarative `rest` change requests (no code)
 

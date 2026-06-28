@@ -687,7 +687,10 @@ unchanged.
   scoped one-credential env + the request on **stdin**; the token is read by
   **name inside the child** (never argv). `RestRequest`/`RestResponse`/
   `RestTransport` are exported (transport is an injectable test seam). Write
-  methods no-op in 2b (rest body templating deferred to 2c).
+  methods no-op'd in 2b (rest body templating deferred to 2c); **later
+  implemented** as optional templated-body `postProgress`/`assignSelf`/
+  `setStatus` routes with a `doneStatus`-without-`setStatus` fail-closed guard
+  (issue #24 — see `assertStatusTransitionRoutable`).
 - `adw_sdlc/src/providers.ts` — registered `rest` in `WORK_ITEM_PROVIDERS`.
 - `adw_sdlc/src/config.ts` — added loose `baseUrl`/`allowedHosts`/`authHeader`/
   `authScheme` to `providers.workItems` (validated by the rest loader).
@@ -1260,6 +1263,64 @@ that locks in the invariant so future doc edits cannot silently regress it.
 Issue class: `chore`. Run mode: native. No kernel/runtime/prompt-pack/config
 change. `npm run verify` stays green (578 tests, 41 files).
 
+## 8z. Fix — issue #24: `rest` work-item write methods fail closed
+
+Closed a genuine silent-loss trap in the declarative `rest` work-item provider
+(GitHub issue #24 — "`rest` work-item write methods are silent no-ops — make
+them FAIL CLOSED"). `createRestWorkItemProvider` left `postProgress`/
+`assignSelf`/`setStatus` as hard-coded `() => {}` no-ops. Because the
+orchestrator calls `setStatus(doneStatus)` after a verified merge
+(`transitionToDone`), a project configured with `workItems: { type: "rest", … }`
+and a `doneStatus` would silently never mark its work item done — a real
+correctness loss, not merely a deferred feature. Fix delivered as a hybrid:
+
+1. **Implement** optional `postProgress`/`assignSelf`/`setStatus` routes for
+   the `rest` work-item provider via the body-templating proven in the rest
+   change-request provider (`substituteBody` + `requester.request(route, vars,
+   route.body)`). Each route binds only its own placeholders: `postProgress`
+   `{id}`/`{repo}`/`{body}`, `assignSelf` `{id}`/`{repo}`, `setStatus`
+   `{id}`/`{repo}`/`{status}`. An unrouted write stays a best-effort no-op —
+   matching the `cli` provider and `github` without `gh`.
+2. **Guard** at construction: `assertStatusTransitionRoutable(doneStatus,
+   hasSetStatusRoute, kind)` — if `workItems.doneStatus` is set but the
+   `cli`/`rest` descriptor has **no `setStatus` route**, `createProvidersFromConfig`
+   throws a loud `AdwError` at run start (before any side effect, even on
+   `--dry-run`). Throwing at the `setStatus` call site would be swallowed by
+   `transitionToDone`'s best-effort `try/catch`, so the check must live before
+   any work begins. The guard generalizes to the `cli` work-item provider, which
+   has the identical latent drop.
+
+- `adw_sdlc/src/provider-descriptor.ts` — extended `RawRestWorkItemSchema.routes`
+  (Zod `.strict()`) to allow optional `postProgress`/`assignSelf`/`setStatus`
+  routes, each validating placeholders via `assertRestPath` + `assertBodyPlaceholders`.
+  Added and exported `assertStatusTransitionRoutable`.
+- `adw_sdlc/src/providers-rest-cli.ts` — replaced the three no-op arrows with
+  route-conditional dispatches that call `requester.request(route, vars, route.body)`.
+  Runtime failures are best-effort + `note()`-logged (matching `transitionToDone`'s
+  design; a runtime failure is caught independently by the post-merge verify gate's
+  work-item re-read).
+- `adw_sdlc/src/providers.ts` — both `cli` and `rest` work-item factories call
+  `assertStatusTransitionRoutable` after parsing.
+- `adw_sdlc/src/index.ts` — exports `assertStatusTransitionRoutable`.
+- `adw_sdlc/docs/UNIVERSAL.md` — "Declarative `rest` (HTTP) work items" section
+  updated: write routes documented with a `setStatus` example, fail-closed guard
+  noted (add a `setStatus` route or remove `doneStatus`).
+- `adw_sdlc/docs/DESIGN-declarative-providers.md` — §9 updated (the `doneStatus`
+  exception to "best-effort": the one loud guard that survives); §12 step 2b
+  updated (write routes landed alongside the guard).
+- Tests: `test/providers.test.ts` (+14 new, 1 existing assertion replaced) —
+  unrouted writes stay no-ops; routed `setStatus` issues PUT with percent-encoded
+  URL, substituted body, and scoped env (`GH_TOKEN` withheld); non-ok response is
+  best-effort; routed `postProgress` templates `{body}`; routed `assignSelf`
+  issues its request; fail-closed guard (cli + rest) both throwing without a route
+  and passing with one; unknown/disallowed placeholders in write-route bodies and
+  paths throw. **578 → 598 tests**.
+
+Issue class: `fix`. No new dependency, no interface churn (`WorkItemProvider`,
+`config.ts`, and the orchestrator are untouched). The committed `github` config
+and the dry-run baseline are byte-for-byte unaffected. `npm run verify` stays
+green (598 tests, 42 files).
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -1466,7 +1527,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **578 passing across 41 files**
+Test count baseline after this session: **598 passing across 42 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1482,7 +1543,8 @@ the unused-symbol typecheck guards and refactored 4 tests onto `withScopedEnv`;
 measurement mode — §8s, +16 for the observed-live ledger + cross-document sync —
 §8u, +35 for the parity-rate-core extraction — §8v, +6 for the env-naming
 drift guard — §8w, +10 for the live secret-boundary audit scaffold — §8x,
-+22 for the env-naming docs regression guard — §8y). The §8v refactor (issue #5
++22 for the env-naming docs regression guard — §8y, +14 for the `rest` work-item
+write methods + fail-closed guard — §8z). The §8v refactor (issue #5
 — split parity-rate classification from rendering) added `tools/parity-rate-core.ts`
 (pure core module, no new test file) and extended `test/parity-rate.test.ts` with
 35 direct unit tests of the extracted core (39 tests total in the file, up from 4

@@ -499,6 +499,12 @@ function restParseError(kind: string, error: z.ZodError): AdwError {
 // ── rest work-item descriptor ────────────────────────────────────────────────
 
 const WORK_ITEM_PLACEHOLDERS = ['id', 'repo'] as const;
+// Write-route placeholder sets, mirroring the cli ALLOWED_PLACEHOLDERS above:
+// postProgress binds the formatted comment body, setStatus the target status,
+// assignSelf nothing beyond the item id/repo (REST has no universal "self").
+const WI_POST_PROGRESS_PLACEHOLDERS = ['id', 'repo', 'body'] as const;
+const WI_ASSIGN_PLACEHOLDERS = ['id', 'repo'] as const;
+const WI_SET_STATUS_PLACEHOLDERS = ['id', 'repo', 'status'] as const;
 
 const rawRestFetchRoute = z
   .object({ method: restMethod.default('GET'), path: z.string().min(1), map: fetchMapSchema })
@@ -506,9 +512,32 @@ const rawRestFetchRoute = z
 const rawRestStateRoute = z
   .object({ method: restMethod.default('GET'), path: z.string().min(1), map: stateMapSchema })
   .strict();
+// Optional write routes — each carries an optional templated JSON body (same
+// shape as the change-request create/merge routes). Sensible method defaults:
+// POST for postProgress/assignSelf, PUT for setStatus.
+const rawRestPostProgressRoute = z
+  .object({ method: restMethod.default('POST'), path: z.string().min(1), body: z.record(z.string(), z.unknown()).optional() })
+  .strict();
+const rawRestAssignSelfRoute = z
+  .object({ method: restMethod.default('POST'), path: z.string().min(1), body: z.record(z.string(), z.unknown()).optional() })
+  .strict();
+const rawRestSetStatusRoute = z
+  .object({ method: restMethod.default('PUT'), path: z.string().min(1), body: z.record(z.string(), z.unknown()).optional() })
+  .strict();
 
 const RawRestWorkItemSchema = z
-  .object({ ...restBaseFields, routes: z.object({ fetch: rawRestFetchRoute, state: rawRestStateRoute }).strict() })
+  .object({
+    ...restBaseFields,
+    routes: z
+      .object({
+        fetch: rawRestFetchRoute,
+        state: rawRestStateRoute,
+        postProgress: rawRestPostProgressRoute.optional(),
+        assignSelf: rawRestAssignSelfRoute.optional(),
+        setStatus: rawRestSetStatusRoute.optional(),
+      })
+      .strict(),
+  })
   .strict();
 
 /** A validated, compiled rest work-item descriptor (paths/maps pre-parsed). */
@@ -516,6 +545,9 @@ export interface RestWorkItemDescriptor extends RestBase {
   routes: {
     fetch: { method: string; path: string } & FetchFieldMap;
     state: { method: string; path: string; state: ScalarMapping };
+    postProgress?: { method: string; path: string; body?: Record<string, unknown> };
+    assignSelf?: { method: string; path: string; body?: Record<string, unknown> };
+    setStatus?: { method: string; path: string; body?: Record<string, unknown> };
   };
 }
 
@@ -542,17 +574,71 @@ export function parseRestWorkItemDescriptor(slice: unknown): RestWorkItemDescrip
   const base = resolveRestBase(raw);
   assertRestPath(raw.routes.fetch.path, WORK_ITEM_PLACEHOLDERS, 'fetch');
   assertRestPath(raw.routes.state.path, WORK_ITEM_PLACEHOLDERS, 'state');
-  return {
-    ...base,
-    routes: {
-      fetch: { method: raw.routes.fetch.method, path: raw.routes.fetch.path, ...compileFetchMap(raw.routes.fetch.map) },
-      state: {
-        method: raw.routes.state.method,
-        path: raw.routes.state.path,
-        state: compileStatePath(raw.routes.state.map),
-      },
+  const routes: RestWorkItemDescriptor['routes'] = {
+    fetch: { method: raw.routes.fetch.method, path: raw.routes.fetch.path, ...compileFetchMap(raw.routes.fetch.map) },
+    state: {
+      method: raw.routes.state.method,
+      path: raw.routes.state.path,
+      state: compileStatePath(raw.routes.state.map),
     },
   };
+  if (raw.routes.postProgress) {
+    assertRestPath(raw.routes.postProgress.path, WI_POST_PROGRESS_PLACEHOLDERS, 'postProgress');
+    if (raw.routes.postProgress.body !== undefined) {
+      assertBodyPlaceholders(raw.routes.postProgress.body, WI_POST_PROGRESS_PLACEHOLDERS, 'postProgress');
+    }
+    routes.postProgress = {
+      method: raw.routes.postProgress.method,
+      path: raw.routes.postProgress.path,
+      body: raw.routes.postProgress.body,
+    };
+  }
+  if (raw.routes.assignSelf) {
+    assertRestPath(raw.routes.assignSelf.path, WI_ASSIGN_PLACEHOLDERS, 'assignSelf');
+    if (raw.routes.assignSelf.body !== undefined) {
+      assertBodyPlaceholders(raw.routes.assignSelf.body, WI_ASSIGN_PLACEHOLDERS, 'assignSelf');
+    }
+    routes.assignSelf = {
+      method: raw.routes.assignSelf.method,
+      path: raw.routes.assignSelf.path,
+      body: raw.routes.assignSelf.body,
+    };
+  }
+  if (raw.routes.setStatus) {
+    assertRestPath(raw.routes.setStatus.path, WI_SET_STATUS_PLACEHOLDERS, 'setStatus');
+    if (raw.routes.setStatus.body !== undefined) {
+      assertBodyPlaceholders(raw.routes.setStatus.body, WI_SET_STATUS_PLACEHOLDERS, 'setStatus');
+    }
+    routes.setStatus = {
+      method: raw.routes.setStatus.method,
+      path: raw.routes.setStatus.path,
+      body: raw.routes.setStatus.body,
+    };
+  }
+  return { ...base, routes };
+}
+
+/**
+ * Run-start fail-closed guard shared by the declarative work-item factories. An
+ * opt-in terminal board transition (`doneStatus`) is a loss-bearing write: the
+ * operator has explicitly asked for it. If it is configured but the provider has
+ * no `setStatus` route to honor it, the transition would be silently dropped
+ * (the orchestrator swallows the no-op as best-effort) — so refuse to build the
+ * provider instead of losing the write at runtime. Provider-agnostic: the values
+ * are passed in, so this stays decoupled from config.ts.
+ */
+export function assertStatusTransitionRoutable(
+  doneStatus: string | undefined,
+  hasSetStatusRoute: boolean,
+  kind: 'cli' | 'rest',
+): void {
+  if (doneStatus && !hasSetStatusRoute) {
+    throw new AdwError(
+      `workItems.doneStatus "${doneStatus}" is configured but the ${kind} work-item provider has no ` +
+        `setStatus route; the terminal board transition would be silently dropped. ` +
+        `Add a setStatus route or remove doneStatus.`,
+    );
+  }
 }
 
 // ── Pagination (step 2.5b) ───────────────────────────────────────────────────

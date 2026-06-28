@@ -152,6 +152,7 @@ export {
 } from './providers.js';
 export {
   assertAllowedHost,
+  assertStatusTransitionRoutable,
   evalArray,
   evalItems,
   evalScalar,
