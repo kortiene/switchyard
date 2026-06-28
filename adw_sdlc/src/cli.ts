@@ -7,12 +7,10 @@
  * `--engine`) picks which language drives the run, orthogonal to the runner
  * choice:
  *
- * - `py` — delegate to the unchanged Python pipeline: spawn
- *   `python3 adw/issue.py` with this CLI's argv forwarded verbatim (minus
- *   `--engine`) and the FULL parent env. The py engine parses its own flags,
- *   applies its own runner validation (pi|claude), and builds its own secret
- *   boundary (adw/_exec.py safe_subprocess_env), exactly as a direct
- *   invocation would.
+ * - `py` — NOT available in this standalone port. It would require the Python
+ *   sibling (`adw/issue.py`), which is not bundled here, so selecting it raises
+ *   an explicit `AdwError` at dispatch — no subprocess, no `python3` dependency.
+ *   (To drive a run with the py engine, use the integrated upstream repository.)
  * - `ts` — parse the phased flags (mirroring adw/issue.py build_parser),
  *   resolve `--runner`/`ADW_RUNNER` over the four-runner registry, and
  *   bind the loaded adapter into `orchestrator.run()`.
@@ -21,11 +19,8 @@
  * adw/_orchestrator.py:557-559 — fail loud, never guess.
  */
 
-import { spawn } from 'node:child_process';
-import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { REPO_ROOT } from './common.js';
 import { ENV_ALIASES, readEnvAlias } from './env-vars.js';
 import { AdwError } from './errors.js';
 import { note } from './exec.js';
@@ -40,12 +35,26 @@ export type EngineId = (typeof ENGINE_IDS)[number];
 
 /**
  * Standalone HealthTech port: the cutover (PLAN.md roadmap step 12) is done —
- * `ts` is the default. The `py` engine is still selectable via
- * `--engine py` / `ADW_ENGINE=py`, but it delegates to a Python `adw/`
- * sibling that is NOT included in this standalone port, so it will fail loudly
- * unless that sibling is added.
+ * `ts` is the default. `py` stays a recognized engine id, but it is NOT
+ * available in this standalone port: selecting it via `--engine py` /
+ * `ADW_ENGINE=py` raises a deterministic `AdwError` at dispatch (no spawn, no
+ * `python3` dependency), because the Python `adw/issue.py` sibling is not
+ * bundled here.
  */
 export const DEFAULT_ENGINE: EngineId = 'ts';
+
+/**
+ * Why `--engine py` / `ADW_ENGINE=py` fails closed here: the Python sibling
+ * (`adw/issue.py`) is not bundled in this standalone port, so the mode cannot
+ * work. `main()` throws this at engine dispatch — before any subprocess is
+ * attempted — and the existing handler renders it as `error: …` with rc 1.
+ * The load-bearing substring `not available in this standalone distribution`
+ * is pinned by tests; the remaining prose is free to evolve.
+ */
+export const PY_ENGINE_UNAVAILABLE =
+  "the 'py' engine is not available in this standalone distribution: it requires the " +
+  'Python sibling (adw/issue.py), which is not bundled here. Use --engine ts (the default), ' +
+  'or run the py engine from the integrated upstream repository.';
 
 /**
  * Validate a `--engine` / `ADW_ENGINE` value. Unset/empty falls back to
@@ -75,8 +84,8 @@ export function splitPassthru(argv: readonly string[]): [string[], string[]] {
 
 /**
  * Pull every `--engine <value>` / `--engine=<value>` out of `args` so the
- * remainder can be forwarded verbatim to the py engine (whose parser does not
- * know the flag). The last occurrence wins, like argparse.
+ * remainder can be handed to the ts parser (which does not know the flag).
+ * The last occurrence wins, like argparse.
  */
 export function extractEngineFlag(args: readonly string[]): { engine?: string; rest: string[] } {
   const rest: string[] = [];
@@ -183,9 +192,9 @@ export const CLI_USAGE = `usage: adw-sdlc issue [--engine {py,ts}] <work-item-id
 
 Run the phased work-item delivery workflow (the "issue" command name is kept as a
 backward-compatible GitHub alias). --engine / ADW_ENGINE (deprecated alias:
-MX_AGENT_ENGINE) picks the driving language (default: ts). --engine py delegates to a python3 adw/issue.py
-sibling, which is NOT bundled in this standalone port. Flags below apply to the
-ts engine:
+MX_AGENT_ENGINE) picks the driving language (default: ts). --engine py is NOT
+available in this distribution (the python3 adw/issue.py sibling is not bundled);
+use --engine ts (the default). Flags below apply to the ts engine:
 
   --runner <id>            agent runner: claude (default) | codex | opencode | pi
                            Env: ADW_RUNNER (deprecated alias: MX_AGENT_RUNNER)
@@ -354,8 +363,6 @@ export function parseCliArgs(
 /** Every external effect main() touches, injectable for tests. */
 export interface CliDeps {
   env: Record<string, string | undefined>;
-  /** Run the py engine (`python3 adw/issue.py <argv>`) and return its rc. */
-  runPyEngine: (argv: readonly string[]) => Promise<number>;
   loadRunner: typeof loadRunner;
   /**
    * Provider-neutral run hook. When set, this is preferred over runIssue;
@@ -366,28 +373,9 @@ export interface CliDeps {
   runIssue: typeof run;
 }
 
-function spawnPyEngine(argv: readonly string[]): Promise<number> {
-  return new Promise((resolve, reject) => {
-    // No `env:` option: the child inherits the full parent environment on
-    // purpose — the py engine builds its own secret boundary, exactly as a
-    // direct `python3 adw/issue.py` invocation would.
-    const child = spawn('python3', [join(REPO_ROOT, 'adw', 'issue.py'), ...argv], {
-      cwd: REPO_ROOT,
-      stdio: 'inherit',
-    });
-    child.on('error', (err) => {
-      reject(new AdwError(`could not launch the py engine (python3): ${err.message}`, { cause: err }));
-    });
-    child.on('exit', (code, signal) => {
-      resolve(code ?? (signal !== null ? 1 : 0));
-    });
-  });
-}
-
 function defaultCliDeps(): CliDeps {
   return {
     env: process.env,
-    runPyEngine: spawnPyEngine,
     loadRunner,
     runIssue: run,
   };
@@ -417,10 +405,11 @@ function dryRunRunner(id: RunnerId): AgentRunner {
 }
 
 /**
- * CLI entry: resolve the engine, then delegate (py) or bind the selected
- * runner into orchestrator.run (ts). Expected failures (AdwError, including
- * RunnerNotInstalledError) print `error: …` and return 1, mirroring
- * adw/issue.py main(); anything else is a bug and propagates.
+ * CLI entry: resolve the engine, then reject `py` (not bundled in this
+ * standalone port) or bind the selected runner into orchestrator.run (ts).
+ * Expected failures (AdwError, including RunnerNotInstalledError) print
+ * `error: …` and return 1, mirroring adw/issue.py main(); anything else is a
+ * bug and propagates.
  */
 export async function main(argv: readonly string[], depsOverride: Partial<CliDeps> = {}): Promise<number> {
   const deps: CliDeps = { ...defaultCliDeps(), ...depsOverride };
@@ -430,8 +419,10 @@ export async function main(argv: readonly string[], depsOverride: Partial<CliDep
     const engine = resolveEngineId(engineFlag ?? readEnvAlias(deps.env, ENV_ALIASES.engine));
 
     if (engine === 'py') {
-      const forwarded = passthru.length > 0 ? [...rest, '--', ...passthru] : rest;
-      return await deps.runPyEngine(forwarded);
+      // Fail closed: the Python sibling is not bundled in this standalone port,
+      // so the mode cannot work. Throw before any subprocess is attempted,
+      // rather than spawning a missing-file `python3 adw/issue.py`.
+      throw new AdwError(PY_ENGINE_UNAVAILABLE);
     }
 
     if (passthru.length > 0) {

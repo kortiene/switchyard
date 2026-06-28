@@ -22,7 +22,7 @@ The original was a pnpm-workspace member with a sibling Python `adw/` engine. Th
 
 | Area | Upstream (mx-agent) | HealthTech port |
 | --- | --- | --- |
-| Default engine | `--engine py` (delegates to `python3 adw/issue.py`) | **`--engine ts`** (the Python sibling is not bundled; `py` stays selectable but fails loudly) |
+| Default engine | `--engine py` (delegates to `python3 adw/issue.py`) | **`--engine ts`** (the Python sibling is not bundled; `py` stays a recognized id but is **not available here** — selecting it raises an explicit "not available in this standalone distribution" `AdwError` at dispatch, with no spawn and no `python3` dependency) |
 | Test gate (`DEFAULT_TEST_CMD`) | `cargo test --all` | **empty** — skipped until configured (set `ADW_TEST_CMD`) |
 | Pre-merge gates (`DEFAULT_FINALIZE_GATES`) | hardcoded `cargo fmt/clippy/build` | **empty/configurable** via `ADW_FINALIZE_GATES` (newline-separated); empty repo can merge |
 | Branch prefixes (`TYPE_PREFIX`) | `type:bug`/`type:docs`/… | also maps HealthTech's plain labels (`bug`, `docs`, `tech-debt`, `infra`, …), case-insensitive |

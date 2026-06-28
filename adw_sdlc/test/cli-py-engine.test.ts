@@ -1,15 +1,13 @@
 /**
- * Pins the REAL py-engine delegation spawn (PLAN.md roadmap step 10): the
- * step's headline contract — engine=py spawns `python3 adw/issue.py` from
- * REPO_ROOT with the FULL parent environment (no env option: the py engine
- * builds its own secret boundary) — must be asserted on the spawn call
- * itself, not only on the injected runPyEngine seam, or a scrub/interpreter/
- * rc-mapping regression on the DEFAULT engine path would ship green.
- * (Same discipline as the runner suites, which pin every other spawn site.)
+ * Pins that `--engine py` fails CLOSED in this standalone port (issue #27): the
+ * Python sibling (`adw/issue.py`) is not bundled here, so selecting py must
+ * raise an explicit AdwError at dispatch — rc 1, the load-bearing message
+ * substring `not available in this standalone distribution`, and (the strongest
+ * regression pin) NO subprocess attempted at all. We still mock
+ * node:child_process so a regression that reintroduces the dead
+ * `python3 adw/issue.py` spawn would trip the spawn-never-called guard.
  */
 
-import { EventEmitter } from 'node:events';
-import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
@@ -20,54 +18,49 @@ vi.mock('node:child_process', async (importOriginal) => ({
 }));
 
 import { main } from '../src/cli.js';
-import { REPO_ROOT } from '../src/common.js';
 
 afterEach(() => {
   spawnMock.mockReset();
   vi.restoreAllMocks();
 });
 
-type SpawnOptions = { cwd?: string; stdio?: string; env?: unknown };
+const UNAVAILABLE = 'not available in this standalone distribution';
 
-/** A child whose lifecycle events fire after the handlers are registered. */
-function scriptChild(emit: (child: EventEmitter) => void): EventEmitter {
-  const child = new EventEmitter();
-  setImmediate(() => emit(child));
-  return child;
-}
-
-describe('spawnPyEngine (the real py delegation, no injected seam)', () => {
-  it('spawns python3 adw/issue.py from REPO_ROOT with the FULL parent env', async () => {
-    spawnMock.mockImplementation(() => scriptChild((c) => c.emit('exit', 0, null)));
-
-    const rc = await main(['5', '--yes'], { env: { GH_TOKEN: 'x', ADW_ENGINE: 'py' } });
-    expect(rc).toBe(0);
-
-    expect(spawnMock).toHaveBeenCalledTimes(1);
-    const [cmd, args, options] = spawnMock.mock.calls[0] as [string, string[], SpawnOptions];
-    expect(cmd).toBe('python3');
-    expect(args).toEqual([join(REPO_ROOT, 'adw', 'issue.py'), '5', '--yes']);
-    expect(options.cwd).toBe(REPO_ROOT);
-    expect(options.stdio).toBe('inherit');
-    // The load-bearing inverse of the D5 allowlist: NO env option at all, so
-    // the child inherits everything and python scrubs for itself. A
-    // safeSubprocessEnv-style "fix" here would break the py engine's own
-    // boundary construction.
-    expect('env' in options).toBe(false);
-  });
-
-  it('maps the child exit code through, and a signal death to rc 1', async () => {
-    spawnMock.mockImplementation(() => scriptChild((c) => c.emit('exit', 3, null)));
-    expect(await main(['5'], { env: { ADW_ENGINE: 'py' } })).toBe(3);
-
-    spawnMock.mockImplementation(() => scriptChild((c) => c.emit('exit', null, 'SIGTERM')));
-    expect(await main(['5'], { env: { ADW_ENGINE: 'py' } })).toBe(1);
-  });
-
-  it('maps a spawn failure (python3 missing) to a friendly rc-1 AdwError', async () => {
+describe('--engine py fails closed (Python sibling not bundled)', () => {
+  it('rejects the --engine py flag with rc 1 and never spawns a subprocess', async () => {
     const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
-    spawnMock.mockImplementation(() => scriptChild((c) => c.emit('error', new Error('spawn python3 ENOENT'))));
-    expect(await main(['5'], { env: { ADW_ENGINE: 'py' } })).toBe(1);
-    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('could not launch the py engine'));
+    const rc = await main(['--engine', 'py', '5', '--yes'], { env: {} });
+    expect(rc).toBe(1);
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining(UNAVAILABLE));
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects ADW_ENGINE=py from the environment identically', async () => {
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const rc = await main(['5', '--yes'], { env: { ADW_ENGINE: 'py' } });
+    expect(rc).toBe(1);
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining(UNAVAILABLE));
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('fails closed regardless of forwarded args or post-`--` passthru', async () => {
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // A TS-invalid runner and a passthru chunk are both irrelevant on a dead
+    // path: nothing is parsed, nothing is forwarded, nothing is spawned.
+    const rc = await main(['--engine', 'py', '5', '--runner', 'gemini', '--', '--x'], { env: {} });
+    expect(rc).toBe(1);
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining(UNAVAILABLE));
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for the --engine=py (equals) spelling (distinct extractEngineFlag branch)', async () => {
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // extractEngineFlag has two code paths: `--engine <value>` (space) and
+    // `--engine=<value>` (equals). The three tests above cover the space form
+    // and the env knob; this pins the equals branch against the same contract.
+    const rc = await main(['--engine=py', '5', '--yes'], { env: {} });
+    expect(rc).toBe(1);
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining(UNAVAILABLE));
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 });

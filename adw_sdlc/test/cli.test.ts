@@ -1,8 +1,8 @@
 /**
  * Engine/runner selection wiring (PLAN.md roadmap step 10, D4): the CLI must
- * resolve ADW_ENGINE / --engine (default ts in this standalone port),
- * delegate py runs to adw/issue.py verbatim, and on the ts engine validate
- * ADW_RUNNER / --runner over the four-runner registry and bind the
+ * resolve ADW_ENGINE / --engine (default ts in this standalone port), reject
+ * `py` (the Python sibling is not bundled — issue #27), and on the ts engine
+ * validate ADW_RUNNER / --runner over the four-runner registry and bind the
  * loaded adapter into orchestrator.run. Unknown engine/runner values throw,
  * mirroring adw/_orchestrator.py:557-559.
  */
@@ -30,7 +30,6 @@ afterEach(() => {
 function cliDeps(over: Partial<CliDeps> = {}): CliDeps {
   return {
     env: { PATH: '/bin' },
-    runPyEngine: vi.fn(async () => 0),
     loadRunner: vi.fn(async (id) => createMockRunner({ id }) as AgentRunner),
     runIssue: vi.fn(async () => 0),
     ...over,
@@ -95,6 +94,14 @@ describe('CLI usage', () => {
     expect(CLI_USAGE).toContain('<work-item-id>');
     expect(CLI_USAGE).toContain('work-item delivery workflow');
     expect(CLI_USAGE).toContain('"issue" command name is kept as a');
+  });
+
+  it('describes --engine py as NOT available, not as a working delegation (issue #27)', () => {
+    // Pin the corrected help text so a revert to the old "delegates to python3
+    // adw/issue.py" wording is caught before it ships. "NOT" and "available"
+    // are split across two lines in the template literal, so use a regex.
+    expect(CLI_USAGE).toMatch(/engine py is NOT\s+available in this distribution/);
+    expect(CLI_USAGE).not.toContain('delegates');
   });
 });
 
@@ -256,34 +263,36 @@ describe('runWorkItem dispatch', () => {
 });
 
 describe('main — engine dispatch', () => {
-  it('defaults to the ts engine (post-cutover): binds the runner, never the py path', async () => {
+  it('defaults to the ts engine (post-cutover): binds the runner', async () => {
     const deps = cliDeps();
     const rc = await main(['5', '--runner', 'claude', '--yes'], deps);
     expect(rc).toBe(0);
     expect(deps.loadRunner).toHaveBeenCalledWith('claude');
     expect(deps.runIssue).toHaveBeenCalledTimes(1);
-    expect(deps.runPyEngine).not.toHaveBeenCalled();
   });
 
-  it('delegates to the py engine when selected, forwarding argv verbatim', async () => {
-    const deps = cliDeps({ runPyEngine: vi.fn(async () => 3) });
-    // 'gemini' is invalid in the TS registry TOO, so this pins that the TS
-    // layer does NOT pre-validate the runner on the py path: the value and
-    // the passthru are forwarded untouched (minus --engine) and the py engine
-    // applies its own validation (pi|claude) exactly as a direct invocation would.
+  it('fails closed when --engine py is selected: explicit AdwError, no runner', async () => {
+    const stderr = muteStderr();
+    const deps = cliDeps();
+    // argv content is irrelevant on a dead path; nothing is forwarded.
     const rc = await main(['--engine', 'py', '5', '--runner', 'gemini', '--yes', '--', '--model', 'x'], deps);
-    expect(rc).toBe(3);
-    expect(deps.runPyEngine).toHaveBeenCalledWith(['5', '--runner', 'gemini', '--yes', '--', '--model', 'x']);
+    expect(rc).toBe(1);
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('not available in this standalone distribution'),
+    );
     expect(deps.loadRunner).not.toHaveBeenCalled();
     expect(deps.runIssue).not.toHaveBeenCalled();
   });
 
-  it('strips --engine from the argv forwarded to the py engine', async () => {
-    const deps = cliDeps();
-    await main(['--engine', 'py', '5', '--yes'], deps);
-    expect(deps.runPyEngine).toHaveBeenCalledWith(['5', '--yes']);
-    await main(['--engine=py', '5'], deps);
-    expect(deps.runPyEngine).toHaveBeenLastCalledWith(['5']);
+  it('fails closed identically when py comes from ADW_ENGINE', async () => {
+    const stderr = muteStderr();
+    const deps = cliDeps({ env: { ADW_ENGINE: 'py' } });
+    expect(await main(['5', '--yes'], deps)).toBe(1);
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('not available in this standalone distribution'),
+    );
+    expect(deps.loadRunner).not.toHaveBeenCalled();
+    expect(deps.runIssue).not.toHaveBeenCalled();
   });
 
   it('binds the selected runner into orchestrator.run on the ts engine', async () => {
@@ -306,13 +315,12 @@ describe('main — engine dispatch', () => {
     const deps = cliDeps({ env: { ADW_ENGINE: 'ts', ADW_RUNNER: 'codex' } });
     await main(['5', '--yes'], deps);
     expect(deps.loadRunner).toHaveBeenCalledWith('codex');
-    expect(deps.runPyEngine).not.toHaveBeenCalled();
   });
 
   it('lets flags win over the environment for both selectors', async () => {
+    // ADW_ENGINE=py would fail closed, but the --engine ts flag wins.
     const deps = cliDeps({ env: { ADW_ENGINE: 'py', ADW_RUNNER: 'codex' } });
     await main(['--engine', 'ts', '5', '--runner', 'pi', '--yes'], deps);
-    expect(deps.runPyEngine).not.toHaveBeenCalled();
     expect(deps.loadRunner).toHaveBeenCalledWith('pi');
   });
 
@@ -328,7 +336,6 @@ describe('main — engine dispatch', () => {
     expect(await main(['--engine', 'rust', '5'], deps)).toBe(1);
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining("unknown engine: 'rust'"));
     expect(await main(['5'], cliDeps({ env: { ADW_ENGINE: 'go' } }))).toBe(1);
-    expect(deps.runPyEngine).not.toHaveBeenCalled();
     expect(deps.runIssue).not.toHaveBeenCalled();
   });
 
@@ -390,10 +397,15 @@ describe('main — engine dispatch', () => {
     expect(stdout).toHaveBeenCalledWith(expect.stringContaining('usage: adw-sdlc issue'));
     expect(deps.loadRunner).not.toHaveBeenCalled();
     expect(deps.runIssue).not.toHaveBeenCalled();
-    // …while a py-engine --help is delegated, so Python prints its own help.
+    // …while py is unavailable here, so even --help fails closed at dispatch
+    // (the engine is rejected before argv is parsed for --help).
+    const stderr = muteStderr();
     const py = cliDeps({ env: { ADW_ENGINE: 'py' } });
-    expect(await main(['--help'], py)).toBe(0);
-    expect(py.runPyEngine).toHaveBeenCalledWith(['--help']);
+    expect(await main(['--help'], py)).toBe(1);
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('not available in this standalone distribution'),
+    );
+    expect(py.loadRunner).not.toHaveBeenCalled();
   });
 
   it('previews --dry-run without loading the optional runner SDK (py parity)', async () => {

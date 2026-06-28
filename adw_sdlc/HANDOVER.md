@@ -16,7 +16,9 @@ session can pick up where we stopped.
   `AgentRunner.runPhase()` seam.
 - Cross-language state contract: `adw/state.schema.json` plus the fixtures
   in `adw/fixtures/cross_language/`. The Python sibling is not bundled in
-  this standalone port.
+  this standalone port, so selecting `--engine py` / `ADW_ENGINE=py` raises an
+  explicit "not available in this standalone distribution" `AdwError` at
+  dispatch (no spawn, no `python3` dependency).
 - Architectural plan & parity criteria: `adw_sdlc/PLAN.md`,
   `adw_sdlc/PARITY.md`, `adw_sdlc/HEALTHTECH_PORT.md`.
 - MVP open-risk counterweight to PARITY.md (what real readiness still requires —
@@ -1377,6 +1379,53 @@ had zero automated coverage.
 Issue class: `test`. No kernel/runtime/prompt-pack/config change.
 `npm run verify` stays green (**605 tests, 43 files**).
 
+## 8ab. Issue #27 — py engine fails closed (Python sibling not bundled)
+
+Replaced the dead `spawnPyEngine` spawn with a deterministic `AdwError` on
+the `py` dispatch branch. Previously, `--engine py` / `ADW_ENGINE=py` tried
+to spawn `python3 adw/issue.py`, which does not exist in this standalone port
+(`adw/` ships only `state.schema.json` + fixtures). The failure was
+non-deterministic (rc depended on whether `python3` was installed) and gave no
+actionable error message. After this fix the behavior is: an explicit
+`AdwError` whose message contains the pinned substring
+`not available in this standalone distribution` is thrown at engine dispatch
+before any subprocess is attempted, rendering as `error: …` with rc 1.
+
+- `adw_sdlc/src/cli.ts` — new module-level `PY_ENGINE_UNAVAILABLE` constant
+  (the canonical error message; its load-bearing substring is pinned by tests);
+  `main()`'s `py` branch throws `new AdwError(PY_ENGINE_UNAVAILABLE)` instead
+  of calling the dead `deps.runPyEngine`. Removed: `spawnPyEngine` (the
+  `python3 adw/issue.py` spawn), `CliDeps.runPyEngine` (the injection seam),
+  and the `spawn`/`join`/`REPO_ROOT` imports used only by the spawn. Corrected:
+  file-top docstring, `DEFAULT_ENGINE` docstring, and `CLI_USAGE` — none
+  describe `py` as a working delegation any longer. `py` stays in `ENGINE_IDS`
+  and `resolveEngineId('py')` still returns `'py'`; the unavailability is
+  enforced at dispatch (not at id-resolution) so the error is descriptive
+  rather than the generic "unknown engine."
+- `adw_sdlc/test/cli-py-engine.test.ts` — complete rewrite (kept the
+  filename; changed the contract being pinned). The 3 old spawn-pin tests
+  replaced by 4 fail-closed tests: `--engine py` (space form),
+  `ADW_ENGINE=py` (env knob), extra args + post-`--` passthru (irrelevant on a
+  dead path), and `--engine=py` (equals form — a distinct `extractEngineFlag`
+  code branch). All four assert `spawnMock` was **never called** — the
+  strongest regression guard: a reintroduced spawn would trip even before the
+  rc/message assertions.
+- `adw_sdlc/test/cli.test.ts` — engine-dispatch tests updated: the 2 old
+  py-delegation tests (`delegates to the py engine when selected` and `strips
+  --engine from argv forwarded to the py engine`) replaced by 2 fail-closed
+  tests (`fails closed when --engine py is selected` and `fails closed
+  identically when py comes from ADW_ENGINE`).
+
+`HEALTHTECH_PORT.md` (table row, py-engine delta), `MVP-READINESS.md` (§3
+coexistence gate, adds the issue #27 pointer), and the `cli.ts` docstrings /
+`CLI_USAGE` / `DEFAULT_ENGINE` docstring were updated by the implementation
+phase (this doc pass records the architecture-level change in the handover
+narrative).
+
+Issue class: `fix`. No new dependency. The dry-run baseline and all other CLI
+behavior are byte-for-byte unchanged. `npm run verify` stays green
+(**606 tests, 43 files**).
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -1583,7 +1632,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **605 passing across 43 files**
+Test count baseline after this session: **606 passing across 43 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1601,7 +1650,8 @@ measurement mode — §8s, +16 for the observed-live ledger + cross-document syn
 drift guard — §8w, +10 for the live secret-boundary audit scaffold — §8x,
 +22 for the env-naming docs regression guard — §8y, +14 for the `rest` work-item
 write methods + fail-closed guard — §8z, +7 for the real-transport loopback
-suite — issue #26, §8aa). The §8v refactor (issue #5
+suite — issue #26, §8aa, +1 for the py-engine fail-closed test rewrite —
+issue #27, §8ab). The §8v refactor (issue #5
 — split parity-rate classification from rendering) added `tools/parity-rate-core.ts`
 (pure core module, no new test file) and extended `test/parity-rate.test.ts` with
 35 direct unit tests of the extracted core (39 tests total in the file, up from 4
