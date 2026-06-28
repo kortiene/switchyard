@@ -1426,6 +1426,42 @@ Issue class: `fix`. No new dependency. The dry-run baseline and all other CLI
 behavior are byte-for-byte unchanged. `npm run verify` stays green
 (**606 tests, 43 files**).
 
+## 8ac. Issue #25 — reconcile cutover documentation conflict (`cli.ts` vs `MVP-READINESS.md`)
+
+Comment-only reconciliation. The `DEFAULT_ENGINE` JSDoc in `cli.ts` previously
+asserted "the cutover (PLAN.md roadmap step 12) is done — `ts` is the default,"
+while `MVP-READINESS.md` §3 classifies `(C)` cutover as **post-MVP / ❌ not
+started**. A reviewer reading only `cli.ts` could prematurely treat the cutover
+milestone as shipped.
+
+The fix separates the two concepts the old wording conflated:
+
+- **`ts` default flip** — real and done locally in this standalone port.
+  `DEFAULT_ENGINE = 'ts'` is correct and unchanged.
+- **cutover *milestone*** (PLAN step 12 — py↔ts coexistence in the integrated
+  repo, keep-py-≥1-release rollback plan, maintainer sign-off) — **post-MVP**.
+  `MVP-READINESS.md` §3 is the single source of truth; `cli.ts` now defers to it
+  via a cross-reference (`see MVP-READINESS.md §3`) so the two docs cannot
+  silently diverge again.
+
+- `adw_sdlc/src/cli.ts` — `DEFAULT_ENGINE` JSDoc first sentence softened:
+  "the cutover … is done" → "the `ts` default is set (the `py → ts` default flip
+  is local to this port); the cutover *milestone* (PLAN.md roadmap step 12) is
+  **post-MVP** — see `MVP-READINESS.md` §3". Sentences 2-3 (the `py`-fails-closed
+  explanation) kept verbatim. `DEFAULT_ENGINE`'s value, `ENGINE_IDS`,
+  `resolveEngineId`, `PY_ENGINE_UNAVAILABLE`, and every runtime path are untouched.
+- `adw_sdlc/test/mvp-readiness-doc.test.ts` — new describe block
+  (`cli.ts / MVP-READINESS.md cross-doc consistency — issue #25`), 4 tests:
+  (1) `DEFAULT_ENGINE` JSDoc frames the milestone as post-MVP;
+  (2) it no longer claims the cutover "is done";
+  (3) `MVP-READINESS.md` §3 stays post-MVP with ≥1 ❌ and no ✅;
+  (4) the original contradiction (both conditions true simultaneously) cannot
+  reappear. A revert of the comment fix now fails CI.
+
+Issue class: `docs`. Comment + additive tests only — no behavior change, no
+prompt-pack change, no `pack:generate` required. `npm run verify` stays green
+(**611 tests, 44 files**).
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -1632,7 +1668,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **606 passing across 43 files**
+Test count baseline after this session: **611 passing across 44 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1651,7 +1687,8 @@ drift guard — §8w, +10 for the live secret-boundary audit scaffold — §8x,
 +22 for the env-naming docs regression guard — §8y, +14 for the `rest` work-item
 write methods + fail-closed guard — §8z, +7 for the real-transport loopback
 suite — issue #26, §8aa, +1 for the py-engine fail-closed test rewrite —
-issue #27, §8ab). The §8v refactor (issue #5
+issue #27, §8ab, +5 for the `cli.ts`/`MVP-READINESS.md` cross-doc consistency
+guard — issue #25, §8ac). The §8v refactor (issue #5
 — split parity-rate classification from rendering) added `tools/parity-rate-core.ts`
 (pure core module, no new test file) and extended `test/parity-rate.test.ts` with
 35 direct unit tests of the extracted core (39 tests total in the file, up from 4
