@@ -308,7 +308,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 578 tests, 41 files)
+# 3) Full test suite (current: 605 tests, 43 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -719,6 +719,13 @@ transport (helper read the token from its scoped env and sent
 `Authorization: Bearer <token>`; status 200; body mapped). Committed and merged
 to `main` in `0ac57a5` (see §1).
 
+> Reconcile (issue #26): that loopback roundtrip was, at the time, a one-off
+> manual check — there was no committed test. It is now codified as the automated
+> forked-loopback suite `test/providers-rest-transport.test.ts` (real
+> `restTransportViaNode`: GET/POST, auth-by-name, `AbortSignal` timeout,
+> connection-refused, and the https/allowlist guard gating egress), so the
+> "verified" claim is reproducible from a clean clone.
+
 Next for #4: **2c — declarative change-requests** — **now implemented, see §8m**;
 then **step 3** the out-of-process plugin broker (Option C, still a §10 hard stop).
 
@@ -777,6 +784,8 @@ github dry-run, and a **live two-process loopback roundtrip** of the real
 transport doing a `create`-shaped **POST with a templated JSON body** —
 the server received `Authorization: Bearer <token>` (from the child's scoped env)
 and the substituted body. Committed and merged to `main` in `0ac57a5` (see §1).
+(The POST-with-JSON-body roundtrip is now a committed automated case in
+`test/providers-rest-transport.test.ts`; see the §8l reconcile note, issue #26.)
 
 Scope note: 2c is `rest`-only; a `cli` change-request provider (`glab mr …`) is a
 symmetric follow-up (rest covers the forges). Next for #4: **step 3** the
@@ -1321,6 +1330,53 @@ Issue class: `fix`. No new dependency, no interface churn (`WorkItemProvider`,
 and the dry-run baseline are byte-for-byte unaffected. `npm run verify` stays
 green (598 tests, 42 files).
 
+## 8aa. Issue #26 — real `restTransportViaNode` loopback coverage
+
+Closes the gap the §8l "verified" claim exposed: that one-off manual
+loopback check was never committed as a test. Every other `rest` test
+injects a fake transport; the real HTTP path (kernel-owned inline
+`node -e` helper, auth-by-name, `AbortSignal` timeout, JSON round-trip)
+had zero automated coverage.
+
+- `adw_sdlc/test/helpers/loopback-server.mjs` (new) — forked loopback
+  server for the round-trip tests. Runs in its own process so its event
+  loop stays live while `spawnSync` blocks the test thread (an in-process
+  server would be frozen and the round-trip would deadlock to its timeout).
+  Three response modes: `echo` (200 + request mirror), `status404`, and
+  `hang` (never responds, to exercise `AbortSignal`). IPC protocol:
+  child → `{ type: 'listening', port }` on startup; parent → `{ type:
+  'requests' }` to drain captured requests; parent → `{ type: 'close' }`
+  to tear down (force-destroys held sockets so `hang` mode does not block
+  cleanup). Not a runner child — no secret-boundary rules apply.
+- `adw_sdlc/test/providers-rest-transport.test.ts` (new, **+7**) —
+  drives `restTransportViaNode` directly against the loopback:
+  - GET round-trip: auth token read by name inside the child (`FORGE_TOKEN`
+    in scoped env), `GH_TOKEN` withheld, `Authorization: Bearer` header
+    present in the captured request, JSON body mapped.
+  - POST with JSON body: `content-type: application/json` sent, body
+    echoed back via the server's echo response.
+  - Missing token: no `Authorization` header when the named env var is
+    absent from the scoped env.
+  - Non-2xx relay: 404 status and body propagated verbatim, no `error`.
+  - `AbortSignal` timeout: `hang` mode + 250 ms ⇒ `status:0`, `error`
+    matching `/abort|timeout/i`.
+  - Connection refused: close the loopback before the call ⇒ `status:0`,
+    truthy `error` (ECONNREFUSED).
+  - https/allowlist guard gates egress: `parseRestWorkItemDescriptor` with
+    a plain `http://` `baseUrl` throws at parse time, before any request
+    reaches the loopback; `assertAllowedHost`/`isAllowedHost` confirmed on
+    loopback-shaped origins.
+- `adw_sdlc/docs/DESIGN-declarative-providers.md` — §12 sub-step 2b
+  and §13 (Testing strategy) updated: the previous "verified" claim now
+  points to `test/providers-rest-transport.test.ts` rather than the
+  one-off manual check; the fork rationale is recorded in §13.
+- `adw_sdlc/HANDOVER.md` (§8l, §8m) — inline reconcile notes explain
+  the prior "manual check" framing and confirm the claim is now
+  reproducible from a clean clone.
+
+Issue class: `test`. No kernel/runtime/prompt-pack/config change.
+`npm run verify` stays green (**605 tests, 43 files**).
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -1527,7 +1583,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **598 passing across 42 files**
+Test count baseline after this session: **605 passing across 43 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1544,7 +1600,8 @@ measurement mode — §8s, +16 for the observed-live ledger + cross-document syn
 §8u, +35 for the parity-rate-core extraction — §8v, +6 for the env-naming
 drift guard — §8w, +10 for the live secret-boundary audit scaffold — §8x,
 +22 for the env-naming docs regression guard — §8y, +14 for the `rest` work-item
-write methods + fail-closed guard — §8z). The §8v refactor (issue #5
+write methods + fail-closed guard — §8z, +7 for the real-transport loopback
+suite — issue #26, §8aa). The §8v refactor (issue #5
 — split parity-rate classification from rendering) added `tools/parity-rate-core.ts`
 (pure core module, no new test file) and extended `test/parity-rate.test.ts` with
 35 direct unit tests of the extracted core (39 tests total in the file, up from 4

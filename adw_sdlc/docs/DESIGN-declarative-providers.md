@@ -326,9 +326,11 @@ imports nothing from these.
    kernel fetch helper + `createRestWorkItemProvider`. Read routes `fetch`/
    `state` are required; the optional write routes (`postProgress`/`assignSelf`/
    `setStatus`, templated JSON body) landed later alongside the
-   `doneStatus`-without-`setStatus` fail-closed guard (issue #24). Tests use an
-   injected transport; the real transport is verified via a two-process loopback
-   roundtrip. No new dependency.
+   `doneStatus`-without-`setStatus` fail-closed guard (issue #24). Tests inject a
+   fake transport for the mapping/guard logic; the real `restTransportViaNode`
+   HTTP path (spawn + stdin + auth-by-name + `AbortSignal` timeout + JSON
+   round-trip) is covered by an automated forked-loopback test,
+   `test/providers-rest-transport.test.ts` (issue #26). No new dependency.
 3. **2c — declarative `ChangeRequestProvider`. ✅ DONE** (`HANDOVER.md` §8m).
    The merge-authorized path over `rest`: `findForBranch`/`create`/`squashMerge`
    (required) + optional `pipelineStatus`, with request-body templating and the
@@ -351,9 +353,15 @@ imports nothing from these.
   `providers.test.ts`) returning canned JSON; assert `WorkItemContext` equality
   with the GitHub path for an equivalent payload; assert scoped env is built via
   `safeSubprocessEnv` (no `GH_TOKEN`, no deny-prefixed key).
-- `rest`: unit-test the path evaluator and guards directly; integration-test the
-  driver against a localhost `http`→ rejected and an allowlisted loopback
-  `https` (or a mocked helper) → mapped.
+- `rest`: unit-test the path evaluator and guards directly (against an injected
+  fake transport). Cover the real `restTransportViaNode` with a **forked**
+  loopback HTTP server (`test/providers-rest-transport.test.ts`, issue #26) that
+  round-trips the transport directly — GET/POST, auth-by-name + Accept +
+  content-type header assembly, non-2xx passthrough, `AbortSignal` timeout, and
+  connection-refused. The fork is required because `restTransportViaNode` uses
+  `spawnSync`, which would freeze an in-process server's event loop. The
+  https/allowlist guard is shown to gate the real transport (a plain-`http`
+  descriptor is rejected at parse and the loopback records zero egress).
 - Fail-closed: a descriptor with a bad `map` form, `authEnv: "GH_TOKEN"`, an
   off-allowlist host, or an `http://` baseUrl each throws at construction.
 - Parity: the `github` built-in and the committed dry-run output are unchanged.
