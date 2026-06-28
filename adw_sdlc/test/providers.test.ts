@@ -23,7 +23,7 @@ import {
   type RestRequest,
   type RestTransport,
 } from '../src/providers-rest-cli.js';
-import type { Captured } from '../src/exec.js';
+import { formatProgress, type Captured } from '../src/exec.js';
 import { withScopedEnv } from './helpers.js';
 
 function fakeProviders(): AdwProviders {
@@ -154,6 +154,27 @@ describe('declarative cli work-item provider', () => {
     expect(called).toBe(false);
   });
 
+  it('fail-closed guard (cli): doneStatus without setStatus route throws at construction', () => {
+    const config = parseAdwConfig({ providers: { workItems: { ...descriptorRaw, doneStatus: 'Done' } } });
+    expect(() => createProvidersFromConfig(config, () => [])).toThrow(/doneStatus .* no .* setStatus route/);
+  });
+
+  it('fail-closed guard (cli): doneStatus with setStatus route does not throw', () => {
+    const config = parseAdwConfig({
+      providers: {
+        workItems: {
+          ...descriptorRaw,
+          doneStatus: 'Done',
+          routes: {
+            ...descriptorRaw.routes,
+            setStatus: { command: ['glab', 'issue', 'reopen', '{id}'] },
+          },
+        },
+      },
+    });
+    expect(() => createProvidersFromConfig(config, () => [])).not.toThrow();
+  });
+
   it('is built through createProvidersFromConfig for type: "cli"', () => {
     const config = parseAdwConfig({ providers: { workItems: descriptorRaw } });
     const providers = createProvidersFromConfig(config, () => []);
@@ -221,7 +242,8 @@ describe('declarative rest work-item provider', () => {
     expect(pBad.state({ ghBin: null, repo: 'g/p' }, 1)).toBe('UNKNOWN');
   });
 
-  it('no-ops the write methods in 2b', () => {
+  it('unrouted write methods (no route keys) are best-effort no-ops', () => {
+    // descriptor has only fetch/state — postProgress/assignSelf/setStatus unrouted
     let called = false;
     const provider = createRestWorkItemProvider(descriptor, () => {
       called = true;
@@ -231,6 +253,170 @@ describe('declarative rest work-item provider', () => {
     provider.assignSelf({ ghBin: null, repo: '' }, 1);
     provider.setStatus({ ghBin: null, repo: '' }, 1, 'Done');
     expect(called).toBe(false);
+  });
+
+  it('routed setStatus: issues PUT request with percent-encoded URL, substituted body, and scoped env', () => {
+    const rawWithSetStatus = {
+      ...raw,
+      routes: {
+        ...raw.routes,
+        setStatus: { method: 'PUT', path: '/projects/{repo}/issues/{id}', body: { state_event: '{status}' } },
+      },
+    };
+    const d = parseRestWorkItemDescriptor(rawWithSetStatus);
+    const seen: { req: RestRequest; env: Record<string, string> }[] = [];
+    const transport: RestTransport = (req, env) => {
+      seen.push({ req, env });
+      return { status: 200, body: '{}' };
+    };
+    withScopedEnv({ GITLAB_TOKEN: 'tok', GH_TOKEN: 'gh-secret' }, () => {
+      const provider = createRestWorkItemProvider(d, transport);
+      provider.setStatus({ ghBin: null, repo: 'group/proj' }, 42, 'Done');
+      expect(seen).toHaveLength(1);
+      const { req, env } = seen[0]!;
+      expect(req.method).toBe('PUT');
+      expect(req.url).toBe('https://gitlab.example.com/api/v4/projects/group%2Fproj/issues/42');
+      expect(req.body).toEqual({ state_event: 'Done' });
+      expect(env['GITLAB_TOKEN']).toBe('tok');
+      expect(env['GH_TOKEN']).toBeUndefined();
+    });
+  });
+
+  it('routed setStatus: non-ok response is best-effort (does not throw)', () => {
+    const rawWithSetStatus = {
+      ...raw,
+      routes: {
+        ...raw.routes,
+        setStatus: { method: 'PUT', path: '/projects/{repo}/issues/{id}', body: { state_event: '{status}' } },
+      },
+    };
+    const d = parseRestWorkItemDescriptor(rawWithSetStatus);
+    const provider = createRestWorkItemProvider(d, () => ({ status: 422, body: '{"message":"invalid state"}' }));
+    // must not throw — write failures are best-effort; orchestrator swallows them
+    expect(() => provider.setStatus({ ghBin: null, repo: 'g/p' }, 42, 'Done')).not.toThrow();
+  });
+
+  it('routed postProgress: templates the {body} placeholder into the request body', () => {
+    const rawWithPostProgress = {
+      ...raw,
+      routes: {
+        ...raw.routes,
+        postProgress: { path: '/projects/{repo}/issues/{id}/notes', body: { body: '{body}' } },
+      },
+    };
+    const d = parseRestWorkItemDescriptor(rawWithPostProgress);
+    const seen: RestRequest[] = [];
+    const transport: RestTransport = (req) => {
+      seen.push(req);
+      return { status: 201, body: '{}' };
+    };
+    const provider = createRestWorkItemProvider(d, transport);
+    provider.postProgress({ ghBin: null, repo: 'g/p' }, 7, 'a1b2c3d4', 'plan', 'msg');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.body).toEqual({ body: formatProgress('a1b2c3d4', 'plan', 'msg') });
+  });
+
+  it('routed postProgress: non-ok response is best-effort (does not throw)', () => {
+    const rawWithPostProgress = {
+      ...raw,
+      routes: {
+        ...raw.routes,
+        postProgress: { path: '/projects/{repo}/issues/{id}/notes', body: { body: '{body}' } },
+      },
+    };
+    const d = parseRestWorkItemDescriptor(rawWithPostProgress);
+    const provider = createRestWorkItemProvider(d, () => ({ status: 503, body: '' }));
+    expect(() => provider.postProgress({ ghBin: null, repo: 'g/p' }, 7, 'a1b2c3d4', 'plan', 'msg')).not.toThrow();
+  });
+
+  it('routed assignSelf: issues its request with correct method and URL', () => {
+    const rawWithAssign = {
+      ...raw,
+      routes: {
+        ...raw.routes,
+        assignSelf: { method: 'POST', path: '/projects/{repo}/issues/{id}/assignees' },
+      },
+    };
+    const d = parseRestWorkItemDescriptor(rawWithAssign);
+    const seen: RestRequest[] = [];
+    const transport: RestTransport = (req) => {
+      seen.push(req);
+      return { status: 200, body: '{}' };
+    };
+    const provider = createRestWorkItemProvider(d, transport);
+    provider.assignSelf({ ghBin: null, repo: 'g/p' }, 5);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.method).toBe('POST');
+    expect(seen[0]!.url).toBe('https://gitlab.example.com/api/v4/projects/g%2Fp/issues/5/assignees');
+  });
+
+  it('fail-closed guard (rest): doneStatus without setStatus route throws at construction', () => {
+    const config = parseAdwConfig({ providers: { workItems: { ...raw, doneStatus: 'Done' } } });
+    expect(() => createProvidersFromConfig(config, () => [])).toThrow(/doneStatus .* no .* setStatus route/);
+  });
+
+  it('fail-closed guard (rest): doneStatus with setStatus route builds successfully', () => {
+    const config = parseAdwConfig({
+      providers: {
+        workItems: {
+          ...raw,
+          doneStatus: 'Done',
+          routes: {
+            ...raw.routes,
+            setStatus: { path: '/projects/{repo}/issues/{id}', body: { state_event: '{status}' } },
+          },
+        },
+      },
+    });
+    expect(() => createProvidersFromConfig(config, () => [])).not.toThrow();
+  });
+
+  it('parseRestWorkItemDescriptor: unknown placeholder in setStatus body throws', () => {
+    expect(() =>
+      parseRestWorkItemDescriptor({
+        ...raw,
+        routes: {
+          ...raw.routes,
+          setStatus: { path: '/projects/{repo}/issues/{id}', body: { evil: '{bogus}' } },
+        },
+      }),
+    ).toThrow(/unknown placeholder/);
+  });
+
+  it('parseRestWorkItemDescriptor: disallowed placeholder in write-route path throws', () => {
+    expect(() =>
+      parseRestWorkItemDescriptor({
+        ...raw,
+        routes: {
+          ...raw.routes,
+          setStatus: { path: '/projects/{repo}/issues/{id}/{bogus}' },
+        },
+      }),
+    ).toThrow(/unknown placeholder/);
+  });
+
+  it('parseRestWorkItemDescriptor: unknown placeholder in postProgress body throws', () => {
+    expect(() =>
+      parseRestWorkItemDescriptor({
+        ...raw,
+        routes: {
+          ...raw.routes,
+          postProgress: { path: '/projects/{repo}/issues/{id}/notes', body: { note: '{bogus}' } },
+        },
+      }),
+    ).toThrow(/unknown placeholder/);
+  });
+
+  it('parseRestWorkItemDescriptor: unknown placeholder in assignSelf path throws', () => {
+    expect(() =>
+      parseRestWorkItemDescriptor({
+        ...raw,
+        routes: {
+          ...raw.routes,
+          assignSelf: { path: '/projects/{repo}/issues/{id}/{bogus}/assignees' },
+        },
+      }),
+    ).toThrow(/unknown placeholder/);
   });
 
   it('is built through createProvidersFromConfig, and fails closed for an off-allowlist host', () => {

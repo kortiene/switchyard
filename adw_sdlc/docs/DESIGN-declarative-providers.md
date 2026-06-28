@@ -266,7 +266,17 @@ Mirror the `schema-override.ts` loader posture and `validatePhaseChain`:
   `setStatus` are optional and **no-op when absent** (best-effort, exactly like
   the GitHub provider no-ops without `gh`). This resolves §8 q4 (progress
   posting needs no special brokering in v1 — it is just an optional write route;
-  if it later proves hot, a dedicated batched route is an additive change).
+  if it later proves hot, a dedicated batched route is an additive change). Both
+  the `cli` and `rest` work-item providers honor these optional write routes
+  (the `rest` ones use the same templated JSON body as the change-request
+  provider).
+- One exception to "best-effort": an opt-in `doneStatus` is a *loss-bearing*
+  terminal write the operator explicitly requested, so configuring it on a
+  `cli`/`rest` provider that has **no `setStatus` route** **fails closed** at
+  construction (`assertStatusTransitionRoutable`) — the only place a loud error
+  survives, since a throw at the `setStatus` call site would be swallowed by the
+  orchestrator's best-effort `transitionToDone`. The `github` provider is not
+  guarded (it has no route concept and auto-closes via `closes #<n>`).
 
 ## 10. Interface fit & code layout
 
@@ -313,9 +323,12 @@ imports nothing from these.
    unchanged.
 2. **2b — `rest` work-item provider. ✅ DONE** (`HANDOVER.md` §8l). Adds the
    `allowedHosts`/https guard + percent-encoded path placeholders + the inline
-   kernel fetch helper + `createRestWorkItemProvider` (read routes `fetch`/
-   `state`; write routes deferred). Tests use an injected transport; the real
-   transport is verified via a two-process loopback roundtrip. No new dependency.
+   kernel fetch helper + `createRestWorkItemProvider`. Read routes `fetch`/
+   `state` are required; the optional write routes (`postProgress`/`assignSelf`/
+   `setStatus`, templated JSON body) landed later alongside the
+   `doneStatus`-without-`setStatus` fail-closed guard (issue #24). Tests use an
+   injected transport; the real transport is verified via a two-process loopback
+   roundtrip. No new dependency.
 3. **2c — declarative `ChangeRequestProvider`. ✅ DONE** (`HANDOVER.md` §8m).
    The merge-authorized path over `rest`: `findForBranch`/`create`/`squashMerge`
    (required) + optional `pipelineStatus`, with request-body templating and the
