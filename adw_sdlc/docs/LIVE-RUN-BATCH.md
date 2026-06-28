@@ -4,18 +4,16 @@ Purpose: a ready-to-create batch of small GitHub issues to drive **5–10 varied
 live `claude` ADW runs**. These satisfy the `MVP-READINESS.md` §1 gate
 ("≥ 5–10 live `claude` runs across varied `issue_class`") *and* advance the repo.
 
-> Status: **in progress.** Issue #1 (docs: declare Claude-only MVP scope +
-> live-run playbook) has been run live as a **forced-fenced** ADW run — the first
-> live run from this checkout and the seed of the fenced-path baseline. Issue #3
-> (feat: MVP live-run observation ledger) has been run as a **native** ADW run,
-> producing `adw_sdlc/docs/OBSERVED-LIVE-LEDGER.md`. Issue #4 (test: failure-drill
-> scaffold) has been run as a **native** ADW run, producing
-> `adw_sdlc/docs/FAILURE-DRILLS.md`. Issue #5 (refactor: parity-rate-core
-> extraction) has been run as a **native** ADW run (§8v). Issue #6 (fix: ADW_*
-> env-naming drift guard) has been run as a **native** ADW run (§8w). Issue #7
-> (feat: live secret-boundary audit scaffold) has been run as a **native** ADW
-> run, producing `adw_sdlc/docs/SECRET-BOUNDARY-AUDIT.md` and
-> `adw_sdlc/test/secret-boundary-audit.test.ts` (§8x). Issues 2, 8 remain planned.
+> Status: **complete — all 8 issues run live.** Issues #1–#8 each ran as a live
+> `claude` ADW run and squash-merged as PRs #9–#16 on `kortiene/switchyard`. Issue
+> #1 (docs: Claude-only MVP scope) ran **forced-fenced** — the seed of the
+> fenced-path baseline (5 fenced attempts); issues #2–#8 ran **native**. Measured
+> over the batch, `npm run parity:rate -- agents/` reports native **0/36 hard-fails
+> (0.0%)**, an **88.9% single-nudge rate**, and fenced **5/5 clean** (so the
+> comparative bar is still INSUFFICIENT — it needs ≥ 20 fenced attempts). The run
+> workspaces are git-ignored. Remaining readiness work is the live failure-mode
+> drills and the secret-boundary live audit (still scaffold-only), not more batch
+> issues.
 
 ## Why a single `verify` gate first
 
@@ -52,7 +50,7 @@ Valid `issue_class` values (must match `src/schemas.ts` `ISSUE_CLASSES` and
 `.adw/prompts/classify.md`): `feat`, `fix`, `docs`, `chore`, `ci`, `test`,
 `refactor`.
 
-## The batch (8 issues, 7 distinct classes)
+## The batch (8 issues, 7 planned classes)
 
 | # | Title | Class | Run mode | Advances |
 | --- | --- | --- | --- | --- |
@@ -65,8 +63,10 @@ Valid `issue_class` values (must match `src/schemas.ts` `ISSUE_CLASSES` and
 | 7 | feat: live secret-boundary audit scaffold (no secret printing) | feat | native | MVP-READINESS §1 operational basics |
 | 8 | chore: normalize handover/env docs after rename | chore | native | current-vs-historical env clarity |
 
-Class coverage: `docs, ci, feat, test, refactor, fix, chore` (7 of 7). Run 1–6
-for a minimal sample; all 8 for the stronger sample.
+Class coverage *as planned*: `docs, ci, feat, test, refactor, fix, chore` (7 of 7).
+*As realized* (classify phase): **6 distinct** — issue #8 classified as `docs`, not
+the planned `chore`, so `docs` recurs for #1/#3/#8 and `chore` was never exercised.
+Run 1–6 for a minimal sample; all 8 for the stronger sample.
 
 ## Run-order rationale
 
@@ -132,7 +132,8 @@ each, stop early if the hard-fail rate or cost looks wrong.
 
 ## Uncertainties
 
-- No remote configured here → cannot create/run from this checkout yet.
+- The batch ran on `kortiene/switchyard`; a fresh checkout has no remote configured
+  → add `origin` before creating/running new issues from it.
 - The `--max-native-rate` threshold (20%) is a placeholder; pick the real MVP
   threshold before declaring the gate met.
 - Nudge-retry observation is opportunistic, not guaranteed.
