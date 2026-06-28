@@ -1,0 +1,55 @@
+{
+  "adw_id": "f83c8ce5",
+  "schema_version": 1,
+  "issue_number": "3",
+  "issue_class": "docs",
+  "branch_name": "feat/3-f83c8ce5-feat-mvp-live-run-observation-ledger",
+  "base": "main",
+  "plan_file": "specs/mvp-live-run-observation-ledger.md",
+  "pr_number": 11,
+  "pr_url": "https://github.com/kortiene/switchyard/pull/11",
+  "commit_message": "docs(adw): add observed-live ledger for PARITY §10 guarantees\n\nAdd `adw_sdlc/docs/OBSERVED-LIVE-LEDGER.md`, the live counterpart to\nPARITY.md's mocked-seam checklist. It carries one row per PARITY.md\nSection-10 guarantee (all 13), each with an explicit observed-live\nstatus drawn from a four-token legend (✅ observed-live / 🟡 partial /\n⏳ not-yet-observed / N/A not-live-observable) plus its mocked status and\nrun-id evidence.\n\nThe ledger is seeded conservatively from the one existing live `claude`\nrun (issue #304 → PR #331, parity fix #332, run `007fd5ba`, ≈ $34.76):\n6 ✅, 4 🟡, 2 ⏳, 1 N/A. Rows are marked ✅ only where a committed\ndocument (PARITY.md / MVP-READINESS.md) supports it; the load-bearing\nsecurity/failure guarantees (#5 secret withholding, #8 bounded loops)\nstay ⏳, matching MVP-READINESS §1's still-owed list. The `agents/`\nartifact tree is not vendored here, so the seed is doc-grounded only and\nthe update procedure documents how to upgrade rows after future runs.\n\n- Link the ledger from MVP-READINESS.md §1 and reconcile the stale\n  \"12 boxes\" wording to \"13 Section-10 guarantees\" (the count predates\n  the additive State-equivalence row); flip the bullet's ❌ → 🔧 since\n  the artifact now exists (the gate itself stays unchecked).\n- Add `test/observed-live-ledger-doc.test.ts`: asserts the four\n  acceptance criteria mechanically (all 13 guarantees present, each data\n  row carries a status token, seed evidence cited, MVP-READINESS links\n  the ledger) and a cross-document sync check that parses PARITY.md\n  Section 10 directly so a future add/remove of a guarantee fails the\n  suite instead of silently drifting.\n- Add ledger entry to README.md documentation map.\n- Update LIVE-RUN-BATCH.md status (issue #3 in progress).\n- Record §8u in HANDOVER.md; update test count 466 → 482.\n\nDocs/feature artifact only: no kernel, prompt-pack, config, schema, or\nruntime change. The ledger lives outside `.adw/prompts`, so `pack:check`\nis unaffected. `npm run verify` stays green (482 tests).\n\ncloses #3",
+  "pr_body": "## Summary\n\nAdds the **observed-live ledger** — the live counterpart to `PARITY.md`'s\nmocked-seam checklist. `PARITY.md` is a wall of green boxes, but nearly every\nbox is proven only under stubs; the one live `claude` run that exists (PR #331)\nsurfaced a real parity bug (#332). This ledger asks the harder question for each\nPARITY Section-10 guarantee: **has it been seen at least once in a real run, not\nonly under mocks?**\n\nIt is the readiness dashboard called for by `MVP-READINESS.md` §1 and is scoped\nto the `claude` cutover gate (the adopted (A) MVP).\n\n## Changes\n\n| File | Change |\n| --- | --- |\n| `adw_sdlc/docs/OBSERVED-LIVE-LEDGER.md` | **New.** Legend, one row per PARITY §10 guarantee (13 rows), conservative seed, and a \"how to update after a live run\" procedure. |\n| `adw_sdlc/MVP-READINESS.md` | **Edit (§1 only).** Links the ledger, reconciles \"12 boxes\" → \"13 Section-10 guarantees\", flips the bullet marker `❌ → 🔧`. |\n| `adw_sdlc/test/observed-live-ledger-doc.test.ts` | **New.** Encodes the acceptance criteria + a cross-document sync check against PARITY.md Section 10. |\n| `adw_sdlc/README.md` | **Edit.** Adds `docs/OBSERVED-LIVE-LEDGER.md` to the documentation map. |\n| `adw_sdlc/docs/LIVE-RUN-BATCH.md` | **Edit.** Status updated to reflect issue #3 has been run. |\n| `adw_sdlc/HANDOVER.md` | **Edit.** Adds §8u recording this run; test count updated 466 → 482. |\n\n## Seed (conservative, doc-grounded)\n\nSeeded from the single live run — issue #304 → PR #331 (squash-merged), parity\nfix #332, run `007fd5ba`, cost ≈ $34.76 — using a four-token legend so each row\ncarries an honest status:\n\n**6 ✅ observed-live · 4 🟡 partial/inferred · 2 ⏳ not-yet-observed · 1 N/A.**\n\nA row is `✅` **only** where a committed document supports it. The load-bearing\nsecurity/failure guarantees — **#5 secret withholding** and **#8 bounded loops +\nno-retry-on-timeout** — stay `⏳`, matching the still-owed items in\n`MVP-READINESS.md` §1. The `agents/007fd5ba/` artifact tree is not vendored in\nthis checkout, so the seed is grounded in the committed docs only; the update\nprocedure documents how to upgrade `🟡` rows once artifacts are available.\n\n## Acceptance criteria\n\n- [x] Ledger lists every PARITY.md Section-10 guarantee (all 13).\n- [x] Each row has an explicit observed-live status.\n- [x] Linked from `MVP-READINESS.md`.\n- [x] `npm run verify` stays green.\n\n## Verification\n\n`npm run verify` from `adw_sdlc/` — **green** (typecheck → lint:env → pack:check\n→ test → build → rm -rf dist). 482 tests pass (466 prior + 16 new), including the\nnew `observed-live-ledger-doc.test.ts` and the unchanged `mvp-readiness-doc.test.ts`.\n\nThe cross-document sync test parses PARITY.md Section 10 directly, so a future\nadd/remove of a guarantee fails the suite rather than silently desyncing the\nledger.\n\n## Scope / risk\n\nDocs + one test only. No kernel, prompt-pack, config, schema, or runtime change;\nthe ledger lives outside `.adw/prompts`, so `pack:check` is unaffected and no\n`pack:generate` is needed. Rollback is deleting the two new files and reverting\nthe one-line MVP-READINESS edit.\n\ncloses #3",
+  "review_findings": [
+    {
+      "severity": "tech_debt",
+      "description": "Ledger cites hardcoded source line numbers (e.g. MVP-READINESS.md:87–90 for the secret-boundary row) that no test guards; this PR's own §1 edit shifted MVP-READINESS lines, leaving that citation ~2 lines stale (the cited text now sits ~line 91). Citations will silently rot on future doc edits — prefer section/anchor references over line numbers.",
+      "location": "adw_sdlc/docs/OBSERVED-LIVE-LEDGER.md:42"
+    },
+    {
+      "severity": "skippable",
+      "description": "The 'every data row carries an explicit observed-live status token' test checks row.includes(token) across the whole row, so it passes even if the Observed-live? cell were empty (every row's Mocked? column already contains ✅). The later per-token cross-check on split('|')[4] compensates, so coverage is intact, but this named assertion is weaker than it reads.",
+      "location": "adw_sdlc/test/observed-live-ledger-doc.test.ts:63"
+    }
+  ],
+  "completed_phases": [
+    "setup",
+    "classify",
+    "plan",
+    "implement",
+    "tests",
+    "resolve",
+    "e2e",
+    "review",
+    "patch",
+    "document",
+    "merge"
+  ],
+  "engine": "ts",
+  "runner": "claude",
+  "work_item": {
+    "provider": "github",
+    "type": "issue",
+    "id": "3",
+    "number": 3,
+    "title": "feat: MVP live-run observation ledger"
+  },
+  "change_request": {
+    "provider": "github",
+    "type": "pull_request",
+    "id": "11",
+    "number": 11,
+    "url": "https://github.com/kortiene/switchyard/pull/11"
+  },
+  "total_cost_usd": 9.0365286
+}

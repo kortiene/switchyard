@@ -1,0 +1,60 @@
+{
+  "adw_id": "8a863e1d",
+  "schema_version": 1,
+  "issue_number": "5",
+  "issue_class": "refactor",
+  "branch_name": "feat/5-8a863e1d-refactor-split-parity-rate-classificatio",
+  "base": "main",
+  "plan_file": "specs/split-parity-rate-classification-from-rendering.md",
+  "pr_number": 13,
+  "pr_url": "https://github.com/kortiene/switchyard/pull/13",
+  "commit_message": "docs(adw): update HANDOVER test count for §8v parity-rate-core extraction\n\nUpdate the §12 test-count baseline in HANDOVER.md to 540 (was 482 before\n§8v), adding \"+35 for the parity-rate-core extraction — §8v\" to the delta\nlist and replacing the deferred \"run npm run verify\" hedge with the precise\nper-test accounting for the 35 tests added to test/parity-rate.test.ts\n(39 total in the file, up from 4 in §8r).\n\nNo code, behavior, or prompt-pack change; the test count was the only stale\nsurface after the §8v implementation phase recorded the §8v section in\nHANDOVER.md but left the exact count as TBD.\n\ncloses #5",
+  "pr_body": "## What & why\n\nSplits the parity-rate tool's **classifier** (pure: per-phase classification,\nrate aggregation, verdicts, and per-run classification) out of the\n**I/O + rendering + CLI** shell, so the classifier can be unit-tested and reused\nwithout touching the disk or printing. Implements\n`specs/split-parity-rate-classification-from-rendering.md`.\n\nCloses #5.\n\n## Changes\n\n- **New `adw_sdlc/tools/parity-rate-core.ts`** — dependency-free pure module\n  (imports neither `node:fs` nor `process`). Holds `FENCED_MARKER`, the public\n  types (`ContractPath`, `Outcome`, `PhaseClassification`, `RunAnalysis`,\n  `Bucket`, `Verdict`), `PATHS`, and the pure functions `classifyPhasePath`,\n  `classifyOutcome`, `attempts`, `aggregate`, `pct`, `verdict`,\n  `nativeAbsoluteVerdict`.\n- **New pure `classifyRun(RunInputs)`** — classifies one run from already-loaded\n  inputs (`RunInputs`/`PhaseInputs`), a faithful mirror of the old `analyzeRun`\n  loop: `attempted = true`, classify path + outcome, sort by\n  `phase.localeCompare`, and an `error` short-circuit to an empty-phases\n  analysis.\n- **`adw_sdlc/tools/parity-rate.ts`** — `analyzeRun` becomes a thin loader that\n  reads `state.json` + phase dirs off disk into `RunInputs` and delegates to\n  `classifyRun`. The exact phase gate (`isDirectory() && transcript.log`), field\n  extraction, error path, `renderReport`, `findRunDirs`, `main`, and the\n  `import.meta.url` guard are unchanged. The file `export *`s the core surface so\n  external importers and the CLI keep a byte-identical public API.\n- **`adw_sdlc/test/parity-rate.test.ts`** — adds direct pure-core tests for\n  `classifyRun` (sort order, classify/unknown paths, all five outcomes, error +\n  null-meta passthrough), cross-module re-export identity checks, and broader\n  coverage for `verdict`, `nativeAbsoluteVerdict`, `aggregate`, `pct`, and\n  `renderReport` structure.\n- **`adw_sdlc/HANDOVER.md`** — new §8v records the refactor: module split\n  rationale, what moved where, and the test extension. §12 test-count note\n  updated to reference §8v.\n\n## Acceptance criteria\n\n- [x] No behavior change to `npm run parity:rate` output for the same inputs —\n  logic preserved; loader keeps the exact filter/order/error invariants; CLI\n  surface re-exported unchanged.\n- [x] Classification/verdict functions are exported and unit-tested.\n- [x] `npm run verify` stays green.\n- [x] `FENCED_MARKER` drift guard intact and still passing.\n- [x] New tool file excluded from `dist` (`tsconfig.build.json` includes only\n  `src`; `verify` ends with `rm -rf dist`).\n\n## Verification\n\n- `npm run verify` → **green** (typecheck, lint:env, pack:check, **540** tests,\n  build).\n- Focused `npx vitest run test/parity-rate.test.ts` → **39** passing.\n\n## Reviewer notes / follow-ups (non-blocking)\n\nThe spec listed two *additional* (spec-only) acceptance criteria that are not\nyet implemented; the issue's three ACs are all met and behavior is preserved, so\nthese are tracked as tech-debt rather than blockers:\n\n1. **No golden/byte-stability lock for rendering.** The new `renderReport` tests\n   use `toContain` substring assertions, which do not pin the full output. The\n   spec called for a golden snapshot of `renderReport` (and the `--json`\n   `{ runs, aggregate, comparative, absolute }` object) over a fixed\n   `RunAnalysis[]` to lock AC #1 against future drift. The `--json` shape and\n   `main`'s exit-code logic remain untested. Recommend a follow-up adding an\n   inline-snapshot golden test.\n2. **No core-purity guard.** The spec recommended a structural test asserting\n   `parity-rate-core.ts` source contains no `node:fs` / `process` references —\n   the stated rationale for the module split (an enforceable \"no I/O in the\n   classifier\" boundary). The module is pure today but nothing prevents\n   regression. Recommend adding the cheap source-scan guard.\n\nNo `src/` or prompt-pack (`.adw/`) changes, so `pack:check` is unaffected.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+  "review_findings": [
+    {
+      "severity": "tech_debt",
+      "description": "No byte-exact golden/snapshot test locks renderReport (or the `--json` {runs,aggregate,comparative,absolute} object) for a fixed RunAnalysis[]. The new renderReport tests only use `toContain` substring checks, so AC #1 (byte-stable output) is preserved by construction here but not guarded against future drift, as the spec §4.4 recommended.",
+      "location": "adw_sdlc/test/parity-rate.test.ts:491"
+    },
+    {
+      "severity": "tech_debt",
+      "description": "Missing the spec §4.5 core-purity structural guard: no test asserts parity-rate-core.ts imports no `node:fs`/`process`. The module is pure today, but the enforceable 'no I/O in the classifier' boundary that justifies the module split is not actually enforced, so a future edit could silently reintroduce I/O into the pure layer.",
+      "location": "adw_sdlc/tools/parity-rate-core.ts:1"
+    },
+    {
+      "severity": "skippable",
+      "description": "`main` arg-parsing and exit-code semantics (0 meets/insufficient, 1 measured-and-fails, 2 usage error) and the `--json` serialization remain untested; a follow-up could cover the CLI shell directly.",
+      "location": "adw_sdlc/tools/parity-rate.ts:164"
+    }
+  ],
+  "completed_phases": [
+    "setup",
+    "classify",
+    "plan",
+    "implement",
+    "tests",
+    "resolve",
+    "e2e",
+    "review",
+    "patch",
+    "document",
+    "merge"
+  ],
+  "engine": "ts",
+  "runner": "claude",
+  "work_item": {
+    "provider": "github",
+    "type": "issue",
+    "id": "5",
+    "number": 5,
+    "title": "refactor: split parity-rate classification from rendering"
+  },
+  "change_request": {
+    "provider": "github",
+    "type": "pull_request",
+    "id": "13",
+    "number": 13,
+    "url": "https://github.com/kortiene/switchyard/pull/13"
+  },
+  "total_cost_usd": 8.2246646
+}

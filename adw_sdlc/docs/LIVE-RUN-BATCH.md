@@ -8,10 +8,12 @@ live `claude` ADW runs**. These satisfy the `MVP-READINESS.md` §1 gate
 > `claude` ADW run and squash-merged as PRs #9–#16 on `kortiene/switchyard`. Issue
 > #1 (docs: Claude-only MVP scope) ran **forced-fenced** — the seed of the
 > fenced-path baseline (5 fenced attempts); issues #2–#8 ran **native**. Measured
-> over the batch, `npm run parity:rate -- agents/` reports native **0/36 hard-fails
+> over the batch, `npm run parity:rate -- test/fixtures/parity-runs/` reports native **0/36 hard-fails
 > (0.0%)**, an **88.9% single-nudge rate**, and fenced **5/5 clean** (so the
-> comparative bar is still INSUFFICIENT — it needs ≥ 20 fenced attempts). The run
-> workspaces are git-ignored. Remaining readiness work is the live failure-mode
+> comparative bar is still INSUFFICIENT — it needs ≥ 20 fenced attempts). The batch
+> evidence is committed at `test/fixtures/parity-runs/` (CI-guarded by
+> `test/parity-evidence.test.ts`), so `parity:rate` reproduces from a clean clone; the
+> raw `agents/` workspaces stay git-ignored. Remaining readiness work is the live failure-mode
 > drills and the secret-boundary live audit (still scaffold-only), not more batch
 > issues.
 

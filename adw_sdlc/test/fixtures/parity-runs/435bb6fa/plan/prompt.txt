@@ -1,0 +1,111 @@
+You are running as a single automated phase of the ADW pipeline.
+The orchestrator performs ALL git and GitHub work for this run: do NOT run git or gh, do NOT create/switch/commit/push branches, and do NOT open, merge, or comment on pull requests. If the task section below tells you to do any of that, skip those steps.
+You have no GitHub access in this phase; all issue context you need is provided inline.
+
+---
+
+## Switchyard ADW project context
+
+<!-- Generated project context. Edit .adw/pack.profile.json and run `npm run pack:generate`; do not hand-edit this block in .adw/prompts. -->
+
+### Repository context to read
+
+- `README.md` at the repository root, if present, for top-level project context.
+- `adw_sdlc/README.md` — package overview, commands, config surface, and documentation map.
+- `adw_sdlc/HANDOVER.md` — current architecture, operational invariants, and session-to-session state.
+- `adw_sdlc/MVP-READINESS.md` and `adw_sdlc/PARITY.md` — MVP gates, live-run evidence, and parity criteria.
+- `adw_sdlc/docs/LIVE-RUN-BATCH.md` — planned live `claude` issues and run-command templates.
+- The specific GitHub issue being worked (`kortiene/switchyard`) and its acceptance criteria.
+- The existing source tree and tests as they actually exist now; verify before assuming behavior.
+
+### Project summary
+
+`Switchyard` contains the ADW SDLC TypeScript control plane and related project-pack / Pi cockpit tooling. The control plane drives one work item through deterministic phases (`setup → classify → plan → implement → tests → resolve → e2e → review → patch → document → finalize → ci-fix → merge → report`) while runner adapters (`claude`, `codex`, `opencode`, `pi`) perform only the agentic code-editing phases. The near-term MVP goal is audited live reliability for the `claude` runner.
+
+### Component map
+
+- `adw_sdlc/src/orchestrator.ts`, `run-phase.ts`, `phases.ts`, `state.ts` — deterministic phase control, prompt composition, structured-output handling, and persisted run state.
+- `adw_sdlc/src/runners/` and `invoker.ts` — runner adapters and the shared `AgentRunner.runPhase()` seam.
+- `adw_sdlc/src/env.ts`, `env-vars.ts`, `exec.ts` — secret-boundary env allowlist, canonical `ADW_*` control-plane env aliases, and subprocess helpers.
+- `adw_sdlc/src/providers*.ts`, `provider-descriptor.ts` — GitHub/git built-ins plus declarative `cli`/`rest` provider support.
+- `adw_sdlc/tools/` — prompt-pack generation and parity-rate measurement.
+- `.adw/config.json`, `.adw/pack.profile.json`, `.adw/prompts/` — project pack and generated runtime prompt templates.
+- `.pi/extensions/adw-cockpit/` and `adw_sdlc/docs/PI-UI-EXTENSION-BACKLOG.md` — optional Pi TUI cockpit surface.
+
+### Security and operational invariants
+
+- The orchestrator owns all git/gh operations; ADW phases must not ask the coding agent to run git or gh.
+- Runner child environments are deny-by-default: `GH_TOKEN`, `MATRIX_*`, canonical `ADW_*`, and legacy `MX_AGENT_*` control variables must not reach agents.
+- Do not spread `process.env` into runner processes; `npm run lint:env` guards this boundary.
+- Opencode integration must use the approved v2 client path and avoid factory calls that inherit parent env.
+- Treat `PHASE_PREAMBLE_SHARED` and prompt contract wording as behavior-affecting; change only with explicit care and tests.
+- State-schema fields used for cross-language compatibility must remain additive/non-breaking.
+
+### Current status and assumptions
+
+The package is TypeScript/Node and uses npm. Canonical runtime env knobs use `ADW_*` names, with deprecated `MX_AGENT_*` compatibility aliases. The canonical local gate is `npm run verify`, which runs typecheck, env lint, prompt-pack drift check, tests, build, and removes `dist/`. A live-run issue batch (#1–#8) exists to collect MVP evidence, but do not start costly live `claude` runs unless explicitly asked.
+
+### Working rules
+
+- Keep changes scoped to the GitHub issue and acceptance criteria.
+- Prefer small, auditable changes with focused tests over broad rewrites.
+- Update docs and prompt-pack sources when behavior or operator guidance changes.
+- If `.adw/pack.profile.json` changes, regenerate `.adw/prompts` with `npm run pack:generate` and verify with `npm run pack:check`.
+- Use `ADW_TEST_CMD="npm run verify"` for live ADW runs; do not chain multiple commands directly in `ADW_TEST_CMD`.
+
+### Verification guidance
+
+Run `npm run verify` from `adw_sdlc/` for the full local gate. For narrow changes, run the most relevant focused test first, then the full gate before reporting. If a check cannot be run, state exactly why and what command should be run by the maintainer.
+
+Create a detailed implementation specification for this request:
+
+GitHub issue #7: feat: live secret-boundary audit scaffold
+Labels: issue_class:feat adw-live-batch
+
+Part of the MVP live-run batch (`adw_sdlc/docs/LIVE-RUN-BATCH.md`). Intended `issue_class`: **feat**. Planned ADW run mode: native.
+
+## Goal
+Add a live secret-boundary audit scaffold: a way to assert, on a real spawned runner env, that `GH_TOKEN`/`MATRIX_*`/`ADW_*`/`MX_AGENT_*` are absent — without ever printing secret values.
+
+## Scope
+- New `adw_sdlc/docs/SECRET-BOUNDARY-AUDIT.md` describing the procedure.
+- Optional: a helper (script or test) that builds the runner env via `safeSubprocessEnv` and asserts denied keys are absent, printing only key NAMES / pass-fail, never values.
+
+## Acceptance criteria
+- [ ] Audit asserts denied prefixes/keys are absent from the runner env.
+- [ ] No secret values are ever printed (names/booleans only).
+- [ ] `npm run verify` stays green.
+
+## Notes
+Complements the static `lint:env` gate and the mocked env tests with a live-oriented check.
+
+Do not implement the requested feature. Only create a planning/spec document.
+
+Workflow:
+
+1. Read enough repository context to make the plan accurate.
+   - README and developer docs
+   - product requirements, roadmap, backlog, ADRs, or specs when present
+   - relevant source packages/modules
+   - existing tests, CI, deployment, and operational docs
+   - the specific work item context when available
+
+2. Think through the request carefully.
+   - owning module/package/service
+   - domain model and API/data model impact
+   - validation and authorization rules
+   - error model and observability
+   - security, privacy, reliability, performance, and migration implications
+   - test strategy and rollout/rollback plan
+
+3. Create a `specs/` directory if it does not already exist.
+
+4. Write a new Markdown spec file in `specs/`.
+   - Derive a short descriptive kebab-case filename from the request.
+   - Include implementation steps detailed enough for another engineer/agent to execute.
+   - Include acceptance criteria and risks.
+
+5. Do not modify production code.
+
+Return the spec path, summary, key decisions, assumptions, and open questions.
+

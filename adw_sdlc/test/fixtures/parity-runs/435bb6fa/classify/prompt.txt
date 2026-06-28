@@ -1,0 +1,43 @@
+You are running as a single automated phase of the ADW pipeline.
+The orchestrator performs ALL git and GitHub work for this run: do NOT run git or gh, do NOT create/switch/commit/push branches, and do NOT open, merge, or comment on pull requests. If the task section below tells you to do any of that, skip those steps.
+You have no GitHub access in this phase; all issue context you need is provided inline.
+
+---
+
+Classify work item #7 into a single change type for branch naming and commit prefixing.
+
+Work item context (title, body, labels):
+
+7 GitHub issue #7: feat: live secret-boundary audit scaffold
+Labels: issue_class:feat adw-live-batch
+
+Part of the MVP live-run batch (`adw_sdlc/docs/LIVE-RUN-BATCH.md`). Intended `issue_class`: **feat**. Planned ADW run mode: native.
+
+## Goal
+Add a live secret-boundary audit scaffold: a way to assert, on a real spawned runner env, that `GH_TOKEN`/`MATRIX_*`/`ADW_*`/`MX_AGENT_*` are absent — without ever printing secret values.
+
+## Scope
+- New `adw_sdlc/docs/SECRET-BOUNDARY-AUDIT.md` describing the procedure.
+- Optional: a helper (script or test) that builds the runner env via `safeSubprocessEnv` and asserts denied keys are absent, printing only key NAMES / pass-fail, never values.
+
+## Acceptance criteria
+- [ ] Audit asserts denied prefixes/keys are absent from the runner env.
+- [ ] No secret values are ever printed (names/booleans only).
+- [ ] `npm run verify` stays green.
+
+## Notes
+Complements the static `lint:env` gate and the mocked env tests with a live-oriented check.
+
+## Instructions
+
+- Choose exactly one `issue_class` from: `feat`, `fix`, `docs`, `chore`, `ci`, `test`, `refactor`.
+  - `feat` — new user-visible feature or capability.
+  - `fix` — bug fix or correctness change.
+  - `docs` — documentation-only change.
+  - `chore` — maintenance, deps, tooling with no user-visible behavior change.
+  - `ci` — CI/build/workflow change.
+  - `test` — test-only change.
+  - `refactor` — internal restructuring with no behavior change.
+- Prefer the narrowest truthful classification.
+- If labels and body disagree, classify by the actual requested change.
+

@@ -1,0 +1,60 @@
+{
+  "adw_id": "2c8e4232",
+  "schema_version": 1,
+  "issue_number": "2",
+  "issue_class": "ci",
+  "branch_name": "feat/2-2c8e4232-ci-add-single-verify-quality-gate-script",
+  "base": "main",
+  "plan_file": "specs/verify-quality-gate-script.md",
+  "pr_number": 10,
+  "pr_url": "https://github.com/kortiene/switchyard/pull/10",
+  "commit_message": "ci: ratify and document the single `verify` quality gate\n\nProvide one `npm run verify` command so the ADW test gate can use\n`ADW_TEST_CMD=\"npm run verify\"`. The gate is shell-split and run via\nspawnSync (no shell), so a chained `a && b` command cannot be used —\na single command is required.\n\n- package.json: ratify `scripts.verify`, which chains\n  typecheck -> lint:env -> pack:check -> test -> build -> rm -rf dist\n  fail-fast via `&&`, ending by removing the dist/ build artifact.\n- README.md (## Development): document `verify` as the canonical\n  local/CI quality gate, show the `ADW_TEST_CMD=\"npm run verify\"`\n  single-command form, and link docs/LIVE-RUN-BATCH.md; keep the\n  per-stage breakdown below it.\n- test/scaffold.test.ts: add guard tests asserting the verify script\n  chains the expected stages in canonical order, uses `&&`, ends with\n  `rm -rf dist`, references only defined npm scripts, and that the\n  README names `verify` as canonical with the ADW_TEST_CMD form and the\n  batch-doc link.\n- test/verify-gate.e2e.test.ts: assert the build/cleanup filesystem\n  boundary (build creates dist/, `rm -rf dist` removes it; a failed\n  build leaves no dist/).\n- specs/verify-quality-gate-script.md: implementation spec.\n\nFix a typecheck failure in the new guard test: matchAll group access is\n`string | undefined` under noUncheckedIndexedAccess, so the captured\nscript names are filtered to defined strings before assertion. Without\nthis, `npm run verify` failed at the typecheck stage.\n\nVerified: `npm run verify` exits 0 (486 tests pass) and leaves no dist/.\n\ncloses #2",
+  "pr_body": "## Summary\n\nRatifies and documents a single `npm run verify` quality gate so ADW live\nruns can set `ADW_TEST_CMD=\"npm run verify\"`. The ADW test/finalize gates are\nshell-split and run via `spawnSync(bin, args)` with **no shell**, so a chained\n`a && b` command would pass `&&` as a literal argument and fail — one command\nis required. `npm run verify` chains the gates internally via npm.\n\nThe `verify` script already existed from planning (`package.json:15`); this\nchange ratifies it, documents it, and guards it with tests.\n\n## Changes\n\n- **`package.json`** — ratified `scripts.verify` (no drift): chains\n  `typecheck → lint:env → pack:check → test → build → rm -rf dist`, fail-fast\n  via `&&`, ending with `rm -rf dist`.\n- **`README.md` (`## Development`)** — documents `verify` as the **canonical**\n  local/CI gate, shows the `ADW_TEST_CMD=\"npm run verify\"` single-command form,\n  and links [`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md). The per-stage\n  breakdown is kept below as the \"what each stage does\" reference.\n- **`test/scaffold.test.ts`** — static guard tests: the `verify` script chains\n  the expected stages in canonical order, uses `&&`, ends with `rm -rf dist`,\n  and references only defined npm scripts; the README names `verify` as\n  canonical with the `ADW_TEST_CMD` form and the batch-doc link.\n- **`test/verify-gate.e2e.test.ts`** — runtime guard for the build-artifact\n  lifecycle AC: `npm run build` creates `dist/`, `rm -rf dist` removes it, and a\n  failed build leaves no `dist/`.\n- **`specs/verify-quality-gate-script.md`** — implementation spec.\n\n## Acceptance criteria\n\n- [x] `npm run verify` runs all gates and exits non-zero if any fails (fail-fast\n  `&&` chain).\n- [x] `dist/` is removed at the end of a green run (no build artifact left).\n- [x] README names `verify` as the canonical local/CI gate.\n\n## Review note — blocker found and fixed\n\nThe new guard test broke the gate it protects: under `noUncheckedIndexedAccess`,\n`matchAll` group access is `string | undefined`, so `toHaveProperty(name)`\nfailed `tsc --noEmit` and `npm run verify` exited red at the **typecheck**\nstage. (It was invisible to a bare `vitest run`, which transpiles via esbuild\nwithout typechecking.) Fixed by filtering the captured script names to defined\nstrings before the assertion.\n\n## Verification\n\n```\nnpm run verify   # exit 0 — 486 tests pass across 37 files; dist/ absent afterward\n```\n\n## Follow-ups (non-blocking)\n\n- `test/verify-gate.e2e.test.ts` runs a real `npm run build` (~26s) inside the\n  default `test` stage, so `verify` performs a full build twice (test stage +\n  build stage) and plain `npm test` is ~26s slower. The `.e2e.test.ts` name\n  implies separation, but there is no vitest project / `test:e2e` script, so it\n  runs in the default suite. Consider gating it behind a separate `test:e2e`\n  script (or vitest project) to keep the default gate lean.\n- The \"build exits non-zero for a missing tsconfig\" e2e case exercises `tsc`'s\n  generic behavior rather than the `verify` chain itself — low signal for its\n  subprocess cost.\n- Because the e2e build runs during the `test` stage, a broken\n  `tsconfig.build.json` would first surface as a test-stage failure rather than\n  a build-stage failure (minor failure-attribution confusion).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+  "review_findings": [
+    {
+      "severity": "tech_debt",
+      "description": "The new e2e test runs a full `npm run build` inside the default `test` stage, so `npm run verify` compiles the project twice (test stage + explicit build stage). This gate is run repeatedly in live ADW resolve loops (the issue's whole purpose), so it adds avoidable latency. The `.e2e.test.ts` name implies a separate suite, but there is no `test:e2e` script or vitest project, so it runs in the default `npm test`. Consider gating it behind a separate script/project to keep the recurring gate lean.",
+      "location": "adw_sdlc/test/verify-gate.e2e.test.ts:29"
+    },
+    {
+      "severity": "tech_debt",
+      "description": "Second e2e case name/implementation mismatch: it('npm run build exits non-zero for a broken TypeScript source ...') does not run `npm run build`; it runs `npx tsc -p tsconfig.does-not-exist.json`, which is a missing-config error (not a broken source) and does not exercise the verify chain's `&&` fail-fast. Misleading label and low signal for its subprocess cost.",
+      "location": "adw_sdlc/test/verify-gate.e2e.test.ts:56"
+    },
+    {
+      "severity": "skippable",
+      "description": "Both e2e cases are largely tautological (they validate tsc and the OS `rm` command) relative to the static guards in scaffold.test.ts, which already assert the chaining, canonical order, and `rm -rf dist` ending. Marginal incremental coverage of AC2's filesystem boundary.",
+      "location": "adw_sdlc/test/verify-gate.e2e.test.ts:33"
+    }
+  ],
+  "completed_phases": [
+    "setup",
+    "classify",
+    "plan",
+    "implement",
+    "tests",
+    "resolve",
+    "e2e",
+    "review",
+    "patch",
+    "document",
+    "merge"
+  ],
+  "engine": "ts",
+  "runner": "claude",
+  "work_item": {
+    "provider": "github",
+    "type": "issue",
+    "id": "2",
+    "number": 2,
+    "title": "ci: add single `verify` quality-gate script"
+  },
+  "change_request": {
+    "provider": "github",
+    "type": "pull_request",
+    "id": "10",
+    "number": 10,
+    "url": "https://github.com/kortiene/switchyard/pull/10"
+  },
+  "total_cost_usd": 6.4944714
+}

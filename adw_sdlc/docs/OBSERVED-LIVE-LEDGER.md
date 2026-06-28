@@ -38,7 +38,7 @@ for `adw/ green` — proven by the Python suite), matching PARITY.
 | 1 | Phase order & gating | ✅ | ✅ observed-live | Run `007fd5ba` ran the full chain end-to-end → squash-merged PR #331 (`PARITY.md:53`, `:69`). The *conditional* e2e/document gates firing identically was not separately evidenced. |
 | 2 | Per-phase model routing | ✅ | 🟡 partial / inferred | The live run necessarily used per-phase routing, but no committed artifact pins the exact tier per phase. Upgrade only if `007fd5ba` phase outputs confirm tiers. |
 | 3 | Selected runner edits the worktree unattended (capability parity) | ✅ | ✅ observed-live | The `claude` runner edited the worktree unattended and produced PR #331 (`PARITY.md:69`). |
-| 4 | Structured output | ✅ | ✅ observed-live (rate: native measured, comparative ⏳) | Seen live including a real tests-phase contract mismatch, root-caused and fixed structurally in #332 (`PARITY.md:91–95`). Now **measured** over the 8-run batch (`npm run parity:rate -- agents/`): native **0/36 hard-fails (0.0%)** but an **88.9% single-nudge rate** — native rarely lands clean on the first attempt. The *comparative* bar (native ≤ fenced) still reads `INSUFFICIENT DATA` (fenced = 5 attempts, < 20 needed). |
+| 4 | Structured output | ✅ | ✅ observed-live (rate: native measured, comparative ⏳) | Seen live including a real tests-phase contract mismatch, root-caused and fixed structurally in #332 (`PARITY.md:91–95`). Now **measured** over the 8-run batch (`npm run parity:rate -- test/fixtures/parity-runs/`): native **0/36 hard-fails (0.0%)** but an **88.9% single-nudge rate** — native rarely lands clean on the first attempt. The *comparative* bar (native ≤ fenced) still reads `INSUFFICIENT DATA` (fenced = 5 attempts, < 20 needed). |
 | 5 | Secret withholding (fail-closed) | ✅ | ⏳ not-yet-observed | `MVP-READINESS.md:101–102` explicitly owes "the secret boundary asserted once on a *real* spawned env (not only the lint + mocks)." Mocked-only today. |
 | 6 | Sandboxed-to-worktree (per runner) | ✅ | 🟡 partial / inferred | `cwd` was bound to the worktree for the live run, but the per-tool git/gh veto (`caps.perToolHook`) firing live is not evidenced. |
 | 7 | Gated squash-merge | ✅ | 🟡 partial / inferred | The merge path executed live (PR #331 was squash-merged with `--yes`), but the *unattended refusal without `--yes`* was not induced live (it is one of the owed §1 failure drills). |
@@ -51,8 +51,8 @@ for `adw/ green` — proven by the Python suite), matching PARITY.
 
 **Headline: 6 `✅`, 4 `🟡`, 2 `⏳`, 1 `N/A`** (unchanged — see the conservative rule
 below). Nine live `claude` runs now exist (the original seed plus the 8-issue batch),
-but the tokens stay put: the batch artifacts are git-ignored and self-referential, and
-the load-bearing security/failure guarantees (#5 secret boundary, #8 bounded-loop
+but the tokens stay put: the batch is self-referential, and the load-bearing
+security/failure guarantees (#5 secret boundary, #8 bounded-loop
 fast-fail) were still not induced live — which is exactly the gap
 [`MVP-READINESS.md` §1](../MVP-READINESS.md#1-gates-for-a--claude-ships-reliably) calls out.
 
@@ -71,26 +71,29 @@ The ledger seeds from **two** sources, kept distinct because their evidence diff
 2. **The MVP live-run batch** — 8 additional completed `claude` runs (issues #1–#8 →
    squash-merged PRs #9–#16 on `kortiene/switchyard`), per
    [`LIVE-RUN-BATCH.md`](./LIVE-RUN-BATCH.md). These runs actually authored the
-   readiness docs themselves (this ledger came from issue #3). Their workspaces exist
-   locally under `agents/{adw_id}/` but are **git-ignored**, so they evaporate on a
-   clean clone. Run `npm run parity:rate -- agents/` over them and the
-   structured-output rate is **measured**: native **0/36 hard-fails (0.0%)** with an
-   **88.9% nudge rate**; fenced **5/5 clean** (so the *comparative* bar still reads
-   INSUFFICIENT DATA — it needs ≥ 20 fenced attempts).
+   readiness docs themselves (this ledger came from issue #3). The raw workspaces
+   under `agents/{adw_id}/` stay git-ignored, but their classification-determining
+   artifacts are now **committed** at
+   [`test/fixtures/parity-runs/`](../test/fixtures/parity-runs/) (transcripts replaced
+   by presence-markers). Run `npm run parity:rate -- test/fixtures/parity-runs/` and the
+   structured-output rate is **measured reproducibly from a clean clone**: native
+   **0/36 hard-fails (0.0%)** with an **88.9% nudge rate**; fenced **5/5 clean** (so the
+   *comparative* bar still reads INSUFFICIENT DATA — it needs ≥ 20 fenced attempts).
 
-So nine live `claude` runs exist in total — but every row above stays conservative
-for two reasons the batch does **not** overcome: the batch artifacts are git-ignored
-(not reproducible from a clean clone) and **self-referential** (claude editing
-`adw_sdlc`'s own docs/tests/CI, not shipping independent features), and the
-load-bearing failure-mode (#8) and secret-boundary (#5) guarantees were still never
-induced against a real spawned runner.
+So nine live `claude` runs exist in total — and the measurement is now reproducible
+from a clean clone — but every row above stays conservative for reasons the batch
+does **not** overcome: it is **self-referential** (claude editing `adw_sdlc`'s own
+docs/tests/CI, not shipping independent features), and the load-bearing failure-mode
+(#8) and secret-boundary (#5) guarantees were still never induced against a real
+spawned runner.
 
 **Conservative rule (load-bearing):** a row is `✅ observed-live` **only** where a
 cited committed document supports it; everything else stays `⏳` or `🟡` with a note
 on the gap. Do not overclaim — a readiness dashboard that marks an unproven
-guarantee green is worse than no dashboard. Vendoring or archiving the batch
-`agents/{adw_id}/` trees (so `parity:rate` is reproducible) is the first step to
-upgrading any `🟡`/`⏳` rows.
+guarantee green is worse than no dashboard. The batch evidence is now committed at
+[`test/fixtures/parity-runs/`](../test/fixtures/parity-runs/) (CI-guarded by
+`test/parity-evidence.test.ts`), so `parity:rate` is reproducible; what still gates
+any `🟡`/`⏳` upgrade is **live** evidence for the guarantee, not more committed artifacts.
 
 ## How to update after a live `claude` run
 

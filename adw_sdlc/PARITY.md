@@ -66,7 +66,7 @@ runnable.
 
 | Runner | Live status | Detail / how to unblock |
 |---|---|---|
-| **claude** | ✅ done | Seed: Issue #304 → PR #331 (squash-merged), parity bug fixed in #332, cost ≈ $34.76, run `007fd5ba`. Plus an 8-issue self-hosting batch: issues #1–#8 → squash-merged PRs #9–#16 on `kortiene/switchyard` (`docs/LIVE-RUN-BATCH.md`). Over the batch, `parity:rate` measures native **0/36 hard-fails (0.0%)**, **88.9% nudge rate**, fenced **5/5 clean** (workspaces git-ignored, so not reproducible from a clean clone). On a box with no `ANTHROPIC_API_KEY` (CLI-OAuth only), the D1 default classify path fails — run with `ADW_CLASSIFY_ON_RUNNER=1`. |
+| **claude** | ✅ done | Seed: Issue #304 → PR #331 (squash-merged), parity bug fixed in #332, cost ≈ $34.76, run `007fd5ba`. Plus an 8-issue self-hosting batch: issues #1–#8 → squash-merged PRs #9–#16 on `kortiene/switchyard` (`docs/LIVE-RUN-BATCH.md`). Over the batch, `parity:rate` measures native **0/36 hard-fails (0.0%)**, **88.9% nudge rate**, fenced **5/5 clean** (evidence committed at `test/fixtures/parity-runs/`, reproducible from a clean clone and guarded by `test/parity-evidence.test.ts`). On a box with no `ANTHROPIC_API_KEY` (CLI-OAuth only), the D1 default classify path fails — run with `ADW_CLASSIFY_ON_RUNNER=1`. |
 | **codex** | ⛔ blocked | Live phase dies at classify: `refresh token was revoked` (OAuth access token expires ~1h; the refresh token comes back revoked server-side). `codex login status` reports success on local-file presence only. **Unblock:** `export OPENAI_API_KEY=…` (codex `RUNNER_ENV_ALLOW` already passes it; API-key mode skips the OAuth refresh entirely), or `codex logout && codex login` then run codex **immediately** (no long run in between). If a fresh token is also revoked within hours it is account-level — resolve with OpenAI. The transport is verified live (binary spawn, JSONL stream, `turn.failed` mapping); only the credential blocks a real phase. |
 | **opencode** | ⏳ owed | Adapter + native-schema route verified live against the real 1.17.3 binary via a local stub provider (no credential) in step 8. A real-issue run needs a real provider key on `OPENCODE`'s allowlist row. |
 | **pi** | ⏳ owed | Adapter + `--mode json` stream verified live against the real 0.79.1 binary via a scrubbed-agentDir stub provider (no credential) in step 9. A real-issue run needs a real provider key + Node ≥ 22.19 (the pi npm engines floor; the CI node-20 lane skips pi). |
@@ -94,11 +94,13 @@ parity runs.
   terminal parse failures) and append as runs complete. So far: `claude` PR #331 hit one tests-phase
   contract mismatch, root-caused and fixed structurally in #332 (Python truthiness coercion + native-schema
   nudge footer), no recurrence on resume. The 8-run self-hosting batch (PRs #9–#16) is now measured —
-  `npm run parity:rate -- agents/` reports native **0/36 hard-fails (0.0%)** with an **88.9% single-nudge
+  `npm run parity:rate -- test/fixtures/parity-runs/` reports native **0/36 hard-fails (0.0%)** with an **88.9% single-nudge
   rate**, and fenced **5/5 clean**. So the native *absolute* bar is clearable today, but the *comparative*
-  bar stays `INSUFFICIENT DATA` until the fenced sample reaches ≥ 20 (issue #1 produced 5). These batch
-  workspaces are git-ignored, so the measurement is not reproducible from a clean clone.
-  - **Measure it:** `npm run parity:rate -- agents/` (`tools/parity-rate.ts`) classifies every phase
+  bar stays `INSUFFICIENT DATA` until the fenced sample reaches ≥ 20 (issue #1 produced 5). The batch
+  evidence is committed at `test/fixtures/parity-runs/` and re-derived in CI by
+  `test/parity-evidence.test.ts`, so this measurement is reproducible from a clean clone; the raw
+  `agents/` workspaces (full transcripts) stay git-ignored.
+  - **Measure it:** `npm run parity:rate -- test/fixtures/parity-runs/` (the committed corpus; or a fresh `agents/` run) (`tools/parity-rate.ts`) classifies every phase
     invocation from those artifacts and reports the per-path hard-fail rate. It deliberately prints
     **INSUFFICIENT DATA** rather than a verdict until each path has enough live attempts, so the bar is an
     audited measurement — not the structural argument above standing in for one. The fenced sample is empty
