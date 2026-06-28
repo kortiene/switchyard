@@ -8,7 +8,7 @@ than a judgement call.
 Two kinds of evidence are distinguished:
 
 - **mocked-seams** — proven by the automated `adw_sdlc` (vitest) and Python `adw/` (unittest) suites, with
-  every SDK/spawn/`gh`/git effect stubbed. No network, no API keys, no native binaries. This is the bulk
+  nearly every SDK/spawn/`gh`/git effect stubbed (a few tests deliberately cross the boundary — see MVP-READINESS.md). This is the bulk
   of the checklist and is **complete for the `claude` cutover-gate runner**.
 - **live** — requires a real-issue run against a real runner SDK with real credentials and spend. Not
   autonomously runnable (provider login, runner cost, a real GitHub issue). Tracked per runner in the
