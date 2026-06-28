@@ -80,8 +80,8 @@ npm run parity:rate -- agents/
   rarely lands clean on the first try). The **comparative** bar (native ≤ fenced) is
   still `INSUFFICIENT DATA`: issue #1's forced-fenced run produced only **5 fenced
   attempts** (< 20 needed). Two ways to finish closing it, both wired:
-  - **Absolute gate (claude-only):** `npm run parity:rate -- --max-native-rate <PCT> agents/`
-    — already clearable today (0.0% native). Ratify `<PCT>` as the MVP threshold.
+  - **Absolute gate (claude-only):** `npm run parity:rate -- --max-native-rate 10 agents/`
+    — **ratified MVP threshold: ≤ 10% hard-fail** (decided #29); clears today at 0.0%.
   - **Comparative gate (literal bar):** harvest ≥ 20 fenced attempts from claude with
     `ADW_PARITY_FORCE_FENCED_JSON=1` (routes the native runner through the fenced path),
     then the comparative verdict becomes computable without waiting on `pi`.
@@ -105,12 +105,12 @@ npm run parity:rate -- agents/
 
 _Post-MVP: not required for the (A) MVP. Listed for completeness._
 
-- [ ] ⏳ A live run each for **codex / opencode / pi**, OR an explicit decision to
-  ship claude-only and demote the rest to post-MVP.
-- [ ] ⛔ **Unblock codex's credential.** It currently *cannot authenticate*
-  (OAuth refresh revoked, possibly account-level — PARITY.md "real-issue runs").
-  That is a hard blocker, not "owed". Prefer `OPENAI_API_KEY` (skips the OAuth
-  refresh).
+- [x] ✅ **Decided (2026-06-28): ship claude-only for the MVP**; codex / opencode / pi
+  live runs are demoted to post-MVP (tracked as issues #31 / #32 / #33 under M4).
+- [ ] ⛔ **codex credential — shelved to post-MVP (decided #33, 2026-06-28).** It
+  currently *cannot authenticate* (OAuth refresh revoked, possibly account-level —
+  PARITY.md "real-issue runs"). Revisit via `OPENAI_API_KEY` (skips the OAuth
+  refresh) when (B) is taken up.
 - [ ] ⏳ **pi needs Node ≥ 22.19** (the CI node-20 lane skips it) — bump CI or
   accept pi is unverified in CI.
 
@@ -131,8 +131,9 @@ transforms, pagination, custom phases, schema overrides — has unit tests and
 GitLab). **Decide scope:**
 
 - [ ] In MVP scope → at least one live run against a real non-GitHub forge.
-- [ ] Out of scope → mark it explicitly "post-MVP, unvalidated-in-anger" so the
-  green unit tests are not mistaken for production-ready.
+- [x] **Out of scope — DECIDED (#35, 2026-06-28).** The declarative cli/rest provider
+  surface is **post-MVP, unvalidated-in-anger**: it ships with unit tests only and is
+  not validated against a real non-GitHub forge. The (A) MVP is claude + GitHub only.
 
 ---
 

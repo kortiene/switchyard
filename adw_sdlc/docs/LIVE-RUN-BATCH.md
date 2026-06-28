@@ -107,7 +107,7 @@ ADW_CLASSIFY_ON_RUNNER=1 ADW_TEST_CMD="npm run verify" \
 After every run, classify the artifacts:
 
 ```bash
-npm run parity:rate -- --max-native-rate 20 agents/   # 20% is a starting threshold
+npm run parity:rate -- --max-native-rate 10 agents/   # ratified MVP threshold (#29): ≤ 10% hard-fail
 ```
 
 ## Failure-mode drills (MVP-READINESS §1)
@@ -136,7 +136,7 @@ each, stop early if the hard-fail rate or cost looks wrong.
 
 - The batch ran on `kortiene/switchyard`; a fresh checkout has no remote configured
   → add `origin` before creating/running new issues from it.
-- The `--max-native-rate` threshold (20%) is a placeholder; pick the real MVP
-  threshold before declaring the gate met.
+- The `--max-native-rate` MVP threshold is **≤ 10% hard-fail** (ratified, #29); it
+  clears today at 0.0% native (0/36) and is asserted once the sample grows.
 - Nudge-retry observation is opportunistic, not guaranteed.
 - Cost figures are extrapolated from a single prior run.
