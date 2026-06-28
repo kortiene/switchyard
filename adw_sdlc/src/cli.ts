@@ -34,12 +34,13 @@ export const ENGINE_IDS = ['py', 'ts'] as const;
 export type EngineId = (typeof ENGINE_IDS)[number];
 
 /**
- * Standalone HealthTech port: the cutover (PLAN.md roadmap step 12) is done —
- * `ts` is the default. `py` stays a recognized engine id, but it is NOT
- * available in this standalone port: selecting it via `--engine py` /
- * `ADW_ENGINE=py` raises a deterministic `AdwError` at dispatch (no spawn, no
- * `python3` dependency), because the Python `adw/issue.py` sibling is not
- * bundled here.
+ * Standalone HealthTech port: the `ts` default is set (the `py → ts` default
+ * flip is local to this port); the cutover *milestone* (PLAN.md roadmap step 12)
+ * is **post-MVP** — see `MVP-READINESS.md` §3, which tracks `(C)` cutover as a
+ * post-MVP gate. `py` stays a recognized engine id, but it is NOT available in
+ * this standalone port: selecting it via `--engine py` / `ADW_ENGINE=py` raises
+ * a deterministic `AdwError` at dispatch (no spawn, no `python3` dependency),
+ * because the Python `adw/issue.py` sibling is not bundled here.
  */
 export const DEFAULT_ENGINE: EngineId = 'ts';
 
