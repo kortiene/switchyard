@@ -310,7 +310,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 605 tests, 43 files)
+# 3) Full test suite (current: 620 tests, 44 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -1020,7 +1020,8 @@ new dependency, no behavior change.
 Came out of an explicit **challenge to the "essentially at MVP" claim**. The MVP
 bar is the `claude` cutover gate (PLAN step 12); PARITY.md reports it green, but
 verification showed the **entire 450-test suite is mocked** (no test spawns a real
-process or hits a real network) and the only live evidence is **one** `claude` run
+process or hits a real network) (later sections add real-process tests — see §8x /
+§8aa) and the only live evidence is **one** `claude` run
 (PR #331) — which itself surfaced a parity bug (#332). Critically, PARITY.md's
 defining metric — a native-schema backend's structured-output hard-failure rate ≤
 the fenced-JSON+nudge path — is **argued structurally, not measured** ("Rate (live,
@@ -1460,7 +1461,48 @@ The fix separates the two concepts the old wording conflated:
 
 Issue class: `docs`. Comment + additive tests only — no behavior change, no
 prompt-pack change, no `pack:generate` required. `npm run verify` stays green
-(**611 tests, 44 files**).
+(**611 tests, 43 files**).
+
+## 8ad. Issue #41 — doc-currency fixes (HANDOVER.md test counts; stale runtime claim)
+
+Two stale doc claims corrected and locked in with a regression guard.
+
+**HANDOVER.md count drift** (three references, now consistent at HEAD):
+
+- `HANDOVER.md §8` (verification gate comment) — inline "current" test count
+  was `605`; updated to `611` by the implementation phase.
+- `HANDOVER.md §8ac` (trailing verify line) — file count was recorded as `44`;
+  actual is `43` (§8ac added a `describe` block to the already-existing
+  `test/mvp-readiness-doc.test.ts`, not a new file). Corrected to
+  `611 tests, 43 files`.
+- `HANDOVER.md §12` (baseline line) — same `44` → `43` correction.
+
+Why `44` crept in: the §8ac entry was written assuming a new file would be
+created, but the new `describe` block went into the pre-existing
+`test/mvp-readiness-doc.test.ts`, so no file-count increment occurred.
+
+**MVP-READINESS.md preamble** — lines 4–5 previously read "every SDK/spawn/gh/git
+effect stubbed — verified: no test in the suite spawns a real process or touches a
+real network." That claim became false after §8x (secret-boundary audit crosses
+the spawn boundary) and §8aa (rest-transport loopback drives a real localhost
+round-trip). The parenthetical was replaced with a softened form that names the
+three boundary-crossing tests (`test/secret-boundary-audit.test.ts`,
+`test/verify-gate.e2e.test.ts`, `test/providers-rest-transport.test.ts`) while
+preserving the paragraph's parity numbers and `**mocked-seam**` thesis.
+
+**PARITY.md:11** — the parallel "No network, no API keys, no native binaries" phrase
+was softened in the same pass to acknowledge the handful of boundary-crossing tests
+(same class as the MVP-READINESS.md fix; no absolute "no network" claim remains).
+
+- `adw_sdlc/test/mvp-readiness-doc.test.ts` (+5) — new describe block pins the
+  softened preamble: stale "no real process" language absent; preamble acknowledges
+  real subprocess / real-network tests; each of the three named test files present.
+- `adw_sdlc/test/handover-doc.test.ts` (new, +4) — section 12 exists; the baseline
+  line uses the canonical bold format; recorded test count ≥ 600; recorded file
+  count ≥ 43. Structural invariants guard against a stale count shipping.
+
+Issue class: `docs`. No kernel/runtime/prompt-pack/config/provider change. No new
+dependency. `npm run verify` stays green (**620 tests, 44 files**).
 
 ## 9. Files created/modified this session
 
@@ -1668,7 +1710,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **611 passing across 44 files**
+Test count baseline after this session: **620 passing across 44 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1688,7 +1730,9 @@ drift guard — §8w, +10 for the live secret-boundary audit scaffold — §8x,
 write methods + fail-closed guard — §8z, +7 for the real-transport loopback
 suite — issue #26, §8aa, +1 for the py-engine fail-closed test rewrite —
 issue #27, §8ab, +5 for the `cli.ts`/`MVP-READINESS.md` cross-doc consistency
-guard — issue #25, §8ac). The §8v refactor (issue #5
+guard — issue #25, §8ac; +9 for the doc-currency fixes (HANDOVER.md
+test-count baseline guard + MVP-READINESS.md real-process acknowledgment guard)
+— issue #41, §8ad). The §8v refactor (issue #5
 — split parity-rate classification from rendering) added `tools/parity-rate-core.ts`
 (pure core module, no new test file) and extended `test/parity-rate.test.ts` with
 35 direct unit tests of the extracted core (39 tests total in the file, up from 4

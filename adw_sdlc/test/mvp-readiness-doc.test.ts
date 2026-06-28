@@ -147,3 +147,49 @@ describe('docs/LIVE-RUN-BATCH.md — linked target exists and is non-empty', () 
     expect(batch).toMatch(/shellSplit|shell.split|shell_split/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// MVP-READINESS.md preamble — real-process test acknowledgment — issue #41
+//
+// Before issue #41 the preamble still said "no test in the suite spawns a real
+// process" (line 6 of the pre-fix document), now false because the
+// secret-boundary audit, verify-gate e2e, and rest-transport loopback tests
+// deliberately cross the mock seam. These guards pin the corrected wording.
+// ---------------------------------------------------------------------------
+
+describe('MVP-READINESS.md preamble — real-process test acknowledgment — issue #41', () => {
+  let preamble: string;
+
+  beforeAll(() => {
+    const content = readFileSync(MVP_READINESS, 'utf8');
+    // Preamble = everything up to the first `---` horizontal rule
+    const hrIdx = content.indexOf('\n---\n');
+    preamble = hrIdx === -1 ? content : content.slice(0, hrIdx);
+  });
+
+  it('does not claim all suite tests are purely mocked (stale "no real process" language is absent)', () => {
+    // The pre-fix preamble said something like "no test in the suite spawns a
+    // real process". That claim is now false. Guard that neither that phrase nor
+    // any close variant reappears.
+    expect(preamble).not.toMatch(/no test.*spawns? a real process/i);
+    expect(preamble).not.toMatch(/no test.*real.*subprocess/i);
+  });
+
+  it('acknowledges that some tests spawn real subprocesses', () => {
+    // The softened preamble must say that at least some tests cross the mock
+    // seam and spawn real subprocesses or drive real network round-trips.
+    expect(preamble).toMatch(/spawn real subprocess|real localhost|deliberately cross/i);
+  });
+
+  it('names the secret-boundary audit as a real-process test', () => {
+    expect(preamble).toContain('secret-boundary-audit.test.ts');
+  });
+
+  it('names the verify-gate e2e test as a real-process test', () => {
+    expect(preamble).toContain('verify-gate.e2e.test.ts');
+  });
+
+  it('names the rest-transport loopback suite as a real-process test', () => {
+    expect(preamble).toContain('providers-rest-transport.test.ts');
+  });
+});

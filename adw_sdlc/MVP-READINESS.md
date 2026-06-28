@@ -1,9 +1,12 @@
 # MVP readiness — open risks
 
 This is the **counterweight to `PARITY.md`**. PARITY.md is a checklist of green
-boxes; nearly all of them are **mocked-seam** evidence (every SDK/spawn/gh/git
-effect stubbed — verified: no test in the suite spawns a real process or touches a
-real network). Contact with reality now spans **nine** live `claude` runs — the
+boxes; nearly all of them are **mocked-seam** evidence (most SDK/spawn/gh/git
+effects stubbed at the seam — though a few tests now deliberately cross it: the
+secret-boundary audit (`test/secret-boundary-audit.test.ts`) and the verify-gate
+e2e test (`test/verify-gate.e2e.test.ts`) spawn real subprocesses, and the rest
+transport loopback suite (`test/providers-rest-transport.test.ts`) drives a real
+localhost round-trip). Contact with reality now spans **nine** live `claude` runs — the
 original seed (PR #331, which itself surfaced parity bug #332) plus an 8-issue
 self-hosting batch (issues #1–#8 → merged PRs #9–#16 on `kortiene/switchyard`, see
 [`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md)). Measured over the batch,
