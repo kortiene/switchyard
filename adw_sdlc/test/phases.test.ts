@@ -4,13 +4,13 @@
  * native-schema backends).
  */
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { REPO_ROOT } from '../src/common.js';
-import { parseAdwConfig } from '../src/config.js';
+import { parseAdwConfig, resolveRepoPath } from '../src/config.js';
+import { diffMirror, listFilesRecursive } from '../tools/mirror.js';
 import { AdwError } from '../src/errors.js';
 import {
   AGENT_PHASES,
@@ -92,18 +92,13 @@ describe('templatePath', () => {
   });
 
   it('keeps fallback command prompts neutral and byte-identical across runner roots', () => {
-    const piRoot = join(REPO_ROOT, '.pi', 'prompts');
-    const claudeRoot = join(REPO_ROOT, '.claude', 'commands');
-    const files = readdirSync(piRoot).filter((f) => f.endsWith('.md')).sort();
-    expect(files.length).toBeGreaterThan(0);
-    expect(readdirSync(claudeRoot).filter((f) => f.endsWith('.md')).sort()).toEqual(files);
+    const result = diffMirror('.pi/prompts', '.claude/commands');
+    expect(result, 'pi/claude prompt mirror drifted').toMatchObject({ ok: true, missing: [], extra: [], drifted: [] });
 
+    const piRoot = resolveRepoPath('.pi/prompts');
     const projectSpecific = /HealthTech|PRD_HealthTech|zero-knowledge|AES-256|ARTCI|Côte|Ivoire|crypto-core|app-patient|app-medecin/i;
-    for (const file of files) {
-      const piText = readFileSync(join(piRoot, file), 'utf8');
-      const claudeText = readFileSync(join(claudeRoot, file), 'utf8');
-      expect(claudeText).toBe(piText);
-      expect(piText).not.toMatch(projectSpecific);
+    for (const file of listFilesRecursive(piRoot)) {
+      expect(readFileSync(join(piRoot, file), 'utf8')).not.toMatch(projectSpecific);
     }
   });
 });
