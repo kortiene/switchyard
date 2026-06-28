@@ -1,0 +1,8 @@
+presence-marker — not the original transcript.
+
+tools/parity-rate.ts classifies a phase invocation from the EXISTENCE of
+transcript.log (the phase ran) and transcript-2.log (a single nudge retry fired),
+never from their content. The live-run transcript is intentionally omitted from
+this committed corpus; the classification-determining evidence is vendored verbatim:
+prompt.txt (native vs fenced via the fenced-JSON footer) and the run's state.json
+(runner + completed_phases). See test/fixtures/parity-runs/README.md.

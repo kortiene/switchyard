@@ -1,0 +1,54 @@
+You are running as a single automated phase of the ADW pipeline.
+The orchestrator performs ALL git and GitHub work for this run: do NOT run git or gh, do NOT create/switch/commit/push branches, and do NOT open, merge, or comment on pull requests. If the task section below tells you to do any of that, skip those steps.
+You have no GitHub access in this phase; all issue context you need is provided inline.
+
+---
+
+Classify work item #1 into a single change type for branch naming and commit prefixing.
+
+Work item context (title, body, labels):
+
+1 GitHub issue #1: docs: declare Claude-only MVP scope + live-run playbook
+Labels: issue_class:docs adw-live-batch
+
+Part of the MVP live-run batch (`adw_sdlc/docs/LIVE-RUN-BATCH.md`). Intended `issue_class`: **docs**. Planned ADW run mode: **forced-fenced** (`ADW_PARITY_FORCE_FENCED_JSON=1`).
+
+## Goal
+Declare the MVP scope as **(A) Claude ships real issues reliably** and add a short live-run playbook, so `MVP-READINESS.md` §0 stops reading "unset".
+
+## Scope
+- In `adw_sdlc/MVP-READINESS.md` §0, record the decision: MVP = (A); demote (B) four-runner and (C) cutover to post-MVP.
+- Add a brief "How to run a live `claude` issue" section that points at `docs/LIVE-RUN-BATCH.md` and the `npm run verify` gate.
+- Keep `(B)`/`(C)` gates listed but clearly marked post-MVP.
+
+## Acceptance criteria
+- [ ] §0 shows MVP = (A) explicitly (no "unset").
+- [ ] A live-run playbook subsection links `docs/LIVE-RUN-BATCH.md`.
+- [ ] `npm run verify` stays green (docs-only change).
+
+## Notes
+Docs-only; no code paths change. Good low-risk smoke test and the forced-fenced parity baseline.
+
+## Instructions
+
+- Choose exactly one `issue_class` from: `feat`, `fix`, `docs`, `chore`, `ci`, `test`, `refactor`.
+  - `feat` — new user-visible feature or capability.
+  - `fix` — bug fix or correctness change.
+  - `docs` — documentation-only change.
+  - `chore` — maintenance, deps, tooling with no user-visible behavior change.
+  - `ci` — CI/build/workflow change.
+  - `test` — test-only change.
+  - `refactor` — internal restructuring with no behavior change.
+- Prefer the narrowest truthful classification.
+- If labels and body disagree, classify by the actual requested change.
+
+
+---
+
+## Required output
+
+End your reply with EXACTLY one fenced ```json block matching this shape, and nothing after it:
+
+```json
+{"issue_class": "feat|fix|docs|chore|ci|test|refactor", "reason": "<one sentence>"}
+```

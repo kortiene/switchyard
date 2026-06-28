@@ -1,0 +1,45 @@
+You are running as a single automated phase of the ADW pipeline.
+The orchestrator performs ALL git and GitHub work for this run: do NOT run git or gh, do NOT create/switch/commit/push branches, and do NOT open, merge, or comment on pull requests. If the task section below tells you to do any of that, skip those steps.
+You have no GitHub access in this phase; all issue context you need is provided inline.
+
+---
+
+Classify work item #3 into a single change type for branch naming and commit prefixing.
+
+Work item context (title, body, labels):
+
+3 GitHub issue #3: feat: MVP live-run observation ledger
+Labels: issue_class:feat adw-live-batch
+
+Part of the MVP live-run batch (`adw_sdlc/docs/LIVE-RUN-BATCH.md`). Intended `issue_class`: **feat**. Planned ADW run mode: native.
+
+## Goal
+Add an "observed-live" ledger so each `MVP-READINESS.md` parity guarantee can be marked as seen in a real run, not only under mocks.
+
+## Scope
+- New `adw_sdlc/docs/OBSERVED-LIVE-LEDGER.md` with a row per PARITY.md guarantee: guarantee | mocked? | observed-live? | run id / evidence.
+- Seed it from the existing live `claude` run (PR #331) where applicable.
+- Link it from `MVP-READINESS.md` §1.
+
+## Acceptance criteria
+- [ ] Ledger lists every PARITY.md Section-10 guarantee.
+- [ ] Each row has an explicit observed-live status.
+- [ ] Linked from MVP-READINESS.md.
+- [ ] `npm run verify` stays green.
+
+## Notes
+Docs/feature artifact; no kernel change required.
+
+## Instructions
+
+- Choose exactly one `issue_class` from: `feat`, `fix`, `docs`, `chore`, `ci`, `test`, `refactor`.
+  - `feat` — new user-visible feature or capability.
+  - `fix` — bug fix or correctness change.
+  - `docs` — documentation-only change.
+  - `chore` — maintenance, deps, tooling with no user-visible behavior change.
+  - `ci` — CI/build/workflow change.
+  - `test` — test-only change.
+  - `refactor` — internal restructuring with no behavior change.
+- Prefer the narrowest truthful classification.
+- If labels and body disagree, classify by the actual requested change.
+

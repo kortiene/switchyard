@@ -1,0 +1,55 @@
+{
+  "adw_id": "435bb6fa",
+  "schema_version": 1,
+  "issue_number": "7",
+  "issue_class": "feat",
+  "branch_name": "feat/7-435bb6fa-feat-live-secret-boundary-audit-scaffold",
+  "base": "main",
+  "plan_file": "specs/live-secret-boundary-audit-scaffold.md",
+  "pr_number": 15,
+  "pr_url": "https://github.com/kortiene/switchyard/pull/15",
+  "commit_message": "feat(adw): live secret-boundary audit scaffold (spawned-child env check)\n\nAdd a live-oriented secret-boundary audit: the spawn-crossing complement to\nenv.test.ts's in-process check. It spawns a REAL child with the runner env\nthat safeSubprocessEnv() builds and reads the child's own process.env, proving\nthe spawn REPLACES (not merges) the parent environment so a runner grandchild\ncannot observe GH_TOKEN / MATRIX_* / ADW_* / legacy MX_AGENT_*.\n\nThe no-secret-printing rule is structural, not a promise: the source env is\nseeded with SENTINEL values (never real credentials) and the child emits only\nthe NAMES of any denied keys it sees (expected: none). Deny prefixes are\nimported from ENV_DENY_PREFIXES (single source of truth), never re-hardcoded.\n\n- docs/SECRET-BOUNDARY-AUDIT.md — the three-layer model (static lint / mocked\n  unit / live audit), the names/booleans-only rule, the mode-conditional denied\n  set (GH_TOKEN absent phased / present one-shot), the deterministic command,\n  and a verified operator live-mode snippet (real process.env, names only).\n- test/secret-boundary-audit.test.ts — deterministic vitest (inside verify):\n  per-runner phased env exposes no denied key; positive control proves the\n  audit can see a leak; sentinel value never appears in output; one-shot pin;\n  plus guards (EXPECTED_LEAK↔POISONED consistency, extraAllow deny-exclusion at\n  the spawn boundary, ENV_DENY_PREFIXES exact, allowlisted-present, RUNNER_IDS↔\n  RUNNER_ENV_ALLOW parity, non-denied extraAllow forwarding).\n- README doc-map row; HANDOVER §8x + test-count bump (546→556, 40 files);\n  LIVE-RUN-BATCH status updated (issues #5, #6, #7 marked done).\n\nNo src/ change, no .adw/ change. npm run verify green (556 tests, dist cleaned).\n\ncloses #7",
+  "pr_body": "## Summary\n\nAdds the **live secret-boundary audit scaffold** (issue #7, MVP live-run batch row 7): a third layer over the existing static `lint:env` gate and the mocked in-process `env.test.ts`. It asserts, on a **real spawned runner environment**, that the denied secrets `GH_TOKEN` / `MATRIX_*` / `ADW_*` / legacy `MX_AGENT_*` are absent — **without ever printing a secret value** (key names / booleans only).\n\nThe distinguishing value over `env.test.ts` is that it crosses the **spawn boundary**: it spawns a child with the env `safeSubprocessEnv()` builds and reads the child's own `process.env`, proving the spawn **replaces** (does not merge) the parent environment — a regression `env.test.ts` cannot catch.\n\n## What's included\n\n- **`adw_sdlc/docs/SECRET-BOUNDARY-AUDIT.md`** — the procedure: the three-layer model, the load-bearing no-secret-printing rule, the **mode-conditional** denied set (`GH_TOKEN` absent in phased mode / intentionally present in one-shot), the deterministic command, and an operator live-mode snippet against the real `process.env`.\n- **`adw_sdlc/test/secret-boundary-audit.test.ts`** — deterministic vitest, runs inside `npm run verify` (no real secrets, no network, one trivial `node -e` child per case). Imports `ENV_DENY_PREFIXES` from `../src/env.js` as the single source of truth; seeds the source with **sentinel** values.\n- **`adw_sdlc/README.md`** — documentation-map row for `docs/SECRET-BOUNDARY-AUDIT.md`.\n- **`adw_sdlc/HANDOVER.md`** — §8x section recording the scaffold; test-count baseline updated from 540/36 to **556/40 files** (captures §8w +6 and §8x +10 that were missing).\n- **`adw_sdlc/docs/LIVE-RUN-BATCH.md`** — status updated: issues #5, #6, #7 marked done; issues #2, #8 remain planned.\n\n### Tests (10)\n\n1. Per-runner phased env (`allowGhToken: false`, all four runners) exposes **no** denied key to a spawned child — the audit (AC #1).\n2. **Positive control** — a no-allowlist spawn (`{ env: POISONED }`) **does** expose the denied keys, so test 1 isn't trivially true.\n3. **No secret value ever crosses the report** — stdout never contains the sentinel; structurally captures AC #2.\n4. **One-shot pin** — `allowGhToken: true` lets `GH_TOKEN`/`GH_BIN` through but still no deny-prefixed key.\n5–10. Guards: `EXPECTED_LEAK`↔`POISONED` consistency, `extraAllow` deny-prefixed exclusion at the spawn boundary, `ENV_DENY_PREFIXES` exact regression pin, allowlisted-keys-present (no empty-env false pass), `RUNNER_IDS`↔`RUNNER_ENV_ALLOW` parity, non-denied `extraAllow` forwarding.\n\n## Acceptance criteria\n\n- [x] Audit asserts denied prefixes/keys are absent from the runner env — test 1, backed by positive control (test 2).\n- [x] No secret values are ever printed (names/booleans only) — sentinel-valued source + child emits names only + test 3.\n- [x] `npm run verify` stays green — verified locally: exit 0, **556 tests / 40 files**, `dist/` cleaned. No `src/` or `.adw/` change.\n\n## Reviewer verification\n\n- `npm run verify` → exit 0, 556 passed, `dist/` removed.\n- `npx vitest run test/secret-boundary-audit.test.ts` → 10/10 passed.\n- The documented operator live-mode snippet was executed against the real `process.env`: `claude/codex/opencode/pi → PASS`.\n- Cross-reference checked: PARITY.md Section 10 \"Secret withholding (fail-closed)\" row exists; this audit is its spawned-child observation.\n\n## Scope / notes\n\n- No change to `src/env.ts`, `safeSubprocessEnv`, the allowlist, or the deny prefixes — the audit only **imports** the existing boundary.\n- The `audit:secrets` CLI is intentionally **deferred**; the doc ships the manual `node -e`/`tsx` equivalent (verified to run).\n\ncloses #7",
+  "review_findings": [
+    {
+      "severity": "skippable",
+      "description": "The §5 operator live-mode snippet hardcodes the runner list [\"claude\",\"codex\",\"opencode\",\"pi\"] and the GitHub-specific keys [\"GH_TOKEN\",\"GH_BIN\"] as static strings, duplicating RUNNER_IDS/DENIED_SPECIFIC. Nothing in CI executes the doc snippet (the test imports the constants; the doc cannot), so it could silently bitrot if those sets change. Verified to run today; spec §6 explicitly defers a doc-content guard, so this is acceptable.",
+      "location": "adw_sdlc/docs/SECRET-BOUNDARY-AUDIT.md:118"
+    },
+    {
+      "severity": "skippable",
+      "description": "The doc/audit scope the boundary to safeSubprocessEnv (phased) mode but don't mention that the orchestrator's opts.inheritEnv:true branch deliberately bypasses safeSubprocessEnv via definedEnv(deps.env), forwarding the full parent env. A strict reader could over-read 'the runner env never contains secrets' as universal. The doc already carefully scopes its claims to the safeSubprocessEnv path, so this is context-only.",
+      "location": "adw_sdlc/src/orchestrator.ts:1071"
+    }
+  ],
+  "completed_phases": [
+    "setup",
+    "classify",
+    "plan",
+    "implement",
+    "tests",
+    "resolve",
+    "e2e",
+    "review",
+    "patch",
+    "document",
+    "merge"
+  ],
+  "engine": "ts",
+  "runner": "claude",
+  "work_item": {
+    "provider": "github",
+    "type": "issue",
+    "id": "7",
+    "number": 7,
+    "title": "feat: live secret-boundary audit scaffold"
+  },
+  "change_request": {
+    "provider": "github",
+    "type": "pull_request",
+    "id": "15",
+    "number": 15,
+    "url": "https://github.com/kortiene/switchyard/pull/15"
+  },
+  "total_cost_usd": 9.2352616
+}

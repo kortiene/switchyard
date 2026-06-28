@@ -1,0 +1,128 @@
+You are running as a single automated phase of the ADW pipeline.
+The orchestrator performs ALL git and GitHub work for this run: do NOT run git or gh, do NOT create/switch/commit/push branches, and do NOT open, merge, or comment on pull requests. If the task section below tells you to do any of that, skip those steps.
+You have no GitHub access in this phase; all issue context you need is provided inline.
+
+---
+
+## Switchyard ADW project context
+
+<!-- Generated project context. Edit .adw/pack.profile.json and run `npm run pack:generate`; do not hand-edit this block in .adw/prompts. -->
+
+### Repository context to read
+
+- `README.md` at the repository root, if present, for top-level project context.
+- `adw_sdlc/README.md` — package overview, commands, config surface, and documentation map.
+- `adw_sdlc/HANDOVER.md` — current architecture, operational invariants, and session-to-session state.
+- `adw_sdlc/MVP-READINESS.md` and `adw_sdlc/PARITY.md` — MVP gates, live-run evidence, and parity criteria.
+- `adw_sdlc/docs/LIVE-RUN-BATCH.md` — planned live `claude` issues and run-command templates.
+- The specific GitHub issue being worked (`kortiene/switchyard`) and its acceptance criteria.
+- The existing source tree and tests as they actually exist now; verify before assuming behavior.
+
+### Project summary
+
+`Switchyard` contains the ADW SDLC TypeScript control plane and related project-pack / Pi cockpit tooling. The control plane drives one work item through deterministic phases (`setup → classify → plan → implement → tests → resolve → e2e → review → patch → document → finalize → ci-fix → merge → report`) while runner adapters (`claude`, `codex`, `opencode`, `pi`) perform only the agentic code-editing phases. The near-term MVP goal is audited live reliability for the `claude` runner.
+
+### Component map
+
+- `adw_sdlc/src/orchestrator.ts`, `run-phase.ts`, `phases.ts`, `state.ts` — deterministic phase control, prompt composition, structured-output handling, and persisted run state.
+- `adw_sdlc/src/runners/` and `invoker.ts` — runner adapters and the shared `AgentRunner.runPhase()` seam.
+- `adw_sdlc/src/env.ts`, `env-vars.ts`, `exec.ts` — secret-boundary env allowlist, canonical `ADW_*` control-plane env aliases, and subprocess helpers.
+- `adw_sdlc/src/providers*.ts`, `provider-descriptor.ts` — GitHub/git built-ins plus declarative `cli`/`rest` provider support.
+- `adw_sdlc/tools/` — prompt-pack generation and parity-rate measurement.
+- `.adw/config.json`, `.adw/pack.profile.json`, `.adw/prompts/` — project pack and generated runtime prompt templates.
+- `.pi/extensions/adw-cockpit/` and `adw_sdlc/docs/PI-UI-EXTENSION-BACKLOG.md` — optional Pi TUI cockpit surface.
+
+### Security and operational invariants
+
+- The orchestrator owns all git/gh operations; ADW phases must not ask the coding agent to run git or gh.
+- Runner child environments are deny-by-default: `GH_TOKEN`, `MATRIX_*`, canonical `ADW_*`, and legacy `MX_AGENT_*` control variables must not reach agents.
+- Do not spread `process.env` into runner processes; `npm run lint:env` guards this boundary.
+- Opencode integration must use the approved v2 client path and avoid factory calls that inherit parent env.
+- Treat `PHASE_PREAMBLE_SHARED` and prompt contract wording as behavior-affecting; change only with explicit care and tests.
+- State-schema fields used for cross-language compatibility must remain additive/non-breaking.
+
+### Current status and assumptions
+
+The package is TypeScript/Node and uses npm. Canonical runtime env knobs use `ADW_*` names, with deprecated `MX_AGENT_*` compatibility aliases. The canonical local gate is `npm run verify`, which runs typecheck, env lint, prompt-pack drift check, tests, build, and removes `dist/`. A live-run issue batch (#1–#8) exists to collect MVP evidence, but do not start costly live `claude` runs unless explicitly asked.
+
+### Working rules
+
+- Keep changes scoped to the GitHub issue and acceptance criteria.
+- Prefer small, auditable changes with focused tests over broad rewrites.
+- Update docs and prompt-pack sources when behavior or operator guidance changes.
+- If `.adw/pack.profile.json` changes, regenerate `.adw/prompts` with `npm run pack:generate` and verify with `npm run pack:check`.
+- Use `ADW_TEST_CMD="npm run verify"` for live ADW runs; do not chain multiple commands directly in `ADW_TEST_CMD`.
+
+### Verification guidance
+
+Run `npm run verify` from `adw_sdlc/` for the full local gate. For narrow changes, run the most relevant focused test first, then the full gate before reporting. If a check cannot be run, state exactly why and what command should be run by the maintainer.
+
+Review the implementation currently in the working tree for this change. There is no change request yet — review the staged and uncommitted changes against the work item and, if one was created, the spec.
+
+Spec file, if any: specs/claude-only-mvp-scope-live-run-playbook.md
+
+Work item and change context:
+
+GitHub issue #1: docs: declare Claude-only MVP scope + live-run playbook
+Labels: issue_class:docs adw-live-batch
+
+Part of the MVP live-run batch (`adw_sdlc/docs/LIVE-RUN-BATCH.md`). Intended `issue_class`: **docs**. Planned ADW run mode: **forced-fenced** (`ADW_PARITY_FORCE_FENCED_JSON=1`).
+
+## Goal
+Declare the MVP scope as **(A) Claude ships real issues reliably** and add a short live-run playbook, so `MVP-READINESS.md` §0 stops reading "unset".
+
+## Scope
+- In `adw_sdlc/MVP-READINESS.md` §0, record the decision: MVP = (A); demote (B) four-runner and (C) cutover to post-MVP.
+- Add a brief "How to run a live `claude` issue" section that points at `docs/LIVE-RUN-BATCH.md` and the `npm run verify` gate.
+- Keep `(B)`/`(C)` gates listed but clearly marked post-MVP.
+
+## Acceptance criteria
+- [ ] §0 shows MVP = (A) explicitly (no "unset").
+- [ ] A live-run playbook subsection links `docs/LIVE-RUN-BATCH.md`.
+- [ ] `npm run verify` stays green (docs-only change).
+
+## Notes
+Docs-only; no code paths change. Good low-risk smoke test and the forced-fenced parity baseline.
+
+## What to do
+
+1. Understand the change.
+   - Inspect the working-tree diff against the base branch and read changed files in context.
+   - Read the work item, acceptance criteria, and spec (`specs/claude-only-mvp-scope-live-run-playbook.md`) when provided.
+   - Read relevant repository docs and tests.
+
+2. Review as a strict pre-merge reviewer.
+   - correctness and edge cases
+   - security/privacy/data handling
+   - API/data model compatibility
+   - maintainability and scope control
+   - test quality and meaningful assertions
+   - documentation and operational impact
+
+3. Classify findings.
+   - `blocker`: must be fixed before merge
+   - `tech_debt`: valid but not blocking this change
+   - `skippable`: optional/nit/context
+
+4. Author release artifacts if useful.
+   - If the change is merge-ready or nearly merge-ready, write a clear commit message and change-request body to the artifact paths provided by the ADW footer.
+   - Do not run git or forge CLI commands; the orchestrator owns those operations.
+
+Be concise but rigorous. Avoid generic feedback; every blocker should be actionable.
+
+
+---
+
+Author these files first (this keeps large free-form text out of the JSON, which
+the pipeline parses mechanically):
+- Write the full commit message (subject + body, ending with a line `closes #<issue>`) to: agents/bfd9405e/commit_message.txt
+- Write the complete PR body (Markdown) to: agents/bfd9405e/pr_body.md
+Set the matching wrote_* booleans to true once each file is written.
+
+## Required output
+
+End your reply with EXACTLY one fenced ```json block matching this shape, and nothing after it:
+
+```json
+{"findings": [{"severity": "blocker|tech_debt|skippable", "description": "<what>", "location": "<file:line>"}], "wrote_commit_message": true, "wrote_pr_body": true}
+```

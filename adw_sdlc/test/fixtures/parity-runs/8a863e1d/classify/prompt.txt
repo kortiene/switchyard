@@ -1,0 +1,44 @@
+You are running as a single automated phase of the ADW pipeline.
+The orchestrator performs ALL git and GitHub work for this run: do NOT run git or gh, do NOT create/switch/commit/push branches, and do NOT open, merge, or comment on pull requests. If the task section below tells you to do any of that, skip those steps.
+You have no GitHub access in this phase; all issue context you need is provided inline.
+
+---
+
+Classify work item #5 into a single change type for branch naming and commit prefixing.
+
+Work item context (title, body, labels):
+
+5 GitHub issue #5: refactor: split parity-rate classification from rendering
+Labels: issue_class:refactor adw-live-batch
+
+Part of the MVP live-run batch (`adw_sdlc/docs/LIVE-RUN-BATCH.md`). Intended `issue_class`: **refactor**. Planned ADW run mode: native.
+
+## Goal
+Separate `tools/parity-rate.ts` classification logic from its terminal rendering so the classifier can be unit-tested and reused without printing.
+
+## Scope
+- Extract pure functions (per-phase classification, rate aggregation, verdict) from the I/O/printing layer in `adw_sdlc/tools/parity-rate.ts`.
+- Keep the CLI entry behavior and output byte-stable.
+- Extend `test/parity-rate.test.ts` to call the extracted functions directly.
+
+## Acceptance criteria
+- [ ] No behavior change to `npm run parity:rate` output for the same inputs.
+- [ ] Classification/verdict functions are exported and unit-tested.
+- [ ] `npm run verify` stays green.
+
+## Notes
+Behavior-preserving refactor; the drift-guard test (`FENCED_MARKER`) must stay intact.
+
+## Instructions
+
+- Choose exactly one `issue_class` from: `feat`, `fix`, `docs`, `chore`, `ci`, `test`, `refactor`.
+  - `feat` — new user-visible feature or capability.
+  - `fix` — bug fix or correctness change.
+  - `docs` — documentation-only change.
+  - `chore` — maintenance, deps, tooling with no user-visible behavior change.
+  - `ci` — CI/build/workflow change.
+  - `test` — test-only change.
+  - `refactor` — internal restructuring with no behavior change.
+- Prefer the narrowest truthful classification.
+- If labels and body disagree, classify by the actual requested change.
+

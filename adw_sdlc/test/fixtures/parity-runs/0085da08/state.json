@@ -1,0 +1,44 @@
+{
+  "adw_id": "0085da08",
+  "schema_version": 1,
+  "issue_number": "6",
+  "issue_class": "fix",
+  "branch_name": "feat/6-0085da08-fix-drift-guard-for-adw-env-naming-in-do",
+  "base": "main",
+  "plan_file": "specs/drift-guard-adw-env-naming.md",
+  "pr_number": 14,
+  "pr_url": "https://github.com/kortiene/switchyard/pull/14",
+  "commit_message": "test(adw): guard against MX_AGENT_* env-naming drift in src/\n\nAdd a vitest regression guard that prevents the recent control-plane env\nrename from silently drifting. Canonical knobs are now `ADW_*` with\ndeprecated `MX_AGENT_*` compatibility aliases; the alias machinery\n(`ENV_ALIASES`, `modelEnvAlias`, `readEnvAlias`/`readEnvFlag`) lives only\nin `src/env-vars.ts`. The guard fails if any new bare `MX_AGENT_*` read is\nreintroduced elsewhere in `src/` as if it were canonical.\n\n- adw_sdlc/test/env-naming-drift.test.ts (new, +6): scans every\n  `src/**/*.ts` except the sanctioned `env-vars.ts` for a bracket\n  (`env['MX_AGENT_X']`) or dot (`process.env.MX_AGENT_X`) read of an\n  `MX_AGENT_*` key, reporting offending `file:line` on failure. The\n  `MX_AGENT_[A-Z]` + access-shape discriminator excludes today's\n  legitimate mentions (deny-prefix constant `'MX_AGENT_'`, `--help`\n  text, prose comments, the alias-table values) by construction, so the\n  tree stays green. `//` comments are stripped before matching.\n- Detector self-test (positive + negative fixtures) proves the guard\n  actually fires and does not false-positive; a source-of-truth check\n  ties it to `ENV_ALIASES` + `modelEnvAlias` so a new alias auto-extends\n  the guard's intent.\n- adw_sdlc/HANDOVER.md: record §8w and bump the test count to\n  546 tests / 39 files.\n\nNo production-code change: `src/env-vars.ts` and the secret boundary are\nuntouched; `MX_AGENT_*` keeps working as a deprecated alias. The optional\ndocs/prompts scan is deferred (generated prompts are covered by\n`pack:check`; committed docs already mark `MX_AGENT_*` as legacy).\n\nVerification: `npm run verify` green (typecheck, lint:env, pack:check,\n546 tests, build+clean). Negative proof: injecting a bare\n`process.env['MX_AGENT_RUNNER']` read into `src/exec.ts` fails the guard\nwith that `file:line`; reverting restores green.\n\ncloses #6",
+  "pr_body": "# fix: drift guard for `ADW_*` env naming\n\nCloses #6. Part of the MVP live-run batch (`adw_sdlc/docs/LIVE-RUN-BATCH.md`).\n\n## Summary\n\nGuards the recent control-plane env rename — canonical `ADW_*` with\ndeprecated `MX_AGENT_*` compatibility aliases — against silent regression.\nThe alias machinery (`ENV_ALIASES`, `modelEnvAlias`, and the only sanctioned\nreaders `readEnvAlias`/`readEnvFlag`) lives entirely in `src/env-vars.ts`.\nThis change adds a lightweight vitest guard that fails if a **new** bare\n`MX_AGENT_*` read is reintroduced anywhere in `src/` outside `env-vars.ts`,\nas if the legacy name were canonical.\n\n**Test-only / no production change.** `src/env-vars.ts` and the secret\nboundary are untouched; `MX_AGENT_*` keeps working as a deprecated alias.\n\n## Changes\n\n- **`adw_sdlc/test/env-naming-drift.test.ts`** (new, +6 tests) — scans every\n  `src/**/*.ts` except the sanctioned `env-vars.ts` for a bracket\n  (`env['MX_AGENT_X']`) or dot (`process.env.MX_AGENT_X`) read of an\n  `MX_AGENT_*` key; reports each offending `file:line` on failure. Includes:\n  - a **detector self-test** (positive + negative fixtures) so the guard\n    can't rot into a trivially-true no-op or false-positive on the\n    legitimate mentions (deny-prefix constant, `--help` text, prose\n    comments, alias-table values);\n  - a **source-of-truth coverage** check tied to `ENV_ALIASES` +\n    `modelEnvAlias`, so adding a new alias automatically extends the guard;\n  - `//`-comment stripping before matching, to avoid flagging\n    commented-out example reads.\n- **`adw_sdlc/HANDOVER.md`** — records §8w and bumps the test count to\n  **546 tests / 39 files**.\n\n## Design notes\n\n- **Discriminator:** a real read always has an uppercase letter immediately\n  after the `MX_AGENT_` prefix **and** uses bracket/dot access. That\n  excludes every legitimate mention in the current tree by construction (no\n  allowlist needed) — verified against `src/env-vars.ts`, `src/env.ts`\n  (`ENV_DENY_PREFIXES`), and the `src/cli.ts` `--help` text.\n- **Scope:** the issue's optional docs/prompts scan is deferred — generated\n  `.adw/prompts` are covered by `pack:check`, and committed docs already\n  mark `MX_AGENT_*` as legacy. No `.adw/` or production `src/` edits.\n\n## Acceptance criteria\n\n- [x] The guard fails if a new bare `MX_AGENT_*` read is added to `src/`\n      outside `env-vars.ts`.\n- [x] Existing canonical `ADW_*` usage passes (tree is green today).\n- [x] `npm run verify` stays green.\n\n## Verification\n\n- `npm run verify` → green (typecheck, `lint:env`, `pack:check`,\n  **546 tests / 39 files**, build + `dist/` cleanup).\n- Negative proof: injecting `process.env['MX_AGENT_RUNNER']` into\n  `src/exec.ts` fails the guard with `adw_sdlc/src/exec.ts:<line>` detail;\n  reverting restores green.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+  "review_findings": [],
+  "completed_phases": [
+    "setup",
+    "classify",
+    "plan",
+    "implement",
+    "tests",
+    "resolve",
+    "e2e",
+    "review",
+    "patch",
+    "document",
+    "merge"
+  ],
+  "engine": "ts",
+  "runner": "claude",
+  "work_item": {
+    "provider": "github",
+    "type": "issue",
+    "id": "6",
+    "number": 6,
+    "title": "fix: drift guard for ADW_* env naming in docs/prompts"
+  },
+  "change_request": {
+    "provider": "github",
+    "type": "pull_request",
+    "id": "14",
+    "number": 14,
+    "url": "https://github.com/kortiene/switchyard/pull/14"
+  },
+  "total_cost_usd": 6.553717499999999
+}

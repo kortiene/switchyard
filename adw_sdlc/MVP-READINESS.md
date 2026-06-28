@@ -93,9 +93,9 @@ npm run parity:rate -- agents/
   Section-10 guarantees, has it been seen live even once? The dashboard lives in
   [`docs/OBSERVED-LIVE-LEDGER.md`](./docs/OBSERVED-LIVE-LEDGER.md); it stands at
   **6 `✅` / 4 `🟡` / 2 `⏳` / 1 `N/A`** (seeded from PR #331 / run `007fd5ba` plus
-  the 8-run batch — kept conservative because the batch artifacts are git-ignored
-  and self-referential). The load-bearing #5 (secret boundary) and #8 (fast-fail)
-  rows are still `⏳`. #332 is proof the mocks under-specify reality.
+  the 8-run batch — kept conservative because the batch is self-referential, with the
+  load-bearing #5 (secret boundary) and #8 (fast-fail) rows still `⏳` — never induced
+  live). #332 is proof the mocks under-specify reality.
 - [ ] ⏳ **Operational basics** for an agent that spends money and edits repos: a
   bounded cost envelope (~$35/run is real) with the `maxBudgetUsd` ceiling +
   kill-switch confirmed live; the secret boundary asserted once on a *real*
@@ -145,6 +145,11 @@ GitLab). **Decide scope:**
 - `ADW_PARITY_FORCE_FENCED_JSON=1` — routes a native-schema runner through the fenced
   path so a fenced baseline can be harvested from `claude` (no `pi` needed).
   Default off ⇒ behavior unchanged.
+- `test/fixtures/parity-runs/` — the 8-run batch evidence (each run's `state.json` +
+  per-phase `prompt.txt`; transcripts as presence-markers), committed so that
+  `npm run parity:rate -- test/fixtures/parity-runs/` reproduces the rate from a clean
+  clone. `test/parity-evidence.test.ts` re-derives the documented figures under
+  `npm run verify`.
 
 ## What I can do vs. what needs a human
 

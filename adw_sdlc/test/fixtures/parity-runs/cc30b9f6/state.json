@@ -1,0 +1,55 @@
+{
+  "adw_id": "cc30b9f6",
+  "schema_version": 1,
+  "issue_number": "4",
+  "issue_class": "test",
+  "branch_name": "feat/4-cc30b9f6-test-failure-drill-scaffold-timeout-budg",
+  "base": "main",
+  "plan_file": "specs/failure-drills-scaffold.md",
+  "pr_number": 12,
+  "pr_url": "https://github.com/kortiene/switchyard/pull/12",
+  "commit_message": "test(adw): scaffold timeout/budget/resume failure-drill runbook\n\nTurn the terse \"Failure-mode drills\" bullets in LIVE-RUN-BATCH.md into a\nstandalone, copy-paste live `claude` runbook and close the one uncovered\nfail-fast branch with a deterministic test.\n\nDocs:\n- Add adw_sdlc/docs/FAILURE-DRILLS.md: three drills (timeout fast-fail,\n  budget fast-fail, kill-then--resume) each with an exact command and the\n  expected signal/outcome. Expected-signal text quotes the verbatim AdwError\n  strings (run-phase.ts:136/139/144) and anchors every claim to source lines\n  so a future editor can re-verify. The nudge-retry case is documented as\n  opportunistic-only with NO recipe to force an output-contract violation.\n- LIVE-RUN-BATCH.md: add full-runbook pointer from \"Failure-mode drills\",\n  mark issue #4 as run in the Status block, and retire the \"Land issue #4\n  first\" instruction from the nudge-retry bullet.\n- README.md: add a row to the \"Documentation map\" table for FAILURE-DRILLS.md,\n  and add --timeout / --max-budget-usd to the frequently-used flags table with\n  a one-line note on their fail-fast behaviour (no nudge retry).\n\nTests (deterministic, mocked, no network/spend):\n- run-phase.test.ts: add the missing `signal:'cancelled'` fail-fast-no-nudge\n  case (timeout/budget were already covered); asserts one request, no\n  transcript-2.log, error matches /cancelled/.\n- orchestrator.test.ts: pin that `--timeout` / `--max-budget-usd` thread from\n  RunOptions into every runAgentPhase call (the Drill 1 / Drill 2 wiring).\n\nNo src/ behavior changed; docs + tests only. `npm run verify` green\n(typecheck, lint:env, pack:check, 505 tests, build).\n\ncloses #4",
+  "pr_body": "## What\n\nScaffolds the ADW failure-mode drill procedure for issue #4 (part of the MVP\nlive-run batch). Primarily a documentation artifact, plus deterministic tests\nthat close a real coverage gap and pin the wiring the drills rely on.\n\n## Changes\n\n**Docs**\n- **New `adw_sdlc/docs/FAILURE-DRILLS.md`** — a live `claude` runbook with three\n  drills, each a copy-paste command + expected outcome:\n  1. **Timeout fast-fail** (`--timeout 1`) → `signal:'timeout'`, no nudge.\n  2. **Budget fast-fail** (`--max-budget-usd 0.01`) → `signal:'budget'`, no nudge.\n  3. **Kill, then `--resume`** → resume prints `skipping <phase> (already completed)`.\n  Expected-signal text quotes the **verbatim** `AdwError` strings\n  (`run-phase.ts:136/139/144`) and the parse-before-signal nuance\n  (`run-phase.ts:126–128`), and anchors each claim to source lines.\n- The **nudge-retry** path is documented as *opportunistic only* — no recipe to\n  force a JSON-contract violation (per issue Notes / `LIVE-RUN-BATCH.md`).\n- **`LIVE-RUN-BATCH.md`**: full-runbook pointer added to the \"Failure-mode drills\"\n  section; Status block updated to note issue #4 as run; \"Land issue #4 first\"\n  instruction retired now that the scaffold is available.\n- **`README.md`**: row added to the \"Documentation map\" table for `FAILURE-DRILLS.md`;\n  `--timeout` and `--max-budget-usd` added to the frequently-used flags table with\n  a one-line note on their fail-fast behaviour (`signal:'timeout'` / `signal:'budget'`, no nudge retry).\n\n**Tests** (deterministic, mocked, no network/spend)\n- `test/run-phase.test.ts`: adds the missing **`signal:'cancelled'`**\n  fail-fast-no-nudge case (timeout/budget were already covered at `:191`/`:202`).\n  Asserts one runner request, no `transcript-2.log`, error matches `/cancelled/`.\n- `test/orchestrator.test.ts`: two tests pinning that **`--timeout` /\n  `--max-budget-usd` thread from `RunOptions` into every `runAgentPhase` call**\n  (the Drill 1 / Drill 2 plumbing).\n\n## Acceptance criteria\n\n- [x] Each of the three drills has a copy-paste command and expected outcome.\n- [x] Any added test is deterministic (mocked runner; no network/spend).\n- [x] `npm run verify` stays green.\n\nReviewer done-checks: no force-misbehave recipe; expected-signal text matches the\nverbatim error strings; cross-links added; **no `src/` changed** (docs + tests only).\n\n## Verification\n\n`npm run verify` from `adw_sdlc/` — exit 0\n(typecheck → lint:env → pack:check → **505 tests, 38 files** → build → rm dist).\n\n## Review notes (non-blocking)\n\n- `orchestrator.test.ts` is extended in addition to the spec-named\n  `run-phase.test.ts`. Both additions are test-only, deterministic, and directly\n  strengthen the drills (they prove the CLI flags actually reach the invoker).\n- The runbook cites exact source line numbers (brittle by nature). Mitigated as\n  the spec intends: error messages are **quoted, not paraphrased**, and the new\n  `cancelled` test pins that message in CI.\n- Running the live drills (real spend) remains a separate, human-driven step;\n  this change only scaffolds the procedure and does not flip any ledger rows.\n\ncloses #4",
+  "review_findings": [
+    {
+      "severity": "skippable",
+      "description": "Tests added to orchestrator.test.ts (2 cases pinning that --timeout/--max-budget-usd thread into every runAgentPhase call) go beyond the spec's named test scope (run-phase.test.ts cancelled case only). Justified: deterministic, mocked, no spend, and they close a real gap making the documented Drill 1/Drill 2 commands end-to-end meaningful. Disclosed in PR body.",
+      "location": "adw_sdlc/test/orchestrator.test.ts:996"
+    },
+    {
+      "severity": "tech_debt",
+      "description": "FAILURE-DRILLS.md hardcodes exact source line numbers (e.g. run-phase.ts:136/139/144, run-phase.test.ts:191/202, orchestrator.ts:1114-1116) that will silently drift as code moves. Mitigated per the spec's intent — error messages are quoted verbatim (not paraphrased) and the new cancelled test pins those strings in CI — but the citations themselves remain a maintenance footgun.",
+      "location": "adw_sdlc/docs/FAILURE-DRILLS.md:9"
+    }
+  ],
+  "completed_phases": [
+    "setup",
+    "classify",
+    "plan",
+    "implement",
+    "tests",
+    "resolve",
+    "e2e",
+    "review",
+    "patch",
+    "document",
+    "merge"
+  ],
+  "engine": "ts",
+  "runner": "claude",
+  "work_item": {
+    "provider": "github",
+    "type": "issue",
+    "id": "4",
+    "number": 4,
+    "title": "test: failure-drill scaffold (timeout/budget/resume)"
+  },
+  "change_request": {
+    "provider": "github",
+    "type": "pull_request",
+    "id": "12",
+    "number": 12,
+    "url": "https://github.com/kortiene/switchyard/pull/12"
+  },
+  "total_cost_usd": 8.3253693
+}
