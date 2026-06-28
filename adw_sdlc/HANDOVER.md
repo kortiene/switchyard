@@ -310,7 +310,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 620 tests, 44 files)
+# 3) Full test suite (current: 638 tests, 46 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -323,7 +323,7 @@ npx tsx src/cli.ts 42 --dry-run
 Also confirm:
 
 ```bash
-# prompt mirrors byte-identical
+# prompt mirrors byte-identical (also gate-enforced by `npm run mirror:check`)
 diff -rq .pi/prompts .claude/commands
 
 # .adw config present
@@ -1504,6 +1504,59 @@ was softened in the same pass to acknowledge the handful of boundary-crossing te
 Issue class: `docs`. No kernel/runtime/prompt-pack/config/provider change. No new
 dependency. `npm run verify` stays green (**620 tests, 44 files**).
 
+## 8ae. Issue #39 — gate-enforce the `.pi/prompts` ↔ `.claude/commands` mirror
+
+The neutral fallback command prompts ship as two trees that must stay
+byte-for-byte identical: `.pi/prompts` (canonical — `DEFAULT_TEMPLATES_DIR`) and
+`.claude/commands` (hand-maintained mirror). `pack:check` only ever reads
+`.pi/prompts` and writes `.adw/prompts`, so it never looked at
+`.claude/commands`; the only guard was a single `.md`-only, non-recursive unit
+test (`phases.test.ts`). Editing one root without the other could silently
+drift. This change makes the mirror a **gate-enforced, recursive, all-file**
+invariant with a one-command repair path, parallel to `pack:check`/`pack:generate`.
+
+- `adw_sdlc/tools/mirror.ts` (new) — pure diff helper (no `process`, no print,
+  no exit; typechecked via `tools/` but never built to `dist`, like
+  `tools/parity-rate-core.ts`). `MIRROR_PAIRS` (source→mirror list, extensible),
+  `listFilesRecursive` (sorted, recursive, POSIX-separated relative file paths;
+  throws on non-regular entries so a symlink can't masquerade as identical), and
+  `diffMirror` → `{ ok, missing, extra, drifted, source, mirror }` using
+  `Buffer.compare` (true byte-identity, EOL/encoding-safe).
+- `adw_sdlc/tools/mirror-check.ts` (new) — thin CLI in the `pack-generate.ts`
+  shape. `--check` (default) writes nothing and exits `1` on any drift, printing
+  the missing/extra/drifted buckets + `run: npm run mirror:sync`; `--write`
+  makes the mirror exact (writes missing/drifted source files, deletes extra
+  mirror files, prunes now-empty dirs) and is idempotent; `--dry-run` previews
+  `--write`. Usage/unknown-flag errors exit `2`. No git, no network.
+- `adw_sdlc/package.json` — added `mirror:check` (`--check`) and `mirror:sync`
+  (`--write`); inserted `npm run mirror:check` into `verify` immediately after
+  `pack:check`. New chain: `typecheck → lint:env → pack:check → mirror:check →
+  test → build → rm -rf dist`.
+- Docs/comments — `README.md` (verify chain + new `mirror:check`/`mirror:sync`
+  bullets, `.pi/prompts` named canonical), `.github/workflows/verify.yml`
+  (stage-chain comment), `src/pack-generator.ts` (the "mirrored byte-for-byte"
+  note now points at `npm run mirror:check` as the enforcing guard).
+
+Issue class: `test` (tooling + gate hardening). No `src/` runtime behavior, no
+prompt-content, and no `.adw/` regeneration — `pack:check` output is unchanged.
+- `adw_sdlc/test/mirror.test.ts` (new, **+13**) — `MIRROR_PAIRS` pin, `listFilesRecursive`
+  (empty dir, single file, nested+sorted, symlink rejection), and `diffMirror`
+  (identical trees, missing/extra/drifted, all-three-simultaneously, trailing-newline,
+  absolute-path pass-through, real-repo byte-identity guard with non-empty source
+  assertion).
+- `adw_sdlc/test/mirror-check.test.ts` (new, **+5**) — CLI `main()`: clean path
+  reports "byte-identical" (rc 0), clean stderr on clean repo (rc 0), idempotent
+  `--write` (synced 0/removed 0), `--write --dry-run` reports "would sync" (rc 0),
+  unknown flag exits 2 with "unknown flag".
+- `adw_sdlc/test/phases.test.ts` — existing mirror test routed through `diffMirror`;
+  neutrality regex now recurses via `listFilesRecursive`. No count change.
+- `adw_sdlc/test/scaffold.test.ts` — required-stages and canonical-order assertions
+  extended for `mirror:check` (stage list + `idx('pack:check') < idx('mirror:check')`
+  ordering). No count change.
+
+`npm run verify` stays green (**638 tests, 46 files**; `mirror:check` passes on the
+already-identical trees).
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -1710,7 +1763,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **620 passing across 44 files**
+Test count baseline after this session: **638 passing across 46 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1732,7 +1785,8 @@ suite — issue #26, §8aa, +1 for the py-engine fail-closed test rewrite —
 issue #27, §8ab, +5 for the `cli.ts`/`MVP-READINESS.md` cross-doc consistency
 guard — issue #25, §8ac; +9 for the doc-currency fixes (HANDOVER.md
 test-count baseline guard + MVP-READINESS.md real-process acknowledgment guard)
-— issue #41, §8ad). The §8v refactor (issue #5
+— issue #41, §8ad; +18 for the mirror gate — `test/mirror.test.ts` +13,
+`test/mirror-check.test.ts` +5 — issue #39, §8ae). The §8v refactor (issue #5
 — split parity-rate classification from rendering) added `tools/parity-rate-core.ts`
 (pure core module, no new test file) and extended `test/parity-rate.test.ts` with
 35 direct unit tests of the extracted core (39 tests total in the file, up from 4

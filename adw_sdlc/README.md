@@ -110,6 +110,14 @@ npm run pack:check          # CI drift guard; fails if prompts are stale
 npm run pack:generate -- --dry-run
 ```
 
+The neutral `../.pi/prompts` ↔ `../.claude/commands` mirror has its own
+recursive, all-file byte-identity guard (`../.pi/prompts` is canonical):
+
+```bash
+npm run mirror:check        # gate drift guard; fails if the two trees differ
+npm run mirror:sync         # repair: make ../.claude/commands match ../.pi/prompts
+```
+
 The generator intentionally uses `{{var}}` and
 `<!-- adw:block NAME -->…<!-- adw:endblock -->` so it cannot collide with the
 runtime `$1` / `$ARGUMENTS` prompt-argument substitution. It also injects the
@@ -132,7 +140,7 @@ below in order, exits non-zero if any fails, and removes the `dist/` build
 artifact at the end:
 
 ```bash
-npm run verify   # typecheck → lint:env → pack:check → test → build → rm -rf dist
+npm run verify   # typecheck → lint:env → pack:check → mirror:check → test → build → rm -rf dist
 ```
 
 ADW live runs use it as the single test command (the gate is shell-split and run
@@ -153,6 +161,7 @@ development:
 npm run typecheck     # tsc --noEmit
 npm run lint:env      # static secret-boundary lint (fail-closed)
 npm run pack:check    # generated prompt-pack drift guard
+npm run mirror:check  # .pi/prompts ↔ .claude/commands byte-identity guard
 npm test              # vitest suite
 npm run build         # tsc -p tsconfig.build.json  (dist/ is a build artifact)
 ```

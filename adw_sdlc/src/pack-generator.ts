@@ -2,7 +2,9 @@
  * Project-pack prompt generator.
  *
  * The neutral *template* prompts (`.pi/prompts/*.md`, mirrored byte-for-byte in
- * `.claude/commands/*.md`) are the single source of truth. A project's runtime
+ * `.claude/commands/*.md` — enforced by `npm run mirror:check`, repaired by
+ * `npm run mirror:sync`; see tools/mirror.ts) are the single source of truth.
+ * A project's runtime
  * *pack* prompts (`.adw/prompts/*.md`, the `config.prompts.defaultRoot` this
  * repo ships) are GENERATED from those templates plus a project profile
  * (`.adw/pack.profile.json`) — so the pack is reproducible and the project's
@@ -38,7 +40,7 @@ import { z } from 'zod';
 import { resolveRepoPath } from './config.js';
 import { AdwError } from './errors.js';
 
-/** Default template source root (neutral prompts; `.claude/commands` mirrors it). */
+/** Default template source root (neutral prompts; `.claude/commands` mirrors it — `npm run mirror:check`). */
 export const DEFAULT_TEMPLATES_DIR = '.pi/prompts';
 /** Default generated-pack output root (this repo's `config.prompts.defaultRoot`). */
 export const DEFAULT_PACK_DIR = '.adw/prompts';
