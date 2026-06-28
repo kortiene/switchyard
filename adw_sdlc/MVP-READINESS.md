@@ -120,7 +120,10 @@ _Post-MVP: not required for the (A) MVP. Listed for completeness._
 
 - [ ] ❌ **`ADW_ENGINE` py↔ts coexistence tested in the *integrated* repo.**
   The Python sibling is not bundled here, so **(C) cannot be validated from this
-  standalone port** — it needs the combined environment.
+  standalone port** — it needs the combined environment. In the standalone port
+  the `py` path now **fails closed explicitly** (selecting it raises a "not
+  available in this standalone distribution" `AdwError`; issue #27); the
+  coexistence gate itself stays ❌/post-MVP.
 - [ ] ❌ Rollback plan: keep py ≥ 1 release, with a documented revert path.
 
 ## 4. Cross-cutting — the universalization surface (regardless of A/B/C)
