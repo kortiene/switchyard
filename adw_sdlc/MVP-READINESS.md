@@ -3,10 +3,16 @@
 This is the **counterweight to `PARITY.md`**. PARITY.md is a checklist of green
 boxes; nearly all of them are **mocked-seam** evidence (every SDK/spawn/gh/git
 effect stubbed — verified: no test in the suite spawns a real process or touches a
-real network). The only contact with reality is **one** live `claude` run
-(PR #331), which itself surfaced a parity bug (#332). So "all boxes green" means
-*the control plane is internally consistent against stubs* — not *proven in
-production*. This doc tracks what real MVP-readiness still requires.
+real network). Contact with reality now spans **nine** live `claude` runs — the
+original seed (PR #331, which itself surfaced parity bug #332) plus an 8-issue
+self-hosting batch (issues #1–#8 → merged PRs #9–#16 on `kortiene/switchyard`, see
+[`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md)). Measured over the batch,
+native structured output has **0/36 hard-fails (0.0%)** but an **88.9% single-nudge
+rate**. Still: those workspaces are git-ignored and self-referential (claude editing
+this repo's own docs/tests), and the load-bearing failure-mode and secret-boundary
+guarantees remain mock-only — so "all boxes green" means *the control plane is
+internally consistent against stubs*, not *proven in production*. This doc tracks
+what real MVP-readiness still requires.
 
 Status legend: ✅ done · ⏳ owed (human/credential-gated) · ❌ not started ·
 🔧 automatable in-repo.
@@ -62,19 +68,21 @@ npm run parity:rate -- agents/
 
 ## 1. Gates for (A) — claude ships reliably
 
-- [ ] ⏳ **≥ 5–10 live `claude` runs across varied `issue_class`** (feat / fix /
-  docs / refactor / ci / test). One green run is an anecdote; different classes
-  exercise the e2e/document gates and the resolve/patch loops. Feed each to
-  `npm run parity:rate -- agents/`. A ready-to-create issue batch + run-command
-  templates for exactly this gate live in
-  [`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md).
-- [ ] 🔧/⏳ **The hard-failure bar is *measured*, not argued.** PARITY's bar is
-  native ≤ fenced, but there is **no fenced sample** yet. Two ways to close it,
-  both now wired:
+- [x] ✅ **≥ 5–10 live `claude` runs across varied `issue_class`** — **8 done**
+  (issues #1–#8 → merged PRs #9–#16, realized classes: docs ×3 + ci/feat/test/refactor/fix = 6 distinct),
+  each fed to `npm run parity:rate -- agents/`. Caveat: every run targeted this
+  repo's own docs/tests/CI (self-referential) and the workspaces are git-ignored, so
+  it is a *thin* sample for "ships independent features." The batch + run-command
+  templates live in [`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md).
+- [ ] 🔧/⏳ **The hard-failure bar is *measured*, not argued — partially closed.**
+  Over the 8-run batch the **absolute** native rate is now measured: **0/36
+  hard-fails (0.0%)**, with an **88.9% single-nudge rate** worth tracking (native
+  rarely lands clean on the first try). The **comparative** bar (native ≤ fenced) is
+  still `INSUFFICIENT DATA`: issue #1's forced-fenced run produced only **5 fenced
+  attempts** (< 20 needed). Two ways to finish closing it, both wired:
   - **Absolute gate (claude-only):** `npm run parity:rate -- --max-native-rate <PCT> agents/`
-    — evaluable from native runs alone, so the bar stops reading INSUFFICIENT the
-    moment a few claude runs exist. Pick `<PCT>` as the MVP threshold.
-  - **Comparative gate (literal bar):** harvest a fenced baseline from claude with
+    — already clearable today (0.0% native). Ratify `<PCT>` as the MVP threshold.
+  - **Comparative gate (literal bar):** harvest ≥ 20 fenced attempts from claude with
     `ADW_PARITY_FORCE_FENCED_JSON=1` (routes the native runner through the fenced path),
     then the comparative verdict becomes computable without waiting on `pi`.
 - [ ] ⏳ **Failure modes observed live, not just mocked.** Induce and confirm each
@@ -83,9 +91,11 @@ npm run parity:rate -- agents/
   been seen live.
 - [ ] 🔧 **"Mocked ✅ → observed live?" ledger.** For each of PARITY's 13
   Section-10 guarantees, has it been seen live even once? The dashboard lives in
-  [`docs/OBSERVED-LIVE-LEDGER.md`](./docs/OBSERVED-LIVE-LEDGER.md); today almost
-  every row is still `⏳` (seeded from PR #331 / run `007fd5ba`). #332 is proof the
-  mocks under-specify reality.
+  [`docs/OBSERVED-LIVE-LEDGER.md`](./docs/OBSERVED-LIVE-LEDGER.md); it stands at
+  **6 `✅` / 4 `🟡` / 2 `⏳` / 1 `N/A`** (seeded from PR #331 / run `007fd5ba` plus
+  the 8-run batch — kept conservative because the batch artifacts are git-ignored
+  and self-referential). The load-bearing #5 (secret boundary) and #8 (fast-fail)
+  rows are still `⏳`. #332 is proof the mocks under-specify reality.
 - [ ] ⏳ **Operational basics** for an agent that spends money and edits repos: a
   bounded cost envelope (~$35/run is real) with the `maxBudgetUsd` ceiling +
   kill-switch confirmed live; the secret boundary asserted once on a *real*
