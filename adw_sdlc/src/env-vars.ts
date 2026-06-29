@@ -15,6 +15,11 @@ export const ENV_ALIASES = {
   classifyOnRunner: { canonical: 'ADW_CLASSIFY_ON_RUNNER', legacy: 'MX_AGENT_CLASSIFY_ON_RUNNER' },
   assumeYes: { canonical: 'ADW_ASSUME_YES', legacy: 'MX_AGENT_YES' },
   forceFenced: { canonical: 'ADW_PARITY_FORCE_FENCED_JSON', legacy: 'MX_AGENT_FORCE_FENCED' },
+  // The legacy MX_AGENT_PROJECT_ROOT twin never existed in mx-agent; it is
+  // included only for table uniformity (so readEnvAlias's precedence/conflict
+  // handling applies). ADW_PROJECT_ROOT is covered by the ADW_ deny prefix, so
+  // it is withheld from runner children with no allowlist change.
+  projectRoot: { canonical: 'ADW_PROJECT_ROOT', legacy: 'MX_AGENT_PROJECT_ROOT' },
 } as const;
 
 const warnedLegacy = new Set<string>();

@@ -310,7 +310,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 679 tests, 48 files)
+# 3) Full test suite (current: 744 tests, 51 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -1653,6 +1653,137 @@ the pinned `20.19.0` floor, `fail-fast: false`, and the pi ≥22.19 note) is
 delivered in the separate `tests` phase; the `## 12` Test count baseline is
 updated there to the observed counts.
 
+## 8ah. Issue #55 — per-phase cost/duration metrics + parent-side soft budget gate
+
+Added structured metrics (`metrics.json`) alongside each run's `agents/{adw_id}/`
+workspace, a soft parent-side budget gate, and nudge `attempts` tracking in the
+run-phase invoker.
+
+- `adw_sdlc/tools/` and `adw_sdlc/src/` (multiple files) — cost/duration
+  instrumentation threaded through `runAgentPhase` return values, accumulated
+  into `metrics.json` at the workspace level, with a soft budget abort on the
+  main and ci-fix loops.
+- `adw_sdlc/test/metrics.test.ts` (new, **+10**) — per-phase metric recording,
+  `metrics.json` artifact, and the soft budget abort behaviors.
+- `adw_sdlc/test/orchestrator.test.ts` (+3) — integration coverage for
+  `metrics.json` persistence, the main-chain soft budget abort, and the ci-fix
+  soft budget abort.
+
+Issue class: `feat`. `npm run verify` stays green (**679 tests, 48 files**).
+
+## 8ai. Issue #56 — explicit external project root
+
+Allows Switchyard/`adw_sdlc` to orchestrate a target repository without being
+copied into it — loading that repo's `.adw/config.json`, prompts/schemas, and
+`agents/` state while editing and git-operating in its worktree. The Switchyard
+package root remains only the kernel/code location.
+
+### What changed
+
+**Core seam — `src/common.ts`:**
+
+- Added `projectRootOverride: string | null` (process-global, default `null`),
+  `projectRoot()` (asset root: config/prompts/schemas/agents/cwd; defaults to
+  `REPO_ROOT`), `commandCwd()` (subprocess cwd: git/gh/gate; defaults to
+  `undefined` so spawn inherits `process.cwd()`), `resolveProjectRoot(raw)`
+  (validates + canonicalizes via `realpathSync`/`statSync`, fails closed), and
+  `setProjectRoot(dir|null)` (pure setter, validation in `resolveProjectRoot`).
+  Updated `REPO_ROOT`'s doc comment to "**package root** — kernel/code location."
+
+**Config root-aware cache — `src/config.ts`:**
+
+- `ADW_CONFIG_PATH` const → `adwConfigPath()` function returning
+  `join(projectRoot(), '.adw', 'config.json')`; `ADW_CONFIG_PATH` kept as a
+  deprecated snapshot alias.
+- `resolveRepoPath(p)` → `resolve(projectRoot(), p)` (was `REPO_ROOT`).
+- New `resolvePackagePath(p)` → `resolve(REPO_ROOT, p)` (the package-root tier
+  used by the prompt/schema fallback and the pack generator).
+- `getAdwConfig()` cache is **root-aware**: a `cachedRoot` sentinel reloads the
+  config whenever `projectRoot()` changes, so a late `setProjectRoot()` call
+  always wins without manual cache busting.
+
+**Agent state — `src/state.ts`:**
+`agentsDir()` → `agentsDirOverride ?? join(projectRoot(), 'agents')`.
+
+**Agent cwd — `src/run-phase.ts`:**
+`cwd: options.cwd ?? projectRoot()` (was `REPO_ROOT`).
+
+**Command cwd — `src/exec.ts`:**
+`capture()` passes `commandCwd()` as the default subprocess `cwd` (undefined ⇒
+inherit `process.cwd()`, non-undefined ⇒ target project root).
+
+**Prompt/schema fallback — `src/phases.ts`, `src/schema-registry.ts`:**
+`templatePath()` tries project-root candidates first, then the same paths
+resolved under `REPO_ROOT` (package fallback). `overridePath()` also falls back
+to the package tier for convention-based schema paths (explicit `overrides[phase]`
+paths stay project-root-only to keep their not-found error loud).
+This is the required fix for §1.4.1: `validatePhaseChain()` runs during
+`--dry-run` before anything is printed; without the package fallback, a
+prompt-less external target would throw before printing the test gate.
+
+**Pack generator — `src/pack-generator.ts`:**
+Swapped its three `resolveRepoPath(...)` calls to `resolvePackagePath(...)` so
+the generator always authors the package's own prompts, never a project-root
+override.
+
+**CLI — `src/cli.ts`:**
+`--project-root <dir>` added to `VALUE_FLAGS`; parsed into `options.projectRoot`
+from the flag or `ADW_PROJECT_ROOT` env; help text updated.
+
+**Orchestrator — `src/orchestrator.ts`:**
+`RunOptions.projectRoot?: string` added; `setProjectRoot(options.projectRoot ??
+null)` called as the **first statement** of `run()`, before `resolveOptions`
+reads `getAdwConfig()`. `printPlan()` prints
+`[dry-run] project root: <dir>` for observability (AC1 demo + testable).
+
+**Env alias — `src/env-vars.ts`:**
+`projectRoot: { canonical: 'ADW_PROJECT_ROOT', legacy: 'MX_AGENT_PROJECT_ROOT' }`
+added to `ENV_ALIASES` for the established precedence/conflict-detection behavior.
+The legacy alias never existed in `mx-agent`; it is included for table uniformity.
+`ADW_PROJECT_ROOT` is covered by the `ADW_` deny prefix and is therefore withheld
+from runner children with no allowlist change.
+
+**Exports — `src/index.ts`:**
+`projectRoot`, `commandCwd`, `setProjectRoot`, `resolveProjectRoot`, `adwConfigPath`,
+`resolvePackagePath` exported. Existing exports kept for back-compat.
+
+**Credit-balance regression fix** (surfaced by the issue #56 resumed run,
+`agents/f3fa55d4`): on a resumed run, Claude Code receiving a depleted
+`ANTHROPIC_API_KEY` returned `is_error: true` with literal text "Credit balance
+is too low" — the invoker tried to JSON-parse it (useless error) and burned
+the single nudge retry. Fixed in `src/run-phase.ts` (detect `is_error:true` /
+the credit-balance substring as a `RunnerAuthError` before the JSON parse) and in
+`src/structured-call.ts` (analogous guard for the classify path); both throw a
+typed `RunnerAuthError` immediately with no nudge.
+
+### Tests added / updated
+
+- `adw_sdlc/test/project-root.test.ts` (new, **+49**) — full AC1-AC10 coverage:
+  `resolveProjectRoot` validation (AC6), `projectRoot`/`commandCwd` defaults +
+  override (AC5), `getAdwConfig`/`adwConfigPath` project root (AC1/AC2/D4),
+  `agentsDir` follows project root (AC4), `runAgentPhase` cwd (AC3), `capture`
+  command-cwd routing (AC7/D3), `templatePath` project + package fallback (AC8),
+  CLI flag + env precedence (AC10), dry-run end-to-end (AC1/AC2), secret boundary
+  (AC9), `ENV_ALIASES.projectRoot` alias behavior (D5).
+- `adw_sdlc/test/project-root-e2e.test.ts` (new, **+6**) — full-pipeline
+  integration: state written under external root's `agents/` (E1/AC4), nothing
+  written under `REPO_ROOT/agents/` (E3), external config `defaultTestCommand`
+  flows through resolve loop gate (E2/AC2/AC7), invalid project root fails
+  closed before any side effect (E4/AC6).
+- `adw_sdlc/test/credit-balance-resume.regression.test.ts` (new, **+3**) —
+  regression-pinning the issue #56 resumed-run crash: `RunnerAuthError` raised
+  (not a JSON parse error) on the credit-balance result subtype, the faithful
+  artifact path (stream then throw), and the no-`ANTHROPIC_API_KEY` variant. No
+  nudge retry in all three cases.
+- `adw_sdlc/test/run-phase.test.ts` (+1) — credit-balance output classified as
+  `RunnerAuthError` with no nudge via the mock runner.
+- `adw_sdlc/test/orchestrator.test.ts`, `adw_sdlc/test/structured-call.test.ts`
+  — updated for the new seam and credit-balance guard; no net count change.
+
+Issue class: `feat`. No new dependency, no prompt-pack change. Secret boundary
+unchanged (`ADW_PROJECT_ROOT` is withheld from runner children by the existing
+`ADW_` deny prefix). `npm run verify` stays green (**738 tests, 51 files**).
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -1859,7 +1990,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **679 passing across 48 files**
+Test count baseline after this session: **744 passing across 51 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1890,7 +2021,10 @@ assertions, both new `describe` blocks in `test/coverage-config.test.ts`
 +13 for per-phase cost/duration metrics + parent-side soft budget gate +
 run-phase nudge `attempts` (`test/metrics.test.ts` +10 — new file, +3 orchestrator
 integration tests for `metrics.json`, the main-chain soft budget abort, and the
-ci-fix soft budget abort) — cost/duration work, §8ah). The §8v refactor (issue #5
+ci-fix soft budget abort) — cost/duration work, §8ah; +59 for explicit external
+project root (`test/project-root.test.ts` +49 — new file, `test/project-root-e2e.test.ts`
++6 — new file, `test/credit-balance-resume.regression.test.ts` +3 — new file,
+`test/run-phase.test.ts` +1 credit-balance auth error) — issue #56, §8ai). The §8v refactor (issue #5
 — split parity-rate classification from rendering) added `tools/parity-rate-core.ts`
 (pure core module, no new test file) and extended `test/parity-rate.test.ts` with
 35 direct unit tests of the extracted core (39 tests total in the file, up from 4

@@ -31,7 +31,15 @@ systems, issue trackers, and VCS hosts:
 - **Project pack** — provider selection, the phase chain, branching rules,
   conditional-gate hints, model tiers, and prompt/schema files, supplied
   through `.adw/config.json` at the repository root (with behavior-preserving
-  defaults when absent).
+  defaults when absent). The project pack can also live in an **external** repo:
+  point the run at it with `--project-root` / `ADW_PROJECT_ROOT` to orchestrate
+  a target repository without copying the kernel into it (prompts/schemas the
+  target does not ship fall back to the bundled kernel defaults).
+
+> **Trust caution:** an external project root makes that repo's
+> `.adw/config.json` drive this process — its test/finalize gate commands,
+> prompt/schema paths, and provider descriptors all come from the target. Only
+> target repos you trust to run commands on your machine.
 
 See **[`docs/UNIVERSAL.md`](./docs/UNIVERSAL.md)** for the universal
 architecture, and **[`HEALTHTECH_PORT.md`](./HEALTHTECH_PORT.md)** for this
@@ -62,14 +70,48 @@ Frequently used flags (`-h` / `--help` prints the full list):
 | `--max-budget-usd <usd>` | native spend cap (claude only); `signal:'budget'` fast-fails with no nudge |
 | `--test-cmd <cmd>` | the test-gate command (env: `ADW_TEST_CMD`) |
 | `--repo <owner/repo>` | work-item/repo locator (env: `REPO`) |
+| `--project-root <dir>` | target repo root for config/prompts/state/worktree (env: `ADW_PROJECT_ROOT`) |
 | `-y, --yes` | do not prompt before the irreversible squash-merge |
 
 Control-plane env vars are canonicalized under `ADW_*` (for example
-`ADW_RUNNER`, `ADW_TEST_CMD`, `ADW_ASSUME_YES`, and
+`ADW_RUNNER`, `ADW_TEST_CMD`, `ADW_ASSUME_YES`, `ADW_PROJECT_ROOT`, and
 `ADW_PARITY_FORCE_FENCED_JSON`). The inherited `MX_AGENT_*` names remain as
 deprecated compatibility aliases; if both names are set with different values,
 the CLI fails loudly. Both `ADW_*` and legacy `MX_AGENT_*` are withheld from
 runner subprocesses.
+
+`ADW_PROJECT_ROOT` (or `--project-root`) selects an explicit project root for
+the run: the orchestrator loads **that** directory's `.adw/config.json`,
+prompts/schemas, and `agents/` state, and edits/git-operates/gates in its
+worktree. Omit it and behavior is unchanged — the project root defaults to this
+repository. A relative value resolves against the invocation directory, and a
+non-existent or non-directory path fails closed with an actionable error.
+
+### Troubleshooting: classify and Anthropic API billing
+
+When `ANTHROPIC_API_KEY` is set, the `classify` phase first runs in-process
+against the **public Anthropic messages API**, which is billed pay-as-you-go
+(it does *not* accept a Claude subscription / `claude login` OAuth token). If
+that account is out of credit, mis-billed, rate-limited, or the key is invalid,
+the run treats that as an expected API-boundary failure and falls back to
+classifying through the selected runner.
+
+For example, an unfunded API account produces a progress note like:
+
+```
+>> classify: shared Anthropic API classify failed (Your credit balance is too low to access the Anthropic API.); falling back to claude runner without ANTHROPIC_API_KEY
+```
+
+The same issue can appear later on a resumed run: Claude Code may print
+`Credit balance is too low` for `plan`/`implement`/other runner phases because
+`ANTHROPIC_API_KEY` takes precedence over a local `claude login`. The
+orchestrator recognizes this as runner authentication/account failure (not a
+JSON parse failure), removes `ANTHROPIC_API_KEY` for the `claude` runner, and
+retries that phase once so Claude Code can use `claude login` / OAuth
+subscription auth instead. You can still choose the runner path up front by
+setting `ADW_CLASSIFY_ON_RUNNER=1`; see
+[`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md) for the subscription run
+template.
 
 ## Configuration
 

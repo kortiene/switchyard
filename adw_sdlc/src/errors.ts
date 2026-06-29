@@ -33,3 +33,23 @@ export class RunnerNotInstalledError extends AdwError {
     this.sdkPackage = sdkPackage;
   }
 }
+
+/**
+ * A runner reached its provider but failed before producing phase JSON because
+ * of authentication/account state (for example, Claude Code choosing a depleted
+ * ANTHROPIC_API_KEY over a `claude login` subscription). This is expected and
+ * actionable, so it must not be reported as a generic JSON parse failure.
+ */
+export class RunnerAuthError extends AdwError {
+  readonly runner: RunnerId;
+  readonly phase: string;
+  readonly reason: string;
+
+  constructor(runner: RunnerId, phase: string, reason: string, options?: ErrorOptions) {
+    super(`${phase} phase ${runner} runner authentication failed: ${reason}`, options);
+    this.name = 'RunnerAuthError';
+    this.runner = runner;
+    this.phase = phase;
+    this.reason = reason;
+  }
+}

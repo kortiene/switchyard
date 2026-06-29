@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { AdwError } from '../src/errors.js';
 import { ClassifySchema } from '../src/schemas.js';
-import { structuredCall, type AnthropicLike } from '../src/structured-call.js';
+import { StructuredCallApiError, structuredCall, type AnthropicLike } from '../src/structured-call.js';
 
 function fakeClient(outputs: Array<unknown>): { client: AnthropicLike; parse: ReturnType<typeof vi.fn> } {
   const parse = vi.fn();
@@ -62,5 +62,58 @@ describe('structuredCall', () => {
   it('rejects a parsed payload that fails the Zod schema', async () => {
     const { client } = fakeClient([{ issue_class: 'not-a-class', reason: '' }]);
     await expect(structuredCall('classify this', ClassifySchema, { client })).rejects.toThrow();
+  });
+
+  it('translates an Anthropic API error into an actionable AdwError (no raw SDK crash)', async () => {
+    // Shape of @anthropic-ai/sdk APIError: numeric `status` + nested `error.error.message`.
+    const apiError = Object.assign(new Error('400 Your credit balance is too low'), {
+      status: 400,
+      error: { type: 'error', error: { type: 'invalid_request_error', message: 'Your credit balance is too low to access the Anthropic API.' } },
+    });
+    const parse = vi.fn().mockRejectedValueOnce(apiError);
+    const client: AnthropicLike = { messages: { parse } };
+
+    const promise = structuredCall('classify this', ClassifySchema, { client });
+    await expect(promise).rejects.toThrow(StructuredCallApiError);
+    // Surfaces the API's own reason and the documented runner escape hatch.
+    await expect(promise).rejects.toThrow(/credit balance is too low/);
+    await expect(promise).rejects.toThrow(/ADW_CLASSIFY_ON_RUNNER=1/);
+    // The original SDK error is preserved as the cause for debugging, while the
+    // status/reason fields let the orchestrator safely fall back to the runner.
+    await promise.catch((err: unknown) => {
+      expect((err as { cause?: unknown }).cause).toBe(apiError);
+      expect((err as StructuredCallApiError).status).toBe(400);
+      expect((err as StructuredCallApiError).reason).toBe('Your credit balance is too low to access the Anthropic API.');
+    });
+    // A 400 is not retried — the credit/auth condition will not change mid-run.
+    expect(parse).toHaveBeenCalledTimes(1);
+  });
+
+  it('extracts top-level Anthropic API error messages, not only nested messages', async () => {
+    const apiError = Object.assign(new Error('401 bad key'), {
+      status: 401,
+      error: { message: 'Invalid API key supplied.' },
+    });
+    const parse = vi.fn().mockRejectedValueOnce(apiError);
+    const client: AnthropicLike = { messages: { parse } };
+
+    const promise = structuredCall('classify this', ClassifySchema, { client });
+    await expect(promise).rejects.toThrow(/Invalid API key supplied/);
+    await promise.catch((err: unknown) => {
+      expect((err as StructuredCallApiError).reason).toBe('Invalid API key supplied.');
+    });
+  });
+
+  it('falls back to an HTTP-status reason when an API error has no readable message', () => {
+    const err = new StructuredCallApiError(503, '   ');
+    expect(err.reason).toBe('the request was rejected with HTTP 503');
+    expect(err.message).toContain('Anthropic API HTTP 503');
+  });
+
+  it('rethrows a non-API error unchanged (not wrapped as AdwError)', async () => {
+    const boom = new TypeError('network exploded');
+    const parse = vi.fn().mockRejectedValueOnce(boom);
+    const client: AnthropicLike = { messages: { parse } };
+    await expect(structuredCall('classify this', ClassifySchema, { client })).rejects.toBe(boom);
   });
 });

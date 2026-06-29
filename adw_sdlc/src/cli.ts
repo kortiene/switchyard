@@ -172,6 +172,7 @@ const VALUE_FLAGS = new Set([
   '--base',
   '--timeout',
   '--max-budget-usd',
+  '--project-root',
 ]);
 
 function parseIntFlag(flag: string, value: string): number {
@@ -212,6 +213,7 @@ use --engine ts (the default). Flags below apply to the ts engine:
   --test-cmd <cmd>         test gate command. Env: ADW_TEST_CMD (deprecated alias: MX_AGENT_TEST_CMD)
   --model <id>             model override (overrides per-phase routing)
   --repo <owner/repo>      provider repo/project locator for work-item lookups. Env: REPO
+  --project-root <dir>     target repo root for config/prompts/state/worktree (env: ADW_PROJECT_ROOT)
   --base <branch>          base branch to fork from / merge into (default: main)
   --timeout <s>            abort a runner call after N seconds (0 = none)
   --max-budget-usd <usd>   native budget cap (runners that support it)
@@ -312,6 +314,7 @@ export function parseCliArgs(
 
   const testCmd = str('--test-cmd') ?? readEnvAlias(env, ENV_ALIASES.testCmd);
   const repo = str('--repo') ?? env['REPO'];
+  const projectRootArg = str('--project-root') ?? readEnvAlias(env, ENV_ALIASES.projectRoot);
   const maxResolve = str('--max-resolve');
   const maxPatch = str('--max-patch');
   const maxCiFix = str('--max-ci-fix');
@@ -336,6 +339,7 @@ export function parseCliArgs(
     ...(testCmd !== undefined ? { testCmd } : {}),
     ...(str('--model') !== undefined ? { model: str('--model')! } : {}),
     ...(repo !== undefined ? { repo } : {}),
+    ...(projectRootArg !== undefined ? { projectRoot: projectRootArg } : {}),
     ...(str('--base') !== undefined ? { base: str('--base')! } : {}),
     ...(timeout !== undefined ? { timeoutMs: parseIntFlag('--timeout', timeout) * 1000 } : {}),
     ...(has('--no-verify') ? { verify: false } : {}),
