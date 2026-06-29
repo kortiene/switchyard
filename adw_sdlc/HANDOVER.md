@@ -310,7 +310,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 638 tests, 46 files)
+# 3) Full test suite (current: 666 tests, 47 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -1859,7 +1859,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **665 passing across 47 files**
+Test count baseline after this session: **666 passing across 47 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1886,7 +1886,7 @@ test-count baseline guard + MVP-READINESS.md real-process acknowledgment guard)
 guard (`test/coverage-config.test.ts`) — issue #36, §8af; +10 for the
 Node-version matrix CI guard — 7 matrix assertions + 3 README pi-≥22.19
 assertions, both new `describe` blocks in `test/coverage-config.test.ts`
-— issue #37, §8ag). The §8v refactor (issue #5
+— issue #37, §8ag; +1 for the §8↔§12 count-consistency guard, #41 follow-up). The §8v refactor (issue #5
 — split parity-rate classification from rendering) added `tools/parity-rate-core.ts`
 (pure core module, no new test file) and extended `test/parity-rate.test.ts` with
 35 direct unit tests of the extracted core (39 tests total in the file, up from 4
