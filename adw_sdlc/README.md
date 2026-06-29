@@ -140,7 +140,7 @@ below in order, exits non-zero if any fails, and removes the `dist/` build
 artifact at the end:
 
 ```bash
-npm run verify   # typecheck → lint:env → pack:check → mirror:check → test → build → rm -rf dist
+npm run verify   # typecheck → lint:env → pack:check → mirror:check → coverage → build → rm -rf dist
 ```
 
 ADW live runs use it as the single test command (the gate is shell-split and run
@@ -162,9 +162,19 @@ npm run typecheck     # tsc --noEmit
 npm run lint:env      # static secret-boundary lint (fail-closed)
 npm run pack:check    # generated prompt-pack drift guard
 npm run mirror:check  # .pi/prompts ↔ .claude/commands byte-identity guard
-npm test              # vitest suite
+npm run coverage      # vitest suite + v8 coverage (modest thresholds; the verify test stage)
+npm test              # vitest suite, coverage-free (fast focused/full runs)
 npm run build         # tsc -p tsconfig.build.json  (dist/ is a build artifact)
 ```
+
+`npm run coverage` is the test stage of `verify`: it runs the full suite once
+with the V8 coverage provider and enforces a modest, measured threshold
+(`vitest.config.ts` → `test.coverage`). It measures `src/**/*.ts` with
+`all: true`, so a brand-new untested module reports at 0% and trips the gate.
+Coverage collection is off by default, so a focused `npx vitest run <file>` (and
+plain `npm test`) stays coverage-free and never false-fails on the threshold. The
+v8 reporter writes `coverage/` (git-ignored); open `coverage/index.html` after a
+run.
 
 `npm run lint:env` enforces the non-negotiable secret boundary: no
 `...process.env` spread in `src/`, no banned opencode factory calls, and

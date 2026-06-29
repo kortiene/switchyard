@@ -49,11 +49,21 @@ describe('verify quality-gate script — issue #2 acceptance criteria', () => {
 
   it('scripts.verify chains all required stages', () => {
     // Each stage must appear as a substring — order checked separately
-    for (const stage of ['typecheck', 'lint:env', 'pack:check', 'mirror:check', 'build', 'rm -rf dist']) {
+    for (const stage of [
+      'typecheck',
+      'lint:env',
+      'pack:check',
+      'mirror:check',
+      'coverage',
+      'build',
+      'rm -rf dist',
+    ]) {
       expect(verifyScript, `missing stage: ${stage}`).toContain(stage);
     }
-    // npm test is the test stage form used in package.json
-    expect(verifyScript).toContain('npm test');
+    // npm run coverage is the test stage form used in package.json — it runs the
+    // full suite once with v8 coverage + thresholds (issue #36), replacing the
+    // bare `npm test` stage.
+    expect(verifyScript).toContain('npm run coverage');
   });
 
   it('scripts.verify uses && (fail-fast) between stages', () => {
@@ -64,12 +74,12 @@ describe('verify quality-gate script — issue #2 acceptance criteria', () => {
 
   it('scripts.verify runs stages in canonical order', () => {
     const idx = (s: string) => verifyScript.indexOf(s);
-    // typecheck → lint:env → pack:check → mirror:check → npm test → build → rm -rf dist
+    // typecheck → lint:env → pack:check → mirror:check → npm run coverage → build → rm -rf dist
     expect(idx('typecheck')).toBeLessThan(idx('lint:env'));
     expect(idx('lint:env')).toBeLessThan(idx('pack:check'));
     expect(idx('pack:check')).toBeLessThan(idx('mirror:check'));
-    expect(idx('mirror:check')).toBeLessThan(idx('npm test'));
-    expect(idx('npm test')).toBeLessThan(idx('npm run build'));
+    expect(idx('mirror:check')).toBeLessThan(idx('npm run coverage'));
+    expect(idx('npm run coverage')).toBeLessThan(idx('npm run build'));
     expect(idx('npm run build')).toBeLessThan(idx('rm -rf dist'));
   });
 
