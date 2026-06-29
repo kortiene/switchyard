@@ -187,6 +187,13 @@ export {
 } from './providers-rest-cli.js';
 export { NUDGE, runAgentPhase, type AgentPhaseOutcome, type RunAgentPhaseOptions } from './run-phase.js';
 export {
+  METRICS_FILENAME,
+  MetricsCollector,
+  defaultClock,
+  type Clock,
+  type PhaseMetric,
+} from './metrics.js';
+export {
   structuredCall,
   type AnthropicLike,
   type StructuredCallOptions,

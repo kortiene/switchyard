@@ -63,6 +63,14 @@ export interface AgentPhaseOutcome<P extends SchemaPhase = SchemaPhase> {
   data: z.infer<(typeof PHASE_SCHEMAS)[P]>;
   usage: PhaseUsage;
   sessionId?: string;
+  /**
+   * Runner calls this phase consumed: 1 on a clean first parse, 2 when the
+   * single nudge-retry fired. The nudge double-charges (both attempts' tokens
+   * are summed into `usage`), so this is the load-bearing signal for the
+   * cost/duration work — a high cross-run attempts rate is the lever to attack
+   * (see docs/COST-AND-DURATION.md). Always 1 or 2 (the invoker nudges once).
+   */
+  attempts: number;
 }
 
 /**
@@ -125,7 +133,7 @@ export async function runAgentPhase<P extends SchemaPhase>(
 
   const first = await invoke(prompt, 'transcript.log');
   try {
-    return { data: extract(first), usage: first.usage, ...sessionOf(first) };
+    return { data: extract(first), usage: first.usage, attempts: 1, ...sessionOf(first) };
   } catch (err) {
     if (!(err instanceof AdwError)) {
       throw err;
@@ -152,8 +160,14 @@ export async function runAgentPhase<P extends SchemaPhase>(
       ? prompt
       : composePhasePrompt(phase as AgentPhase, options.templateArgs, state, runner.id, true);
     const second = await invoke(retryPrompt + NUDGE, 'transcript-2.log');
-    // Both attempts consumed tokens; report the pair's combined usage.
-    return { data: extract(second), usage: mergeUsage(first.usage, second.usage), ...sessionOf(second) };
+    // Both attempts consumed tokens; report the pair's combined usage and the
+    // attempts count (2) so the caller can record the nudge-retry rate.
+    return {
+      data: extract(second),
+      usage: mergeUsage(first.usage, second.usage),
+      attempts: 2,
+      ...sessionOf(second),
+    };
   }
 }
 
