@@ -132,3 +132,86 @@ describe('CI workflow — .github/workflows/verify.yml (issue #36)', () => {
     expect(workflowSource).toContain('working-directory: adw_sdlc');
   });
 });
+
+describe('CI workflow — Node version matrix (issue #37)', () => {
+  let workflowSource: string;
+
+  beforeAll(() => {
+    workflowSource = readFileSync(
+      new URL('../../.github/workflows/verify.yml', import.meta.url), 'utf8');
+  });
+
+  it('runs a Node-version matrix', () => {
+    expect(workflowSource).toMatch(/strategy:/);
+    expect(workflowSource).toMatch(/matrix:/);
+  });
+
+  it('exercises the package engines floor (20.19.0) alongside 22', () => {
+    // The floor is the thing #37 says was never tested — pin it literally.
+    expect(workflowSource).toContain('20.19.0');
+    expect(workflowSource).toMatch(/["']22(\.\d+\.\d+)?["']/);
+  });
+
+  it('drives Node selection from the matrix var', () => {
+    expect(workflowSource).toContain('node-version: ${{ matrix.node }}');
+  });
+
+  it('keeps legs independent (fail-fast: false)', () => {
+    expect(workflowSource).toMatch(/fail-fast:\s*false/);
+  });
+
+  it('documents that pi needs Node >= 22.19 (the floor leg cannot run pi)', () => {
+    // Satisfies the "Document the pi >=22.19 lane" AC at the guard level.
+    expect(workflowSource).toMatch(/22\.19/);
+  });
+
+  it('job name embeds the matrix variable so each leg has a distinct check context', () => {
+    // When the matrix expands to two legs the check-context names become
+    // "verify (node 20.19.0)" / "verify (node 22)"; branch protection must
+    // require those names. Pin the template so a rename is caught.
+    expect(workflowSource).toContain('name: verify (node ${{ matrix.node }})');
+  });
+
+  it('pins the exact engines floor (20.19.0) not a range like "20" or "20.x"', () => {
+    // "20" / "20.x" would resolve to the latest 20.x, not the declared minimum.
+    // The issue's point is exercising the literal floor, so the pin must be exact.
+    expect(workflowSource).not.toMatch(/node:\s*\[["']20["']/);
+    expect(workflowSource).not.toMatch(/node:\s*\[["']20\.x["']/);
+    expect(workflowSource).toContain('20.19.0');
+  });
+});
+
+describe('README.md — pi ≥22.19 lane documentation (issue #37 AC2)', () => {
+  let readmeSource: string;
+
+  beforeAll(() => {
+    readmeSource = readFileSync(
+      new URL('../../adw_sdlc/README.md', import.meta.url), 'utf8');
+  });
+
+  it('README Development section records the Node-version matrix (20.19.0 + 22)', () => {
+    // AC2: the pi >=22.19 doc is anchored in the Development section matrix paragraph.
+    const devIdx = readmeSource.indexOf('## Development');
+    expect(devIdx, '## Development section must exist in README.md').toBeGreaterThanOrEqual(0);
+    const devSection = readmeSource.slice(devIdx);
+    expect(devSection).toContain('20.19.0');
+    expect(devSection).toMatch(/\b22\b/);
+  });
+
+  it('README Development section states pi requires Node ≥ 22.19', () => {
+    // "Document the pi >=22.19 lane" AC — the README is the primary user-facing
+    // place where the constraint must be discoverable.
+    const devIdx = readmeSource.indexOf('## Development');
+    const devSection = readmeSource.slice(devIdx);
+    expect(devSection).toMatch(/22\.19/);
+    expect(devSection).toMatch(/\bpi\b/);
+  });
+
+  it('README explains that only the ≥22 leg can exercise pi', () => {
+    // The 20.19.0 leg skips the pi optionalDependency (engines floor mismatch),
+    // so only the 22 leg can load and exercise the pi runner.
+    const devIdx = readmeSource.indexOf('## Development');
+    const devSection = readmeSource.slice(devIdx);
+    expect(devSection).toMatch(/only.*Node.22.*pi|only.*22.*leg.*pi|pi.*only.*22/si);
+  });
+});

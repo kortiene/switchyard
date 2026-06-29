@@ -5,10 +5,28 @@ name: verify
 # verify"): typecheck -> lint:env -> pack:check -> mirror:check -> coverage ->
 # build -> clean.
 #
+# Node-version matrix (#37): the gate runs on BOTH the package engines floor
+# (Node 20.19.0 — `package.json` `"engines": { "node": ">=20.19" }`) and the
+# local-dev / pi line (Node 22). Before #37 CI only ever ran Node 22, so the
+# floor was never exercised and a 20.19-only breakage would have shipped
+# silently. `fail-fast: false` keeps the two legs as independent signal.
+#
+# pi requires Node >= 22.19: the pinned `@earendil-works/pi-coding-agent`
+# declares `"engines": { "node": ">=22.19.0" }` and is an optionalDependency, so
+# on the Node-20.19.0 leg `npm ci` emits an EBADENGINE warning and skips the pi
+# SDK. The 20.19.0 leg therefore exercises only the claude/codex/opencode
+# adapters; only the Node-22 leg can exercise the pi runner. (The full suite is
+# mocked and never spawns pi, so both legs are green regardless.)
+#
 # Wired as a REQUIRED status check on `main`, so no PR (autonomous ADW run or
-# manual) can merge red. The ADW orchestrator already polls PR checks before
-# merging (ciPollIntervalMs 30s x ciMaxPolls 40 = ~20 min budget), so this job
-# integrates with the existing flow rather than fighting it.
+# manual) can merge red. NOTE: expanding the single `verify` job into matrix legs
+# renames the reported check contexts to `verify (node 20.19.0)` /
+# `verify (node 22)`; a repo admin must update branch protection on `main` to
+# require the new names. The ADW orchestrator's own pre-merge poll is
+# check-name-agnostic (it aggregates ALL PR checks), so it needs no change. It
+# already polls PR checks before merging (ciPollIntervalMs 30s x ciMaxPolls 40 =
+# ~20 min budget), so this job integrates with the existing flow rather than
+# fighting it.
 
 on:
   pull_request:
@@ -25,8 +43,21 @@ permissions:
 
 jobs:
   verify:
-    name: verify
+    # One leg per supported Node line. The low leg pins the package engines
+    # floor (>=20.19) — previously never exercised in CI (#37); the high leg is
+    # the local-dev / pi line (pi requires Node >=22.19, so only this leg can
+    # exercise the pi runner — see README "Development").
+    name: verify (node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      # Report every leg independently; a 20.19-only break must not be masked
+      # by the 22 leg (and vice-versa).
+      fail-fast: false
+      matrix:
+        # Pin the EXACT floor (20.19.0), not "20"/"20.x": #37 is that the floor
+        # itself is never tested, so run the literal `engines` minimum. "22" is
+        # the latest 22.x (>= pi's 22.19.0 floor).
+        node: ["20.19.0", "22"]
     defaults:
       run:
         # The npm package lives in adw_sdlc/; `lint:env` shells out to the
@@ -37,14 +68,15 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # Matches the package engines floor (>=20.19) and local dev (22.x).
-          node-version: "22"
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: adw_sdlc/package-lock.json
 
       # Reproducible install from the committed lockfile. Optional SDK deps
       # (claude/codex/opencode/pi) install too; the test suite is fully mocked,
-      # so no API keys or network are needed.
+      # so no API keys or network are needed. On the 20.19.0 leg the pi
+      # optionalDependency (engines node>=22.19.0) emits an EBADENGINE WARNING
+      # and is skipped (engine-strict is unset) — npm ci still succeeds.
       - name: Install (npm ci)
         run: npm ci
 

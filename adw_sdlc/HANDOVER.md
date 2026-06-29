@@ -1609,6 +1609,50 @@ four-metric fields / `autoUpdate: false` / `exclude` barrel / `reportsDirectory`
 no `enabled: true`), one `.gitignore` guard, and two CI workflow checks.
 `npm run verify` stays green (**655 tests, 47 files**; coverage clears the new floor).
 
+## 8ag. Issue #37 — Node-20.19 floor CI matrix + pi ≥22.19 documentation
+
+CI ran a single Node-22 / ubuntu lane, so the package engines floor
+(`"engines": { "node": ">=20.19" }`) was **never exercised** — a 20.19-only
+breakage (tsx/vitest/coverage-v8 misbehaving on the floor) would have shipped
+silently. This change runs the full `npm run verify` gate on both Node lines.
+
+- `.github/workflows/verify.yml` — expanded the single `verify` job into a
+  **Node-version matrix**: `strategy.matrix.node: ["20.19.0", "22"]` with
+  `fail-fast: false` (independent signal — a floor-only break must not be masked
+  by the 22 leg). The job name is now `verify (node ${{ matrix.node }})` and
+  `setup-node`'s `node-version` is driven from `${{ matrix.node }}`. The low leg
+  pins the **exact** floor `20.19.0` (not `"20"`/`"20.x"`), because #37 is that
+  the *floor* is untested — run the literal `engines` minimum. `runs-on:
+  ubuntu-latest`, the `working-directory: adw_sdlc` default, the
+  `cache-dependency-path`, and the `npm run verify` step are unchanged, so the
+  existing `coverage-config.test.ts` (#36) workflow guard stays green.
+- **No `src/` / `package.json` / `package-lock.json` / `vitest.config.ts` /
+  `tsconfig*` change** — `verify` runs verbatim on both legs, so `pack:check` /
+  `mirror:check` cannot drift. The multi-OS half of the issue title is a
+  **deferred decision**: a Windows leg is red-by-construction today (the `verify`
+  chain ends in `rm -rf dist` and `lint:env` shells `bash`, neither portable to
+  `cmd.exe`/PowerShell) and needs that portability work first; macOS is POSIX and
+  could be added later with no script change. Recorded in spec §5.
+- **pi ≥22.19 documented** (AC2) in four coherent places that previously
+  described a Node-20 lane that did not exist: the workflow header comment, the
+  README `## Development` matrix paragraph, the `MVP-READINESS.md` pi checkbox
+  (`:117`), and `PARITY.md:72`. The pinned `@earendil-works/pi-coding-agent`
+  declares `node >=22.19.0` and is an `optionalDependency`, so on the 20.19.0 leg
+  `npm ci` emits an EBADENGINE warning and skips the pi SDK; only the Node-22 leg
+  can exercise pi. The mocked suite never spawns pi, so both legs are green.
+- **Branch-protection rename is an out-of-band admin step** (not done here, no
+  GitHub-settings access in this phase): the required check contexts change from
+  `verify` to `verify (node 20.19.0)` / `verify (node 22)`; an admin must require
+  the new names on `main`. The ADW orchestrator's own pre-merge poll is
+  check-name-agnostic (it aggregates all PR checks — `orchestrator.ts:511-545`),
+  so no `src/` change is needed and the gate keeps waiting for all legs.
+
+Issue class: `ci` (workflow matrix + docs). Per spec §3.4 the additive #37
+workflow-guard `describe` in `test/coverage-config.test.ts` (asserts the matrix,
+the pinned `20.19.0` floor, `fail-fast: false`, and the pi ≥22.19 note) is
+delivered in the separate `tests` phase; the `## 12` Test count baseline is
+updated there to the observed counts.
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -1815,7 +1859,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **655 passing across 47 files**
+Test count baseline after this session: **665 passing across 47 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1839,7 +1883,10 @@ guard — issue #25, §8ac; +9 for the doc-currency fixes (HANDOVER.md
 test-count baseline guard + MVP-READINESS.md real-process acknowledgment guard)
 — issue #41, §8ad; +18 for the mirror gate — `test/mirror.test.ts` +13,
 `test/mirror-check.test.ts` +5 — issue #39, §8ae; +17 for the coverage-config
-guard (`test/coverage-config.test.ts`) — issue #36, §8af). The §8v refactor (issue #5
+guard (`test/coverage-config.test.ts`) — issue #36, §8af; +10 for the
+Node-version matrix CI guard — 7 matrix assertions + 3 README pi-≥22.19
+assertions, both new `describe` blocks in `test/coverage-config.test.ts`
+— issue #37, §8ag). The §8v refactor (issue #5
 — split parity-rate classification from rendering) added `tools/parity-rate-core.ts`
 (pure core module, no new test file) and extended `test/parity-rate.test.ts` with
 35 direct unit tests of the extracted core (39 tests total in the file, up from 4
