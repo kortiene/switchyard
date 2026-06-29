@@ -4,6 +4,9 @@ node_modules/
 # Build output (dist/ is a build artifact; tsconfig.build.json emits it)
 dist/
 
+# Test-coverage output (vitest v8 reporter; reportsDirectory: ./coverage)
+coverage/
+
 # ADW runtime workspaces (per-run state.json, prompts, transcripts)
 agents/
 

@@ -1557,6 +1557,58 @@ prompt-content, and no `.adw/` regeneration — `pack:check` output is unchanged
 `npm run verify` stays green (**638 tests, 46 files**; `mirror:check` passes on the
 already-identical trees).
 
+## 8af. Issue #36 — test-coverage instrumentation + modest thresholds (vitest v8)
+
+There was no coverage measurement anywhere — `package.json` ran `vitest run` with
+no `--coverage`, no `test.coverage` block, and `@vitest/coverage-v8` was not
+installed (it appeared only as one of vitest's optional peer-dependency
+declarations in `package-lock.json`). Coverage breadth was asserted by eye, and a
+brand-new untested file/branch would not have tripped the canonical gate. This
+change makes undertested code turn `npm run verify` red.
+
+- `adw_sdlc/package.json` — added `@vitest/coverage-v8@^4.1.8` to
+  **devDependencies** (tracks the pinned `vitest@^4.1.8`, resolves to `4.1.9`;
+  kept out of `dependencies`/`optionalDependencies` so `scaffold.test.ts`'s
+  pinned key-sets stay green); added a `coverage` script (`vitest run
+  --coverage`); swapped the `npm test` stage of `verify` for `npm run coverage`.
+  New chain: `typecheck → lint:env → pack:check → mirror:check → coverage → build
+  → rm -rf dist`. `npm test` (coverage-free) is retained for fast focused/full
+  runs. `package-lock.json` regenerated via `npm install`.
+- `adw_sdlc/vitest.config.ts` — extended the existing config (the
+  `server.deps.inline` codex entry is untouched) with a `test.coverage` block:
+  `provider: 'v8'`, `include: ['src/**/*.ts']`, `all: true` (so an untested src
+  module reports at 0% and drags the metric down — the exact gap the issue
+  names), `exclude: ['src/index.ts', '**/*.d.ts']` (barrel + type decls only),
+  `reporter: ['text-summary', 'text', 'html']`, `reportsDirectory: './coverage'`.
+  `coverage.enabled` stays default (false) so a focused `npx vitest run <file>`
+  never collects/enforces and never false-fails.
+- **Threshold = measured, modest floor.** Baseline over the full suite:
+  statements 88.9 / branches 79.1 / functions 87.9 / lines 89.0. Floor set a few
+  points under each so routine churn doesn't flake the gate: **statements 85 /
+  branches 73 / functions 82 / lines 85**, `autoUpdate: false` (the bar only
+  ratchets up by deliberate edit).
+- `.gitignore` (root) — added `coverage/` (the v8 reporter writes
+  `coverage/`; git-ignored rather than `rm`'d so a dev can open
+  `coverage/index.html`).
+- Docs/comments — `README.md` `## Development` (chain comment + a `npm run
+  coverage` bullet naming the v8 provider/modest floor; `npm test` kept as the
+  coverage-free run), `.github/workflows/verify.yml` (stage-chain comment only;
+  CI still runs `npm run verify` and now gets the dep via `npm ci`).
+- `adw_sdlc/test/scaffold.test.ts` — required-stages + canonical-order
+  assertions updated for the `coverage` stage (`npm test` → `npm run coverage`).
+  No `it()`-count change.
+
+Issue class: `ci` (instrumentation + gate wiring). No `src/` runtime change, no
+prompt-content/`.adw` regeneration — `pack:check`/`mirror:check` output unchanged.
+A dedicated coverage-config guard test (`test/coverage-config.test.ts`, **+17**) was
+delivered in the `tests` phase (per spec §3.4): four `package.json` invariants
+(`@vitest/coverage-v8` in `devDependencies`, `coverage` script, `verify` references
+`npm run coverage`, no bare `npm test` stage), ten `vitest.config.ts` shape invariants
+(`coverage` block / `provider: 'v8'` / `include` / `all: true` / `thresholds` block /
+four-metric fields / `autoUpdate: false` / `exclude` barrel / `reportsDirectory` /
+no `enabled: true`), one `.gitignore` guard, and two CI workflow checks.
+`npm run verify` stays green (**655 tests, 47 files**; coverage clears the new floor).
+
 ## 9. Files created/modified this session
 
 ### Priming (restored to make the baseline green)
@@ -1763,7 +1815,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **638 passing across 46 files**
+Test count baseline after this session: **655 passing across 47 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -1786,7 +1838,8 @@ issue #27, §8ab, +5 for the `cli.ts`/`MVP-READINESS.md` cross-doc consistency
 guard — issue #25, §8ac; +9 for the doc-currency fixes (HANDOVER.md
 test-count baseline guard + MVP-READINESS.md real-process acknowledgment guard)
 — issue #41, §8ad; +18 for the mirror gate — `test/mirror.test.ts` +13,
-`test/mirror-check.test.ts` +5 — issue #39, §8ae). The §8v refactor (issue #5
+`test/mirror-check.test.ts` +5 — issue #39, §8ae; +17 for the coverage-config
+guard (`test/coverage-config.test.ts`) — issue #36, §8af). The §8v refactor (issue #5
 — split parity-rate classification from rendering) added `tools/parity-rate-core.ts`
 (pure core module, no new test file) and extended `test/parity-rate.test.ts` with
 35 direct unit tests of the extracted core (39 tests total in the file, up from 4
