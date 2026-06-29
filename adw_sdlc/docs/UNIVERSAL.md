@@ -68,6 +68,59 @@ leftover template markers raise an error rather than emitting partial prompts.
 metaprompt refinement pass only; generated prompts remain committed artifacts,
 and the ADW runtime never calls the metaprompt generator.
 
+## Package root and project root
+
+ADW SDLC distinguishes two directory concepts that normally coincide (in-repo)
+but can be separated for external orchestration:
+
+| Concept | Accessor | What it anchors |
+|---|---|---|
+| **Package root** (`REPO_ROOT`) | constant | kernel code, bundled neutral prompts/schemas |
+| **Project root** | `projectRoot()` | `.adw/config.json`, project-pack prompts/schemas, `agents/` state, agent editing cwd, git/gh/gate subprocess cwd |
+
+By default `projectRoot() === REPO_ROOT`, so behavior is byte-for-byte unchanged
+when `--project-root` is omitted.
+
+### Targeting an external repository
+
+Pass `--project-root <dir>` (or `ADW_PROJECT_ROOT=<dir>`) to orchestrate a
+target repository without copying the kernel into it:
+
+```bash
+adw-sdlc issue 5 --repo kortiene/iroh-room \
+  --project-root /Users/you/TAC/iroh-room
+```
+
+The orchestrator will:
+
+1. Load `.adw/config.json` from the target directory (falling back to built-in
+   defaults if absent).
+2. Write `agents/{adw_id}/` state under the target directory.
+3. Resolve prompt templates and schema overrides from the target directory
+   **first**, then fall back to the bundled package defaults — so a target that
+   ships only `.adw/config.json` (no `.adw/prompts`) still runs.
+4. Execute git/gh commands and the local gate command in the target directory.
+5. Set the agent's editing `cwd` to the target directory.
+
+When `--project-root` is omitted, `commandCwd()` returns `undefined` (the
+subprocess inherits `process.cwd()`), preserving the in-repo gate behavior
+where the gate must run in `adw_sdlc/` (not the parent `REPO_ROOT`).
+
+A relative value for `--project-root` resolves against the invocation
+directory. A non-existent or non-directory path fails closed with an
+actionable `AdwError` before any side effect.
+
+`ADW_PROJECT_ROOT` is a control-plane env var covered by the `ADW_` deny
+prefix — it is withheld from runner children with no allowlist change.
+
+> **Trust caution.** Pointing the orchestrator at an external repo means that
+> repo's `.adw/config.json` drives this process: test/finalize gate commands,
+> prompt/schema paths, and provider descriptors all come from the target. Only
+> target repos you trust to run commands on your machine.
+
+The `pack-generator` tool always resolves against the **package root** only
+(it generates the package's own prompts; it is never run by the ADW runtime).
+
 ## Provider boundary
 
 The orchestrator reasons in terms of:

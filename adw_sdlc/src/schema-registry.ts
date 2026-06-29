@@ -18,7 +18,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { getAdwConfig, resolveRepoPath, type AdwConfig } from './config.js';
+import { getAdwConfig, resolvePackagePath, resolveRepoPath, type AdwConfig } from './config.js';
 import { AdwError } from './errors.js';
 import type { JsonSchema } from './invoker.js';
 import {
@@ -86,7 +86,15 @@ function overrideHandle<P extends SchemaPhase>(phase: P, schema: JsonSchema, pat
   };
 }
 
-/** Resolve the override file for `phase`, or null when none is configured. */
+/**
+ * Resolve the override file for `phase`, or null when none is configured. An
+ * explicit `overrides[phase]` is a deliberate project choice and stays
+ * project-root-resolved — a missing one fails loudly (no silent fallback). The
+ * convention path `root/<phase>.json` resolves from the PROJECT root first,
+ * then falls back to the PACKAGE root (bundled kernel defaults), so a target
+ * that customizes only `.adw/config.json` and ships no `.adw/schemas` still
+ * resolves a phase's schema. In-repo both tiers are the same directory.
+ */
 function overridePath(phase: string, config: AdwConfig): string | null {
   const explicit = config.schemas?.overrides[phase];
   if (explicit !== undefined) {
@@ -97,8 +105,12 @@ function overridePath(phase: string, config: AdwConfig): string | null {
     return resolved;
   }
   const root = config.schemas?.root ?? '.adw/schemas';
-  const candidate = join(resolveRepoPath(root), `${phase}.json`);
-  return existsSync(candidate) ? candidate : null;
+  const projectCandidate = join(resolveRepoPath(root), `${phase}.json`);
+  if (existsSync(projectCandidate)) {
+    return projectCandidate;
+  }
+  const packageCandidate = join(resolvePackagePath(root), `${phase}.json`);
+  return existsSync(packageCandidate) ? packageCandidate : null;
 }
 
 /**

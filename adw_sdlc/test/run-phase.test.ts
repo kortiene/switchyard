@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { AdwError } from '../src/errors.js';
+import { AdwError, RunnerAuthError } from '../src/errors.js';
 import { NUDGE, runAgentPhase } from '../src/run-phase.js';
 import { createMockRunner } from '../src/runners/runner-mock.js';
 import { AdwState, setAgentsDir } from '../src/state.js';
@@ -163,6 +163,24 @@ describe('runAgentPhase', () => {
     });
     expect(outcome.data).toEqual({ issue_class: 'feat', reason: 'r' });
     expect(runner.requests).toHaveLength(2);
+  });
+
+  it('classifies Claude credit-balance output as auth failure with NO nudge retry', async () => {
+    const runner = createMockRunner({
+      id: 'claude',
+      script: () => ({ ok: false, rc: 1, transcriptText: 'Credit balance is too low' }),
+    });
+    await expect(
+      runAgentPhase({
+        phase: 'plan',
+        templateArgs: ['56', 'T', 'B', '', 'src/x.ts', 'GitHub issue'],
+        state,
+        runner,
+        env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-empty' },
+      }),
+    ).rejects.toThrow(RunnerAuthError);
+    expect(runner.requests).toHaveLength(1); // auth/account failures do not benefit from a JSON nudge
+    expect(existsSync(join(tmp, 'a1b2c3d4', 'plan', 'transcript-2.log'))).toBe(false);
   });
 
   it('fails after the second parse failure', async () => {

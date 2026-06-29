@@ -37,7 +37,7 @@ import { join } from 'node:path';
 
 import { z } from 'zod';
 
-import { resolveRepoPath } from './config.js';
+import { resolvePackagePath } from './config.js';
 import { AdwError } from './errors.js';
 
 /** Default template source root (neutral prompts; `.claude/commands` mirrors it — `npm run mirror:check`). */
@@ -256,8 +256,8 @@ export interface GenerateOptions {
 
 /** Render every template against the profile, without touching disk. */
 export function renderPack(options: GenerateOptions): RenderedFile[] {
-  const templatesDir = resolveRepoPath(options.templatesDir ?? DEFAULT_TEMPLATES_DIR);
-  const outDir = resolveRepoPath(options.outDir ?? DEFAULT_PACK_DIR);
+  const templatesDir = resolvePackagePath(options.templatesDir ?? DEFAULT_TEMPLATES_DIR);
+  const outDir = resolvePackagePath(options.outDir ?? DEFAULT_PACK_DIR);
   const names = listTemplates(templatesDir);
   if (names.length === 0) {
     throw new AdwError(`no .md templates found in ${templatesDir}`);
@@ -322,7 +322,7 @@ export interface GenerateResult {
  */
 export function generatePack(options: GenerateOptions & { dryRun?: boolean }): GenerateResult {
   const rendered = renderPack(options);
-  const outDir = resolveRepoPath(options.outDir ?? DEFAULT_PACK_DIR);
+  const outDir = resolvePackagePath(options.outDir ?? DEFAULT_PACK_DIR);
   if (options.dryRun !== true) {
     mkdirSync(outDir, { recursive: true });
   }

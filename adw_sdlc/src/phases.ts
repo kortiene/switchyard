@@ -16,7 +16,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { renderPromptFile } from './common.js';
-import { getAdwConfig, resolveRepoPath, type AdwConfig } from './config.js';
+import { getAdwConfig, resolvePackagePath, resolveRepoPath, type AdwConfig } from './config.js';
 import { AdwError } from './errors.js';
 import { resolvePhaseSchema } from './schema-registry.js';
 import type { AdwState } from './state.js';
@@ -203,13 +203,24 @@ function validateControlFlowKeys(config: AdwConfig): void {
   }
 }
 
-/** Resolve a phase template path, preferring a runner-specific configured root when present. */
+/**
+ * Resolve a phase template path, preferring a runner-specific configured root
+ * when present. Candidates are tried under the PROJECT root first, then the
+ * PACKAGE root (bundled kernel defaults), so a target that customizes only
+ * `.adw/config.json` — shipping no `.adw/prompts` — still runs on the package's
+ * own prompts. In-repo, projectRoot() === REPO_ROOT, so both tiers are the same
+ * directory and behavior is unchanged. The not-found error path points at the
+ * project-root default for a clear message.
+ */
 export function templatePath(runner: string, name: string, config: AdwConfig = getAdwConfig()): string {
   const roots = [config.prompts.runnerRoots[runner], config.prompts.defaultRoot].filter(
     (root): root is string => typeof root === 'string' && root.length > 0,
   );
-  for (const root of roots) {
-    const candidate = join(resolveRepoPath(root), `${name}.md`);
+  const candidates = [
+    ...roots.map((root) => join(resolveRepoPath(root), `${name}.md`)), // project root
+    ...roots.map((root) => join(resolvePackagePath(root), `${name}.md`)), // package fallback
+  ];
+  for (const candidate of candidates) {
     if (existsSync(candidate)) {
       return candidate;
     }

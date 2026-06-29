@@ -16,7 +16,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { REPO_ROOT } from './common.js';
+import { projectRoot } from './common.js';
 import { AdwError } from './errors.js';
 
 export const STATE_FILENAME = 'state.json';
@@ -27,9 +27,14 @@ const PHASE_RE = /^[a-zA-Z0-9_-]+$/;
 // Overridable for tests (the analogue of patching _state.AGENTS_DIR).
 let agentsDirOverride: string | null = null;
 
-/** The workspace root agents/ (test-overridable via setAgentsDir). */
+/**
+ * The workspace root agents/ — under the project root (the target repo when an
+ * explicit project root is set, else the package root), test-overridable via
+ * setAgentsDir. The explicit override always wins (AC4's "unless explicitly
+ * overridden").
+ */
 export function agentsDir(): string {
-  return agentsDirOverride ?? join(REPO_ROOT, 'agents');
+  return agentsDirOverride ?? join(projectRoot(), 'agents');
 }
 
 /** Override the workspace root (tests); pass null to restore the default. */

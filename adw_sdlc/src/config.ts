@@ -12,10 +12,20 @@ import { join, resolve } from 'node:path';
 
 import { z } from 'zod';
 
-import { REPO_ROOT } from './common.js';
+import { projectRoot, REPO_ROOT } from './common.js';
 import { AdwError } from './errors.js';
 
-export const ADW_CONFIG_PATH = join(REPO_ROOT, '.adw', 'config.json');
+/** Path to the project's .adw/config.json, resolved under the current project root. */
+export function adwConfigPath(): string {
+  return join(projectRoot(), '.adw', 'config.json');
+}
+
+/**
+ * @deprecated Use adwConfigPath(); kept for back-compat with existing importers.
+ * Evaluated at import = the package root (today's default value); runtime reads
+ * that must follow an explicit project root call adwConfigPath() instead.
+ */
+export const ADW_CONFIG_PATH = adwConfigPath();
 
 const TierSchema = z.enum(['cheap', 'mid', 'capable']);
 const RunnerModelMapSchema = z
@@ -398,7 +408,7 @@ export function parseAdwConfig(raw: unknown, source: string = 'ADW config'): Adw
 }
 
 /** Load .adw/config.json if present; otherwise return the behavior-preserving defaults. */
-export function loadAdwConfig(path: string = ADW_CONFIG_PATH): AdwConfig {
+export function loadAdwConfig(path: string = adwConfigPath()): AdwConfig {
   if (!existsSync(path)) {
     return parseAdwConfig({}, 'default ADW config');
   }
@@ -412,15 +422,24 @@ export function loadAdwConfig(path: string = ADW_CONFIG_PATH): AdwConfig {
 }
 
 let cachedConfig: AdwConfig | null = null;
+let cachedRoot: string | null = null;
 let testOverride: AdwConfig | null = null;
 
-/** Cached project config for production call sites. */
+/**
+ * Cached project config for production call sites. The cache is root-aware: it
+ * reloads when projectRoot() changes (e.g. after a late setProjectRoot()), so a
+ * run that targets an external repo always reads that repo's config without any
+ * manual cache busting — and the dependency graph stays acyclic (setProjectRoot
+ * never reaches into this module).
+ */
 export function getAdwConfig(): AdwConfig {
   if (testOverride !== null) {
     return testOverride;
   }
-  if (cachedConfig === null) {
+  const root = projectRoot();
+  if (cachedConfig === null || cachedRoot !== root) {
     cachedConfig = loadAdwConfig();
+    cachedRoot = root;
   }
   return cachedConfig;
 }
@@ -429,10 +448,21 @@ export function getAdwConfig(): AdwConfig {
 export function setAdwConfigForTests(config: AdwConfig | null): void {
   testOverride = config;
   cachedConfig = null;
+  cachedRoot = null;
 }
 
-/** Resolve a config path relative to the repository root unless already absolute. */
+/** Resolve a config path relative to the PROJECT root unless already absolute. */
 export function resolveRepoPath(path: string): string {
+  return resolve(projectRoot(), path);
+}
+
+/**
+ * Resolve a path relative to the PACKAGE root (the kernel/code location) unless
+ * already absolute. The second tier of prompt/schema resolution (bundled
+ * kernel defaults) and the pin for the build-time pack generator, which authors
+ * the package's own prompts and must never follow a project-root override.
+ */
+export function resolvePackagePath(path: string): string {
   return resolve(REPO_ROOT, path);
 }
 

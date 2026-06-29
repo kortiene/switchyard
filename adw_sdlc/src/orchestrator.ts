@@ -10,8 +10,8 @@
  *
  * Differences from the Python driver are exactly the planned ones:
  * - phases run through runner.runPhase via run-phase.ts (not a CLI spawn);
- * - classify runs on the shared Anthropic-SDK structured call by default
- *   (opt-out ADW_CLASSIFY_ON_RUNNER=1 routes it through the runner);
+ * - classify first tries the shared Anthropic-SDK structured call when an API
+ *   key is configured, then falls back to the runner if that request is rejected;
  * - per-phase cost/usage is accumulated additively into state.
  *
  * Every external effect is injected via OrchestratorDeps (defaulting to the
@@ -22,10 +22,10 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { shellSplit } from './common.js';
+import { projectRoot, setProjectRoot, shellSplit } from './common.js';
 import { DEFAULT_ADW_CONFIG, getAdwConfig, isClosedWorkItemState, type AdwConfig } from './config.js';
 import { ENV_ALIASES, readEnvAlias, readEnvFlag } from './env-vars.js';
-import { AdwError } from './errors.js';
+import { AdwError, RunnerAuthError } from './errors.js';
 import { safeSubprocessEnv } from './env.js';
 import { assumeYes, capture, confirm, note, postProgress, type Captured } from './exec.js';
 import * as git from './git.js';
@@ -55,7 +55,12 @@ import {
   type ReviewResult,
 } from './schemas.js';
 import { AdwState, makeAdwId } from './state.js';
-import { structuredCall, type StructuredCallOptions, type StructuredCallResult } from './structured-call.js';
+import {
+  StructuredCallApiError,
+  structuredCall,
+  type StructuredCallOptions,
+  type StructuredCallResult,
+} from './structured-call.js';
 import type { PhaseUsage } from './invoker.js';
 
 /** Cap failure text fed into prompts/comments (adw/_orchestrator.py:38). */
@@ -117,9 +122,20 @@ export interface RunOptions {
   yes?: boolean;
   dryRun?: boolean;
   maxBudgetUsd?: number;
+  /**
+   * Explicit external project (asset/worktree) root: the target repo whose
+   * .adw/config.json, prompts/schemas, agents/ state, worktree, git ops, and
+   * local gate this run uses. Omitted ⇒ the Switchyard package root (today's
+   * in-repo behavior). Validated + canonicalized by setProjectRoot() at the
+   * very start of run(); not threaded through ResolvedOptions (it is consumed
+   * before resolveOptions reads the now-target config).
+   */
+  projectRoot?: string;
 }
 
-type ResolvedOptions = Required<Omit<RunOptions, 'phases' | 'adwId' | 'repo' | 'maxBudgetUsd'>> &
+// projectRoot is omitted entirely: it is consumed from the raw options at the
+// top of run() (setProjectRoot) before resolveOptions runs, never carried here.
+type ResolvedOptions = Required<Omit<RunOptions, 'phases' | 'adwId' | 'repo' | 'maxBudgetUsd' | 'projectRoot'>> &
   Pick<RunOptions, 'phases' | 'adwId' | 'repo' | 'maxBudgetUsd'>;
 
 /** Defaults mirror adw/issue.py build_parser. */
@@ -332,6 +348,20 @@ interface AgentCtx {
   maxBudgetUsd?: number;
   /** ADW_PARITY_FORCE_FENCED_JSON measurement mode — see run-phase RunAgentPhaseOptions. */
   forceFenced?: boolean;
+}
+
+function envWithoutKey(env: Record<string, string>, key: string): Record<string, string> {
+  const next = { ...env };
+  delete next[key];
+  return next;
+}
+
+function canRetryWithoutAnthropicApiKey(agent: AgentCtx): boolean {
+  return agent.runner.id === 'claude' && Object.prototype.hasOwnProperty.call(agent.env, 'ANTHROPIC_API_KEY');
+}
+
+function stripAnthropicApiKeyForClaude(agent: AgentCtx): void {
+  agent.env = envWithoutKey(agent.env, 'ANTHROPIC_API_KEY');
 }
 
 // --- helpers (unit-testable) ------------------------------------------------------
@@ -633,24 +663,34 @@ export async function ciFixLoop(
 }
 
 /** One agent-phase call through the injected run-phase seam. */
-function invokeAgent<P extends 'resolve' | 'patch'>(
+async function invokeAgent<P extends 'resolve' | 'patch'>(
   deps: OrchestratorDeps,
   phase: P,
   templateArgs: readonly string[],
   state: AdwState,
   agent: AgentCtx,
 ): Promise<AgentPhaseOutcome<P>> {
-  return deps.runAgentPhase({
-    phase,
-    templateArgs,
-    state,
-    runner: agent.runner,
-    cliModel: agent.cliModel,
-    env: agent.env,
-    timeoutMs: agent.timeoutMs,
-    ...(agent.maxBudgetUsd !== undefined ? { maxBudgetUsd: agent.maxBudgetUsd } : {}),
-    ...(agent.forceFenced ? { forceFenced: true } : {}),
-  });
+  const invoke = (): Promise<AgentPhaseOutcome<P>> =>
+    deps.runAgentPhase({
+      phase,
+      templateArgs,
+      state,
+      runner: agent.runner,
+      cliModel: agent.cliModel,
+      env: agent.env,
+      timeoutMs: agent.timeoutMs,
+      ...(agent.maxBudgetUsd !== undefined ? { maxBudgetUsd: agent.maxBudgetUsd } : {}),
+      ...(agent.forceFenced ? { forceFenced: true } : {}),
+    });
+  try {
+    return await invoke();
+  } catch (err) {
+    if (!(err instanceof RunnerAuthError) || !canRetryWithoutAnthropicApiKey(agent)) {
+      throw err;
+    }
+    stripAnthropicApiKeyForClaude(agent);
+    return await invoke();
+  }
 }
 
 // --- phase argument assembly -----------------------------------------------------
@@ -1004,6 +1044,7 @@ function printPlan(
   const chain = ['setup(ts)', ...phases, 'finalize(ts)', 'ci-fix(ts)', 'merge(ts)', 'report(ts)'];
   console.log(`[dry-run] phased run for ${workItemRef(issue, config)} via ${runner.id}`);
   console.log(`[dry-run] phases: ${chain.join(' -> ')}`);
+  console.log(`[dry-run] project root: ${projectRoot()}`);
   console.log(
     `[dry-run] agent env: GH_TOKEN withheld (allowGhToken=false)${opts.inheritEnv ? '; inherited (--inherit-env)' : ''}`,
   );
@@ -1060,6 +1101,13 @@ export async function run(
   options: RunOptions = {},
   depsOverride: Partial<OrchestratorDeps> = {},
 ): Promise<number> {
+  // FIRST, before any config read: point the asset/command roots at the target
+  // repo (or clear back to the package root when omitted). Validated + canonical
+  // or a fail-closed AdwError. The root-aware config cache (getAdwConfig) then
+  // self-heals, so resolveOptions and defaultDeps below both see the target
+  // config. run() does not reset this (the CLI process exits after one run);
+  // tests own the teardown reset to setProjectRoot(null).
+  setProjectRoot(options.projectRoot ?? null);
   const opts = resolveOptions(options);
   const config = getAdwConfig();
   const itemLabel = workItemLabel(config);
@@ -1219,12 +1267,13 @@ export async function run(
         continue;
       }
 
-      // D1: classify normally runs on the shared Anthropic-SDK structured call.
+      // D1: classify normally tries the shared Anthropic-SDK structured call.
       // That path needs a pay-as-you-go ANTHROPIC_API_KEY (the public messages
       // API does not accept a Claude subscription OAuth token), so when no API
-      // key is configured we auto-route classify through the selected runner —
-      // the Claude Code executable honors a `claude login` / CLAUDE_CODE_OAUTH_TOKEN
-      // subscription. ADW_CLASSIFY_ON_RUNNER=1 forces the runner regardless.
+      // key is configured — or when the API rejects the request (billing/auth/
+      // rate-limit/etc.) — classify routes through the selected runner. The
+      // Claude Code executable honors a `claude login` / CLAUDE_CODE_OAUTH_TOKEN
+      // subscription. ADW_CLASSIFY_ON_RUNNER=1 forces the runner up front.
       const classifyOnSharedSdk =
         !readEnvFlag(deps.env, ENV_ALIASES.classifyOnRunner) &&
         (deps.env['ANTHROPIC_API_KEY'] ?? '').trim() !== '';
@@ -1233,19 +1282,42 @@ export async function run(
         const phaseDir = state.phaseDir(phase);
         writeFileSync(join(phaseDir, 'prompt.txt'), prompt, 'utf8');
         const mark = metrics.start();
-        const { value, usage } = await deps.classify(prompt, {
-          ...(opts.timeoutMs > 0 ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
-        });
-        writeFileSync(join(phaseDir, 'transcript.log'), `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-        recordUsage(state, usage);
-        metrics.record(phase, mark, usage, { model: config.models.classifyModel });
-        metrics.save();
-        applyResult(state, phase, value);
-        state.markDone(phase);
-        state.save();
-        assertWithinBudget(state, agent.maxBudgetUsd);
-        progress(phase, 'done');
-        continue;
+        try {
+          const { value, usage } = await deps.classify(prompt, {
+            ...(opts.timeoutMs > 0 ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
+          });
+          writeFileSync(join(phaseDir, 'transcript.log'), `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+          recordUsage(state, usage);
+          metrics.record(phase, mark, usage, { model: config.models.classifyModel });
+          metrics.save();
+          applyResult(state, phase, value);
+          state.markDone(phase);
+          state.save();
+          assertWithinBudget(state, agent.maxBudgetUsd);
+          progress(phase, 'done');
+          continue;
+        } catch (err) {
+          if (!(err instanceof StructuredCallApiError)) {
+            throw err;
+          }
+          const strippedApiKey =
+            runner.id === 'claude' && Object.prototype.hasOwnProperty.call(agent.env, 'ANTHROPIC_API_KEY');
+          if (strippedApiKey) {
+            // A depleted pay-as-you-go key can make Claude Code prefer the same
+            // failing API account over its `claude login`/OAuth subscription.
+            // Remove only that key on this fallback path so the runner can use
+            // its subscription auth for classify and the remaining phases.
+            agent.env = envWithoutKey(agent.env, 'ANTHROPIC_API_KEY');
+          }
+          const fallback =
+            `shared Anthropic API classify failed (${err.reason}); falling back to ${runner.id} runner` +
+            (strippedApiKey ? ' without ANTHROPIC_API_KEY' : '');
+          note(`classify: ${fallback}`);
+          progress(phase, fallback);
+          // Do not record failed shared-SDK usage or mark the phase done; the
+          // normal agent phase below owns the fallback transcript, metrics, and
+          // state transition.
+        }
       }
 
       // Normal agent phase (including classify when ADW_CLASSIFY_ON_RUNNER=1,
@@ -1253,17 +1325,32 @@ export async function run(
       // phase name through the SchemaPhase-typed seam; run-phase resolves its
       // template (<name>.md) and schema (.adw/schemas/<name>.json) by name.
       const mark = metrics.start();
-      const outcome = await deps.runAgentPhase({
-        phase: phase as AgentPhase,
-        templateArgs: phaseArgs(phase, issue, state, ctx, files, itemLabel),
-        state,
-        runner: agent.runner,
-        cliModel: agent.cliModel,
-        env: agent.env,
-        timeoutMs: agent.timeoutMs,
-        ...(agent.maxBudgetUsd !== undefined ? { maxBudgetUsd: agent.maxBudgetUsd } : {}),
-        ...(agent.forceFenced ? { forceFenced: true } : {}),
-      });
+      const agentPhaseArgs = phaseArgs(phase, issue, state, ctx, files, itemLabel);
+      const invokeCurrentPhase = (): ReturnType<typeof deps.runAgentPhase> =>
+        deps.runAgentPhase({
+          phase: phase as AgentPhase,
+          templateArgs: agentPhaseArgs,
+          state,
+          runner: agent.runner,
+          cliModel: agent.cliModel,
+          env: agent.env,
+          timeoutMs: agent.timeoutMs,
+          ...(agent.maxBudgetUsd !== undefined ? { maxBudgetUsd: agent.maxBudgetUsd } : {}),
+          ...(agent.forceFenced ? { forceFenced: true } : {}),
+        });
+      let outcome: Awaited<ReturnType<typeof deps.runAgentPhase>>;
+      try {
+        outcome = await invokeCurrentPhase();
+      } catch (err) {
+        if (!(err instanceof RunnerAuthError) || !canRetryWithoutAnthropicApiKey(agent)) {
+          throw err;
+        }
+        stripAnthropicApiKeyForClaude(agent);
+        const fallback = `${phase} phase ${agent.runner.id} runner auth failed (${err.reason}); retrying without ANTHROPIC_API_KEY`;
+        note(fallback);
+        progress(phase, fallback);
+        outcome = await invokeCurrentPhase();
+      }
       recordUsage(state, outcome.usage);
       metrics.record(phase, mark, outcome.usage, {
         attempts: outcome.attempts,

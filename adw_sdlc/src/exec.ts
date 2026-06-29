@@ -8,12 +8,13 @@
  * sequential, exactly like the Python pipeline's subprocess.run usage.
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
 import { accessSync, constants, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
+import { commandCwd } from './common.js';
 import { getAdwConfig } from './config.js';
 import { ENV_ALIASES, readEnvFlag } from './env-vars.js';
 
@@ -97,13 +98,30 @@ export function postProgress(
  * GH_TOKEN or other ambient secrets. gh/git callers omit it and inherit as
  * before. The parent environment is never spread in here; the only env builder
  * remains `safeSubprocessEnv` (the lint:env gate stays green).
+ *
+ * `opts.cwd` (or, by default, `commandCwd()`) sets the child's working
+ * directory: an explicit project root when one is configured, else undefined so
+ * git/gh/gate inherit `process.cwd()` exactly as before. This routes every
+ * git/gh query and the local gate command into the target repo when
+ * --project-root is set, without changing the in-repo default.
  */
-export function capture(cmd: readonly string[], opts?: { env?: Record<string, string> }): Captured {
+export function capture(
+  cmd: readonly string[],
+  opts?: { env?: Record<string, string>; cwd?: string },
+): Captured {
   const [bin, ...args] = cmd;
   if (bin === undefined) {
     return { returncode: 127, stdout: '', stderr: 'empty command' };
   }
-  const result = spawnSync(bin, args, opts?.env ? { encoding: 'utf8', env: opts.env } : { encoding: 'utf8' });
+  const cwd = opts?.cwd ?? commandCwd();
+  const spawnOpts: SpawnSyncOptionsWithStringEncoding = { encoding: 'utf8' };
+  if (opts?.env) {
+    spawnOpts.env = opts.env;
+  }
+  if (cwd !== undefined) {
+    spawnOpts.cwd = cwd;
+  }
+  const result = spawnSync(bin, args, spawnOpts);
   if (result.error) {
     return { returncode: 127, stdout: result.stdout ?? '', stderr: String(result.error) };
   }

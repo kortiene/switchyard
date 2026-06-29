@@ -18,8 +18,8 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { parseJson, REPO_ROOT } from './common.js';
-import { AdwError } from './errors.js';
+import { parseJson, projectRoot } from './common.js';
+import { AdwError, RunnerAuthError } from './errors.js';
 import { PHASE_TIMEOUT_ABORT_REASON } from './invoker.js';
 import type { AgentRunner, PhaseResult, PhaseUsage } from './invoker.js';
 import { modelForPhase } from './models.js';
@@ -42,7 +42,7 @@ export interface RunAgentPhaseOptions {
   cliModel?: string;
   /** The allowlist env the orchestrator built (safeSubprocessEnv). */
   env: Record<string, string>;
-  /** The worktree the agent edits; defaults to the repo root. */
+  /** The worktree the agent edits; defaults to the project root. */
   cwd?: string;
   /** Per-call timeout in milliseconds; 0/undefined = none. */
   timeoutMs?: number;
@@ -111,7 +111,7 @@ export async function runAgentPhase<P extends SchemaPhase>(
         phase,
         prompt: text,
         model,
-        cwd: options.cwd ?? REPO_ROOT,
+        cwd: options.cwd ?? projectRoot(),
         env: options.env,
         transcriptPath: join(phaseDir, transcriptName),
         signal: controller.signal,
@@ -138,6 +138,10 @@ export async function runAgentPhase<P extends SchemaPhase>(
     if (!(err instanceof AdwError)) {
       throw err;
     }
+    const firstAuthFailure = runnerAuthFailureReason(first, runner.id, options.env);
+    if (firstAuthFailure !== null) {
+      throw new RunnerAuthError(runner.id, phase, firstAuthFailure, { cause: err });
+    }
     // Mirrors the _TIMEOUT_EXIT_CODES fail-fast: a run the parent had to kill
     // (or that hit a native cost cap) gets no nudge.
     if (first.signal === 'timeout') {
@@ -160,15 +164,47 @@ export async function runAgentPhase<P extends SchemaPhase>(
       ? prompt
       : composePhasePrompt(phase as AgentPhase, options.templateArgs, state, runner.id, true);
     const second = await invoke(retryPrompt + NUDGE, 'transcript-2.log');
+    let data: z.infer<(typeof PHASE_SCHEMAS)[P]>;
+    try {
+      data = extract(second);
+    } catch (secondErr) {
+      if (secondErr instanceof AdwError) {
+        const secondAuthFailure = runnerAuthFailureReason(second, runner.id, options.env);
+        if (secondAuthFailure !== null) {
+          throw new RunnerAuthError(runner.id, phase, secondAuthFailure, { cause: secondErr });
+        }
+      }
+      throw secondErr;
+    }
     // Both attempts consumed tokens; report the pair's combined usage and the
     // attempts count (2) so the caller can record the nudge-retry rate.
     return {
-      data: extract(second),
+      data,
       usage: mergeUsage(first.usage, second.usage),
       attempts: 2,
       ...sessionOf(second),
     };
   }
+}
+
+function runnerAuthFailureReason(
+  result: PhaseResult,
+  runnerId: AgentRunner['id'],
+  env: Record<string, string>,
+): string | null {
+  if (runnerId !== 'claude') {
+    return null;
+  }
+  const text = result.transcriptText;
+  if (/credit balance is too low/i.test(text)) {
+    return Object.prototype.hasOwnProperty.call(env, 'ANTHROPIC_API_KEY')
+      ? 'Claude Code used ANTHROPIC_API_KEY and the Anthropic API credit balance is too low'
+      : 'Anthropic API credit balance is too low';
+  }
+  if (/ANTHROPIC_API_KEY[\s\S]*takes precedence[\s\S]*(?:claude\.ai login|login)/i.test(text)) {
+    return 'Claude Code is using ANTHROPIC_API_KEY instead of claude.ai login';
+  }
+  return null;
 }
 
 function sessionOf(result: PhaseResult): { sessionId?: string } {

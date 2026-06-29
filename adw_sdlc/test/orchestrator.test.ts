@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { parseAdwConfig, setAdwConfigForTests } from '../src/config.js';
-import { AdwError } from '../src/errors.js';
+import { AdwError, RunnerAuthError } from '../src/errors.js';
 import type { AgentRunner } from '../src/invoker.js';
 import type { AdwProviders } from '../src/providers.js';
 import {
@@ -30,6 +30,7 @@ import { commitMessagePath, prBodyPath } from '../src/phases.js';
 import { runAgentPhase } from '../src/run-phase.js';
 import { createMockRunner } from '../src/runners/runner-mock.js';
 import { AdwState, setAgentsDir } from '../src/state.js';
+import { StructuredCallApiError } from '../src/structured-call.js';
 
 let tmp: string;
 
@@ -920,6 +921,69 @@ describe('run() integration', () => {
       issue_class: 'feat',
       reason: 'r',
     });
+  });
+
+  it('retries a normal claude runner phase without ANTHROPIC_API_KEY after runner auth failure', async () => {
+    const order: string[] = [];
+    const seenEnvs: Array<Record<string, string>> = [];
+    let planAttempts = 0;
+    const deps = testDeps({
+      env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-empty' },
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
+      runAgentPhase: (async (opts: Parameters<typeof runAgentPhase>[0]) => {
+        order.push(opts.phase);
+        seenEnvs.push(opts.env);
+        if (opts.phase === 'plan') {
+          planAttempts += 1;
+          if (planAttempts === 1) {
+            throw new RunnerAuthError('claude', 'plan', 'Claude Code used ANTHROPIC_API_KEY and the Anthropic API credit balance is too low');
+          }
+        }
+        const data = PHASE_RESULTS[opts.phase];
+        if (data === undefined) {
+          throw new Error(`unexpected phase: ${opts.phase}`);
+        }
+        return { data, usage: {}, attempts: 1 };
+      }) as typeof runAgentPhase,
+    });
+
+    const rc = await run(5, createMockRunner(), { yes: true, noProgress: true }, deps);
+
+    expect(rc).toBe(0);
+    expect(order).toEqual(['plan', 'plan', 'implement', 'tests', 'review']);
+    expect(seenEnvs[0]).toHaveProperty('ANTHROPIC_API_KEY', 'sk-ant-empty');
+    expect(seenEnvs.slice(1).every((env) => !Object.prototype.hasOwnProperty.call(env, 'ANTHROPIC_API_KEY'))).toBe(true);
+  });
+
+  it('falls back to the runner when shared-SDK classify hits an Anthropic API error', async () => {
+    const order: string[] = [];
+    const seenEnvs: Array<Record<string, string>> = [];
+    const classify = vi.fn(async () => {
+      throw new StructuredCallApiError(400, 'Your credit balance is too low to access the Anthropic API.');
+    });
+    const deps = testDeps({
+      env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-test' },
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
+      classify,
+      runAgentPhase: agentStub(
+        { ...PHASE_RESULTS, classify: { issue_class: 'fix', reason: 'runner fallback' } },
+        (opts) => {
+          order.push(opts.phase);
+          seenEnvs.push(opts.env);
+        },
+      ),
+    });
+
+    const rc = await run(5, createMockRunner(), { yes: true, noProgress: true }, deps);
+
+    expect(rc).toBe(0);
+    expect(classify).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['classify', 'plan', 'implement', 'tests', 'review']);
+    expect(seenEnvs).toHaveLength(5);
+    expect(
+      seenEnvs.every((env) => !Object.prototype.hasOwnProperty.call(env, 'ANTHROPIC_API_KEY')),
+    ).toBe(true);
+    expect(AdwState.load(loadedId())?.issueClass).toBe('fix');
   });
 
   it('routes classify through the runner when ADW_CLASSIFY_ON_RUNNER=1', async () => {

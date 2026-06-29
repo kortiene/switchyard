@@ -39,15 +39,17 @@ export {
   ADW_CONFIG_PATH,
   AdwConfigSchema,
   DEFAULT_ADW_CONFIG,
+  adwConfigPath,
   getAdwConfig,
   isClosedWorkItemState,
   loadAdwConfig,
   parseAdwConfig,
+  resolvePackagePath,
   resolveRepoPath,
   setAdwConfigForTests,
   type AdwConfig,
 } from './config.js';
-export { AdwError, RunnerNotInstalledError } from './errors.js';
+export { AdwError, RunnerAuthError, RunnerNotInstalledError } from './errors.js';
 export { DEFAULT_RUNNER, loadRunner, resolveRunnerId, type RunnerModule } from './registry.js';
 export {
   TYPE_PREFIX,
@@ -82,7 +84,18 @@ export {
 export { OVERRIDABLE_PHASES, resolvePhaseSchema, type PhaseSchemaHandle } from './schema-registry.js';
 export { CLASSIFY_MODEL, PHASE_TIER, TIER_MODELS, classifyModel, modelForPhase, type ModelOverrides, type Tier } from './models.js';
 export { PRICES, costUsd, type PriceEntry } from './pricing.js';
-export { REPO_ROOT, parseJson, renderPromptFile, shellSplit, stripFrontmatter, substituteArgs } from './common.js';
+export {
+  REPO_ROOT,
+  commandCwd,
+  parseJson,
+  projectRoot,
+  renderPromptFile,
+  resolveProjectRoot,
+  setProjectRoot,
+  shellSplit,
+  stripFrontmatter,
+  substituteArgs,
+} from './common.js';
 export {
   BASE_ENV_ALLOW,
   ENV_DENY_PREFIXES,
@@ -194,6 +207,7 @@ export {
   type PhaseMetric,
 } from './metrics.js';
 export {
+  StructuredCallApiError,
   structuredCall,
   type AnthropicLike,
   type StructuredCallOptions,
