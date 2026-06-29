@@ -6,7 +6,7 @@
  * withholding, and the merge gate.
  */
 
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -93,6 +93,7 @@ function testDeps(overrides: DepsOverride = {}): OrchestratorDeps {
 function agentStub(
   results: Record<string, unknown>,
   onCall?: (opts: Parameters<typeof runAgentPhase>[0]) => void,
+  usage: Record<string, unknown> = {},
 ): typeof runAgentPhase {
   return (async (opts: Parameters<typeof runAgentPhase>[0]) => {
     onCall?.(opts);
@@ -100,7 +101,7 @@ function agentStub(
     if (data === undefined) {
       throw new Error(`unexpected phase: ${opts.phase}`);
     }
-    return { data, usage: {} };
+    return { data, usage, attempts: 1 };
   }) as typeof runAgentPhase;
 }
 
@@ -348,6 +349,19 @@ describe('ciFixLoop', () => {
     expect(await ciFixLoop(st(), 7, agentCtx(createMockRunner()), cfg, deps)).toBe(true);
     expect(commitAll).toHaveBeenCalledWith('fix: address CI failures (ci)');
     expect(push).toHaveBeenCalledWith('feat/5-x');
+  });
+
+  it('enforces the soft parent-side budget after a ci-fix agent attempt', async () => {
+    const commitAll = vi.fn(() => ({ ok: true, error: null }));
+    const deps = testDeps({
+      workingTreeDirty: () => true,
+      git: { ciStatus: () => ({ state: 'failure', failingJobs: [{ name: 'ci', logExcerpt: '' }] }), commitAll },
+      runAgentPhase: agentStub({ resolve: { resolved: 1, remaining: 0, summary: '' } }, undefined, { costUsd: 0.5 }),
+    });
+    await expect(
+      ciFixLoop(st(), 7, agentCtx(createMockRunner()), { ...cfg, maxBudgetUsd: 0.4 }, deps),
+    ).rejects.toThrow(/exceeded the budget cap/);
+    expect(commitAll).not.toHaveBeenCalled(); // stopped before committing/pushing another CI fix
   });
 
   it('stops when the agent claims a fix but changed nothing', async () => {
@@ -1029,6 +1043,68 @@ describe('run() integration', () => {
     expect(rc).toBe(0);
     expect(seen.length).toBeGreaterThan(0);
     expect(seen.every((usd) => usd === 2.5)).toBe(true);
+  });
+
+  it('writes per-phase metrics.json (cost/duration/attempts) alongside state.json', async () => {
+    // A deterministic stepped clock so durations are stable: each start()/record()
+    // pair advances 1000ms.
+    let t = 0;
+    const now = () => (t += 1000);
+    const deps = testDeps({
+      now,
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
+      classify: async () => ({ value: { issue_class: 'feat' as const, reason: 'r' }, usage: { costUsd: 0.05 } }),
+      runAgentPhase: (async (opts: Parameters<typeof runAgentPhase>[0]) => {
+        if (opts.phase === 'review') {
+          mkdirSync(opts.state.workspace(), { recursive: true });
+          writeFileSync(commitMessagePath(opts.state), 'feat: x\n\ncloses #5', 'utf8');
+          writeFileSync(prBodyPath(opts.state), 'b', 'utf8');
+        }
+        // implement "nudged" (2 attempts); the rest clean.
+        return {
+          data: PHASE_RESULTS[opts.phase],
+          usage: { costUsd: 0.1, inputTokens: 20, outputTokens: 4 },
+          attempts: opts.phase === 'implement' ? 2 : 1,
+        };
+      }) as typeof runAgentPhase,
+    });
+    const rc = await run(5, createMockRunner(), { yes: true, noProgress: true }, deps);
+    expect(rc).toBe(0);
+
+    const doc = JSON.parse(readFileSync(join(tmp, loadedId(), 'metrics.json'), 'utf8'));
+    // classify + plan + implement + tests + review = 5 recorded phases.
+    expect(doc.summary.phases).toBe(5);
+    expect(doc.summary.attempts).toBe(6); // one phase nudged (2), four clean (1)
+    expect(doc.summary.nudged_phases).toBe(1);
+    expect(doc.summary.total_cost_usd).toBeCloseTo(0.05 + 0.1 * 4, 10);
+    const byPhase = Object.fromEntries(doc.phases.map((p: { phase: string }) => [p.phase, p]));
+    expect(byPhase.implement.attempts).toBe(2);
+    expect(byPhase.plan.duration_ms).toBe(1000); // one clock step per phase
+    expect(byPhase.plan.model).toBe('claude-opus-4-8'); // capable tier on claude
+    expect(byPhase.classify.model).toBe('claude-haiku-4-5'); // classify model
+  });
+
+  it('aborts mid-chain when the accumulated cost exceeds --max-budget-usd (soft parent gate)', async () => {
+    // pi has no native budget cap, so the parent-side gate is the only stop.
+    const order: string[] = [];
+    const deps = testDeps({
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
+      classify: async () => ({ value: { issue_class: 'feat' as const, reason: 'r' }, usage: { costUsd: 0.5 } }),
+      runAgentPhase: agentStub(PHASE_RESULTS, (opts) => {
+        order.push(opts.phase);
+      }, { costUsd: 0.5 }),
+    });
+    // classify (0.5) + plan (0.5) = 1.0 > cap 0.9 -> abort before implement.
+    await expect(
+      run(5, createMockRunner({ id: 'pi', caps: { nativeBudget: false } }), {
+        yes: true,
+        noProgress: true,
+        maxBudgetUsd: 0.9,
+      }, deps),
+    ).rejects.toThrow(/exceeded the budget cap/);
+    expect(order).toEqual(['plan']); // implement never started
+    // The partial run still left a metrics.json for the phases that did run.
+    expect(existsSync(join(tmp, loadedId(), 'metrics.json'))).toBe(true);
   });
 
   it('rejects a misconfigured custom phase at startup, before the dry-run plan prints', async () => {

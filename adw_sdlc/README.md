@@ -204,6 +204,7 @@ hardcoded for security and must not be relaxed by a project pack.
 | [`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md) | Ready-to-create issue batch + live-run command templates for the 5–10 varied `claude` runs |
 | [`docs/OBSERVED-LIVE-LEDGER.md`](./docs/OBSERVED-LIVE-LEDGER.md) | Live-run dashboard: tracks which PARITY.md Section-10 guarantees have been observed in a real `claude` run (not only under mocks) |
 | [`docs/FAILURE-DRILLS.md`](./docs/FAILURE-DRILLS.md) | Live `claude` runbook for the timeout / budget fast-fail and kill-then-`--resume` failure drills (MVP-READINESS §1 evidence) |
+| [`docs/COST-AND-DURATION.md`](./docs/COST-AND-DURATION.md) | Cost/duration levers (tier routing, nudge-retry rate, budget/timeout caps) + the per-run `agents/{adw_id}/metrics.json` artifact and measurement plan |
 | [`docs/SECRET-BOUNDARY-AUDIT.md`](./docs/SECRET-BOUNDARY-AUDIT.md) | Live-oriented secret-boundary audit: spawns a real child and asserts denied keys (`GH_TOKEN`/`MATRIX_*`/`ADW_*`/`MX_AGENT_*`) are absent, names/booleans only (the spawn-crossing complement to `lint:env` + `env.test.ts`) |
 | [`MEMORY_STACK.md`](./MEMORY_STACK.md) | Decision record for the deferred cross-run memory feature |
 | [`docs/DESIGN-schema-overrides.md`](./docs/DESIGN-schema-overrides.md) | Design + rollout for per-phase schema overrides / custom phases (implemented) |

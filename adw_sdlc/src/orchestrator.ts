@@ -43,6 +43,8 @@ import {
   type AgentPhase,
 } from './phases.js';
 import { createProvidersFromConfig, providerBackedDeps, type AdwProviders, type ProviderContext } from './providers.js';
+import { MetricsCollector, defaultClock, type Clock } from './metrics.js';
+import { modelForPhase } from './models.js';
 import { runAgentPhase, type AgentPhaseOutcome } from './run-phase.js';
 import {
   ClassifySchema,
@@ -198,6 +200,12 @@ export interface OrchestratorDeps {
     prompt: string,
     options?: StructuredCallOptions,
   ) => Promise<StructuredCallResult<ClassifyResult>>;
+  /**
+   * Monotonic clock for per-phase duration metrics; injectable for tests.
+   * Optional so existing OrchestratorDeps fixtures need no change; defaults to
+   * the high-resolution clock (defaultDeps sets it; run() falls back too).
+   */
+  now?: Clock;
 }
 
 export function defaultDeps(): OrchestratorDeps {
@@ -217,6 +225,7 @@ export function defaultDeps(): OrchestratorDeps {
     ...providerDeps,
     runAgentPhase,
     classify: (prompt, options) => structuredCall(prompt, ClassifySchema, options),
+    now: defaultClock,
   };
 }
 
@@ -395,6 +404,31 @@ function recordUsage(state: AdwState, usage: PhaseUsage): void {
   }
 }
 
+/**
+ * Parent-side (runner-agnostic) budget gate. claude enforces maxBudgetUsd
+ * natively per call (caps.nativeBudget) and fails fast with signal:'budget',
+ * but codex/opencode/pi have no native cap — so a long run on those backends
+ * could overspend unbounded. After each phase the orchestrator checks the
+ * ACCUMULATED run cost against the cap and aborts the chain before launching
+ * the next phase. This complements (never replaces) the native per-call gate:
+ * the native cap stops a single runaway call; this stops cumulative drift.
+ *
+ * A null total means a phase was unpriceable, so the true spend is unknown and
+ * the soft gate cannot reason about it — it stays quiet rather than abort on
+ * incomplete data (the native cap and --timeout remain the backstops).
+ */
+function assertWithinBudget(state: AdwState, maxBudgetUsd: number | undefined): void {
+  if (maxBudgetUsd === undefined || typeof state.totalCostUsd !== 'number') {
+    return;
+  }
+  if (state.totalCostUsd > maxBudgetUsd) {
+    throw new AdwError(
+      `run cost $${state.totalCostUsd.toFixed(4)} exceeded the budget cap ` +
+        `$${maxBudgetUsd.toFixed(2)} (--max-budget-usd); stopping before the next phase`,
+    );
+  }
+}
+
 // --- bounded loops -----------------------------------------------------------------
 
 /**
@@ -405,7 +439,7 @@ function recordUsage(state: AdwState, usage: PhaseUsage): void {
 export async function resolveLoop(
   state: AdwState,
   agent: AgentCtx,
-  config: { testCmd: string; maxAttempts: number; progress: ProgressFn; phase?: string },
+  config: { testCmd: string; maxAttempts: number; progress: ProgressFn; phase?: string; metrics?: MetricsCollector },
   deps: OrchestratorDeps,
 ): Promise<boolean> {
   // Built-in resolve passes no `phase`; a custom loop phase passes its own name
@@ -432,8 +466,14 @@ export async function resolveLoop(
     // Cast: a custom loop name flows to runAgentPhase at runtime (resolving its
     // own template/schema); typing it as 'resolve' here gives `data.resolved`,
     // which the custom schema is validated to declare (validatePhaseChain).
+    const mark = config.metrics?.start() ?? 0;
     const outcome = await invokeAgent(deps, phase as 'resolve', [truncate(output)], state, agent);
     recordUsage(state, outcome.usage);
+    config.metrics?.record(phase, mark, outcome.usage, {
+      attempts: outcome.attempts,
+      model: modelForPhase(phase, agent.runner.id, { cliModel: agent.cliModel, env: deps.env }),
+    });
+    config.metrics?.save();
     if (outcome.data.resolved === 0) {
       config.progress(phase, 'agent resolved nothing; stopping');
       return false;
@@ -446,7 +486,7 @@ export async function patchLoop(
   state: AdwState,
   findings: readonly ReviewFinding[],
   agent: AgentCtx,
-  config: { maxAttempts: number; progress: ProgressFn },
+  config: { maxAttempts: number; progress: ProgressFn; metrics?: MetricsCollector },
   deps: OrchestratorDeps,
 ): Promise<boolean> {
   const blockers = findings.filter((f) => f.severity === 'blocker');
@@ -471,8 +511,14 @@ export async function patchLoop(
     attempt += 1;
     config.progress('patch', `resolving ${remaining} blocker(s); attempt ${attempt}/${config.maxAttempts}`);
     const promptText = attempt === 1 ? blockersText : retryNote + blockersText;
+    const mark = config.metrics?.start() ?? 0;
     const outcome = await invokeAgent(deps, 'patch', [promptText], state, agent);
     recordUsage(state, outcome.usage);
+    config.metrics?.record('patch', mark, outcome.usage, {
+      attempts: outcome.attempts,
+      model: modelForPhase('patch', agent.runner.id, { cliModel: agent.cliModel, env: deps.env }),
+    });
+    config.metrics?.save();
     const result = outcome.data;
     if (result.resolved === 0 || result.remaining >= remaining) {
       remaining = result.remaining;
@@ -495,6 +541,8 @@ export async function ciFixLoop(
     pollIntervalMs: number;
     maxPolls: number;
     progress: ProgressFn;
+    metrics?: MetricsCollector;
+    maxBudgetUsd?: number;
   },
   deps: OrchestratorDeps,
 ): Promise<boolean> {
@@ -551,6 +599,7 @@ export async function ciFixLoop(
     attempt += 1;
     const names = status.failingJobs.map((j) => j.name).join(', ') || 'unknown jobs';
     config.progress('ci-fix', `CI red (${names}); fix attempt ${attempt}/${config.maxAttempts}`);
+    const mark = config.metrics?.start() ?? 0;
     const outcome = await invokeAgent(
       deps,
       'resolve',
@@ -559,6 +608,12 @@ export async function ciFixLoop(
       agent,
     );
     recordUsage(state, outcome.usage);
+    config.metrics?.record('ci-fix', mark, outcome.usage, {
+      attempts: outcome.attempts,
+      model: modelForPhase('resolve', agent.runner.id, { cliModel: agent.cliModel, env: deps.env }),
+    });
+    config.metrics?.save();
+    assertWithinBudget(state, config.maxBudgetUsd);
     if (outcome.data.resolved === 0) {
       config.progress('ci-fix', 'agent resolved nothing; stopping');
       return false;
@@ -805,10 +860,11 @@ async function finalizeAndMerge(
     progress: ProgressFn;
     providers: AdwProviders;
     config: AdwConfig;
+    metrics?: MetricsCollector;
   },
   deps: OrchestratorDeps,
 ): Promise<number> {
-  const { providerCtx, issue, agent, progress, providers, config } = context;
+  const { providerCtx, issue, agent, progress, providers, config, metrics } = context;
   const { ghBin, repo } = providerCtx;
   const itemRef = workItemRef(issue, config);
   const crLabel = changeRequestLabel(config);
@@ -895,6 +951,8 @@ async function finalizeAndMerge(
         pollIntervalMs: opts.ciPollIntervalMs,
         maxPolls: opts.ciMaxPolls,
         progress,
+        ...(metrics !== undefined ? { metrics } : {}),
+        ...(agent.maxBudgetUsd !== undefined ? { maxBudgetUsd: agent.maxBudgetUsd } : {}),
       },
       deps,
     );
@@ -1104,6 +1162,11 @@ export async function run(
     ...(readEnvFlag(deps.env, ENV_ALIASES.forceFenced) ? { forceFenced: true } : {}),
   };
 
+  // Per-phase cost/duration metrics (observability only; written to the
+  // additive agents/{adw_id}/metrics.json, never state.json). See metrics.ts
+  // for why this is a separate artifact from the cross-language state contract.
+  const metrics = new MetricsCollector(state, deps.now ?? defaultClock);
+
   // Runner lifecycle (D6): start/stop are no-ops for the in-process backends;
   // opencode tears down its self-spawned server in stop(), so it runs in a
   // finally — a leaked server child would otherwise outlive the run.
@@ -1135,12 +1198,13 @@ export async function run(
           state,
           agent,
           customLoop !== undefined
-            ? { testCmd: customLoop.command, maxAttempts: customLoop.maxAttempts, progress, phase }
-            : { testCmd: opts.testCmd, maxAttempts: opts.maxResolve, progress },
+            ? { testCmd: customLoop.command, maxAttempts: customLoop.maxAttempts, progress, phase, metrics }
+            : { testCmd: opts.testCmd, maxAttempts: opts.maxResolve, progress, metrics },
           deps,
         );
         state.markDone(phase);
         state.save();
+        assertWithinBudget(state, agent.maxBudgetUsd);
         continue;
       }
 
@@ -1148,9 +1212,10 @@ export async function run(
         // On a resume the review phase is skipped, so reconstruct its findings
         // from persisted state rather than silently patching nothing.
         const findings = reviewResult !== null ? reviewResult.findings : findingsFromState(state);
-        await patchLoop(state, findings, agent, { maxAttempts: opts.maxPatch, progress }, deps);
+        await patchLoop(state, findings, agent, { maxAttempts: opts.maxPatch, progress, metrics }, deps);
         state.markDone(phase);
         state.save();
+        assertWithinBudget(state, agent.maxBudgetUsd);
         continue;
       }
 
@@ -1167,14 +1232,18 @@ export async function run(
         const prompt = composePhasePrompt(phase, phaseArgs(phase, issue, state, ctx, files, itemLabel), state, runner.id, false);
         const phaseDir = state.phaseDir(phase);
         writeFileSync(join(phaseDir, 'prompt.txt'), prompt, 'utf8');
+        const mark = metrics.start();
         const { value, usage } = await deps.classify(prompt, {
           ...(opts.timeoutMs > 0 ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
         });
         writeFileSync(join(phaseDir, 'transcript.log'), `${JSON.stringify(value, null, 2)}\n`, 'utf8');
         recordUsage(state, usage);
+        metrics.record(phase, mark, usage, { model: config.models.classifyModel });
+        metrics.save();
         applyResult(state, phase, value);
         state.markDone(phase);
         state.save();
+        assertWithinBudget(state, agent.maxBudgetUsd);
         progress(phase, 'done');
         continue;
       }
@@ -1183,6 +1252,7 @@ export async function run(
       // and any plain project-registered custom phase). The cast carries a custom
       // phase name through the SchemaPhase-typed seam; run-phase resolves its
       // template (<name>.md) and schema (.adw/schemas/<name>.json) by name.
+      const mark = metrics.start();
       const outcome = await deps.runAgentPhase({
         phase: phase as AgentPhase,
         templateArgs: phaseArgs(phase, issue, state, ctx, files, itemLabel),
@@ -1195,6 +1265,11 @@ export async function run(
         ...(agent.forceFenced ? { forceFenced: true } : {}),
       });
       recordUsage(state, outcome.usage);
+      metrics.record(phase, mark, outcome.usage, {
+        attempts: outcome.attempts,
+        model: modelForPhase(phase, agent.runner.id, { cliModel: agent.cliModel, env: deps.env }),
+      });
+      metrics.save();
       const result = outcome.data;
       applyResult(state, phase, result);
       if (phase === 'review' || phase === 'document') {
@@ -1217,10 +1292,11 @@ export async function run(
       }
       state.markDone(phase);
       state.save();
+      assertWithinBudget(state, agent.maxBudgetUsd);
       progress(phase, 'done');
     }
 
-    return await finalizeAndMerge(state, opts, { providerCtx: pctx, issue, agent, progress, providers, config }, deps);
+    return await finalizeAndMerge(state, opts, { providerCtx: pctx, issue, agent, progress, providers, config, metrics }, deps);
   } finally {
     await runner.stop?.();
   }

@@ -42,6 +42,7 @@ describe('runAgentPhase', () => {
       env: { PATH: '/bin' },
     });
     expect(outcome.data).toEqual(GOOD_RESOLVE);
+    expect(outcome.attempts).toBe(1); // clean first parse, no nudge
     expect(runner.requests).toHaveLength(1);
     const req = runner.requests[0]!;
     // Native-schema backend: schema attached, fenced-JSON footer gated OFF.
@@ -112,6 +113,7 @@ describe('runAgentPhase', () => {
       env: {},
     });
     expect(outcome.data.resolved).toBe(2);
+    expect(outcome.attempts).toBe(2); // nudge-retry fired (double-charge signal)
     expect(runner.requests).toHaveLength(2);
     expect(runner.requests[1]!.prompt.endsWith(NUDGE)).toBe(true);
     expect(runner.requests[1]!.transcriptPath.endsWith('transcript-2.log')).toBe(true);

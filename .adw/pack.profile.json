@@ -39,7 +39,7 @@
       },
       {
         "heading": "Verification guidance",
-        "body": "Run `npm run verify` from `adw_sdlc/` for the full local gate. For narrow changes, run the most relevant focused test first, then the full gate before reporting. If a check cannot be run, state exactly why and what command should be run by the maintainer."
+        "body": "Run the most relevant focused test(s) for your change first — e.g. `npx vitest run test/<file>.test.ts` from `adw_sdlc/`. Reserve the full `npm run verify` gate (typecheck, env lint, prompt-pack drift, tests, build) for broad or risky changes and for the final review; the ADW orchestrator runs the canonical gate at finalize, so re-running the whole suite in every phase wastes time and budget. If a check cannot be run, state exactly why and what command the maintainer should run."
       }
     ]
   },
