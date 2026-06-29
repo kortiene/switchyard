@@ -2,70 +2,78 @@
  * E2e coverage for issue #2 acceptance criteria that require a real subprocess.
  *
  * scaffold.test.ts covers the static structure (package.json + README content).
- * These tests cover the runtime behavior: build actually creates dist/, and the
- * cleanup step actually removes it — the filesystem boundary AC2 targets.
+ * These tests cover the runtime behavior AC2 targets: the production build
+ * (`tsc -p tsconfig.build.json`) actually emits its artifact tree, and the
+ * `rm -rf` cleanup actually removes it.
+ *
+ * De-flaked (#41 follow-up): the build is emitted into a per-test temp `outDir`
+ * (mkdtemp) instead of the package-root `dist/`. The shared `dist/` is ALSO
+ * produced by the verify chain's own `build` stage and removed by its
+ * `rm -rf dist`; sharing that one path across parallel test files raced on
+ * `existsSync`. An isolated outDir exercises the same compiler config + the same
+ * `rm -rf` cleanup semantics, deterministically and with no shared-path contention.
  *
  * We intentionally do NOT run `npm run verify` here (circular: npm test is a
- * stage inside verify). Instead we run only the two stages that produce and
- * consume the build artifact.
+ * stage inside verify) — only the build + cleanup stages that touch the artifact.
  */
 
-import { existsSync } from 'node:fs';
-import { rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 const PKG_DIR = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
-const DIST_DIR = join(PKG_DIR, 'dist');
 
-/** Remove dist/ if it exists, to start each test from a clean state. */
-function cleanDist(): void {
-  if (existsSync(DIST_DIR)) {
-    rmSync(DIST_DIR, { recursive: true, force: true });
-  }
-}
+let workDir: string;
+let outDir: string;
+
+beforeEach(() => {
+  // A unique build target per test — no contention with the shared package dist/.
+  workDir = mkdtempSync(join(tmpdir(), 'adw-verify-e2e-'));
+  outDir = join(workDir, 'dist');
+});
+
+afterEach(() => {
+  rmSync(workDir, { recursive: true, force: true });
+});
 
 describe('verify quality-gate — build artifact lifecycle (e2e)', () => {
-  beforeEach(cleanDist);
-  afterEach(cleanDist);
-
   it(
-    'npm run build creates dist/ and rm -rf dist removes it',
+    'tsc build emits the artifact tree and `rm -rf` removes it',
     { timeout: 120_000 },
     () => {
-      expect(existsSync(DIST_DIR), 'dist/ must not exist before build').toBe(false);
+      expect(existsSync(outDir), 'outDir must not exist before build').toBe(false);
 
-      const buildResult = spawnSync('npm', ['run', 'build'], {
-        cwd: PKG_DIR,
-        encoding: 'utf8',
-      });
-      expect(buildResult.status, `npm run build failed:\n${buildResult.stderr}`).toBe(0);
-      expect(existsSync(DIST_DIR), 'dist/ must exist after npm run build').toBe(true);
+      // Same compiler config as `npm run build`, redirected to the isolated outDir.
+      const buildResult = spawnSync(
+        'npx',
+        ['tsc', '-p', 'tsconfig.build.json', '--outDir', outDir],
+        { cwd: PKG_DIR, encoding: 'utf8' },
+      );
+      expect(buildResult.status, `tsc build failed:\n${buildResult.stderr}`).toBe(0);
+      expect(existsSync(outDir), 'outDir must exist after build').toBe(true);
 
-      // This is the exact cleanup command used in scripts.verify
-      const rmResult = spawnSync('rm', ['-rf', 'dist'], {
-        cwd: PKG_DIR,
-        encoding: 'utf8',
-      });
-      expect(rmResult.status, `rm -rf dist failed:\n${rmResult.stderr}`).toBe(0);
-      expect(existsSync(DIST_DIR), 'dist/ must be gone after rm -rf dist (AC2)').toBe(false);
+      // The exact cleanup mechanism scripts.verify uses (`rm -rf <build dir>`).
+      const rmResult = spawnSync('rm', ['-rf', outDir], { cwd: PKG_DIR, encoding: 'utf8' });
+      expect(rmResult.status, `rm -rf failed:\n${rmResult.stderr}`).toBe(0);
+      expect(existsSync(outDir), 'outDir must be gone after rm -rf (AC2)').toBe(false);
     },
   );
 
   it(
-    'npm run build exits non-zero for a broken TypeScript source (fail-fast signal)',
+    'tsc exits non-zero for a broken build (fail-fast signal) and emits nothing',
     { timeout: 60_000 },
     () => {
-      // Passing a non-existent tsconfig forces tsc to exit non-zero, confirming
-      // that the build stage can signal failure so && stops execution.
-      const result = spawnSync('npx', ['tsc', '-p', 'tsconfig.does-not-exist.json'], {
-        cwd: PKG_DIR,
-        encoding: 'utf8',
-      });
+      // A non-existent tsconfig forces tsc to exit non-zero, confirming the build
+      // stage can signal failure so the verify chain's && stops execution.
+      const result = spawnSync(
+        'npx',
+        ['tsc', '-p', 'tsconfig.does-not-exist.json', '--outDir', outDir],
+        { cwd: PKG_DIR, encoding: 'utf8' },
+      );
       expect(result.status, 'tsc with missing config must exit non-zero').not.toBe(0);
-      // dist/ must NOT have been created when the build command fails
-      expect(existsSync(DIST_DIR), 'dist/ must not be created on a failed build').toBe(false);
+      expect(existsSync(outDir), 'outDir must not be created on a failed build').toBe(false);
     },
   );
 });
