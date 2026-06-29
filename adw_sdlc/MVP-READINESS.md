@@ -114,8 +114,11 @@ _Post-MVP: not required for the (A) MVP. Listed for completeness._
   currently *cannot authenticate* (OAuth refresh revoked, possibly account-level —
   PARITY.md "real-issue runs"). Revisit via `OPENAI_API_KEY` (skips the OAuth
   refresh) when (B) is taken up.
-- [ ] ⏳ **pi needs Node ≥ 22.19** (the CI node-20 lane skips it) — bump CI or
-  accept pi is unverified in CI.
+- [ ] ⏳ **pi needs Node ≥ 22.19** — the CI Node-version matrix (#37) now runs a
+  Node-20.19.0 floor leg alongside Node 22, and the 20.19.0 leg cannot load pi
+  (its npm engines floor is `>=22.19.0`, optional dep skipped), so pi is
+  exercised only on the Node-22 leg. That leg runs the mocked suite; a real-issue
+  pi run (live provider key) is still owed — see PARITY.md.
 
 ## 3. Gates that (C) — cutover — adds (post-MVP)
 

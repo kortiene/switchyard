@@ -154,6 +154,16 @@ ADW_TEST_CMD="npm run verify"
 See [`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md) for the live-run
 rationale and command templates.
 
+CI runs `npm run verify` on a **Node-version matrix** (`.github/workflows/verify.yml`):
+the package engines floor **`20.19.0`** (`"engines": { "node": ">=20.19" }`) and
+**`22`** (local-dev line), with `fail-fast: false` so each leg is independent
+signal. The floor leg exists because CI previously only ever ran Node 22, leaving
+the `>=20.19` floor unexercised (issue #37). The `pi` runner requires **Node ≥
+22.19** (its npm package declares `"engines": { "node": ">=22.19.0" }` and is an
+optional dependency), so only the Node-22 leg can exercise pi; the Node-20.19.0
+leg covers the claude/codex/opencode adapters (the suite is fully mocked, so both
+legs are green with no pi binary present).
+
 The individual gates `verify` chains, for running a single stage during
 development:
 
