@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { parseAdwConfig, setAdwConfigForTests } from '../src/config.js';
-import { AdwError, RunnerAuthError } from '../src/errors.js';
+import { AdwError, RunnerAuthError, RunnerTransientError } from '../src/errors.js';
 import type { AgentRunner } from '../src/invoker.js';
 import type { AdwProviders } from '../src/providers.js';
 import {
@@ -318,9 +318,21 @@ describe('ciFixLoop', () => {
     expect(await ciFixLoop(st(), 7, agentCtx(createMockRunner()), cfg, deps)).toBe(true);
   });
 
-  it('returns false on unknown', async () => {
-    const deps = testDeps({ git: { ciStatus: () => ({ state: 'unknown', failingJobs: [] }) } });
+  it('returns false only after a sustained unknown streak, not on the first transient read', async () => {
+    const ciStatus = vi.fn(() => ({ state: 'unknown' as const, failingJobs: [] }));
+    const deps = testDeps({ git: { ciStatus } });
     expect(await ciFixLoop(st(), 7, agentCtx(createMockRunner()), cfg, deps)).toBe(false);
+    expect(ciStatus.mock.calls.length).toBeGreaterThan(3); // settled, not an instant bail
+  });
+
+  it('recovers when a transient unknown read clears to success', async () => {
+    const ciStatus = vi
+      .fn()
+      .mockReturnValueOnce({ state: 'unknown' as const, failingJobs: [] })
+      .mockReturnValueOnce({ state: 'unknown' as const, failingJobs: [] })
+      .mockReturnValue({ state: 'success' as const, failingJobs: [] });
+    const deps = testDeps({ git: { ciStatus } });
+    expect(await ciFixLoop(st(), 7, agentCtx(createMockRunner()), cfg, deps)).toBe(true);
   });
 
   it('settles a persistent empty rollup to success', async () => {
@@ -889,9 +901,12 @@ describe('run() integration', () => {
     );
   });
 
-  it('aborts before merge when a finalize gate fails', async () => {
-    // Extra (non-test) pre-merge gates are configured via ADW_FINALIZE_GATES
-    // in the standalone port; one that returns non-zero must block the merge.
+  it('surfaces the failing output and aborts before merge when a finalize gate cannot be healed', async () => {
+    // Extra (non-test) pre-merge gates are configured via ADW_FINALIZE_GATES;
+    // one that returns non-zero must block the merge. The orchestrator now
+    // surfaces the failing output and gives the agent a bounded chance to fix
+    // it, but when the agent changes nothing it still aborts (never merges red)
+    // — and the thrown error carries the gate output, not a bare "gate failed".
     const runCmd = vi.fn((cmd: readonly string[]) =>
       cmd.join(' ') === 'check:fmt' ? { rc: 1, output: 'fmt diff' } : { rc: 0, output: '' },
     );
@@ -900,13 +915,81 @@ describe('run() integration', () => {
       env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-test', ADW_FINALIZE_GATES: 'check:fmt' },
       issueState: vi.fn().mockReturnValue('OPEN'),
       runCmd,
+      workingTreeDirty: () => false,
       git: { squashMerge },
-      runAgentPhase: agentStub(PHASE_RESULTS),
+      runAgentPhase: agentStub({ ...PHASE_RESULTS, resolve: { resolved: 0, remaining: 0, summary: '' } }),
     });
     await expect(run(5, createMockRunner(), { yes: true, noProgress: true }, deps)).rejects.toThrow(
-      /pre-merge gate failed: check:fmt/,
+      /pre-merge gate failed[\s\S]*check:fmt[\s\S]*fmt diff/,
     );
     expect(squashMerge).not.toHaveBeenCalled();
+  });
+
+  it('heals a fixable finalize gate then merges', async () => {
+    // The lone-formatting-nit case: the gate fails once, the agent fixes the
+    // cause (dirty tree, resolved > 0), the re-run passes, and the merge
+    // proceeds — instead of a whole passing run being thrown away by a gate
+    // that dies silently on the first non-zero exit.
+    let fmtCalls = 0;
+    const runCmd = vi.fn((cmd: readonly string[]) => {
+      if (cmd.join(' ') === 'check:fmt') {
+        fmtCalls += 1;
+        return fmtCalls === 1 ? { rc: 1, output: 'fmt diff' } : { rc: 0, output: '' };
+      }
+      return { rc: 0, output: '' };
+    });
+    const squashMerge = vi.fn(() => ({ ok: true, error: null }));
+    const resolvePrompts: string[] = [];
+    const deps = testDeps({
+      env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-test', ADW_FINALIZE_GATES: 'check:fmt' },
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValue('CLOSED'),
+      runCmd,
+      workingTreeDirty: () => true,
+      git: { squashMerge },
+      runAgentPhase: agentStub(
+        { ...PHASE_RESULTS, resolve: { resolved: 1, remaining: 0, summary: '' } },
+        (o) => {
+          if (o.phase === 'resolve') {
+            resolvePrompts.push(String(o.templateArgs[0]));
+          }
+        },
+      ),
+    });
+    const rc = await run(5, createMockRunner(), { yes: true, noProgress: true, allowDirty: true }, deps);
+    expect(rc).toBe(0);
+    expect(squashMerge).toHaveBeenCalled();
+    expect(fmtCalls).toBeGreaterThanOrEqual(2); // failed, healed, re-checked green
+    expect(resolvePrompts[0]).toContain('check:fmt'); // agent got the gate + its output
+  });
+
+  it('retries a phase that hits a transient provider error, then continues to merge', async () => {
+    // A momentary API 5xx in one phase (review, historically) must not throw
+    // away a passing run: the phase is retried with backoff and the pipeline
+    // continues. Backoff sleep is the injected no-op stub, so this is instant.
+    let reviewCalls = 0;
+    const runAgentPhaseStub = (async (opts: Parameters<typeof runAgentPhase>[0]) => {
+      if (opts.phase === 'review') {
+        reviewCalls += 1;
+        if (reviewCalls === 1) {
+          throw new RunnerTransientError('claude', 'review', 'Internal server error');
+        }
+      }
+      const data = PHASE_RESULTS[opts.phase];
+      if (data === undefined) {
+        throw new Error(`unexpected phase: ${opts.phase}`);
+      }
+      return { data, usage: {}, attempts: 1 };
+    }) as typeof runAgentPhase;
+    const squashMerge = vi.fn(() => ({ ok: true, error: null }));
+    const deps = testDeps({
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValue('CLOSED'),
+      git: { squashMerge },
+      runAgentPhase: runAgentPhaseStub,
+    });
+    const rc = await run(5, createMockRunner(), { yes: true, noProgress: true, transientBackoffMs: 0 }, deps);
+    expect(rc).toBe(0);
+    expect(reviewCalls).toBe(2); // failed transiently once, retried, then succeeded
+    expect(squashMerge).toHaveBeenCalled();
   });
 
   it('persists classify prompt.txt and transcript.log on the structured-call path', async () => {
@@ -923,12 +1006,17 @@ describe('run() integration', () => {
     });
   });
 
-  it('retries a normal claude runner phase without ANTHROPIC_API_KEY after runner auth failure', async () => {
+  it('retries a normal claude runner phase without pay-as-you-go Anthropic auth after runner auth failure', async () => {
     const order: string[] = [];
     const seenEnvs: Array<Record<string, string>> = [];
     let planAttempts = 0;
     const deps = testDeps({
-      env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-empty' },
+      env: {
+        PATH: '/bin',
+        ANTHROPIC_API_KEY: 'sk-ant-empty',
+        ANTHROPIC_AUTH_TOKEN: 'payg-token-empty',
+        CLAUDE_CODE_OAUTH_TOKEN: 'subscription-token',
+      },
       issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
       runAgentPhase: (async (opts: Parameters<typeof runAgentPhase>[0]) => {
         order.push(opts.phase);
@@ -936,7 +1024,11 @@ describe('run() integration', () => {
         if (opts.phase === 'plan') {
           planAttempts += 1;
           if (planAttempts === 1) {
-            throw new RunnerAuthError('claude', 'plan', 'Claude Code used ANTHROPIC_API_KEY and the Anthropic API credit balance is too low');
+            throw new RunnerAuthError(
+              'claude',
+              'plan',
+              'Claude Code used ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN and the Anthropic API credit balance is too low',
+            );
           }
         }
         const data = PHASE_RESULTS[opts.phase];
@@ -951,8 +1043,16 @@ describe('run() integration', () => {
 
     expect(rc).toBe(0);
     expect(order).toEqual(['plan', 'plan', 'implement', 'tests', 'review']);
-    expect(seenEnvs[0]).toHaveProperty('ANTHROPIC_API_KEY', 'sk-ant-empty');
-    expect(seenEnvs.slice(1).every((env) => !Object.prototype.hasOwnProperty.call(env, 'ANTHROPIC_API_KEY'))).toBe(true);
+    expect(seenEnvs[0]).toMatchObject({
+      ANTHROPIC_API_KEY: 'sk-ant-empty',
+      ANTHROPIC_AUTH_TOKEN: 'payg-token-empty',
+      CLAUDE_CODE_OAUTH_TOKEN: 'subscription-token',
+    });
+    for (const env of seenEnvs.slice(1)) {
+      expect(env).not.toHaveProperty('ANTHROPIC_API_KEY');
+      expect(env).not.toHaveProperty('ANTHROPIC_AUTH_TOKEN');
+      expect(env).toHaveProperty('CLAUDE_CODE_OAUTH_TOKEN', 'subscription-token');
+    }
   });
 
   it('falls back to the runner when shared-SDK classify hits an Anthropic API error', async () => {
@@ -962,7 +1062,12 @@ describe('run() integration', () => {
       throw new StructuredCallApiError(400, 'Your credit balance is too low to access the Anthropic API.');
     });
     const deps = testDeps({
-      env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-test' },
+      env: {
+        PATH: '/bin',
+        ANTHROPIC_API_KEY: 'sk-ant-test',
+        ANTHROPIC_AUTH_TOKEN: 'payg-token-empty',
+        CLAUDE_CODE_OAUTH_TOKEN: 'subscription-token',
+      },
       issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
       classify,
       runAgentPhase: agentStub(
@@ -980,9 +1085,11 @@ describe('run() integration', () => {
     expect(classify).toHaveBeenCalledTimes(1);
     expect(order).toEqual(['classify', 'plan', 'implement', 'tests', 'review']);
     expect(seenEnvs).toHaveLength(5);
-    expect(
-      seenEnvs.every((env) => !Object.prototype.hasOwnProperty.call(env, 'ANTHROPIC_API_KEY')),
-    ).toBe(true);
+    for (const env of seenEnvs) {
+      expect(env).not.toHaveProperty('ANTHROPIC_API_KEY');
+      expect(env).not.toHaveProperty('ANTHROPIC_AUTH_TOKEN');
+      expect(env).toHaveProperty('CLAUDE_CODE_OAUTH_TOKEN', 'subscription-token');
+    }
     expect(AdwState.load(loadedId())?.issueClass).toBe('fix');
   });
 

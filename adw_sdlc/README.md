@@ -104,14 +104,14 @@ For example, an unfunded API account produces a progress note like:
 
 The same issue can appear later on a resumed run: Claude Code may print
 `Credit balance is too low` for `plan`/`implement`/other runner phases because
-`ANTHROPIC_API_KEY` takes precedence over a local `claude login`. The
-orchestrator recognizes this as runner authentication/account failure (not a
-JSON parse failure), removes `ANTHROPIC_API_KEY` for the `claude` runner, and
-retries that phase once so Claude Code can use `claude login` / OAuth
-subscription auth instead. You can still choose the runner path up front by
-setting `ADW_CLASSIFY_ON_RUNNER=1`; see
-[`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md) for the subscription run
-template.
+pay-as-you-go Anthropic auth (`ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`)
+takes precedence over a local `claude login`. The orchestrator recognizes this
+as runner authentication/account failure (not a JSON parse failure), removes
+those pay-as-you-go credentials for the `claude` runner, and retries that phase
+once so Claude Code can use `claude login` / OAuth subscription auth instead.
+You can still choose the runner path up front by setting
+`ADW_CLASSIFY_ON_RUNNER=1`; see [`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md)
+for the subscription run template.
 
 ## Configuration
 

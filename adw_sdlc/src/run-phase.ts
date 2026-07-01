@@ -19,7 +19,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { parseJson, projectRoot } from './common.js';
-import { AdwError, RunnerAuthError } from './errors.js';
+import { AdwError, RunnerAuthError, RunnerTransientError } from './errors.js';
 import { PHASE_TIMEOUT_ABORT_REASON } from './invoker.js';
 import type { AgentRunner, PhaseResult, PhaseUsage } from './invoker.js';
 import { modelForPhase } from './models.js';
@@ -32,6 +32,8 @@ import type { z } from 'zod';
 /** Verbatim from adw/_phases.py:472. */
 export const NUDGE =
   '\n\nRespond with ONLY the required JSON object in a ```json fenced block, nothing else.';
+
+const CLAUDE_PAYG_AUTH_ENV_KEYS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const;
 
 export interface RunAgentPhaseOptions {
   phase: SchemaPhase;
@@ -173,6 +175,16 @@ export async function runAgentPhase<P extends SchemaPhase>(
         if (secondAuthFailure !== null) {
           throw new RunnerAuthError(runner.id, phase, secondAuthFailure, { cause: secondErr });
         }
+        // A transient provider error (API 5xx / overload) is not a prompt
+        // problem — the nudge could not have fixed it. Classify it so the
+        // orchestrator retries the phase with backoff instead of aborting the
+        // whole run on what looks like an unparseable reply. Check both attempts
+        // (the blip may have spanned the first and the nudge).
+        const transient =
+          runnerTransientFailureReason(second) ?? runnerTransientFailureReason(first);
+        if (transient !== null) {
+          throw new RunnerTransientError(runner.id, phase, transient, { cause: secondErr });
+        }
       }
       throw secondErr;
     }
@@ -196,13 +208,50 @@ function runnerAuthFailureReason(
     return null;
   }
   const text = result.transcriptText;
+  const paygKeys = CLAUDE_PAYG_AUTH_ENV_KEYS.filter((key) => Object.prototype.hasOwnProperty.call(env, key));
   if (/credit balance is too low/i.test(text)) {
-    return Object.prototype.hasOwnProperty.call(env, 'ANTHROPIC_API_KEY')
-      ? 'Claude Code used ANTHROPIC_API_KEY and the Anthropic API credit balance is too low'
+    return paygKeys.length > 0
+      ? `Claude Code used ${paygKeys.join(', ')} and the Anthropic API credit balance is too low`
       : 'Anthropic API credit balance is too low';
   }
-  if (/ANTHROPIC_API_KEY[\s\S]*takes precedence[\s\S]*(?:claude\.ai login|login)/i.test(text)) {
-    return 'Claude Code is using ANTHROPIC_API_KEY instead of claude.ai login';
+  if (/(?:ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|auth source)[\s\S]*takes precedence[\s\S]*(?:claude\.ai login|login)/i.test(text)) {
+    return paygKeys.length > 0
+      ? `Claude Code is using ${paygKeys.join(', ')} instead of claude.ai login`
+      : 'Claude Code is using an auth source instead of claude.ai login';
+  }
+  // A logged-out subscription surfaces as "Not logged in · Please run /login"
+  // and otherwise falls through as a confusing JSON-parse failure. Classify it
+  // so the operator gets an actionable message (re-login, then resume) instead.
+  if (/not logged in|please run\s*`?\/login`?|run\s+`?\/login`?\s+to (?:log|sign) in/i.test(text)) {
+    return 'Claude Code is not logged in (run `claude` then /login, or restore ANTHROPIC_API_KEY)';
+  }
+  return null;
+}
+
+/**
+ * Detect a transient provider failure in a runner transcript — an API 5xx,
+ * "internal server error", overload/529, or a gateway error the SDK surfaced
+ * instead of a reply. Returns the matched phrase (for the error message) or
+ * null. Deliberately narrow: it must not match an agent merely *discussing* an
+ * error, so each pattern is anchored on wording an infrastructure failure emits.
+ * Auth failures are classified separately and take precedence over this.
+ */
+function runnerTransientFailureReason(result: PhaseResult): string | null {
+  const text = result.transcriptText;
+  const patterns: readonly RegExp[] = [
+    /internal server error/i,
+    /service unavailable/i,
+    /bad gateway/i,
+    /gateway time-?out/i,
+    /overloaded(?:_error)?/i,
+    /\b(?:api error|http error|http|status(?:\s*code)?|error)[\s:#]+5(?:00|02|03|04|29)\b/i,
+    /\b529\b[^\n]{0,40}?(?:overloaded|too many|rate)/i,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m) {
+      return m[0].trim();
+    }
   }
   return null;
 }

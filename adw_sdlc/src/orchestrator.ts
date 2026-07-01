@@ -25,7 +25,7 @@ import { join } from 'node:path';
 import { projectRoot, setProjectRoot, shellSplit } from './common.js';
 import { DEFAULT_ADW_CONFIG, getAdwConfig, isClosedWorkItemState, type AdwConfig } from './config.js';
 import { ENV_ALIASES, readEnvAlias, readEnvFlag } from './env-vars.js';
-import { AdwError, RunnerAuthError } from './errors.js';
+import { AdwError, RunnerAuthError, RunnerTransientError } from './errors.js';
 import { safeSubprocessEnv } from './env.js';
 import { assumeYes, capture, confirm, note, postProgress, type Captured } from './exec.js';
 import * as git from './git.js';
@@ -74,6 +74,15 @@ export const MAX_OUTPUT_CHARS = 8000;
 const NO_CHECKS_SETTLE_POLLS = 3;
 
 /**
+ * How many consecutive `unknown` pipeline reads to tolerate before giving up.
+ * A single transient `gh`/API hiccup (a 5xx, a rate-limit, a momentary network
+ * blip) must not abort an otherwise-mergeable PR: the previous behavior turned
+ * one bad read into "could not determine CI status; refusing to merge". Reset
+ * whenever a definite status is read, so only a sustained outage bails.
+ */
+const UNKNOWN_STATUS_SETTLE_POLLS = 3;
+
+/**
  * Default test gate. Empty in this standalone port — HealthTech has not yet
  * chosen its stack/test command (backlog #1), so nothing is assumed. Configure
  * a real command via `--test-cmd` / `ADW_TEST_CMD` once the stack lands;
@@ -110,6 +119,10 @@ export interface RunOptions {
   maxCiFix?: number;
   ciPollIntervalMs?: number;
   ciMaxPolls?: number;
+  /** Bounded backoff retries for a transient runner/provider error (API 5xx). */
+  maxTransientRetries?: number;
+  /** Base delay (ms) for transient backoff; doubles each attempt. */
+  transientBackoffMs?: number;
   testCmd?: string;
   /** --model override; per-phase ADW_MODEL_<PHASE> still applies under it. */
   model?: string;
@@ -150,6 +163,8 @@ function resolveOptions(options: RunOptions): ResolvedOptions {
     maxCiFix: options.maxCiFix ?? 3,
     ciPollIntervalMs: options.ciPollIntervalMs ?? 30_000,
     ciMaxPolls: options.ciMaxPolls ?? 40,
+    maxTransientRetries: options.maxTransientRetries ?? 3,
+    transientBackoffMs: options.transientBackoffMs ?? 2_000,
     testCmd: options.testCmd ?? getAdwConfig().commands.defaultTestCommand,
     model: options.model ?? '',
     timeoutMs: options.timeoutMs ?? 0,
@@ -356,13 +371,68 @@ function envWithoutKey(env: Record<string, string>, key: string): Record<string,
   return next;
 }
 
-function canRetryWithoutAnthropicApiKey(agent: AgentCtx): boolean {
-  return agent.runner.id === 'claude' && Object.prototype.hasOwnProperty.call(agent.env, 'ANTHROPIC_API_KEY');
+const CLAUDE_PAYG_AUTH_ENV_KEYS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const;
+
+function claudePaygAuthKeys(agent: AgentCtx): string[] {
+  if (agent.runner.id !== 'claude') {
+    return [];
+  }
+  return CLAUDE_PAYG_AUTH_ENV_KEYS.filter((key) => Object.prototype.hasOwnProperty.call(agent.env, key));
 }
 
-function stripAnthropicApiKeyForClaude(agent: AgentCtx): void {
-  agent.env = envWithoutKey(agent.env, 'ANTHROPIC_API_KEY');
+function stripClaudePaygAuth(agent: AgentCtx): string[] {
+  const keys = claudePaygAuthKeys(agent);
+  for (const key of keys) {
+    agent.env = envWithoutKey(agent.env, key);
+  }
+  return keys;
 }
+
+/**
+ * Run an agent-phase invocation with bounded exponential backoff on a
+ * {@link RunnerTransientError} (API 5xx / overload). A transient provider error
+ * is not the agent's fault and no prompt change fixes it, so re-running the same
+ * call after a short wait is the correct response — this stops a passing
+ * implementation from being thrown away because the review (or any) phase
+ * happened to hit a momentary API 500. Any other error (including a persistent
+ * transient one after the budget is spent) propagates unchanged.
+ */
+async function withTransientRetry<T>(
+  invoke: () => Promise<T>,
+  config: {
+    retries: number;
+    baseDelayMs: number;
+    phase: string;
+    sleep: (ms: number) => Promise<void>;
+    progress?: ProgressFn;
+    note?: (message: string) => void;
+  },
+): Promise<T> {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await invoke();
+    } catch (err) {
+      if (!(err instanceof RunnerTransientError) || attempt >= config.retries) {
+        throw err;
+      }
+      attempt += 1;
+      const delayMs = config.baseDelayMs * 2 ** (attempt - 1);
+      const message =
+        `${config.phase} phase hit a transient provider error (${err.reason}); ` +
+        `retry ${attempt}/${config.retries} in ${Math.round(delayMs / 1000)}s`;
+      config.note?.(message);
+      config.progress?.(config.phase, message);
+      if (delayMs > 0) {
+        await config.sleep(delayMs);
+      }
+    }
+  }
+}
+
+/** Default transient-retry budget for the resolve/patch/ci-fix agent loops. */
+const INVOKE_AGENT_TRANSIENT_RETRIES = 3;
+const INVOKE_AGENT_TRANSIENT_BACKOFF_MS = 2_000;
 
 // --- helpers (unit-testable) ------------------------------------------------------
 
@@ -584,10 +654,14 @@ export async function ciFixLoop(
   // the byte-for-byte semantics parity (D4); change both engines together
   // post-cutover if it ever matters in practice.
   let nonePolls = 0;
+  let unknownPolls = 0;
   const providers = providersForDeps(deps);
   const ctx = providerContext(config.ghBin, config.repo);
   for (;;) {
     const status = providers.changeRequests.pipelineStatus(ctx, pr);
+    if (status.state !== 'unknown') {
+      unknownPolls = 0; // only a *sustained* unknown streak should bail
+    }
     if (status.state === 'success') {
       config.progress('ci-fix', 'CI is green');
       return true;
@@ -607,8 +681,18 @@ export async function ciFixLoop(
       continue;
     }
     if (status.state === 'unknown') {
-      config.progress('ci-fix', 'could not determine CI status');
-      return false;
+      // A transient read failure, not a verdict. Settle briefly (a real outage
+      // still bails after the streak) rather than refusing an mergeable PR.
+      unknownPolls += 1;
+      if (unknownPolls > UNKNOWN_STATUS_SETTLE_POLLS) {
+        config.progress('ci-fix', `could not determine CI status after ${UNKNOWN_STATUS_SETTLE_POLLS} retries`);
+        return false;
+      }
+      config.progress('ci-fix', 'CI status unknown (transient); retrying');
+      if (config.pollIntervalMs > 0) {
+        await deps.sleep(config.pollIntervalMs);
+      }
+      continue;
     }
     if (status.state === 'pending') {
       polls += 1;
@@ -658,6 +742,13 @@ export async function ciFixLoop(
     if (ok) {
       providers.vcs.push(state.branchName ?? '');
       polls = 0; // a new commit kicks off a fresh CI run; reset the budget
+      // Settle before re-reading: immediately after the push the forge still
+      // reports the *superseded* run's `failure`, which would spuriously burn a
+      // fix attempt on an already-corrected tree (the agent then "resolves
+      // nothing" and the merge is refused even though the new run goes green).
+      if (config.pollIntervalMs > 0) {
+        await deps.sleep(config.pollIntervalMs);
+      }
     }
   }
 }
@@ -682,15 +773,26 @@ async function invokeAgent<P extends 'resolve' | 'patch'>(
       ...(agent.maxBudgetUsd !== undefined ? { maxBudgetUsd: agent.maxBudgetUsd } : {}),
       ...(agent.forceFenced ? { forceFenced: true } : {}),
     });
-  try {
-    return await invoke();
-  } catch (err) {
-    if (!(err instanceof RunnerAuthError) || !canRetryWithoutAnthropicApiKey(agent)) {
-      throw err;
+  const invokeWithAuthFallback = async (): Promise<AgentPhaseOutcome<P>> => {
+    try {
+      return await invoke();
+    } catch (err) {
+      if (!(err instanceof RunnerAuthError)) {
+        throw err;
+      }
+      const strippedKeys = stripClaudePaygAuth(agent);
+      if (strippedKeys.length === 0) {
+        throw err;
+      }
+      return await invoke();
     }
-    stripAnthropicApiKeyForClaude(agent);
-    return await invoke();
-  }
+  };
+  return withTransientRetry(invokeWithAuthFallback, {
+    retries: INVOKE_AGENT_TRANSIENT_RETRIES,
+    baseDelayMs: INVOKE_AGENT_TRANSIENT_BACKOFF_MS,
+    phase,
+    sleep: deps.sleep,
+  });
 }
 
 // --- phase argument assembly -----------------------------------------------------
@@ -933,10 +1035,46 @@ async function finalizeAndMerge(
     .map((g) => g.trim())
     .filter((g) => g.length > 0);
   for (const gate of finalizeGates(opts.testCmd, extraGates)) {
-    const { rc } = deps.runCmd(shellSplit(gate));
-    if (rc !== 0) {
-      progress('finalize', `gate failed: ${gate}; not merging`);
-      throw new AdwError(`pre-merge gate failed: ${gate}`);
+    let { rc, output } = deps.runCmd(shellSplit(gate));
+    let healAttempt = 0;
+    while (rc !== 0) {
+      // Surface WHY. A bare "gate failed: scripts/verify.sh" is unactionable —
+      // a one-line `cargo fmt` nit reads identically to a real test failure.
+      progress('finalize', `gate failed: ${gate}\n${truncate(output)}`);
+      if (healAttempt >= opts.maxResolve) {
+        throw new AdwError(
+          `pre-merge gate failed after ${opts.maxResolve} fix attempt(s): ${gate}\n${truncate(output)}`,
+        );
+      }
+      healAttempt += 1;
+      // Delegate a bounded fix to the agent (it can run the formatter/linter the
+      // gate enforces). The gate runs BEFORE commit, so the fix lands in the
+      // same commit — this is the mechanical salvage a fmt-only failure needs,
+      // and it is the same "fix then re-check" the CI-fix loop already does.
+      progress('finalize', `attempting to heal the gate; attempt ${healAttempt}/${opts.maxResolve}`);
+      const mark = metrics?.start() ?? 0;
+      const outcome = await invokeAgent(
+        deps,
+        'resolve',
+        [
+          `A pre-merge gate failed. Command: ${gate}\n\nOutput:\n${truncate(output)}\n\n` +
+            `Fix the underlying cause in the working tree so the command exits 0. ` +
+            `Do not weaken, skip, or edit the gate itself.`,
+        ],
+        state,
+        agent,
+      );
+      recordUsage(state, outcome.usage);
+      metrics?.record('finalize', mark, outcome.usage, {
+        attempts: outcome.attempts,
+        model: modelForPhase('resolve', agent.runner.id, { cliModel: agent.cliModel, env: deps.env }),
+      });
+      metrics?.save();
+      assertWithinBudget(state, agent.maxBudgetUsd);
+      if (outcome.data.resolved === 0 && !providers.vcs.workingTreeDirty()) {
+        throw new AdwError(`pre-merge gate failed and the agent changed nothing: ${gate}\n${truncate(output)}`);
+      }
+      ({ rc, output } = deps.runCmd(shellSplit(gate)));
     }
   }
   progress('finalize', 'all pre-merge gates green');
@@ -1300,18 +1438,14 @@ export async function run(
           if (!(err instanceof StructuredCallApiError)) {
             throw err;
           }
-          const strippedApiKey =
-            runner.id === 'claude' && Object.prototype.hasOwnProperty.call(agent.env, 'ANTHROPIC_API_KEY');
-          if (strippedApiKey) {
-            // A depleted pay-as-you-go key can make Claude Code prefer the same
-            // failing API account over its `claude login`/OAuth subscription.
-            // Remove only that key on this fallback path so the runner can use
-            // its subscription auth for classify and the remaining phases.
-            agent.env = envWithoutKey(agent.env, 'ANTHROPIC_API_KEY');
-          }
+          // A depleted pay-as-you-go credential can make Claude Code prefer the
+          // same failing API account over its `claude login`/OAuth subscription.
+          // Remove pay-as-you-go Anthropic auth on this fallback path so the
+          // runner can use subscription auth for classify and later phases.
+          const strippedKeys = stripClaudePaygAuth(agent);
           const fallback =
             `shared Anthropic API classify failed (${err.reason}); falling back to ${runner.id} runner` +
-            (strippedApiKey ? ' without ANTHROPIC_API_KEY' : '');
+            (strippedKeys.length > 0 ? ` without ${strippedKeys.join(', ')}` : '');
           note(`classify: ${fallback}`);
           progress(phase, fallback);
           // Do not record failed shared-SDK usage or mark the phase done; the
@@ -1338,19 +1472,34 @@ export async function run(
           ...(agent.maxBudgetUsd !== undefined ? { maxBudgetUsd: agent.maxBudgetUsd } : {}),
           ...(agent.forceFenced ? { forceFenced: true } : {}),
         });
-      let outcome: Awaited<ReturnType<typeof deps.runAgentPhase>>;
-      try {
-        outcome = await invokeCurrentPhase();
-      } catch (err) {
-        if (!(err instanceof RunnerAuthError) || !canRetryWithoutAnthropicApiKey(agent)) {
-          throw err;
+      // Auth-strip fallback (depleted PAYG key → subscription login) nested
+      // inside the transient backoff, so a phase recovers from either a bad
+      // auth precedence or a momentary API 5xx without aborting the run.
+      const invokeWithAuthFallback = async (): Promise<Awaited<ReturnType<typeof deps.runAgentPhase>>> => {
+        try {
+          return await invokeCurrentPhase();
+        } catch (err) {
+          if (!(err instanceof RunnerAuthError)) {
+            throw err;
+          }
+          const strippedKeys = stripClaudePaygAuth(agent);
+          if (strippedKeys.length === 0) {
+            throw err;
+          }
+          const fallback = `${phase} phase ${agent.runner.id} runner auth failed (${err.reason}); retrying without ${strippedKeys.join(', ')}`;
+          note(fallback);
+          progress(phase, fallback);
+          return await invokeCurrentPhase();
         }
-        stripAnthropicApiKeyForClaude(agent);
-        const fallback = `${phase} phase ${agent.runner.id} runner auth failed (${err.reason}); retrying without ANTHROPIC_API_KEY`;
-        note(fallback);
-        progress(phase, fallback);
-        outcome = await invokeCurrentPhase();
-      }
+      };
+      const outcome = await withTransientRetry(invokeWithAuthFallback, {
+        retries: opts.maxTransientRetries,
+        baseDelayMs: opts.transientBackoffMs,
+        phase,
+        progress,
+        note,
+        sleep: deps.sleep,
+      });
       recordUsage(state, outcome.usage);
       metrics.record(phase, mark, outcome.usage, {
         attempts: outcome.attempts,
