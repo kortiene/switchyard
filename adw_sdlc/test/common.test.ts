@@ -44,6 +44,58 @@ describe('parseJson', () => {
     expect(parseJson('the answer is {"a": 1} as shown')).toEqual({ a: 1 });
   });
 
+  it('prefers an explicit json fence over later-looking generic markdown fences', () => {
+    const text = [
+      'report',
+      '```',
+      'tree',
+      '```',
+      '---',
+      '### Current Project Status',
+      '```json',
+      '{"tests_added": true, "summary": "ok"}',
+      '```',
+    ].join('\n');
+    expect(parseJson(text, 'object')).toEqual({ tests_added: true, summary: 'ok' });
+  });
+
+  it('selects the json contract block past tagged+bare fences (issue #35 tests-phase shape)', () => {
+    // Reproduces agents/2493f037/tests/transcript-2.log: a long Markdown report
+    // with toml/bash/bare fences and a trailing `---`-led section BEFORE the
+    // final ```json contract block. The old single-regex parser grabbed the
+    // wrong "last fence" (body starting with `---`) and threw
+    // "No number after minus sign in JSON".
+    const text = [
+      'Here is the layout:',
+      '```toml',
+      '[workspace]',
+      'members = ["a", "b"]',
+      '```',
+      'Run it with:',
+      '```bash',
+      'cargo test',
+      '```',
+      'Tree:',
+      '```',
+      'crates/',
+      '```',
+      '',
+      '---',
+      '',
+      '### 14. **Current Project Status**',
+      '',
+      '**Phase:** 0 — spike',
+      '',
+      '```json',
+      '{"tests_added": true, "summary": "Added 14 conformance tests"}',
+      '```',
+    ].join('\n');
+    expect(parseJson(text, 'object')).toEqual({
+      tests_added: true,
+      summary: 'Added 14 conformance tests',
+    });
+  });
+
   it('enforces the expected top-level type', () => {
     expect(() => parseJson('[1, 2]', 'object')).toThrow(AdwError);
     expect(() => parseJson('{"a": 1}', 'array')).toThrow(AdwError);

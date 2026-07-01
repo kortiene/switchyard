@@ -310,7 +310,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 744 tests, 51 files)
+# 3) Full test suite (current: 753 tests, 51 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -1990,7 +1990,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **744 passing across 51 files**
+Test count baseline after this session: **753 passing across 51 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -2024,7 +2024,10 @@ integration tests for `metrics.json`, the main-chain soft budget abort, and the
 ci-fix soft budget abort) — cost/duration work, §8ah; +59 for explicit external
 project root (`test/project-root.test.ts` +49 — new file, `test/project-root-e2e.test.ts`
 +6 — new file, `test/credit-balance-resume.regression.test.ts` +3 — new file,
-`test/run-phase.test.ts` +1 credit-balance auth error) — issue #56, §8ai). The §8v refactor (issue #5
+`test/run-phase.test.ts` +1 credit-balance auth error) — issue #56, §8ai; +6 for the
+orchestrator resilience fixes — transient-provider backoff retry, CI unknown/post-push
+settle tolerance, and finalize-gate surface+heal (`test/run-phase.test.ts` +3,
+`test/orchestrator.test.ts` +3), §8aj). The §8v refactor (issue #5
 — split parity-rate classification from rendering) added `tools/parity-rate-core.ts`
 (pure core module, no new test file) and extended `test/parity-rate.test.ts` with
 35 direct unit tests of the extracted core (39 tests total in the file, up from 4

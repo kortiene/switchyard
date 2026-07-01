@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { AdwError, RunnerAuthError } from '../src/errors.js';
+import { AdwError, RunnerAuthError, RunnerTransientError } from '../src/errors.js';
 import { NUDGE, runAgentPhase } from '../src/run-phase.js';
 import { createMockRunner } from '../src/runners/runner-mock.js';
 import { AdwState, setAgentsDir } from '../src/state.js';
@@ -170,17 +170,84 @@ describe('runAgentPhase', () => {
       id: 'claude',
       script: () => ({ ok: false, rc: 1, transcriptText: 'Credit balance is too low' }),
     });
-    await expect(
-      runAgentPhase({
-        phase: 'plan',
-        templateArgs: ['56', 'T', 'B', '', 'src/x.ts', 'GitHub issue'],
-        state,
-        runner,
-        env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-empty' },
-      }),
-    ).rejects.toThrow(RunnerAuthError);
+    const promise = runAgentPhase({
+      phase: 'plan',
+      templateArgs: ['56', 'T', 'B', '', 'src/x.ts', 'GitHub issue'],
+      state,
+      runner,
+      env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-empty' },
+    });
+    await expect(promise).rejects.toThrow(RunnerAuthError);
+    await expect(promise).rejects.toThrow(/ANTHROPIC_API_KEY/);
     expect(runner.requests).toHaveLength(1); // auth/account failures do not benefit from a JSON nudge
     expect(existsSync(join(tmp, 'a1b2c3d4', 'plan', 'transcript-2.log'))).toBe(false);
+  });
+
+  it('names ANTHROPIC_AUTH_TOKEN when that pay-as-you-go auth source shadows claude login', async () => {
+    const runner = createMockRunner({
+      id: 'claude',
+      script: () => ({ ok: false, rc: 1, transcriptText: 'Credit balance is too low' }),
+    });
+    const promise = runAgentPhase({
+      phase: 'plan',
+      templateArgs: ['56', 'T', 'B', '', 'src/x.ts', 'GitHub issue'],
+      state,
+      runner,
+      env: { PATH: '/bin', ANTHROPIC_AUTH_TOKEN: 'payg-token-empty' },
+    });
+    await expect(promise).rejects.toThrow(RunnerAuthError);
+    await expect(promise).rejects.toThrow(/ANTHROPIC_AUTH_TOKEN/);
+    expect(runner.requests).toHaveLength(1);
+  });
+
+  it('classifies a logged-out ("Not logged in / /login") transcript as auth failure with NO nudge', async () => {
+    // A logged-out subscription otherwise falls through as a confusing JSON
+    // parse error mid-pipeline; classify it (no key needed) so the operator
+    // gets an actionable message and no wasted nudge.
+    const runner = createMockRunner({
+      id: 'claude',
+      script: () => ({ ok: false, rc: 1, transcriptText: 'Not logged in · Please run /login' }),
+    });
+    const promise = runAgentPhase({
+      phase: 'plan',
+      templateArgs: ['56', 'T', 'B', '', 'src/x.ts', 'GitHub issue'],
+      state,
+      runner,
+      env: { PATH: '/bin' }, // no ANTHROPIC_* key: detection must not depend on one
+    });
+    await expect(promise).rejects.toThrow(RunnerAuthError);
+    await expect(promise).rejects.toThrow(/not logged in/i);
+    expect(runner.requests).toHaveLength(1); // no nudge on an auth failure
+    expect(existsSync(join(tmp, 'a1b2c3d4', 'plan', 'transcript-2.log'))).toBe(false);
+  });
+
+  it('classifies a persistent transient API 5xx as RunnerTransientError (after the nudge)', async () => {
+    // A momentary provider 500 is not a prompt problem — a nudge cannot fix it.
+    // When both the first attempt and the nudge hit it, escalate to a typed
+    // transient error the orchestrator retries with backoff, rather than killing
+    // the run as an unparseable reply.
+    const runner = createMockRunner({
+      id: 'claude',
+      caps: { nativeSchema: false },
+      script: () => ({ transcriptText: "I'll review the code.\nAPI Error: Internal server error" }),
+    });
+    await expect(
+      runAgentPhase({ phase: 'review', templateArgs: ['x'], state, runner, env: {} }),
+    ).rejects.toThrow(RunnerTransientError);
+    expect(runner.requests).toHaveLength(2); // first attempt + one nudge, then escalate
+  });
+
+  it('recovers transparently when a transient blip clears on the nudge retry', async () => {
+    const runner = createMockRunner({
+      caps: { nativeSchema: false },
+      script: (_req, call) =>
+        call === 0
+          ? { transcriptText: 'API Error: 503 Service Unavailable' }
+          : { transcriptText: '```json\n{"resolved": 1, "remaining": 0}\n```' },
+    });
+    const outcome = await runAgentPhase({ phase: 'resolve', templateArgs: ['x'], state, runner, env: {} });
+    expect(outcome.data.resolved).toBe(1);
+    expect(outcome.attempts).toBe(2); // the existing nudge doubled as the quick retry
   });
 
   it('fails after the second parse failure', async () => {

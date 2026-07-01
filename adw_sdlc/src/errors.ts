@@ -53,3 +53,26 @@ export class RunnerAuthError extends AdwError {
     this.reason = reason;
   }
 }
+
+/**
+ * A runner reached its provider but the provider failed transiently — an API
+ * 5xx / "internal server error" / overload (529) surfaced instead of phase JSON.
+ * Unlike {@link RunnerAuthError} this is not account state, and unlike a plain
+ * parse failure a prompt nudge cannot fix it (the reply never arrived). The
+ * caller's correct response is a bounded backoff retry, so this must not be
+ * reported as a generic JSON parse failure (which killed a run mid-pipeline on
+ * a passing implementation before this type existed).
+ */
+export class RunnerTransientError extends AdwError {
+  readonly runner: RunnerId;
+  readonly phase: string;
+  readonly reason: string;
+
+  constructor(runner: RunnerId, phase: string, reason: string, options?: ErrorOptions) {
+    super(`${phase} phase ${runner} runner hit a transient provider error: ${reason}`, options);
+    this.name = 'RunnerTransientError';
+    this.runner = runner;
+    this.phase = phase;
+    this.reason = reason;
+  }
+}

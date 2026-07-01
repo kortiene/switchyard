@@ -143,7 +143,8 @@ export function renderPromptFile(path: string, args: readonly string[]): string 
   return substituteArgs(stripFrontmatter(text), args);
 }
 
-const FENCE_RE = /```(?:json)?\s*\n([\s\S]*?)\n```/g;
+const JSON_FENCE_RE = /```json\s*\n([\s\S]*?)\n```/gi;
+const FENCE_RE = /```(?:[\w-]+)?\s*\n([\s\S]*?)\n```/g;
 
 /** Return the first balanced `{...}`/`[...]` span in `text`, else `text`. */
 function extractBraced(text: string): string {
@@ -162,9 +163,10 @@ function extractBraced(text: string): string {
 
 /**
  * Parse JSON that may be wrapped in a Markdown code fence or surrounding
- * prose (adw/common.py parse_json). Prefers the LAST fenced block (agents
- * emit the contract block last); falls back to the first balanced
- * object/array span. Raises AdwError on failure; `expect` constrains the
+ * prose (adw/common.py parse_json). Prefers the LAST explicit ```json fence
+ * (agents emit the contract block last); then the last generic fenced block;
+ * then the first balanced object/array span. Raises AdwError on failure;
+ * `expect` constrains the
  * parsed top-level type.
  */
 export function parseJson(text: string | null | undefined, expect?: 'object' | 'array'): unknown {
@@ -172,7 +174,9 @@ export function parseJson(text: string | null | undefined, expect?: 'object' | '
     throw new AdwError('no JSON to parse: empty agent output');
   }
 
-  const matches = [...text.matchAll(FENCE_RE)];
+  const jsonMatches = [...text.matchAll(JSON_FENCE_RE)];
+  const genericMatches = jsonMatches.length > 0 ? [] : [...text.matchAll(FENCE_RE)];
+  const matches = jsonMatches.length > 0 ? jsonMatches : genericMatches;
   const last = matches.length > 0 ? matches[matches.length - 1] : undefined;
   let candidate = last?.[1] !== undefined ? last[1].trim() : text.trim();
 
