@@ -16,7 +16,7 @@
  * docs/COST-AND-DURATION.md.
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { PhaseUsage } from './invoker.js';
@@ -171,7 +171,12 @@ export class MetricsCollector {
     try {
       const dir = this.state.workspace();
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, METRICS_FILENAME), `${JSON.stringify(this.toJSON(), null, 2)}\n`, 'utf8');
+      // Write-then-rename: consumers (budget accounting, parity tooling) read
+      // this file while the run is live, so they must never see a torn write.
+      const path = join(dir, METRICS_FILENAME);
+      const tmp = `${path}.tmp`;
+      writeFileSync(tmp, `${JSON.stringify(this.toJSON(), null, 2)}\n`, 'utf8');
+      renameSync(tmp, path);
     } catch {
       // best effort
     }

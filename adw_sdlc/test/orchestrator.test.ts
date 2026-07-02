@@ -73,6 +73,7 @@ function testDeps(overrides: DepsOverride = {}): OrchestratorDeps {
       commitAll: () => ({ ok: true, error: null }),
       push: () => ({ ok: true, error: null }),
       pullRebase: () => ({ ok: true, error: null }),
+      syncWithBase: () => ({ ok: true, rebased: false, error: null }),
       prForBranch: () => null,
       createPr: () => ({ number: 42, url: 'https://x/pull/42', error: null }),
       ciStatus: () => ({ state: 'success', failingJobs: [] }),
@@ -347,6 +348,46 @@ describe('ciFixLoop', () => {
     expect(await ciFixLoop(st(), 7, agentCtx(createMockRunner()), cfg, deps)).toBe(false);
   });
 
+  it('feeds the failing run log excerpt to the fix agent, and only to the fix agent', async () => {
+    const ciStatus = vi
+      .fn()
+      .mockReturnValueOnce({ state: 'failure', failingJobs: [{ name: 'verify', logExcerpt: '' }] })
+      .mockReturnValueOnce({ state: 'success', failingJobs: [] });
+    const failingCiLogExcerpt = vi.fn(() => 'error[E0308]: mismatched types --> src/lib.rs:1');
+    const progressMessages: string[] = [];
+    const resolveArgs: string[] = [];
+    const deps = testDeps({
+      workingTreeDirty: () => true,
+      git: { ciStatus, failingCiLogExcerpt },
+      runAgentPhase: agentStub({ resolve: { resolved: 1, remaining: 0, summary: '' } }, (o) => {
+        resolveArgs.push(String(o.templateArgs[0]));
+      }),
+    });
+    const trackingCfg = { ...cfg, progress: (_p: string, m: string) => void progressMessages.push(m) };
+    expect(await ciFixLoop(st(), 7, agentCtx(createMockRunner()), trackingCfg, deps)).toBe(true);
+    expect(failingCiLogExcerpt).toHaveBeenCalledWith(7, '/bin/gh', 'o/r');
+    expect(resolveArgs[0]).toContain('error[E0308]'); // the agent sees the verdict
+    expect(resolveArgs[0]).toContain('may not reproduce locally');
+    // Secret hygiene: the excerpt must never reach (public) progress comments.
+    expect(progressMessages.join('\n')).not.toContain('error[E0308]');
+  });
+
+  it('skips the excerpt fetch when ADW_CI_LOG_EXCERPTS=0', async () => {
+    const ciStatus = vi
+      .fn()
+      .mockReturnValueOnce({ state: 'failure', failingJobs: [{ name: 'verify', logExcerpt: '' }] })
+      .mockReturnValueOnce({ state: 'success', failingJobs: [] });
+    const failingCiLogExcerpt = vi.fn(() => 'nope');
+    const deps = testDeps({
+      env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-test', ADW_CI_LOG_EXCERPTS: '0' },
+      workingTreeDirty: () => true,
+      git: { ciStatus, failingCiLogExcerpt },
+      runAgentPhase: agentStub({ resolve: { resolved: 1, remaining: 0, summary: '' } }),
+    });
+    expect(await ciFixLoop(st(), 7, agentCtx(createMockRunner()), cfg, deps)).toBe(true);
+    expect(failingCiLogExcerpt).not.toHaveBeenCalled();
+  });
+
   it('fixes a red check, commits, pushes, and goes green', async () => {
     const ciStatus = vi
       .fn()
@@ -361,7 +402,7 @@ describe('ciFixLoop', () => {
     });
     expect(await ciFixLoop(st(), 7, agentCtx(createMockRunner()), cfg, deps)).toBe(true);
     expect(commitAll).toHaveBeenCalledWith('fix: address CI failures (ci)');
-    expect(push).toHaveBeenCalledWith('feat/5-x');
+    expect(push).toHaveBeenCalledWith('feat/5-x', false);
   });
 
   it('enforces the soft parent-side budget after a ci-fix agent attempt', async () => {
@@ -648,6 +689,7 @@ describe('run() integration', () => {
         commitAll: vi.fn(() => ({ ok: true, error: null })),
         push: vi.fn(() => ({ ok: true, error: null })),
         pullRebase: vi.fn(() => ({ ok: true, error: null })),
+        syncWithBase: vi.fn(() => ({ ok: true, rebased: false, error: null })),
       },
       changeRequests: {
         findForBranch: vi.fn(() => null),
@@ -671,6 +713,7 @@ describe('run() integration', () => {
         commitAll: fail('git.commitAll'),
         push: fail('git.push'),
         pullRebase: fail('git.pullRebase'),
+        syncWithBase: fail('git.syncWithBase'),
         prForBranch: fail('git.prForBranch'),
         createPr: fail('git.createPr'),
         ciStatus: fail('git.ciStatus'),
@@ -960,6 +1003,207 @@ describe('run() integration', () => {
     expect(squashMerge).toHaveBeenCalled();
     expect(fmtCalls).toBeGreaterThanOrEqual(2); // failed, healed, re-checked green
     expect(resolvePrompts[0]).toContain('check:fmt'); // agent got the gate + its output
+  });
+
+  it('rebases onto a moved base, re-proves the gates, and force-pushes before merging', async () => {
+    // Parallel worktree-per-run lanes can land PRs while this run is in
+    // flight. When origin/<base> moved, finalize must rebase, re-run the
+    // gates against the new base, and force-push the rewritten history —
+    // never merge a branch whose gates were validated against a stale base.
+    const gateCalls: string[] = [];
+    const runCmd = vi.fn((cmd: readonly string[]) => {
+      gateCalls.push(cmd.join(' '));
+      return { rc: 0, output: '' };
+    });
+    const push = vi.fn(() => ({ ok: true, error: null }));
+    const syncWithBase = vi
+      .fn()
+      .mockReturnValueOnce({ ok: true, rebased: true, error: null }) // pre-push: base moved
+      .mockReturnValue({ ok: true, rebased: false, error: null }); // post-CI recheck: stable
+    const squashMerge = vi.fn(() => ({ ok: true, error: null }));
+    const deps = testDeps({
+      env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-test', ADW_FINALIZE_GATES: 'check:gate' },
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValue('CLOSED'),
+      runCmd,
+      git: { push, syncWithBase, squashMerge },
+      runAgentPhase: agentStub(PHASE_RESULTS),
+    });
+    const rc = await run(5, createMockRunner(), { yes: true, noProgress: true }, deps);
+    expect(rc).toBe(0);
+    expect(syncWithBase).toHaveBeenCalledWith('main');
+    expect(gateCalls.filter((c) => c === 'check:gate')).toHaveLength(2); // proven on both bases
+    expect(push).toHaveBeenCalledWith(expect.stringMatching(/^feat\/5-/), true);
+    expect(squashMerge).toHaveBeenCalled();
+  });
+
+  it('force-pushes without a fresh rebase when the remote branch diverged (resume after a dead force-push)', async () => {
+    // A prior attempt rebased and died before its force-push landed: this
+    // attempt sees behind=0 (rebased:false) but origin/<branch> diverged.
+    // A plain push would non-fast-forward-fail forever under --resume.
+    const push = vi.fn(() => ({ ok: true, error: null }));
+    const syncWithBase = vi.fn(() => ({ ok: true, rebased: false, forcePushNeeded: true, error: null }));
+    const deps = testDeps({
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValue('CLOSED'),
+      git: { push, syncWithBase },
+      runAgentPhase: agentStub(PHASE_RESULTS),
+    });
+    const rc = await run(5, createMockRunner(), { yes: true, noProgress: true }, deps);
+    expect(rc).toBe(0);
+    expect(push).toHaveBeenCalledWith(expect.stringMatching(/^feat\/5-/), true);
+  });
+
+  it('re-syncs after the CI watch and re-proves the gates when the base moved during CI', async () => {
+    // The CI watch is a long window; a sibling lane merging inside it must
+    // trigger rebase + re-gate + force-push + re-watch before the merge.
+    const gateCalls: string[] = [];
+    const runCmd = vi.fn((cmd: readonly string[]) => {
+      gateCalls.push(cmd.join(' '));
+      return { rc: 0, output: '' };
+    });
+    const push = vi.fn(() => ({ ok: true, error: null }));
+    const syncWithBase = vi
+      .fn()
+      .mockReturnValueOnce({ ok: true, rebased: false, error: null }) // pre-push: current
+      .mockReturnValueOnce({ ok: true, rebased: true, error: null }) // post-CI: base moved
+      .mockReturnValue({ ok: true, rebased: false, error: null }); // second recheck: stable
+    const squashMerge = vi.fn(() => ({ ok: true, error: null }));
+    const deps = testDeps({
+      env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-test', ADW_FINALIZE_GATES: 'check:gate' },
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValue('CLOSED'),
+      runCmd,
+      git: { push, syncWithBase, squashMerge },
+      runAgentPhase: agentStub(PHASE_RESULTS),
+    });
+    const rc = await run(5, createMockRunner(), { yes: true, noProgress: true }, deps);
+    expect(rc).toBe(0);
+    expect(syncWithBase).toHaveBeenCalledTimes(3);
+    expect(gateCalls.filter((c) => c === 'check:gate')).toHaveLength(2); // initial + post-CI re-proof
+    expect(push).toHaveBeenNthCalledWith(1, expect.stringMatching(/^feat\/5-/), false);
+    expect(push).toHaveBeenNthCalledWith(2, expect.stringMatching(/^feat\/5-/), true);
+    expect(squashMerge).toHaveBeenCalled();
+  });
+
+  it('gives up resumably (not a fresh-reset error) when the base keeps moving during the CI watch', async () => {
+    const syncWithBase = vi.fn(() => ({ ok: true, rebased: true, error: null }));
+    const squashMerge = vi.fn(() => ({ ok: true, error: null }));
+    const deps = testDeps({
+      issueState: vi.fn().mockReturnValue('OPEN'),
+      git: { syncWithBase, squashMerge },
+      runAgentPhase: agentStub(PHASE_RESULTS),
+    });
+    await expect(run(5, createMockRunner(), { yes: true, noProgress: true }, deps)).rejects.toThrow(
+      /kept moving during the CI watch.*resume retries the merge/,
+    );
+    expect(squashMerge).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a fetch failure as retryable, distinct from the fresh-reset rebase message', async () => {
+    const syncWithBase = vi.fn(() => ({ ok: false, rebased: false, stage: 'fetch' as const, error: 'git fetch origin failed: lock' }));
+    const squashMerge = vi.fn(() => ({ ok: true, error: null }));
+    const deps = testDeps({
+      issueState: vi.fn().mockReturnValue('OPEN'),
+      git: { syncWithBase, squashMerge },
+      runAgentPhase: agentStub(PHASE_RESULTS),
+    });
+    // Must NOT contain 'rebase onto origin/... failed' — the batch wrapper
+    // keys its destructive fresh-reset on that phrase.
+    await expect(run(5, createMockRunner(), { yes: true, noProgress: true }, deps)).rejects.toThrow(
+      /could not verify the branch is current with origin\/main/,
+    );
+    expect(squashMerge).not.toHaveBeenCalled();
+  });
+
+  it('fails closed before push when the pre-merge rebase conflicts', async () => {
+    // A conflicted rebase cannot be healed in-place: --resume would fail the
+    // identical way forever, so the run must abort loudly (the batch wrapper
+    // reacts with a fresh run cut from the moved base) without pushing or
+    // merging anything.
+    const push = vi.fn(() => ({ ok: true, error: null }));
+    const syncWithBase = vi.fn(() => ({ ok: false, rebased: false, error: 'CONFLICT (content): x.rs' }));
+    const squashMerge = vi.fn(() => ({ ok: true, error: null }));
+    const deps = testDeps({
+      issueState: vi.fn().mockReturnValue('OPEN'),
+      git: { push, syncWithBase, squashMerge },
+      runAgentPhase: agentStub(PHASE_RESULTS),
+    });
+    await expect(run(5, createMockRunner(), { yes: true, noProgress: true }, deps)).rejects.toThrow(
+      /rebase onto origin\/main failed[\s\S]*CONFLICT/,
+    );
+    expect(push).not.toHaveBeenCalled();
+    expect(squashMerge).not.toHaveBeenCalled();
+  });
+
+  it('skips the re-gate and plain-pushes when the base has not moved', async () => {
+    // The sequential-batch fast path: syncWithBase reports not-behind, the
+    // gates run exactly once, and the push carries no force flag.
+    const gateCalls: string[] = [];
+    const runCmd = vi.fn((cmd: readonly string[]) => {
+      gateCalls.push(cmd.join(' '));
+      return { rc: 0, output: '' };
+    });
+    const push = vi.fn(() => ({ ok: true, error: null }));
+    const syncWithBase = vi.fn(() => ({ ok: true, rebased: false, error: null }));
+    const deps = testDeps({
+      env: { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-test', ADW_FINALIZE_GATES: 'check:gate' },
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValue('CLOSED'),
+      runCmd,
+      git: { push, syncWithBase },
+      runAgentPhase: agentStub(PHASE_RESULTS),
+    });
+    const rc = await run(5, createMockRunner(), { yes: true, noProgress: true }, deps);
+    expect(rc).toBe(0);
+    expect(gateCalls.filter((c) => c === 'check:gate')).toHaveLength(1);
+    expect(push).toHaveBeenCalledWith(expect.stringMatching(/^feat\/5-/), false);
+  });
+
+  it('fails fast on a resumed over-budget run with agent phases still pending', async () => {
+    // The accumulated cost persists in state, so a same-cap resume used to pay
+    // for one more phase before the between-phases gate tripped — observed
+    // live as a one-paid-phase-per-attempt crawl. Now it refuses before
+    // spending anything, with a message telling the operator to raise the cap.
+    const pre = new AdwState({ adwId: 'a1b2c3d4', issueNumber: '5', branchName: 'feat/5-x' });
+    for (const ph of ['setup', 'classify', 'plan', 'implement']) {
+      pre.markDone(ph);
+    }
+    pre.totalCostUsd = 50.12;
+    pre.save();
+    const phaseSpy = vi.fn(agentStub(PHASE_RESULTS));
+    const deps = testDeps({ runAgentPhase: phaseSpy as unknown as typeof runAgentPhase });
+    await expect(
+      run(
+        5,
+        createMockRunner(),
+        { adwId: 'a1b2c3d4', resume: true, yes: true, noProgress: true, maxBudgetUsd: 45 },
+        deps,
+      ),
+    ).rejects.toThrow(/already exceeds the budget cap[\s\S]*resume with a higher --max-budget-usd/);
+    expect(phaseSpy).not.toHaveBeenCalled(); // zero further spend
+  });
+
+  it('lets an over-budget finalize-only resume proceed to merge (no paid phases left)', async () => {
+    // Observed live: a run over the cap with every agent phase done needs only
+    // the free finalize tail (gates green, push, CI, merge). Blocking it would
+    // strand a completed, already-paid-for run.
+    const pre = new AdwState({ adwId: 'a1b2c3d4', issueNumber: '5', branchName: 'feat/5-x' });
+    for (const ph of ['setup', 'classify', 'plan', 'implement', 'tests', 'resolve', 'e2e', 'review', 'patch', 'document']) {
+      pre.markDone(ph);
+    }
+    pre.totalCostUsd = 53.81;
+    pre.commitMessage = 'feat: x\n\ncloses #5';
+    pre.save();
+    const squashMerge = vi.fn(() => ({ ok: true, error: null }));
+    const deps = testDeps({
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValue('CLOSED'),
+      git: { squashMerge },
+    });
+    const rc = await run(
+      5,
+      createMockRunner(),
+      { adwId: 'a1b2c3d4', resume: true, yes: true, noProgress: true, maxBudgetUsd: 45 },
+      deps,
+    );
+    expect(rc).toBe(0);
+    expect(squashMerge).toHaveBeenCalled();
   });
 
   it('retries a phase that hits a transient provider error, then continues to merge', async () => {

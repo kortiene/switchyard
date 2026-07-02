@@ -65,13 +65,24 @@ export interface OperationResult {
 /** Backward-compatible alias for the old git-operation result wording. */
 export type GitOperationResult = OperationResult;
 
+export interface SyncWithBaseResult extends OperationResult {
+  /** True when the branch was actually behind the base and got rebased. */
+  rebased: boolean;
+  /** True when the remote branch exists but diverged — the next push needs force. */
+  forcePushNeeded?: boolean;
+  /** Which step failed when ok=false; a fetch failure is retryable in place. */
+  stage?: 'fetch' | 'rebase';
+}
+
 export interface VcsProvider {
   workingTreeDirty(): boolean;
   changedFiles(base: string): string[];
   createOrCheckoutBranch(branch: string, base: string): OperationResult;
   commitAll(message: string): OperationResult;
-  push(branch: string): OperationResult;
+  push(branch: string, force?: boolean): OperationResult;
   pullRebase(base: string): OperationResult;
+  /** Rebase the current branch onto origin/<base> when the base has moved. */
+  syncWithBase(base: string): SyncWithBaseResult;
 }
 
 export interface ChangeRequest {
@@ -119,6 +130,12 @@ export interface ChangeRequestProvider {
   /** Compatibility alias for older callers/tests. Prefer pipelineStatus(). */
   ciStatus?(ctx: ProviderContext, id: number | string): PipelineStatus;
   squashMerge(ctx: ProviderContext, id: number | string): OperationResult;
+  /**
+   * Bounded, error-focused log excerpt of the failing pipeline run, or ''.
+   * Optional: providers without log access simply yield no excerpt. Callers
+   * must keep it out of public comments (CI logs can echo secrets).
+   */
+  failingLogExcerpt?(ctx: ProviderContext, id: number | string): string;
 }
 
 export interface AdwProviders {
@@ -174,8 +191,9 @@ export function createGitVcsProvider(captureChangedFiles: (base: string) => stri
     changedFiles: captureChangedFiles,
     createOrCheckoutBranch: (branch, base) => git.createOrCheckoutBranch(branch, base),
     commitAll: (message) => git.commitAll(message),
-    push: (branch) => git.push(branch),
+    push: (branch, force) => git.push(branch, force ?? false),
     pullRebase: (base) => git.pullRebase(base),
+    syncWithBase: (base) => git.syncWithBase(base),
   };
 }
 
@@ -209,6 +227,7 @@ export function createGitHubChangeRequestProvider(): ChangeRequestProvider {
     },
     pipelineStatus: githubPipelineStatus,
     ciStatus: githubPipelineStatus,
+    failingLogExcerpt: (ctx, id) => (ctx.ghBin ? git.failingCiLogExcerpt(id, ctx.ghBin, ctx.repo) : ''),
     squashMerge: (ctx, id) => {
       if (!ctx.ghBin) {
         return { ok: false, error: 'gh not found' };
@@ -323,10 +342,12 @@ export function providerBackedDeps(providers: AdwProviders): {
     commitAll: typeof git.commitAll;
     push: typeof git.push;
     pullRebase: typeof git.pullRebase;
+    syncWithBase: typeof git.syncWithBase;
     prForBranch: typeof git.prForBranch;
     createPr: typeof git.createPr;
     ciStatus: typeof git.ciStatus;
     squashMerge: typeof git.squashMerge;
+    failingCiLogExcerpt: typeof git.failingCiLogExcerpt;
   };
 } {
   return {
@@ -342,13 +363,16 @@ export function providerBackedDeps(providers: AdwProviders): {
     git: {
       createOrCheckoutBranch: (branch, base) => providers.vcs.createOrCheckoutBranch(branch, base),
       commitAll: (message) => providers.vcs.commitAll(message),
-      push: (branch) => providers.vcs.push(branch),
+      push: (branch, force) => providers.vcs.push(branch, force),
       pullRebase: (base) => providers.vcs.pullRebase(base),
+      syncWithBase: (base) => providers.vcs.syncWithBase(base),
       prForBranch: (branch, ghBin, repo) => providers.changeRequests.findForBranch({ ghBin, repo }, branch),
       createPr: (branch, title, body, base, ghBin, repo) =>
         legacyPrResult(providers.changeRequests.create({ ghBin, repo }, { branch, title, body, base })),
       ciStatus: (pr, ghBin, repo) => providers.changeRequests.pipelineStatus({ ghBin, repo }, pr),
       squashMerge: (pr, ghBin, repo) => providers.changeRequests.squashMerge({ ghBin, repo }, pr),
+      failingCiLogExcerpt: (pr, ghBin, repo) =>
+        providers.changeRequests.failingLogExcerpt?.({ ghBin, repo }, pr) ?? '',
     },
   };
 }

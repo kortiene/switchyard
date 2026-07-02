@@ -12,3 +12,6 @@ agents/
 
 # OS / editor noise
 .DS_Store
+
+# Parallel-batch artifact archives (logs, per-attempt metrics, run states)
+batch-artifacts-*/
