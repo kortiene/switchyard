@@ -46,6 +46,7 @@ function fakeProviders(): AdwProviders {
       commitAll: vi.fn(() => ({ ok: true, error: null })),
       push: vi.fn(() => ({ ok: true, error: null })),
       pullRebase: vi.fn(() => ({ ok: true, error: null })),
+      syncWithBase: vi.fn(() => ({ ok: true, rebased: false, error: null })),
     },
     changeRequests: {
       findForBranch: vi.fn((_ctx, branch) => `https://example.test/pull/${branch}`),

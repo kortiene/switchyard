@@ -310,7 +310,7 @@ npm run typecheck
 # 2) Static secret-boundary lint
 npm run lint:env
 
-# 3) Full test suite (current: 753 tests, 51 files)
+# 3) Full test suite (current: 781 tests, 52 files)
 npm test
 
 # 4) Build (then clean — dist/ is a build artifact)
@@ -1990,7 +1990,7 @@ A future agent should:
 5. Pick from §11 (recommended next steps) or take a fresh direction
    from the user.
 
-Test count baseline after this session: **753 passing across 51 files**
+Test count baseline after this session: **781 passing across 52 files**
 (343 at the original handover, +4 for the configurable phase chain, +3 for
 the terminal done-status transition, +3 for the schema-registry indirection,
 +10 for schema overrides capability A, +9 for custom phases capability B, +6
@@ -2027,7 +2027,13 @@ project root (`test/project-root.test.ts` +49 — new file, `test/project-root-e
 `test/run-phase.test.ts` +1 credit-balance auth error) — issue #56, §8ai; +6 for the
 orchestrator resilience fixes — transient-provider backoff retry, CI unknown/post-push
 settle tolerance, and finalize-gate surface+heal (`test/run-phase.test.ts` +3,
-`test/orchestrator.test.ts` +3), §8aj). The §8v refactor (issue #5
+`test/orchestrator.test.ts` +3), §8aj; +28 for the parallel worktree-batch
+merge tail — `syncWithBase` (rebase + post-CI resync + divergence-derived
+force-push + fail-loud fetch), resumed-run budget fail-fast, ci-fix
+failing-log excerpts (`ADW_CI_LOG_EXCERPTS`), and real-git merge-tail e2e
+coverage (`test/git.test.ts` +12, `test/orchestrator.test.ts` +11,
+`test/git-real.e2e.test.ts` +5 — new file; operator guide:
+`docs/PARALLEL-BATCH.md`), §8ak). The §8v refactor (issue #5
 — split parity-rate classification from rendering) added `tools/parity-rate-core.ts`
 (pure core module, no new test file) and extended `test/parity-rate.test.ts` with
 35 direct unit tests of the extracted core (39 tests total in the file, up from 4

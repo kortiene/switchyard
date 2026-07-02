@@ -78,6 +78,7 @@ function testDeps(overrides: DepsOverride = {}): OrchestratorDeps {
       commitAll: () => ({ ok: true, error: null }),
       push: () => ({ ok: true, error: null }),
       pullRebase: () => ({ ok: true, error: null }),
+      syncWithBase: () => ({ ok: true, rebased: false, error: null }),
       prForBranch: () => null,
       createPr: () => ({ number: 42, url: 'https://x/pull/42', error: null }),
       ciStatus: () => ({ state: 'success', failingJobs: [] }),

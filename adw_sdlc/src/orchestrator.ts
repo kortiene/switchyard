@@ -192,10 +192,13 @@ export interface GitOps {
   commitAll: typeof git.commitAll;
   push: typeof git.push;
   pullRebase: typeof git.pullRebase;
+  syncWithBase: typeof git.syncWithBase;
   prForBranch: typeof git.prForBranch;
   createPr: typeof git.createPr;
   ciStatus: typeof git.ciStatus;
   squashMerge: typeof git.squashMerge;
+  /** Optional so existing fixtures need no change; absent ⇒ no excerpts. */
+  failingCiLogExcerpt?: typeof git.failingCiLogExcerpt;
 }
 
 /**
@@ -301,8 +304,9 @@ function legacyProvidersFromDeps(deps: OrchestratorDeps): AdwProviders {
       changedFiles: (base) => deps.changedFiles(base),
       createOrCheckoutBranch: (branch, base) => deps.git.createOrCheckoutBranch(branch, base),
       commitAll: (message) => deps.git.commitAll(message),
-      push: (branch) => deps.git.push(branch),
+      push: (branch, force) => deps.git.push(branch, force ?? false),
       pullRebase: (base) => deps.git.pullRebase(base),
+      syncWithBase: (base) => deps.git.syncWithBase(base),
     },
     changeRequests: {
       findForBranch: (ctx, branch) => (ctx.ghBin ? deps.git.prForBranch(branch, ctx.ghBin, ctx.repo) : null),
@@ -320,6 +324,8 @@ function legacyProvidersFromDeps(deps: OrchestratorDeps): AdwProviders {
       },
       pipelineStatus: (ctx, id) =>
         ctx.ghBin ? deps.git.ciStatus(id, ctx.ghBin, ctx.repo) : { state: 'unknown', failingJobs: [] },
+      failingLogExcerpt: (ctx, id) =>
+        ctx.ghBin ? (deps.git.failingCiLogExcerpt?.(id, ctx.ghBin, ctx.repo) ?? '') : '',
       squashMerge: (ctx, id) => {
         if (!ctx.ghBin) {
           return { ok: false, error: 'gh not found' };
@@ -713,11 +719,25 @@ export async function ciFixLoop(
     attempt += 1;
     const names = status.failingJobs.map((j) => j.name).join(', ') || 'unknown jobs';
     config.progress('ci-fix', `CI red (${names}); fix attempt ${attempt}/${config.maxAttempts}`);
+    // Check names alone are not actionable when the failure does not
+    // reproduce locally (toolchain skew between the CI image and this machine
+    // was observed live). Feed the failing run's log excerpt to the fix agent
+    // ONLY — never into progress comments, which are public: CI logs can echo
+    // secrets on private repos. ADW_CI_LOG_EXCERPTS=0 opts out.
+    let excerptBlock = '';
+    if (deps.env['ADW_CI_LOG_EXCERPTS'] !== '0') {
+      const excerpt = providers.changeRequests.failingLogExcerpt?.(ctx, pr) ?? '';
+      if (excerpt) {
+        excerptBlock =
+          `\n\nFailing run log excerpt (from the CI provider; the failure may not ` +
+          `reproduce locally — trust this over a locally-green result):\n${excerpt}`;
+      }
+    }
     const mark = config.metrics?.start() ?? 0;
     const outcome = await invokeAgent(
       deps,
       'resolve',
-      [`CI is failing for these checks: ${names}. Fix the cause.`],
+      [`CI is failing for these checks: ${names}. Fix the cause.${excerptBlock}`],
       state,
       agent,
     );
@@ -1034,49 +1054,53 @@ async function finalizeAndMerge(
     .split('\n')
     .map((g) => g.trim())
     .filter((g) => g.length > 0);
-  for (const gate of finalizeGates(opts.testCmd, extraGates)) {
-    let { rc, output } = deps.runCmd(shellSplit(gate));
-    let healAttempt = 0;
-    while (rc !== 0) {
-      // Surface WHY. A bare "gate failed: scripts/verify.sh" is unactionable —
-      // a one-line `cargo fmt` nit reads identically to a real test failure.
-      progress('finalize', `gate failed: ${gate}\n${truncate(output)}`);
-      if (healAttempt >= opts.maxResolve) {
-        throw new AdwError(
-          `pre-merge gate failed after ${opts.maxResolve} fix attempt(s): ${gate}\n${truncate(output)}`,
+  const gates = finalizeGates(opts.testCmd, extraGates);
+  const runPreMergeGates = async (): Promise<void> => {
+    for (const gate of gates) {
+      let { rc, output } = deps.runCmd(shellSplit(gate));
+      let healAttempt = 0;
+      while (rc !== 0) {
+        // Surface WHY. A bare "gate failed: scripts/verify.sh" is unactionable —
+        // a one-line `cargo fmt` nit reads identically to a real test failure.
+        progress('finalize', `gate failed: ${gate}\n${truncate(output)}`);
+        if (healAttempt >= opts.maxResolve) {
+          throw new AdwError(
+            `pre-merge gate failed after ${opts.maxResolve} fix attempt(s): ${gate}\n${truncate(output)}`,
+          );
+        }
+        healAttempt += 1;
+        // Delegate a bounded fix to the agent (it can run the formatter/linter the
+        // gate enforces). The gate runs BEFORE commit, so the fix lands in the
+        // same commit — this is the mechanical salvage a fmt-only failure needs,
+        // and it is the same "fix then re-check" the CI-fix loop already does.
+        progress('finalize', `attempting to heal the gate; attempt ${healAttempt}/${opts.maxResolve}`);
+        const mark = metrics?.start() ?? 0;
+        const outcome = await invokeAgent(
+          deps,
+          'resolve',
+          [
+            `A pre-merge gate failed. Command: ${gate}\n\nOutput:\n${truncate(output)}\n\n` +
+              `Fix the underlying cause in the working tree so the command exits 0. ` +
+              `Do not weaken, skip, or edit the gate itself.`,
+          ],
+          state,
+          agent,
         );
+        recordUsage(state, outcome.usage);
+        metrics?.record('finalize', mark, outcome.usage, {
+          attempts: outcome.attempts,
+          model: modelForPhase('resolve', agent.runner.id, { cliModel: agent.cliModel, env: deps.env }),
+        });
+        metrics?.save();
+        assertWithinBudget(state, agent.maxBudgetUsd);
+        if (outcome.data.resolved === 0 && !providers.vcs.workingTreeDirty()) {
+          throw new AdwError(`pre-merge gate failed and the agent changed nothing: ${gate}\n${truncate(output)}`);
+        }
+        ({ rc, output } = deps.runCmd(shellSplit(gate)));
       }
-      healAttempt += 1;
-      // Delegate a bounded fix to the agent (it can run the formatter/linter the
-      // gate enforces). The gate runs BEFORE commit, so the fix lands in the
-      // same commit — this is the mechanical salvage a fmt-only failure needs,
-      // and it is the same "fix then re-check" the CI-fix loop already does.
-      progress('finalize', `attempting to heal the gate; attempt ${healAttempt}/${opts.maxResolve}`);
-      const mark = metrics?.start() ?? 0;
-      const outcome = await invokeAgent(
-        deps,
-        'resolve',
-        [
-          `A pre-merge gate failed. Command: ${gate}\n\nOutput:\n${truncate(output)}\n\n` +
-            `Fix the underlying cause in the working tree so the command exits 0. ` +
-            `Do not weaken, skip, or edit the gate itself.`,
-        ],
-        state,
-        agent,
-      );
-      recordUsage(state, outcome.usage);
-      metrics?.record('finalize', mark, outcome.usage, {
-        attempts: outcome.attempts,
-        model: modelForPhase('resolve', agent.runner.id, { cliModel: agent.cliModel, env: deps.env }),
-      });
-      metrics?.save();
-      assertWithinBudget(state, agent.maxBudgetUsd);
-      if (outcome.data.resolved === 0 && !providers.vcs.workingTreeDirty()) {
-        throw new AdwError(`pre-merge gate failed and the agent changed nothing: ${gate}\n${truncate(output)}`);
-      }
-      ({ rc, output } = deps.runCmd(shellSplit(gate)));
     }
-  }
+  };
+  await runPreMergeGates();
   progress('finalize', 'all pre-merge gates green');
 
   const commitMessage = state.commitMessage ?? defaultCommitMessage(config, issue);
@@ -1084,7 +1108,41 @@ async function finalizeAndMerge(
   if (!committed.ok) {
     throw new AdwError(`commit failed: ${committed.error}`);
   }
-  const pushed = providers.vcs.push(state.branchName ?? '');
+
+  // The branch was cut from origin/<base> at setup and never updated since;
+  // when other runs merge while this one is in flight (worktree-per-run
+  // batches), the gates above and the CI below would otherwise validate
+  // against a base that no longer exists. syncWithBase is a no-op when the
+  // base has not moved; after a real rebase the gates must be re-proven on
+  // the new base and the rewritten history force-pushed (with lease). A
+  // conflicted rebase cannot be healed here — it needs a fresh run cut from
+  // the moved base — so fail loudly before touching the change request.
+  const requireSynced = (label: string) => {
+    const synced = providers.vcs.syncWithBase(opts.base);
+    if (!synced.ok) {
+      // A fetch failure is retryable in place (--resume), so its message must
+      // stay distinct from the rebase-conflict one: batch wrappers key their
+      // destructive fresh-reset on "rebase onto origin/<base> failed".
+      if (synced.stage === 'fetch') {
+        throw new AdwError(`could not verify the branch is current with origin/${opts.base} ${label}: ${synced.error}`);
+      }
+      throw new AdwError(
+        `rebase onto origin/${opts.base} failed; a fresh run from the moved base is required: ${synced.error}`,
+      );
+    }
+    return synced;
+  };
+
+  const synced = requireSynced('before push');
+  if (synced.rebased) {
+    progress('finalize', `origin/${opts.base} moved underneath this run; rebased — re-running pre-merge gates`);
+    await runPreMergeGates();
+    const recommitted = providers.vcs.commitAll(commitMessage);
+    if (!recommitted.ok) {
+      throw new AdwError(`commit failed: ${recommitted.error}`);
+    }
+  }
+  const pushed = providers.vcs.push(state.branchName ?? '', synced.rebased || synced.forcePushNeeded === true);
   if (!pushed.ok) {
     throw new AdwError(`push failed: ${pushed.error}`);
   }
@@ -1116,26 +1174,52 @@ async function finalizeAndMerge(
   state.save();
   progress('finalize', `${crLabel} ready: ${state.prUrl}`);
 
-  // CI watch + fix loop.
-  if (state.prNumber !== null) {
-    const ciOk = await ciFixLoop(
-      state,
-      state.prNumber,
-      agent,
-      {
-        ghBin: ghBin ?? '',
-        repo,
-        maxAttempts: opts.maxCiFix,
-        pollIntervalMs: opts.ciPollIntervalMs,
-        maxPolls: opts.ciMaxPolls,
-        progress,
-        ...(metrics !== undefined ? { metrics } : {}),
-        ...(agent.maxBudgetUsd !== undefined ? { maxBudgetUsd: agent.maxBudgetUsd } : {}),
-      },
-      deps,
-    );
-    if (!ciOk) {
-      throw new AdwError('CI is not green; refusing to merge');
+  // CI watch + fix loop, then a last-moment base re-check: the CI watch is a
+  // 10-40 minute window in which sibling lanes can merge, and gh pr merge
+  // itself never re-validates base freshness. Bounded loop: rebase + re-gate
+  // + force-push + re-watch CI when the base moved; give up (resumable, NOT a
+  // fresh-reset error) when it keeps moving.
+  const MAX_BASE_RESYNCS = 2;
+  for (let resyncs = 0; ; resyncs += 1) {
+    if (state.prNumber !== null) {
+      const ciOk = await ciFixLoop(
+        state,
+        state.prNumber,
+        agent,
+        {
+          ghBin: ghBin ?? '',
+          repo,
+          maxAttempts: opts.maxCiFix,
+          pollIntervalMs: opts.ciPollIntervalMs,
+          maxPolls: opts.ciMaxPolls,
+          progress,
+          ...(metrics !== undefined ? { metrics } : {}),
+          ...(agent.maxBudgetUsd !== undefined ? { maxBudgetUsd: agent.maxBudgetUsd } : {}),
+        },
+        deps,
+      );
+      if (!ciOk) {
+        throw new AdwError('CI is not green; refusing to merge');
+      }
+    }
+    const recheck = requireSynced('after the CI watch');
+    if (!recheck.rebased) {
+      break;
+    }
+    if (resyncs >= MAX_BASE_RESYNCS) {
+      throw new AdwError(
+        `origin/${opts.base} kept moving during the CI watch (${MAX_BASE_RESYNCS} resyncs); giving up this attempt — resume retries the merge`,
+      );
+    }
+    progress('finalize', `origin/${opts.base} moved during the CI watch; rebased — re-proving gates before merge`);
+    await runPreMergeGates();
+    const recommitted = providers.vcs.commitAll(commitMessage);
+    if (!recommitted.ok) {
+      throw new AdwError(`commit failed: ${recommitted.error}`);
+    }
+    const repushed = providers.vcs.push(state.branchName ?? '', true); // rebase rewrote history
+    if (!repushed.ok) {
+      throw new AdwError(`push failed: ${repushed.error}`);
     }
   }
 
@@ -1352,6 +1436,26 @@ export async function run(
   // additive agents/{adw_id}/metrics.json, never state.json). See metrics.ts
   // for why this is a separate artifact from the cross-language state contract.
   const metrics = new MetricsCollector(state, deps.now ?? defaultClock);
+
+  // Budget fail-fast for resumed runs: the accumulated cost persists in
+  // state, so a same-cap resume of an over-budget run would otherwise pay for
+  // one more phase before the between-phases gate trips — each retry crawls
+  // one paid phase and dies (observed live: 3 issues x 3 attempts each). Fail
+  // BEFORE the first paid phase instead. A finalize-only resume (every agent
+  // phase done) is deliberately allowed through: finalize itself spends
+  // nothing unless a gate needs healing, and those paths re-assert the cap.
+  if (
+    agent.maxBudgetUsd !== undefined &&
+    typeof state.totalCostUsd === 'number' &&
+    state.totalCostUsd > agent.maxBudgetUsd &&
+    phases.some((phase) => !state.isDone(phase))
+  ) {
+    throw new AdwError(
+      `run cost $${state.totalCostUsd.toFixed(4)} already exceeds the budget cap ` +
+        `$${agent.maxBudgetUsd.toFixed(2)} with agent phases still pending; ` +
+        `resume with a higher --max-budget-usd to continue`,
+    );
+  }
 
   // Runner lifecycle (D6): start/stop are no-ops for the in-process backends;
   // opencode tears down its self-spawned server in stop(), so it runs in a
