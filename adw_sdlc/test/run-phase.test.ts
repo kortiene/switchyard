@@ -8,9 +8,10 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AdwError, RunnerAuthError, RunnerTransientError } from '../src/errors.js';
+import { PHASE_TIMEOUT_ABORT_REASON } from '../src/invoker.js';
 import { NUDGE, runAgentPhase } from '../src/run-phase.js';
 import { createMockRunner } from '../src/runners/runner-mock.js';
 import { AdwState, setAgentsDir } from '../src/state.js';
@@ -346,5 +347,48 @@ describe('runAgentPhase', () => {
     });
     expect(runner.requests[0]!.signal).toBeInstanceOf(AbortSignal);
     expect(runner.requests[0]!.signal.aborted).toBe(false);
+  });
+
+  it('aborts the phase signal with PHASE_TIMEOUT_ABORT_REASON when timeoutMs elapses', async () => {
+    // Verifies the invoker sends the correct abort reason so adapter runners can
+    // classify 'timeout' vs 'cancelled' (runner-claude/codex/opencode/pi all
+    // key on signal.reason.message === PHASE_TIMEOUT_ABORT_REASON).
+    vi.useFakeTimers();
+    try {
+      let capturedSignal: AbortSignal | undefined;
+      const runner = createMockRunner({
+        script: async (req) => {
+          capturedSignal = req.signal;
+          // Await the abort event, then return a timeout result (simulates a runner
+          // observing the signal and giving up, like the real claude/codex adapters).
+          await new Promise<void>((resolve) => {
+            if (req.signal.aborted) {
+              resolve();
+            } else {
+              req.signal.addEventListener('abort', () => resolve(), { once: true });
+            }
+          });
+          return { ok: false, rc: 1, signal: 'timeout' as const, transcriptText: '' };
+        },
+      });
+
+      const phasePromise = runAgentPhase({
+        phase: 'resolve',
+        templateArgs: ['x'],
+        state,
+        runner,
+        env: {},
+        timeoutMs: 100,
+      });
+
+      await vi.advanceTimersByTimeAsync(101);
+      await expect(phasePromise).rejects.toThrow(/timed out/);
+
+      expect(capturedSignal?.aborted).toBe(true);
+      const abortReason = capturedSignal?.reason as Error | undefined;
+      expect(abortReason?.message).toBe(PHASE_TIMEOUT_ABORT_REASON);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
