@@ -3,13 +3,13 @@
  * step 6, Sections 4.3-1 and 5).
  *
  * The secret boundary is the SDK's own child process: `options.env` REPLACES
- * `process.env` when set (verified on the installed 0.3.173 `sdk.d.ts`: "this
- * value REPLACES the subprocess environment entirely"), so passing the
- * `safeSubprocessEnv()` allowlist verbatim as `options.env` IS the D5
- * boundary — no bespoke fork. This module must never spread `process.env`
- * (enforced by scripts/check-adw-sdlc-env.sh and the env-isolation tests).
+ * `process.env` when set (verified on installed 0.3.183). The SDK clones that
+ * allowlist, may add its own entrypoint/version/telemetry controls, and removes
+ * Node debug knobs before spawn; it never merges the full parent environment.
+ * This module must never spread `process.env` (enforced by env lint, unit tests,
+ * and the names-only real-spawn audit in test/fixtures/live-evidence/).
  *
- * Step-6 [VERIFY] resolutions (installed sdk.d.ts, 0.3.173):
+ * Step-6 [VERIFY] resolutions (installed sdk.d.ts, 0.3.183):
  * - CanUseTool: (toolName, input, {signal, toolUseID, ...}) =>
  *   Promise<PermissionResult>; PermissionResult is the allow/deny union with
  *   `updatedInput`/`message`.
@@ -23,11 +23,12 @@
 
 import { accessSync, appendFileSync, constants, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type {
   CanUseTool,
+  HookCallback,
   Options,
   SDKMessage,
   SDKResultMessage,
@@ -60,11 +61,11 @@ export const CLAUDE_CAPS: RunnerCaps = {
 export const CLAUDE_EDIT_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash'] as const;
 
 /**
- * Tools auto-allowed via `allowedTools` WITHOUT consulting canUseTool. Bash is
- * deliberately absent: an allowedTools entry is an allow RULE that resolves
- * before the canUseTool callback (sdk.d.ts: "auto-allowed without prompting"),
- * so listing Bash there would make the git/gh veto dead code. Bash instead
- * falls through to denyGitGh on every call.
+ * Tools auto-allowed via `allowedTools`. Bash is deliberately absent so the
+ * SDK permission callback remains a defense in depth. A PreToolUse hook runs
+ * for every Bash request and applies the best-effort command recognizer below;
+ * a live Claude Code 2.1.211 probe showed that permission-mode safe-command
+ * rules can bypass canUseTool.
  */
 export const CLAUDE_AUTO_ALLOWED_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep'] as const;
 
@@ -76,13 +77,17 @@ export const CLAUDE_AUTO_ALLOWED_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep
  */
 const GIT_GH_COMMAND = /(^|[\n;&|]|\$\(|`)\s*(?:command\s+|builtin\s+|env\s+(?:\w+=\S*\s+)*)?(?:git|gh)\b/;
 
+function bashInvokesGitGh(toolName: string, input: Record<string, unknown>): boolean {
+  const command = typeof input['command'] === 'string' ? (input['command'] as string) : '';
+  return toolName === 'Bash' && GIT_GH_COMMAND.test(command);
+}
+
 /**
- * Per-tool veto (caps.perToolHook), reached for every call NOT covered by an
- * allow rule — i.e. Bash and anything outside the grant. Denies Bash commands
- * that invoke git/gh (the orchestrator owns all git/gh, PLAN.md Section 3.3;
- * mirrors the PHASE_PREAMBLE_SHARED contract) and fails closed on tools
- * outside CLAUDE_EDIT_TOOLS — matching today's `claude -p`, where a
- * permission-needing tool with no prompt route is denied.
+ * Permission callback defense in depth. Denies Bash commands that invoke
+ * git/gh (the orchestrator owns all git/gh, PLAN.md Section 3.3; mirrors the
+ * PHASE_PREAMBLE_SHARED contract). The `tools` option removes tools outside
+ * CLAUDE_EDIT_TOOLS; PreToolUse below is the unconditional hook point for the
+ * remaining Bash tool, while command recognition remains best-effort.
  */
 export const denyGitGh: CanUseTool = (toolName, input) => {
   if (!(CLAUDE_EDIT_TOOLS as readonly string[]).includes(toolName)) {
@@ -91,19 +96,65 @@ export const denyGitGh: CanUseTool = (toolName, input) => {
       message: `Tool '${toolName}' is outside this phase's grant (${CLAUDE_EDIT_TOOLS.join(', ')}).`,
     });
   }
-  if (toolName === 'Bash') {
-    const command = typeof input['command'] === 'string' ? (input['command'] as string) : '';
-    if (GIT_GH_COMMAND.test(command)) {
-      return Promise.resolve({
-        behavior: 'deny',
-        message:
-          'The orchestrator owns all git/gh operations; do not run git or gh. ' +
-          'Edit files and run tests only — the pipeline commits, pushes, and opens the PR.',
-      });
-    }
+  if (bashInvokesGitGh(toolName, input)) {
+    return Promise.resolve({
+      behavior: 'deny',
+      message:
+        'The orchestrator owns all git/gh operations; do not run git or gh. ' +
+        'Edit files and run tests only — the pipeline commits, pushes, and opens the PR.',
+    });
   }
   return Promise.resolve({ behavior: 'allow', updatedInput: input });
 };
+
+/**
+ * Persist a names/category-only proof when the live per-tool veto fires. The
+ * command and tool input are deliberately never serialized: they can contain
+ * paths, inline credentials, or command substitutions. Audit persistence is
+ * best-effort; a write failure must never replace the explicit deny verdict.
+ */
+export function gitGhPreToolUseHook(phase: string, auditPath: string): HookCallback {
+  return async (hookInput) => {
+    if (hookInput.hook_event_name !== 'PreToolUse') {
+      return { continue: true };
+    }
+    const input =
+      hookInput.tool_input !== null &&
+      typeof hookInput.tool_input === 'object' &&
+      !Array.isArray(hookInput.tool_input)
+        ? (hookInput.tool_input as Record<string, unknown>)
+        : {};
+    if (bashInvokesGitGh(hookInput.tool_name, input)) {
+      try {
+        appendFileSync(
+          auditPath,
+          `${JSON.stringify({
+            schema_version: 1,
+            phase,
+            tool_name: 'Bash',
+            category: 'git-gh-veto',
+            decision: 'deny',
+            input_recorded: false,
+          })}\n`,
+          'utf8',
+        );
+      } catch {
+        // Claude hook errors are not a blocking decision. Preserve the explicit
+        // deny even when the optional audit artifact cannot be written.
+      }
+      return {
+        continue: true,
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason:
+            'The orchestrator owns all git/gh operations; do not run git or gh.',
+        },
+      };
+    }
+    return { continue: true };
+  };
+}
 
 /**
  * Resolve the Claude Code binary like the Python pipeline does
@@ -186,6 +237,29 @@ function asStructured(value: unknown): Record<string, unknown> | null {
   return null;
 }
 
+/**
+ * Claude Code validates `--json-schema` as a schema body but does not register
+ * Zod v4's draft-2020 meta-schema URI. Passing the generated top-level
+ * `$schema` therefore fails before the model starts (observed live with Claude
+ * Code 2.1.211). The dialect marker is annotation-only for these phase shapes;
+ * remove it on a copy while preserving the schema the parent later validates.
+ */
+export function claudeOutputSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  const compatible = { ...schema };
+  delete compatible['$schema'];
+  return compatible;
+}
+
+/**
+ * SDK 0.3.183 can enqueue an `error_max_budget_usd` result and then replace it
+ * with a thrown process-exit error before the async consumer observes the
+ * result. Preserve the public native-budget meaning in that observed shape.
+ */
+export function isClaudeBudgetError(value: unknown): boolean {
+  const message = value instanceof Error ? value.message : String(value);
+  return message.startsWith('Claude Code returned an error result: Reached maximum budget');
+}
+
 class ClaudeRunner implements AgentRunner {
   readonly id = 'claude' as const;
   readonly caps = CLAUDE_CAPS;
@@ -213,19 +287,35 @@ class ClaudeRunner implements AgentRunner {
     const options: Options = {
       model: req.model,
       cwd: req.cwd,
-      // Verbatim allowlist; the SDK passes it to its child as the ENTIRE env.
+      // The SDK clones this entire replacement env and may add its own
+      // entrypoint/version/telemetry controls before the child spawn.
       env: req.env,
       abortController,
+      // `allowedTools` controls prompting, not availability. Restrict the tool
+      // context explicitly, then auto-allow the non-Bash subset.
+      tools: [...CLAUDE_EDIT_TOOLS],
       allowedTools: [...CLAUDE_AUTO_ALLOWED_TOOLS],
       permissionMode: 'acceptEdits',
       canUseTool: denyGitGh,
+      hooks: {
+        PreToolUse: [
+          {
+            hooks: [
+              gitGhPreToolUseHook(
+                req.phase,
+                join(dirname(req.transcriptPath), 'tool-veto-audit.jsonl'),
+              ),
+            ],
+          },
+        ],
+      },
       // Today's `claude -p` runs with Claude Code's default system prompt and
       // CLI-default setting sources; keep both for AS-IS parity.
       systemPrompt: { type: 'preset', preset: 'claude_code' },
       stderr: (data: string) => tee(data),
       ...(claudeBin !== undefined ? { pathToClaudeCodeExecutable: claudeBin } : {}),
       ...(req.schema !== undefined
-        ? { outputFormat: { type: 'json_schema' as const, schema: req.schema } }
+        ? { outputFormat: { type: 'json_schema' as const, schema: claudeOutputSchema(req.schema) } }
         : {}),
       ...(req.maxBudgetUsd !== undefined ? { maxBudgetUsd: req.maxBudgetUsd } : {}),
     };
@@ -246,6 +336,17 @@ class ClaudeRunner implements AgentRunner {
     } catch (err) {
       if (req.signal.aborted) {
         return this.failed(transcriptText, abortKind(req.signal), TIMEOUT_RC, result);
+      }
+      const budgetResult = result?.subtype === 'error_max_budget_usd' ? result : undefined;
+      if (budgetResult !== undefined || isClaudeBudgetError(err)) {
+        const reasons =
+          budgetResult !== undefined && Array.isArray(budgetResult.errors)
+            ? budgetResult.errors.join('\n')
+            : err instanceof Error
+              ? err.message
+              : String(err);
+        tee(`\n[claude result error_max_budget_usd] ${reasons}\n`);
+        return this.failed(transcriptText, 'budget', 1, result);
       }
       // Mirror a crashed CLI run (adw/_phases.py:482-516): keep the captured
       // output, report a nonzero rc, and let the invoker parse/nudge/fail.

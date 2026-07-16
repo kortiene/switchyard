@@ -6,16 +6,18 @@ effects stubbed at the seam — though a few tests now deliberately cross it: th
 secret-boundary audit (`test/secret-boundary-audit.test.ts`) and the verify-gate
 e2e test (`test/verify-gate.e2e.test.ts`) spawn real subprocesses, and the rest
 transport loopback suite (`test/providers-rest-transport.test.ts`) drives a real
-localhost round-trip). Contact with reality now spans **nine** live `claude` runs — the
-original seed (PR #331, which itself surfaced parity bug #332) plus an 8-issue
-self-hosting batch (issues #1–#8 → merged PRs #9–#16 on `kortiene/switchyard`, see
-[`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md)). Measured over the batch,
-native structured output has **0/36 hard-fails (0.0%)** but an **88.9% single-nudge
-rate**. Still: those workspaces are git-ignored and self-referential (claude editing
-this repo's own docs/tests), and the load-bearing failure-mode and secret-boundary
-guarantees remain mock-only — so "all boxes green" means *the control plane is
-internally consistent against stubs*, not *proven in production*. This doc tracks
-what real MVP-readiness still requires.
+localhost round-trip). Contact with reality now spans **thirteen** live `claude` ADW
+run ids — the original seed, an 8-issue self-hosting batch, three issue-#20
+failure-drill carriers, and the active-phase recovery run — plus targeted
+real-spawn boundary/routing/veto probes. See
+[`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md) and the sanitized
+[`test/fixtures/live-evidence/`](./test/fixtures/live-evidence/) corpus. Measured
+over the Claude batch, native structured output has **0/36 hard-fails (0.0%)** but
+an **88.9% single-nudge rate**. The load-bearing timeout/budget/resume,
+secret-boundary, tool-veto, and unattended-merge controls have now also been
+induced live and archived. The sample is still self-referential (Claude editing
+this repo's own docs/tests), so this doc keeps the remaining breadth and
+maintainer-sign-off caveats explicit.
 
 Status legend: ✅ done · ⏳ owed (human/credential-gated) · ❌ not started ·
 🔧 automatable in-repo.
@@ -88,21 +90,29 @@ npm run parity:rate -- agents/
   - **Comparative gate (literal bar):** harvest ≥ 20 fenced attempts from claude with
     `ADW_PARITY_FORCE_FENCED_JSON=1` (routes the native runner through the fenced path),
     then the comparative verdict becomes computable without waiting on `pi`.
-- [ ] ⏳ **Failure modes observed live, not just mocked.** Induce and confirm each
-  once: a real nudge-retry that recovers, a `--timeout`-tripped fast-fail, a tiny
-  `--max-budget` cap, and a kill-then-`--resume`. All are "mocked ✅"; none has
-  been seen live.
-- [ ] 🔧 **"Mocked ✅ → observed live?" ledger.** For each of PARITY's 13
+- [x] ✅ **Failure modes observed live, not just mocked.** The 8-run batch contains
+  recovered single-nudge attempts; issue #20 added a real timeout fast-fail (run
+  `a6b4e6dc`), native tiny-budget fast-fail (`b20d9e02`), active-Claude
+  kill-then-restart (`57b6bfea`), and completed-phase skip (`c20e5a01`). The
+  timeout and budget artifacts each have one transcript and no nudge transcript;
+  the two resume runs directly cover rerunning an incomplete phase and skipping a
+  completed one.
+- [x] ✅ **"Mocked ✅ → observed live?" ledger.** For each of PARITY's 13
   Section-10 guarantees, has it been seen live even once? The dashboard lives in
-  [`docs/OBSERVED-LIVE-LEDGER.md`](./docs/OBSERVED-LIVE-LEDGER.md); it stands at
-  **6 `✅` / 4 `🟡` / 2 `⏳` / 1 `N/A`** (seeded from PR #331 / run `007fd5ba` plus
-  the 8-run batch — kept conservative because the batch is self-referential, with the
-  load-bearing #5 (secret boundary) and #8 (fast-fail) rows still `⏳` — never induced
-  live). #332 is proof the mocks under-specify reality.
-- [ ] ⏳ **Operational basics** for an agent that spends money and edits repos: a
-  bounded cost envelope (~$35/run is real) with the `maxBudgetUsd` ceiling +
-  kill-switch confirmed live; the secret boundary asserted once on a *real*
-  spawned env (not only the lint + mocks); crash/cleanup behavior confirmed once.
+  [`docs/OBSERVED-LIVE-LEDGER.md`](./docs/OBSERVED-LIVE-LEDGER.md); it now stands at
+  **12 `✅` / 0 `🟡` / 0 `⏳` / 1 `N/A`**. Issues #20–#23 independently closed the
+  six former partial/owed rows with sanitized, CI-guarded artifacts. Comparative
+  structured-output sampling and cross-language finalization remain separately
+  qualified rather than hidden by the tally.
+- [x] ✅ **Operational basics** for an agent that spends money and edits repos.
+  Issue #22 reuses issue #20's evidence: Claude's native `$0.01` cap fired; the
+  completed `c20e5a01` review recorded **$0.893283** under a `$45` ceiling;
+  process-group SIGINT (the Ctrl-C signal) interrupted a live Claude subprocess in
+  `57b6bfea`, left the recorded process group empty and made no tracked changes, and
+  preserved byte-identical pre-phase state across the interruption. The same run then
+  resumed and persisted `review` successfully; its interrupted-attempt spend is not
+  claimed. Issue #21's paired real-spawn audit records all five poisoned parent key
+  names present and zero denied names in the Claude child, without recording values.
 
 ## 2. Gates that (B) — four runners — adds (post-MVP)
 
@@ -160,6 +170,11 @@ GitLab). **Decide scope:**
   `npm run parity:rate -- test/fixtures/parity-runs/` reproduces the rate from a clean
   clone. `test/parity-evidence.test.ts` re-derives the documented figures under
   `npm run verify`.
+- `test/fixtures/live-evidence/` — sanitized issues #20–#23 operational evidence:
+  timeout/budget no-retry, active-phase restart, completed-phase skip, cleanup and
+  cost, real-spawn secret names, exact model routes, live git/gh veto, merge refusal,
+  and cross-language state resume. `test/live-evidence.test.ts` guards the claims
+  without vendoring prompts, full transcripts, or secret values.
 
 ## What I can do vs. what needs a human
 
@@ -176,8 +191,8 @@ GitLab). **Decide scope:**
 2. Set the MVP threshold and make the bar computable (`--max-native-rate`, and/or
    an `ADW_PARITY_FORCE_FENCED_JSON` baseline).
 3. Run ~5–10 varied `claude` issues → `parity:rate` clears the threshold.
-4. Induce + observe the four failure modes live.
-5. Confirm the cost envelope + secret boundary live once.
+4. ✅ Induce + observe the four failure modes live.
+5. ✅ Confirm the cost envelope + secret boundary live once.
 6. Write the universalization scope-line.
 
 Then "MVP-ready for `claude`" is an **audited** statement, not a self-attestation.

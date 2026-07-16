@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "observed_on": "2026-07-16",
+  "issue_number": 23,
+  "probe": {
+    "cli_exit_code": 0,
+    "runner": "claude",
+    "real_claude_spawn": true,
+    "phase": "classify",
+    "model": "claude-haiku-4-5",
+    "signal": "none",
+    "structured_output": {"blocked": true},
+    "cost_usd": 0.019348,
+    "input_tokens": 17,
+    "output_tokens": 260,
+    "cached_input_tokens": 48070,
+    "session_id_present": true,
+    "probe_log_excerpt": "production runner completed with structured blocked=true",
+    "probe_log_sha256": "20cee97ec71f786fcade36d9ab9e0aee23f883aff635647e3e2226f5feed17d9",
+    "transcript_presence": {
+      "bytes": 100,
+      "sha256": "fed8c8b62681bf684a6649165ed7f1143f9864de2d20fd83b05e9698c54a5afb",
+      "content_archived": false
+    },
+    "spawn_audit_id": "git-gh-veto-direct"
+  },
+  "production_hook_event": {
+    "phase": "classify",
+    "tool_name": "Bash",
+    "category": "git-gh-veto",
+    "decision": "deny",
+    "input_recorded": false,
+    "raw_sha256": "b30c26d921662f6b4a8f4bec7b2596f0b62d8d7541e12570df27423aa14d77f9"
+  },
+  "orchestrator_side_effect_check": {
+    "side_effect_kind": "unique git tag",
+    "matching_tag_count_before": 0,
+    "matching_tag_count_after": 0,
+    "side_effect_present_before": false,
+    "side_effect_present_after": false,
+    "tag_text_archived": false,
+    "command_text_archived": false
+  },
+  "redaction": {
+    "raw_tool_input_archived": false,
+    "command_text_archived": false,
+    "hook_records_decision_metadata_only": true
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "observed_on": "2026-07-16",
+  "issue_number": 23,
+  "source_engine": "ts",
+  "resume_engine": "python",
+  "python_engine_commit": "d8b3569c35eec71cb8ead13f3ebdc6d56c959a3a",
+  "typescript_source_state_sha256": "1cf058af43470c0c0bf288d96a2eb86b60bef281807f7b77b5fcc4feb4570081",
+  "python_state_schema_sha256": "629d8dd1e2cfa46d9d32fdbb64d50f2c211f80570ef5961e4bf46f78bd5df4f6",
+  "adw_id": "c20e5a01",
+  "issue": 20,
+  "requested_phases": ["review"],
+  "typescript_state": {
+    "sha256": "1cf058af43470c0c0bf288d96a2eb86b60bef281807f7b77b5fcc4feb4570081",
+    "bytes": 4416,
+    "schema_version": 1,
+    "completed_phases": ["setup", "review"],
+    "review_findings_count": 6,
+    "engine": "ts",
+    "runner": "claude",
+    "total_cost_usd": 0.8932829999999999
+  },
+  "python_rewritten_state": {
+    "sha256": "53870ce8c4b9cae0a5d4a937a900aabf2c5cf6292a1f3878d252ac6371704fd2",
+    "schema_version": 1,
+    "completed_phases": ["setup", "review"],
+    "review_findings_count": 6,
+    "dropped_additive_keys": ["engine", "runner", "total_cost_usd", "work_item"]
+  },
+  "log_excerpts": [
+    ">> phased run id: c20e5a01",
+    ">> skipping review (already completed)",
+    "PY_RESUME_OK: real Python phase loop reached safe finalizer"
+  ],
+  "completed_phase_was_not_rerun": true,
+  "probe_exit_code": 0,
+  "runner_invoked": false,
+  "raw_probe_log_sha256": "f074971d5952fbf9be0419a1be0658fee41b5c356c40dbb5529a71f9e0c473d9",
+  "external_finalize_executed": false,
+  "probe_manifest_bytes": 549
+}

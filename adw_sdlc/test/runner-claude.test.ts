@@ -4,8 +4,8 @@
  * The SDK is replaced by vi.mock per the hermetic CI rule (PLAN.md Section 9):
  * no network, no keys, no child processes. The highest-severity case is the
  * env-isolation test — with a poisoned parent env, the options.env object the
- * adapter hands query() (which the SDK passes to its child as the ENTIRE
- * environment, replace semantics) must be exactly the allowlist.
+ * adapter hands query() must be exactly the replacement allowlist. A separate
+ * committed live-spawn probe covers the SDK-added entrypoint/version controls.
  */
 
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -25,8 +25,12 @@ import type { AgentRunner, PhaseRequest } from '../src/invoker.js';
 import {
   CLAUDE_AUTO_ALLOWED_TOOLS,
   CLAUDE_CAPS,
+  CLAUDE_EDIT_TOOLS,
+  claudeOutputSchema,
   createRunner,
   denyGitGh,
+  gitGhPreToolUseHook,
+  isClaudeBudgetError,
   resolveClaudeBin,
 } from '../src/runners/runner-claude.js';
 
@@ -129,11 +133,14 @@ describe('request shape', () => {
     expect(options.cwd).toBe(req.cwd);
     expect(options.model).toBe('claude-opus-4-8');
     expect(options.allowedTools).toEqual([...CLAUDE_AUTO_ALLOWED_TOOLS]);
+    expect(options.tools).toEqual([...CLAUDE_EDIT_TOOLS]);
     // An allowedTools entry is an allow rule that resolves BEFORE canUseTool;
     // Bash must stay out of it or the git/gh veto becomes dead code.
     expect(options.allowedTools).not.toContain('Bash');
     expect(options.permissionMode).toBe('acceptEdits');
     expect(typeof options.canUseTool).toBe('function');
+    expect(options.hooks?.PreToolUse).toHaveLength(1);
+    expect(options.hooks?.PreToolUse?.[0]?.hooks).toHaveLength(1);
     expect(options.systemPrompt).toEqual({ type: 'preset', preset: 'claude_code' });
     expect(options.abortController).toBeInstanceOf(AbortController);
     expect(queryMock.mock.calls[0]![0].prompt).toBe('plan the work');
@@ -141,12 +148,37 @@ describe('request shape', () => {
 
   it('requests native structured output and forwards maxBudgetUsd when given', async () => {
     scriptedQuery([successResult()]);
-    const schema = { type: 'object', properties: { ok: { type: 'boolean' } } };
+    const schema = {
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      type: 'object',
+      properties: { ok: { type: 'boolean' } },
+    };
     await runner.runPhase(makeReq({ schema, maxBudgetUsd: 5 }));
 
     const options = capturedOptions();
-    expect(options.outputFormat).toEqual({ type: 'json_schema', schema });
+    expect(options.outputFormat).toEqual({
+      type: 'json_schema',
+      schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+    });
+    // The shared schema object is reused by parent validation/other runners.
+    expect(schema).toHaveProperty('$schema');
     expect(options.maxBudgetUsd).toBe(5);
+  });
+
+  it('removes only the unsupported top-level schema dialect marker', () => {
+    const nested = { $schema: 'keep-nested', type: 'string' };
+    expect(
+      claudeOutputSchema({
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        $id: 'phase-result',
+        type: 'object',
+        properties: { nested },
+      }),
+    ).toEqual({
+      $id: 'phase-result',
+      type: 'object',
+      properties: { nested },
+    });
   });
 
   it('omits outputFormat and maxBudgetUsd when absent (free-form phase)', async () => {
@@ -265,6 +297,38 @@ describe('result mapping', () => {
     expect(result.sessionId).toBe('sess-1');
   });
 
+  it('preserves the native budget signal when SDK 0.3.183 throws after the error result', async () => {
+    queryMock.mockImplementation(
+      () =>
+        (async function* () {
+          yield assistantMsg('began') as never;
+          throw new Error(
+            'Claude Code returned an error result: Reached maximum budget ($0.01)',
+          );
+        })() as never,
+    );
+    const req = makeReq();
+    const result = await runner.runPhase(req);
+
+    expect(result.ok).toBe(false);
+    expect(result.rc).toBe(1);
+    expect(result.signal).toBe('budget');
+    expect(result.transcriptText).toBe('began\n');
+    expect(readFileSync(req.transcriptPath, 'utf8')).toContain(
+      '[claude result error_max_budget_usd] Claude Code returned an error result: Reached maximum budget',
+    );
+  });
+
+  it('recognizes only the SDK native-budget error prefix', () => {
+    expect(
+      isClaudeBudgetError(
+        new Error('Claude Code returned an error result: Reached maximum budget ($0.01)'),
+      ),
+    ).toBe(true);
+    expect(isClaudeBudgetError(new Error('Reached maximum budget ($0.01)'))).toBe(false);
+    expect(isClaudeBudgetError(new Error('Claude Code process exited with code 1'))).toBe(false);
+  });
+
   it('reports a success-subtype result with is_error true as a failed run', async () => {
     scriptedQuery([successResult({ is_error: true })]);
     const result = await runner.runPhase(makeReq());
@@ -300,7 +364,7 @@ describe('result mapping', () => {
   });
 
   it("maps schema-retry exhaustion to a plain failure (signal 'none' → invoker nudges)", async () => {
-    // 0.3.173 has no maxStructuredOutputRetries option; exhaustion surfaces
+    // 0.3.183 has no maxStructuredOutputRetries option; exhaustion surfaces
     // only as this result subtype ([VERIFY] resolution, PLAN.md step 6).
     scriptedQuery([errorResult('error_max_structured_output_retries')]);
     const result = await runner.runPhase(makeReq());
@@ -463,6 +527,94 @@ describe('denyGitGh (caps.perToolHook)', () => {
         expect(verdict.message).toContain('outside this phase');
       }
     }
+  });
+
+  it('audits a git/gh veto without recording the command or tool input', async () => {
+    const path = join(tmp, 'tool-veto-audit.jsonl');
+    const hook = gitGhPreToolUseHook('review', path);
+    const command = 'git status && echo command-must-not-be-recorded';
+    const verdict = await hook(
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        tool_input: { command },
+        tool_use_id: 'tool-secret-id',
+        session_id: 'session-secret-id',
+        transcript_path: '/secret/transcript',
+        cwd: '/secret/worktree',
+      },
+      'tool-secret-id',
+      { signal: new AbortController().signal },
+    );
+
+    expect(verdict).toMatchObject({
+      continue: true,
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+      },
+    });
+    const raw = readFileSync(path, 'utf8');
+    expect(JSON.parse(raw)).toEqual({
+      schema_version: 1,
+      phase: 'review',
+      tool_name: 'Bash',
+      category: 'git-gh-veto',
+      decision: 'deny',
+      input_recorded: false,
+    });
+    expect(raw).not.toContain(command);
+    expect(raw).not.toContain('tool-secret-id');
+    expect(raw).not.toContain('session-secret-id');
+    expect(raw).not.toContain('/secret/');
+  });
+
+  it('does not create an audit artifact for an allowed Bash command', async () => {
+    const path = join(tmp, 'tool-veto-audit.jsonl');
+    const hook = gitGhPreToolUseHook('tests', path);
+    const verdict = await hook(
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'npm test' },
+        tool_use_id: 't1',
+        session_id: 's1',
+        transcript_path: '/tmp/transcript',
+        cwd: '/tmp/worktree',
+      },
+      't1',
+      { signal: new AbortController().signal },
+    );
+
+    expect(verdict).toEqual({ continue: true });
+    expect(() => readFileSync(path, 'utf8')).toThrow();
+  });
+
+  it('still denies git/gh when the optional audit artifact cannot be written', async () => {
+    const path = join(tmp, 'missing-directory', 'tool-veto-audit.jsonl');
+    const hook = gitGhPreToolUseHook('review', path);
+    const verdict = await hook(
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'git status' },
+        tool_use_id: 't1',
+        session_id: 's1',
+        transcript_path: '/tmp/transcript',
+        cwd: '/tmp/worktree',
+      },
+      't1',
+      { signal: new AbortController().signal },
+    );
+
+    expect(verdict).toMatchObject({
+      continue: true,
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+      },
+    });
+    expect(() => readFileSync(path, 'utf8')).toThrow();
   });
 });
 

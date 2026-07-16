@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "observed_on": "2026-07-16",
+  "issue_number": 23,
+  "reused_run_id": "c20e5a01",
+  "pr_creation_pass": {
+    "cli_exit_code": 0,
+    "merge_disabled_for_pass": true,
+    "log_excerpts": [
+      ">> skipping review (already completed)",
+      ">> git push -u origin feat/20-c20e5a01-run-the-three-live-failure-mode-drills-t",
+      ">> gh pr create --base main --head …",
+      ">> git commit -m fix: address CI failures (verify (node 20.19.0))"
+    ],
+    "sensitive_gh_arguments_redacted_with_ellipsis": true,
+    "raw_cli_log_sha256": "5d107709314ad36109027b63a9948488d7279ca5d2f5c0ac449a9e9ab2d3c879",
+    "ci_fix": {
+      "model": "claude-sonnet-4-6",
+      "cost_usd": 0.4902518,
+      "metrics_sha256": "7515e4e4f3aeb3af80060cd9722b5f7fb64d4b4c2517eb89115fd0e7c58b0c4c",
+      "spawn_audit_id": "ci-fix-pr-only"
+    }
+  },
+  "unattended_refusal_pass": {
+    "cli_exit_code": 1,
+    "yes_flag_present": false,
+    "assume_yes_environment_present": false,
+    "error_excerpt": "error: refusing to merge unattended without --yes / ADW_ASSUME_YES=1",
+    "raw_cli_log_sha256": "54f82b55f1085a0e55159039e4b560e4ee21b616a655588b9d9587c92f6996f8",
+    "state_before_sha256": "8d72ac07ee3383800a692792e1dbced59b5983a49e5eb788c816938770a26bab",
+    "state_after_sha256": "8d72ac07ee3383800a692792e1dbced59b5983a49e5eb788c816938770a26bab",
+    "state_unchanged": true,
+    "merge_executed": false
+  },
+  "pr_after_refusal": {
+    "number": 66,
+    "url": "https://github.com/kortiene/switchyard/pull/66",
+    "head_ref_name": "feat/20-c20e5a01-run-the-three-live-failure-mode-drills-t",
+    "state": "OPEN",
+    "merged_at": null,
+    "merge_state_status": "CLEAN",
+    "checks": [
+      {
+        "name": "verify (node 20.19.0)",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "completed_at": "2026-07-16T22:13:27Z"
+      },
+      {
+        "name": "verify (node 22)",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "completed_at": "2026-07-16T22:13:32Z"
+      }
+    ],
+    "raw_sha256": "dcf4471efdfaa6e197c2d315ae0eeea9b79c2d0b59b6df5e268de4a01f86ec35"
+  }
+}

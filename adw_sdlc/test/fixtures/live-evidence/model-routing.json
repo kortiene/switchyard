@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "observed_on": "2026-07-16",
+  "issue_number": 23,
+  "source_config": ".adw/config.json",
+  "source_config_sha256": "7ee1e1f371e2c3ad09a8e01146114dd7c71f589667f0db17de2fafaa86be33b9",
+  "runner": "claude",
+  "tiers": {
+    "cheap": "claude-haiku-4-5",
+    "mid": "claude-sonnet-4-6",
+    "capable": "claude-opus-4-8"
+  },
+  "live_tier_exemplars": {
+    "cheap": {
+      "evidence_kind": "completed production phase",
+      "run_id": "c20e5a01",
+      "cli_exit_code": 130,
+      "phase": "classify",
+      "model": "claude-haiku-4-5",
+      "signal": "none",
+      "attempts": 1,
+      "nudged_phases": 0,
+      "duration_ms": 17182,
+      "cost_usd": 0.0668047,
+      "input_tokens": 19,
+      "output_tokens": 1291,
+      "cached_input_tokens": 27847,
+      "metrics_sha256": "73fba876d5310150f62d526a20f5d4cdd02c7c944158eeca1bf9b40a53622e79",
+      "state_sha256": "68c488dc5c4fec5ff244dc4ad8b2a96c6dd84f29834e70b9e9ed1317dbc4d47e",
+      "raw_cli_log_sha256": "2e9d6c04d5ed2f2cb2fc22891b818ec80ac3ab5176b6d470bdff781a77ff16a9",
+      "process_group_after_interrupt_count": 0,
+      "spawn_audit_id": "classify-route"
+    },
+    "mid": {
+      "evidence_kind": "completed direct production-runner probe",
+      "run_id": null,
+      "cli_exit_code": 0,
+      "phase": "tests",
+      "model": "claude-sonnet-4-6",
+      "signal": "none",
+      "structured_output": {"ok": true},
+      "cost_usd": 0.1685902,
+      "input_tokens": 6,
+      "output_tokens": 96,
+      "cached_input_tokens": 26364,
+      "session_id_present": true,
+      "probe_log_sha256": "9a8397478659714df4dbbfdb233afade7d4a96ea693bb1f3a1c2b1449afb602c",
+      "transcript_presence": {
+        "bytes": 97,
+        "sha256": "cc0074f8b10d4bc85595c2941a76d59114ba7817a3375b34c9d006055d1a924c",
+        "content_archived": false
+      },
+      "spawn_audit_id": "tests-route-direct"
+    },
+    "capable": {
+      "evidence_kind": "completed production phase",
+      "run_id": "c20e5a01",
+      "cli_exit_code": 130,
+      "phase": "review",
+      "model": "claude-opus-4-8",
+      "signal": "none",
+      "attempts": 1,
+      "nudged_phases": 0,
+      "duration_ms": 139850,
+      "cost_usd": 0.8932829999999999,
+      "input_tokens": 18,
+      "output_tokens": 10131,
+      "cached_input_tokens": 284736,
+      "metrics_sha256": "e111d4fad7e8b6c73b9d84816cc116497518a76c482fa7abb4315b7cc6d3fe44",
+      "transcript_presence": {
+        "bytes": 4321,
+        "sha256": "c888c9f778b462271f32bb0f97f0fd8976a9327bbfd7836791b6779ff12b34a3",
+        "content_archived": false
+      },
+      "spawn_audit_id": "interrupted-review"
+    }
+  },
+  "routes": [
+    {"phase": "classify", "tier": "cheap", "resolved_model": "claude-haiku-4-5", "resolution": "config-derived; cheap tier observed live"},
+    {"phase": "plan", "tier": "capable", "resolved_model": "claude-opus-4-8", "resolution": "config-derived; capable tier observed live"},
+    {"phase": "implement", "tier": "capable", "resolved_model": "claude-opus-4-8", "resolution": "config-derived; capable tier observed live"},
+    {"phase": "tests", "tier": "mid", "resolved_model": "claude-sonnet-4-6", "resolution": "config-derived; mid tier observed live"},
+    {"phase": "resolve", "tier": "mid", "resolved_model": "claude-sonnet-4-6", "resolution": "config-derived; mid tier observed live"},
+    {"phase": "e2e", "tier": "mid", "resolved_model": "claude-sonnet-4-6", "resolution": "config-derived; mid tier observed live"},
+    {"phase": "review", "tier": "capable", "resolved_model": "claude-opus-4-8", "resolution": "config-derived; capable tier observed live"},
+    {"phase": "patch", "tier": "capable", "resolved_model": "claude-opus-4-8", "resolution": "config-derived; capable tier observed live"},
+    {"phase": "document", "tier": "mid", "resolved_model": "claude-sonnet-4-6", "resolution": "config-derived; mid tier observed live"}
+  ]
+}

@@ -17,6 +17,17 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import {
+  constants,
+  accessSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
@@ -193,5 +204,77 @@ describe('live secret-boundary audit (spawned child)', () => {
     expect(r.stdout).toBe('present');
     // Confirm no denied keys slipped in alongside.
     expect(deniedSeenByChild(env)).toEqual([]);
+  });
+
+  it('the real-Claude exec probe reports names only and fails closed before exec on a denied key', () => {
+    const root = mkdtempSync(join(tmpdir(), 'adw-claude-env-probe-'));
+    const clean = join(root, 'clean');
+    const denied = join(root, 'denied');
+    mkdirSync(clean);
+    mkdirSync(denied);
+    const probe = join(import.meta.dirname, '..', 'tools', 'claude-env-audit-wrapper.sh');
+    const forwarded = join(root, 'capture-forwarded-argv.sh');
+    writeFileSync(
+      forwarded,
+      `#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' "$@" > "\${TMPDIR}/forwarded-argv.txt"\n`,
+      { mode: 0o700 },
+    );
+    accessSync(probe, constants.X_OK);
+    const base = {
+      PATH: '/usr/bin:/bin',
+      HOME: '/tmp',
+      CLAUDE_BIN: probe,
+      CLAUDE_CODE_PATH: forwarded,
+      CLAUDE_CODE_ENTRYPOINT: 'sdk-ts',
+      CLAUDE_AGENT_SDK_VERSION: 'test-version',
+    };
+
+    try {
+      const cleanRun = spawnSync(
+        probe,
+        ['--model', 'claude-test', '--max-budget-usd', '0.01'],
+        { env: { ...base, TMPDIR: clean }, encoding: 'utf8' },
+      );
+      expect(cleanRun.status, cleanRun.stderr).toBe(0);
+      const cleanEvidence = JSON.parse(
+        readFileSync(join(clean, 'claude-runner-env-audit.json'), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(cleanEvidence).toMatchObject({
+        value_output_forbidden: true,
+        observed_denied_key_names: [],
+        requested_model: 'claude-test',
+        requested_max_budget_usd: '0.01',
+        result: 'PASS',
+      });
+      expect(cleanEvidence['observed_control_key_names']).toEqual(
+        expect.arrayContaining(['CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_AGENT_SDK_VERSION']),
+      );
+      expect(readFileSync(join(clean, 'forwarded-argv.txt'), 'utf8').split('\n')).toEqual([
+        '--model',
+        'claude-test',
+        '--max-budget-usd',
+        '0.01',
+        '',
+      ]);
+
+      const deniedRun = spawnSync(probe, ['--model', 'claude-test'], {
+        env: { ...base, TMPDIR: denied, GH_TOKEN: SENTINEL },
+        encoding: 'utf8',
+      });
+      expect(deniedRun.status).toBe(97);
+      const deniedEvidence = JSON.parse(
+        readFileSync(join(denied, 'claude-runner-env-audit.json'), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(deniedEvidence).toMatchObject({
+        value_output_forbidden: true,
+        observed_denied_key_names: ['GH_TOKEN'],
+        result: 'FAIL',
+      });
+      expect(`${deniedRun.stdout}${deniedRun.stderr}`).not.toContain(SENTINEL);
+      expect(JSON.stringify(deniedEvidence)).not.toContain(SENTINEL);
+      expect(() => readFileSync(join(denied, 'forwarded-argv.txt'), 'utf8')).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

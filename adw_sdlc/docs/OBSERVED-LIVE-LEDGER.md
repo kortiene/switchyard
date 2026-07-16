@@ -1,6 +1,6 @@
 # Observed-live ledger — "mocked ✅ → seen live?"
 
-_Last updated: 2026-06-28._
+_Last updated: 2026-07-16._
 
 This is the **live counterpart** to [`../PARITY.md`](../PARITY.md): PARITY.md is a
 checklist of green boxes, but nearly every box is **mocked-seam** evidence (every
@@ -36,29 +36,28 @@ for `adw/ green` — proven by the Python suite), matching PARITY.
 | # | Guarantee (PARITY §10) | Mocked? | Observed-live? | Run id / evidence |
 | --- | --- | --- | --- | --- |
 | 1 | Phase order & gating | ✅ | ✅ observed-live | Run `007fd5ba` ran the full chain end-to-end → squash-merged PR #331 (`PARITY.md:53`, `:69`). The *conditional* e2e/document gates firing identically was not separately evidenced. |
-| 2 | Per-phase model routing | ✅ | 🟡 partial / inferred | The live run necessarily used per-phase routing, but no committed artifact pins the exact tier per phase. Upgrade only if `007fd5ba` phase outputs confirm tiers. |
+| 2 | Per-phase model routing | ✅ | ✅ observed-live | Runs `a6b4e6dc`, `b20d9e02`, and `c20e5a01` pin the resolved models in the [sanitized live-evidence corpus](../test/fixtures/live-evidence/): Haiku for `classify`, Sonnet for the direct `tests` invocation and `ci-fix`, and Opus for `review`. The archived all-nine-phase route table reconciles every configured agent phase rather than inferring its tier from a completed run. |
 | 3 | Selected runner edits the worktree unattended (capability parity) | ✅ | ✅ observed-live | The `claude` runner edited the worktree unattended and produced PR #331 (`PARITY.md:69`). |
-| 4 | Structured output | ✅ | ✅ observed-live (rate: native measured, comparative ⏳) | Seen live including a real tests-phase contract mismatch, root-caused and fixed structurally in #332 (`PARITY.md:91–95`). Now **measured** over the 8-run batch (`npm run parity:rate -- test/fixtures/parity-runs/`): native **0/36 hard-fails (0.0%)** but an **88.9% single-nudge rate** — native rarely lands clean on the first attempt. The *comparative* bar (native ≤ fenced) still reads `INSUFFICIENT DATA` (fenced = 5 attempts, < 20 needed). |
-| 5 | Secret withholding (fail-closed) | ✅ | ⏳ not-yet-observed | `MVP-READINESS.md:101–102` explicitly owes "the secret boundary asserted once on a *real* spawned env (not only the lint + mocks)." Mocked-only today. |
-| 6 | Sandboxed-to-worktree (per runner) | ✅ | 🟡 partial / inferred | `cwd` was bound to the worktree for the live run, but the per-tool git/gh veto (`caps.perToolHook`) firing live is not evidenced. |
-| 7 | Gated squash-merge | ✅ | 🟡 partial / inferred | The merge path executed live (PR #331 was squash-merged with `--yes`), but the *unattended refusal without `--yes`* was not induced live (it is one of the owed §1 failure drills). |
-| 8 | Bounded loops + no-retry-on-timeout | ✅ | ⏳ not-yet-observed | `MVP-READINESS.md:88–91`: a real timeout fast-fail / budget fast-fail — "none has been seen live." Mocked-only today. |
-| 9 | Resume | ✅ | ✅ observed-live | `PARITY.md:96` — "no recurrence on resume" after #332 means a real `--resume` occurred. Note: the §1 *kill-then-resume* failure drill is a different, still-owed scenario. |
+| 4 | Structured output | ✅ | ✅ observed-live (native rate measured; comparative rate separately gated) | Seen live including a real tests-phase contract mismatch, root-caused and fixed structurally in #332 (`PARITY.md:91–95`). Now **measured** over the 8-run batch (`npm run parity:rate -- test/fixtures/parity-runs/`): native **0/36 hard-fails (0.0%)** but an **88.9% single-nudge rate** — native rarely lands clean on the first attempt. The separate *comparative* bar (native ≤ fenced) still reads `INSUFFICIENT DATA` (fenced = 5 attempts, < 20 needed). |
+| 5 | Secret withholding (fail-closed) | ✅ | ✅ observed-live | The issue #21 names-only `CLAUDE_BIN` probe crossed the real runner-spawn boundary during carrier runs `a6b4e6dc`, `b20d9e02`, and `c20e5a01`. Its sanitized parent record confirms `GH_TOKEN`, `GH_BIN`, and `MATRIX_*` / `ADW_*` / `MX_AGENT_*` sentinels were present; every spawn record reports no denied names and confirms the real Claude executable was reached ([fixture corpus](../test/fixtures/live-evidence/)). No secret values were captured. |
+| 6 | Sandboxed-to-worktree (per runner) | ✅ | ✅ observed-live | Run `c20e5a01` exercised the unconditional `PreToolUse` veto against `git tag`: the operation was denied before execution and the archived before/after tag evidence shows no tag was created. Together with the run's worktree-bound `cwd`, this directly observes the Claude per-tool sandbox control ([fixture corpus](../test/fixtures/live-evidence/)). |
+| 7 | Gated squash-merge | ✅ | ✅ observed-live | Run `c20e5a01` reached green PR #66 without `--yes`; the unattended merge gate refused authorization, and the archived post-run observation records the PR as OPEN and unmerged. This directly complements the earlier authorized squash-merge of PR #331 ([fixture corpus](../test/fixtures/live-evidence/)). |
+| 8 | Bounded loops + no-retry-on-timeout | ✅ | ✅ observed-live | Run `a6b4e6dc` induced the real timeout fast-fail and run `b20d9e02` induced Claude's native budget fast-fail. Their sanitized artifacts pin the exact terminal errors, one first-attempt transcript apiece, and no `transcript-2.log`, demonstrating that neither signal entered the nudge retry ([fixture corpus](../test/fixtures/live-evidence/)). |
+| 9 | Resume | ✅ | ✅ observed-live | Run `57b6bfea` was interrupted while a real Claude `review` subprocess was active and before the phase persisted; the same run id resumed, reran `review`, and persisted it successfully. Run `c20e5a01` separately resumed after a durable phase and printed the archived `skipping ... (already completed)` observation before continuing to green PR #66. Together they directly observe both restart-incomplete and skip-complete recovery shapes ([fixture corpus](../test/fixtures/live-evidence/)). |
 | 10 | Artifacts | ✅ | ✅ observed-live | PR #331 has a real PR body + commit message → `review`/`document` wrote `pr_body.md`/`commit_message.txt` live. |
-| 11 | State equivalence (cross-language) | ✅ | 🟡 partial / inferred | `PARITY.md:47` — the live run "produced a real such `state.json`" that validates against the schema. The cross-language *resume of that exact artifact* by Python is proven via fixtures/tests, not the live artifact. |
+| 11 | State equivalence (cross-language) | ✅ | ✅ observed-live | The Python engine pinned at commit `d8b3569` loaded and resumed the archived TS-produced state whose source hash begins `1cf058af…`, directly observing the cross-language handoff against a real artifact ([fixture corpus](../test/fixtures/live-evidence/)). The exercise was intentionally stopped before cross-language finalization; finalization itself remains mocked and is not claimed here. |
 | 12 | Cost/usage | ✅ | ✅ observed-live | Cost ≈ $34.76 recorded for run `007fd5ba` (`PARITY.md:69`); native per-phase cost was captured. |
 | 13 | adw/ green | ✅ | N/A (not live-observable) | The Python `adw/` unittest suite staying green is a CI / mocked-suite invariant, not a property of a `claude` live run. |
 
-**Headline: 6 `✅`, 4 `🟡`, 2 `⏳`, 1 `N/A`** (unchanged — see the conservative rule
-below). Nine live `claude` runs now exist (the original seed plus the 8-issue batch),
-but the tokens stay put: the batch is self-referential, and the load-bearing
-security/failure guarantees (#5 secret boundary, #8 bounded-loop
-fast-fail) were still not induced live — which is exactly the gap
-[`MVP-READINESS.md` §1](../MVP-READINESS.md#1-gates-for-a--claude-ships-reliably) calls out.
+**Headline: 12 `✅`, 0 `🟡`, 0 `⏳`, 1 `N/A`.** All twelve live-observable
+guarantees now have cited real-run evidence. The remaining `N/A` row is a suite
+invariant rather than a runtime behavior; the comparative structured-output rate
+and cross-language finalization caveat remain separately stated and are not hidden
+by this tally.
 
 ## Seed source & authoring rule
 
-The ledger seeds from **two** sources, kept distinct because their evidence differs:
+The ledger draws from **three** sources, kept distinct because their evidence differs:
 
 1. **The original seed run** — Issue #304 → PR #331 (squash-merged), parity fix #332,
    run `007fd5ba`, cost ≈ $34.76 — recorded in `PARITY.md`
@@ -79,21 +78,31 @@ The ledger seeds from **two** sources, kept distinct because their evidence diff
    structured-output rate is **measured reproducibly from a clean clone**: native
    **0/36 hard-fails (0.0%)** with an **88.9% nudge rate**; fenced **5/5 clean** (so the
    *comparative* bar still reads INSUFFICIENT DATA — it needs ≥ 20 fenced attempts).
+3. **The issues #20–#23 operational-evidence batch** — Claude carrier runs
+   `a6b4e6dc`, `b20d9e02`, `c20e5a01`, and active-phase recovery run `57b6bfea`,
+   green-but-unmerged PR #66, and the
+   Python-engine state handoff `d8b3569`. The sanitized, names-only/minimal artifacts
+   are committed under [`test/fixtures/live-evidence/`](../test/fixtures/live-evidence/):
+   timeout and native-budget no-retry outcomes, active-phase restart plus completed-phase
+   skip state, the all-nine model
+   route table, real-spawn secret-boundary records, the unconditional git-tag veto,
+   unattended merge refusal, and the cross-language source hash. Raw transcripts and
+   all secret values remain excluded.
 
-So nine live `claude` runs exist in total — and the measurement is now reproducible
-from a clean clone — but every row above stays conservative for reasons the batch
-does **not** overcome: it is **self-referential** (claude editing `adw_sdlc`'s own
-docs/tests/CI, not shipping independent features), and the load-bearing failure-mode
-(#8) and secret-boundary (#5) guarantees were still never induced against a real
-spawned runner.
+Together these sources directly evidence all twelve live-observable guarantees from
+a clean clone. The claims remain deliberately narrower than “every possible tail ran”:
+in particular, Python loaded and resumed the real TS state, but that exercise stopped
+before cross-language finalization, whose proof remains mocked.
 
-**Conservative rule (load-bearing):** a row is `✅ observed-live` **only** where a
-cited committed document supports it; everything else stays `⏳` or `🟡` with a note
-on the gap. Do not overclaim — a readiness dashboard that marks an unproven
-guarantee green is worse than no dashboard. The batch evidence is now committed at
-[`test/fixtures/parity-runs/`](../test/fixtures/parity-runs/) (CI-guarded by
-`test/parity-evidence.test.ts`), so `parity:rate` is reproducible; what still gates
-any `🟡`/`⏳` upgrade is **live** evidence for the guarantee, not more committed artifacts.
+**Conservative rule (load-bearing):** a row is `✅ observed-live` **only** where cited,
+committed evidence directly supports it. Do not overclaim — a readiness dashboard
+that marks an unproven guarantee green is worse than no dashboard. The measurement
+corpus at [`test/fixtures/parity-runs/`](../test/fixtures/parity-runs/) and the
+operational corpus at [`test/fixtures/live-evidence/`](../test/fixtures/live-evidence/)
+are the committed sources for the upgrades above. The former is CI-guarded by
+`test/parity-evidence.test.ts`; the latter preserves only sanitized,
+claim-determining evidence. A row is green only for the behavior those artifacts
+directly show.
 
 ## How to update after a live `claude` run
 
@@ -104,8 +113,8 @@ any `🟡`/`⏳` upgrade is **live** evidence for the guarantee, not more commit
    backing each upgraded row (e.g. per-phase `usage`/cost for #12, the persisted
    `state.json` for #11, `pr_body.md`/`commit_message.txt` for #10).
 3. **Refresh the structured-output rate** with `npm run parity:rate -- agents/`
-   and link the result for row #4 (it stays `(rate ⏳)` until the comparative bar
-   stops printing `INSUFFICIENT DATA`).
+   and link the result for row #4. Its comparative rate remains a separately stated
+   gate until the tool stops printing `INSUFFICIENT DATA`.
 4. **Keep row order aligned with `PARITY.md` Section 10** so the two documents stay
    one-to-one and the "12 vs 13" count cannot drift.
 5. **Bump the `Last updated` date** at the top and update the headline tally.
