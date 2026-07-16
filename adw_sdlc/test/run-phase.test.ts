@@ -381,8 +381,11 @@ describe('runAgentPhase', () => {
         timeoutMs: 100,
       });
 
+      // Attach the rejection handler BEFORE advancing time so the promise has a
+      // handler at the moment it rejects (avoids unhandledRejection warnings).
+      const assertion = expect(phasePromise).rejects.toThrow(/timed out/);
       await vi.advanceTimersByTimeAsync(101);
-      await expect(phasePromise).rejects.toThrow(/timed out/);
+      await assertion;
 
       expect(capturedSignal?.aborted).toBe(true);
       const abortReason = capturedSignal?.reason as Error | undefined;
