@@ -146,7 +146,15 @@ export interface AdwProviders {
 }
 
 function numericId(id: number | string): number {
-  return typeof id === 'number' ? id : Number.parseInt(String(id), 10);
+  const raw = String(id);
+  if (!/^\d+$/.test(raw)) {
+    throw new AdwError(`GitHub work-item id must be a positive integer, got: ${JSON.stringify(id)}`);
+  }
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new AdwError(`GitHub work-item id must be a positive safe integer, got: ${JSON.stringify(id)}`);
+  }
+  return parsed;
 }
 
 export function createGitHubCliProvider(): ProviderCli {
@@ -161,18 +169,20 @@ export function createGitHubWorkItemProvider(): WorkItemProvider {
     fetch: (ctx, id) => fetchWorkItem(ctx.ghBin, numericId(id), ctx.repo),
     state: (ctx, id) => issueState(ctx.ghBin, numericId(id), ctx.repo),
     postProgress: (ctx, id, adwId, phase, message) =>
-      postProgress(ctx.ghBin, id, ctx.repo, adwId, phase, message),
+      postProgress(ctx.ghBin, numericId(id), ctx.repo, adwId, phase, message),
     assignSelf: (ctx, id) => {
+      const issue = numericId(id);
       if (!ctx.ghBin) {
         return;
       }
-      const args = [ctx.ghBin, 'issue', 'edit', String(id), '--add-assignee', '@me'];
+      const args = [ctx.ghBin, 'issue', 'edit', String(issue), '--add-assignee', '@me'];
       if (ctx.repo) {
         args.push('--repo', ctx.repo);
       }
       capture(args);
     },
     setStatus: (ctx, id, status) => {
+      const issue = numericId(id);
       if (!ctx.ghBin) {
         return;
       }
@@ -180,7 +190,7 @@ export function createGitHubWorkItemProvider(): WorkItemProvider {
       if (!owner) {
         return;
       }
-      setStatus(ctx.ghBin, owner, numericId(id), status, getAdwConfig().providers.workItems.statusFieldName);
+      setStatus(ctx.ghBin, owner, issue, status, getAdwConfig().providers.workItems.statusFieldName);
     },
   };
 }

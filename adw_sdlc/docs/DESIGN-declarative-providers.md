@@ -114,7 +114,8 @@ how to map the response onto the kernel's shape. `cli` and `rest` share the
 placeholders, substituted as **separate argv elements** (never shell-joined —
 `capture()` uses `spawnSync` with no shell, so there is no word-splitting or
 injection through the value). A placeholder may only appear as a whole argv
-token or inside one; the substituted value is passed verbatim.
+token or inside one; the substituted value is passed verbatim. Provider-native
+string ids such as `PROJ-123` and UUIDs therefore remain one exact argv value.
 
 ### 3.2 `rest` (HTTP)
 
@@ -140,7 +141,8 @@ token or inside one; the substituted value is passed verbatim.
 }
 ```
 
-The resolved URL is `baseUrl + path` with placeholders percent-encoded. The
+The resolved URL is `baseUrl + path` with placeholders percent-encoded (so a
+string work-item id remains one path component). The
 request carries exactly one header: `Authorization: <authScheme> <token>` (§7).
 No request body for reads; write routes (later) add a JSON body template.
 

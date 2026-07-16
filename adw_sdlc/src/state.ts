@@ -6,10 +6,11 @@
  * Python engine is not bundled in this standalone port.
  *
  * Canonical v1 fields are written always (including nulls), exactly like the
- * Python dataclass writer; TS-only additions (engine/runner/total_cost_usd and
- * provider-neutral work_item/change_request metadata) are additive, written
- * only when set, and never load-bearing for resume — Python's reader drops
- * them, and resume works from v1 fields + completed_phases alone.
+ * Python dataclass writer; TS-only additions (engine/runner/total_cost_usd,
+ * merge_skipped, and provider-neutral work_item/change_request metadata) are
+ * additive, written only when set, and never load-bearing for resume —
+ * Python's reader drops them, and resume works from v1 fields +
+ * completed_phases alone.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -92,6 +93,8 @@ export interface AdwStateInit {
   changeRequest?: StateMetadata;
   /** Accumulated run cost; null = some phase could not be priced (unknown). */
   totalCostUsd?: number | null;
+  /** Why the merge stage was intentionally skipped; absent once merged. */
+  mergeSkipped?: 'flag';
 }
 
 /** Minimal persistent state connecting phased-run steps (adw/_state.py:51). */
@@ -117,6 +120,8 @@ export class AdwState {
   changeRequest: StateMetadata | undefined;
   /** Accumulated run cost; null = some phase could not be priced (unknown). */
   totalCostUsd: number | null | undefined;
+  /** Additive PR-only bookkeeping; merge remains incomplete and resumable. */
+  mergeSkipped: 'flag' | undefined;
 
   constructor(init: AdwStateInit) {
     this.adwId = validateAdwId(init.adwId);
@@ -137,6 +142,7 @@ export class AdwState {
     this.workItem = init.workItem;
     this.changeRequest = init.changeRequest;
     this.totalCostUsd = init.totalCostUsd;
+    this.mergeSkipped = init.mergeSkipped;
   }
 
   // --- paths -----------------------------------------------------------------
@@ -206,6 +212,9 @@ export class AdwState {
     if (this.totalCostUsd !== undefined) {
       doc['total_cost_usd'] = this.totalCostUsd;
     }
+    if (this.mergeSkipped !== undefined) {
+      doc['merge_skipped'] = this.mergeSkipped;
+    }
     return doc;
   }
 
@@ -253,7 +262,7 @@ export class AdwState {
       return new AdwState({
         adwId: doc['adw_id'],
         schemaVersion: typeof doc['schema_version'] === 'number' ? doc['schema_version'] : 1,
-        issueNumber: asStringOrNull(doc['issue_number']),
+        issueNumber: asWorkItemIdStringOrNull(doc['issue_number']),
         issueClass: asStringOrNull(doc['issue_class']),
         branchName: asStringOrNull(doc['branch_name']),
         base: typeof doc['base'] === 'string' ? doc['base'] : 'main',
@@ -276,6 +285,7 @@ export class AdwState {
           typeof doc['total_cost_usd'] === 'number' || doc['total_cost_usd'] === null
             ? doc['total_cost_usd']
             : undefined,
+        mergeSkipped: doc['merge_skipped'] === 'flag' ? 'flag' : undefined,
       });
     } catch {
       return null;
@@ -285,6 +295,14 @@ export class AdwState {
 
 function asStringOrNull(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
+}
+
+/** Canonicalize legacy numeric issue_number values for safe cross-version resume. */
+function asWorkItemIdStringOrNull(value: unknown): string | null {
+  if (typeof value === 'string') {
+    return value;
+  }
+  return typeof value === 'number' && Number.isInteger(value) ? String(value) : null;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

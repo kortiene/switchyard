@@ -553,7 +553,7 @@ own knobs (`--test-cmd`/`maxResolve`, `gates.e2e`/`gates.documentation`).
 | `FailingJob` | `PipelineJob` | compat alias preserved |
 | `git.GitResult` (provider-shaped) | `OperationResult` | compat: `GitOperationResult` |
 | `runIssue` (CliDeps) | `runWorkItem` (optional) | runIssue still required |
-| `parsed.issue` (CLI) | `parsed.workItem` | both populated identically |
+| `parsed.issue` (CLI) | `parsed.workItem` | both populated identically as `number \| string` |
 
 ## State
 
@@ -580,7 +580,10 @@ TS-additive provider-neutral metadata:
 ```
 
 Both halves are validated against `adw/state.schema.json`. The provider-neutral
-fields are non-load-bearing for resume; v1 fields stay canonical.
+fields are non-load-bearing for resume; v1 fields stay canonical. A string id
+is written as `issue_number: "PROJ-123"` and as `work_item.id`, with
+`work_item.number: null`. Readers also accept legacy numeric `issue_number`
+values and canonicalize them to strings before enforcing the resume-id guard.
 
 ## Secret boundary (non-configurable)
 

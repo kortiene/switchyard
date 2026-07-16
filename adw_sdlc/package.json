@@ -2,6 +2,7 @@
   "name": "adw-sdlc",
   "version": "0.0.1",
   "private": true,
+  "license": "MIT",
   "description": "TypeScript control plane for the phased ADW pipeline: one AgentRunner seam, four interchangeable runner backends (claude/codex/opencode/pi). See PLAN.md.",
   "type": "module",
   "engines": {

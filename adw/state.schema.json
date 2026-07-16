@@ -18,8 +18,8 @@
       "description": "8-char hex run id; also the workspace directory name under agents/."
     },
     "issue_number": {
-      "type": ["string", "null"],
-      "description": "GitHub issue number driving the run, as a string."
+      "type": ["string", "integer", "null"],
+      "description": "Provider work-item id driving the run. Current writers emit a canonical string; integer is accepted for backward-compatible resume of legacy state."
     },
     "issue_class": {
       "type": ["string", "null"],
@@ -97,6 +97,11 @@
       "type": "array",
       "items": { "type": "string" },
       "description": "Ordered list of completed phase names; drives --resume skipping."
+    },
+    "merge_skipped": {
+      "type": "string",
+      "enum": ["flag"],
+      "description": "Present as 'flag' when --no-merge deliberately ended a green PR-only run. Merge is not included in completed_phases, so a later explicitly authorized --resume can merge it. Omitted once merge completes."
     }
   }
 }

@@ -498,6 +498,223 @@ describe('run() integration', () => {
     expect(state?.totalCostUsd).toBeCloseTo(0.01);
   });
 
+  it('forwards configured OpenCode authEnv only to the OpenCode runner allowlist', async () => {
+    setAdwConfigForTests(
+      parseAdwConfig({
+        runners: {
+          opencode: {
+            authEnv: 'LOCAL_MODEL_API_KEY',
+            config: {
+              provider: {
+                local: { options: { apiKey: '{env:LOCAL_MODEL_API_KEY}' } },
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    const runWith = async (runnerId: 'opencode' | 'claude', issue: number): Promise<Array<Record<string, string>>> => {
+      const seen: Array<Record<string, string>> = [];
+      const deps = testDeps({
+        env: {
+          PATH: '/bin',
+          ANTHROPIC_API_KEY: 'sk-ant-test',
+          LOCAL_MODEL_API_KEY: 'local-secret',
+          GH_TOKEN: 'must-not-cross',
+        },
+        issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
+        runAgentPhase: agentStub(PHASE_RESULTS, (opts) => {
+          seen.push(opts.env);
+          if (opts.phase === 'review') {
+            mkdirSync(opts.state.workspace(), { recursive: true });
+            writeFileSync(commitMessagePath(opts.state), 'feat: local model config', 'utf8');
+            writeFileSync(prBodyPath(opts.state), `Closes #${issue}`, 'utf8');
+          }
+        }),
+      });
+      expect(await run(issue, createMockRunner({ id: runnerId }), { yes: true, noProgress: true }, deps)).toBe(0);
+      return seen;
+    };
+
+    const opencodeEnvs = await runWith('opencode', 61);
+    expect(opencodeEnvs.length).toBeGreaterThan(0);
+    for (const env of opencodeEnvs) {
+      expect(env['LOCAL_MODEL_API_KEY']).toBe('local-secret');
+      expect(env['GH_TOKEN']).toBeUndefined();
+    }
+
+    const claudeEnvs = await runWith('claude', 1061);
+    expect(claudeEnvs.length).toBeGreaterThan(0);
+    for (const env of claudeEnvs) {
+      expect(env['LOCAL_MODEL_API_KEY']).toBeUndefined();
+      expect(env['GH_TOKEN']).toBeUndefined();
+    }
+  });
+
+  it('reports a green PR-only run and lets an explicitly authorized resume merge it', async () => {
+    const squashMerge = vi.fn(() => ({ ok: true, error: null }));
+    const confirmPrompt = vi.fn(async () => false);
+    const postProgress = vi.fn();
+    const ciStatus = vi.fn(() => ({ state: 'success' as const, failingJobs: [] }));
+    const firstDeps = testDeps({
+      issueState: vi.fn(() => 'OPEN'),
+      confirm: confirmPrompt,
+      postProgress,
+      git: { squashMerge, ciStatus },
+      runAgentPhase: agentStub(PHASE_RESULTS),
+    });
+
+    const firstRc = await run(5, createMockRunner(), { noMerge: true }, firstDeps);
+    expect(firstRc).toBe(0);
+    expect(ciStatus).toHaveBeenCalled();
+    expect(confirmPrompt).not.toHaveBeenCalled();
+    expect(squashMerge).not.toHaveBeenCalled();
+
+    const adwId = loadedId();
+    const skipped = AdwState.load(adwId);
+    expect(skipped?.prUrl).toBe('https://x/pull/42');
+    expect(skipped?.mergeSkipped).toBe('flag');
+    expect(skipped?.completedPhases).not.toContain('merge');
+    expect(postProgress).toHaveBeenCalledWith(
+      '/bin/gh',
+      5,
+      'o/r',
+      adwId,
+      'report',
+      expect.stringMatching(/merge skipped.*https:\/\/x\/pull\/42.*completed phases:.*cost:/),
+    );
+
+    const resumedMerge = vi.fn(() => ({ ok: true, error: null }));
+    const resumeDeps = testDeps({
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValue('CLOSED'),
+      git: {
+        prForBranch: () => 'https://x/pull/42',
+        squashMerge: resumedMerge,
+      },
+      classify: async () => {
+        throw new Error('no agent phase should rerun');
+      },
+    });
+    const secondRc = await run(
+      5,
+      createMockRunner(),
+      { adwId, resume: true, yes: true, noProgress: true },
+      resumeDeps,
+    );
+    expect(secondRc).toBe(0);
+    expect(resumedMerge).toHaveBeenCalledWith(42, '/bin/gh', 'o/r');
+    const merged = AdwState.load(adwId);
+    expect(merged?.completedPhases).toContain('merge');
+    expect(merged?.mergeSkipped).toBeUndefined();
+    expect(JSON.parse(readFileSync(merged!.statePath(), 'utf8'))).not.toHaveProperty('merge_skipped');
+  });
+
+  it('rejects conflicting no-merge and merge authorization at the runtime boundary', async () => {
+    await expect(
+      run(5, createMockRunner(), { noMerge: true, yes: true, dryRun: true }, testDeps()),
+    ).rejects.toThrow(/--yes and --no-merge are mutually exclusive/);
+  });
+
+  it('threads a string id unchanged through a non-GitHub provider and records schema-safe metadata', async () => {
+    setAdwConfigForTests(
+      parseAdwConfig({
+        providers: {
+          workItems: {
+            type: 'cli',
+            routes: {
+              fetch: {
+                command: ['tracker', 'show', '{id}'],
+                map: { title: '$.title', body: '$.body', labels: '$.labels[*]' },
+              },
+              state: { command: ['tracker', 'show', '{id}'], map: { state: '$.state' } },
+            },
+          },
+        },
+      }),
+    );
+
+    const state = vi.fn(() => 'OPEN');
+    const fetch = vi.fn(() => ({ title: 'External ticket', body: 'Do the work', labels: ['feature'] }));
+    const postProgress = vi.fn();
+    const assignSelf = vi.fn();
+    const setStatus = vi.fn();
+    const createOrCheckoutBranch = vi.fn(() => ({ ok: true, error: null }));
+    const create = vi.fn(() => ({ id: 'cr-42', number: 42, url: 'https://tracker.test/cr/42', error: null }));
+    const providers: AdwProviders = {
+      cli: { resolveExecutable: () => '/bin/tracker', detectRepository: () => 'project' },
+      workItems: { state, fetch, postProgress, assignSelf, setStatus },
+      vcs: {
+        workingTreeDirty: () => false,
+        changedFiles: () => ['src/index.ts'],
+        createOrCheckoutBranch,
+        commitAll: () => ({ ok: true, error: null }),
+        push: () => ({ ok: true, error: null }),
+        pullRebase: () => ({ ok: true, error: null }),
+        syncWithBase: () => ({ ok: true, rebased: false, error: null }),
+      },
+      changeRequests: {
+        findForBranch: () => null,
+        create,
+        pipelineStatus: () => ({ state: 'success', failingJobs: [] }),
+        squashMerge: () => ({ ok: true, error: null }),
+      },
+    };
+    const deps = testDeps({ providers, runAgentPhase: agentStub(PHASE_RESULTS) });
+
+    expect(await run('PROJ-123', createMockRunner(), { noMerge: true }, deps)).toBe(0);
+
+    const context = { ghBin: '/bin/tracker', repo: 'project' };
+    expect(state).toHaveBeenCalledWith(context, 'PROJ-123');
+    expect(fetch).toHaveBeenCalledWith(context, 'PROJ-123');
+    expect(assignSelf).toHaveBeenCalledWith(context, 'PROJ-123');
+    expect(setStatus).toHaveBeenCalledWith(context, 'PROJ-123', 'In Progress');
+    expect(postProgress).toHaveBeenCalledWith(
+      context,
+      'PROJ-123',
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+    );
+    expect(createOrCheckoutBranch).toHaveBeenCalledWith(
+      expect.stringMatching(/^feat\/proj-123-[0-9a-f]{8}-external-ticket$/),
+      'main',
+    );
+    expect(create).toHaveBeenCalledWith(
+      context,
+      expect.objectContaining({
+        title: 'Implement work item #PROJ-123',
+        body: 'Work item #PROJ-123',
+      }),
+    );
+
+    const saved = AdwState.load(loadedId());
+    expect(saved?.issueNumber).toBe('PROJ-123');
+    expect(saved?.workItem).toMatchObject({ provider: 'cli', id: 'PROJ-123', number: null });
+  });
+
+  it('rejects empty programmatic ids and string-id resume mismatches', async () => {
+    await expect(run('', createMockRunner(), { dryRun: true }, testDeps())).rejects.toThrow(/work item id/);
+
+    new AdwState({ adwId: 'a1b2c3d4', issueNumber: 'PROJ-123' }).save();
+    await expect(
+      run(
+        'PROJ-999',
+        createMockRunner(),
+        { adwId: 'a1b2c3d4', resume: true, noMerge: true, verify: false, force: true },
+        testDeps({ issueState: () => 'OPEN' }),
+      ),
+    ).rejects.toThrow(/belongs to work item #PROJ-123, not #PROJ-999/);
+  });
+
+  it('renders a no-merge dry run without a merge stage', async () => {
+    const output = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(await run(5, createMockRunner(), { noMerge: true, dryRun: true }, testDeps())).toBe(0);
+    const phaseLine = output.mock.calls.map(([line]) => String(line)).find((line) => line.includes('[dry-run] phases:'));
+    expect(phaseLine).toContain('ci-fix(ts) -> report(ts)');
+    expect(phaseLine).not.toContain('merge(ts)');
+  });
+
   it('threads ADW_PARITY_FORCE_FENCED_JSON=1 to runAgentPhase as forceFenced (measurement mode)', async () => {
     const seen: boolean[] = [];
     const deps = testDeps({

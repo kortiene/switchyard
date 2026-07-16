@@ -22,6 +22,7 @@ import {
 import { AdwError, RunnerNotInstalledError } from '../src/errors.js';
 import type { AgentRunner } from '../src/invoker.js';
 import { createMockRunner } from '../src/runners/runner-mock.js';
+import type { WorkItemId } from '../src/work-item.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -103,21 +104,35 @@ describe('CLI usage', () => {
     expect(CLI_USAGE).toMatch(/engine py is NOT\s+available in this distribution/);
     expect(CLI_USAGE).not.toContain('delegates');
   });
+
+  it('documents the successful PR-only --no-merge mode', () => {
+    expect(CLI_USAGE).toContain('--no-merge');
+    expect(CLI_USAGE).toContain('leave the green change request open');
+  });
 });
 
 describe('parseCliArgs', () => {
   it('parses the issue number and accepts free-form notes', () => {
     const parsed = parseCliArgs(['5', 'fix', 'the', 'thing']);
-    expect(parsed.issue).toBe(5);
-    expect(parsed.workItem).toBe(5);
+    expect(parsed.issue).toBe('5');
+    expect(parsed.workItem).toBe('5');
     expect(parsed.notes).toEqual(['fix', 'the', 'thing']);
     expect(parsed.runner).toBeUndefined();
     expect(parsed.options).toEqual({});
   });
 
-  it('requires a numeric work item id', () => {
+  it('accepts provider-native string ids and rejects only missing or empty ids', () => {
     expect(() => parseCliArgs([])).toThrow(/missing work item id/);
-    expect(() => parseCliArgs(['abc'])).toThrow(/work item id must be a number/);
+    expect(() => parseCliArgs([''])).toThrow(/work item id must be non-empty/);
+    expect(() => parseCliArgs(['   '])).toThrow(/work item id must be non-empty/);
+    expect(parseCliArgs(['PROJ-123']).workItem).toBe('PROJ-123');
+    expect(parseCliArgs(['550e8400-e29b-41d4-a716-446655440000']).workItem).toBe(
+      '550e8400-e29b-41d4-a716-446655440000',
+    );
+    expect(parseCliArgs(['123456789012345678901234567890']).workItem).toBe(
+      '123456789012345678901234567890',
+    );
+    expect(parseCliArgs(['000123']).workItem).toBe('000123');
   });
 
   it('maps every phased flag onto RunOptions (seconds become milliseconds)', () => {
@@ -146,8 +161,8 @@ describe('parseCliArgs', () => {
       '--dry-run',
       '--max-budget-usd', '2.5',
     ]);
-    expect(parsed.issue).toBe(7);
-    expect(parsed.workItem).toBe(7);
+    expect(parsed.issue).toBe('7');
+    expect(parsed.workItem).toBe('7');
     expect(parsed.runner).toBe('codex');
     expect(parsed.options).toEqual({
       phases: 'plan,implement',
@@ -179,6 +194,16 @@ describe('parseCliArgs', () => {
     expect(parsed.runner).toBe('opencode');
     expect(parsed.options.timeoutMs).toBe(30_000);
     expect(parsed.options.yes).toBe(true);
+  });
+
+  it('parses --no-merge and rejects the opposite --yes intent', () => {
+    expect(parseCliArgs(['5', '--no-merge']).options).toEqual({ noMerge: true });
+    expect(() => parseCliArgs(['5', '--no-merge', '--yes'])).toThrow(
+      /--yes and --no-merge are mutually exclusive/,
+    );
+    expect(() => parseCliArgs(['5', '-y', '--no-merge'])).toThrow(
+      /--yes and --no-merge are mutually exclusive/,
+    );
   });
 
   it('defaults --test-cmd and --repo from the environment like adw/issue.py', () => {
@@ -219,8 +244,8 @@ describe('parseCliArgs', () => {
   it('accepts ONE contiguous positional chunk anywhere, like argparse nargs=*', () => {
     // The chunk may follow options…
     const parsed = parseCliArgs(['--yes', '999', 'a', 'note', '--force']);
-    expect(parsed.issue).toBe(999);
-    expect(parsed.workItem).toBe(999);
+    expect(parsed.issue).toBe('999');
+    expect(parsed.workItem).toBe('999');
     expect(parsed.notes).toEqual(['a', 'note']);
     // …but a second positional run is an error there and here.
     expect(() => parseCliArgs(['999', '--yes', 'somenote'])).toThrow(/unrecognized argument: somenote/);
@@ -247,18 +272,26 @@ describe('parseCliArgs', () => {
 
 describe('runWorkItem dispatch', () => {
   it('prefers runWorkItem when supplied, otherwise calls runIssue', async () => {
-    const runIssue: CliDeps['runIssue'] = vi.fn(async (_issue: number) => 0);
-    const runWorkItem: NonNullable<CliDeps['runWorkItem']> = vi.fn(async (_issue: number) => 0);
+    const runIssue: CliDeps['runIssue'] = vi.fn(async (_issue: WorkItemId) => 0);
+    const runWorkItem: NonNullable<CliDeps['runWorkItem']> = vi.fn(async (_issue: WorkItemId) => 0);
     const deps = cliDeps({ runIssue, runWorkItem });
     const rc = await main(['5', '--runner', 'claude', '--yes'], deps);
     expect(rc).toBe(0);
     expect(runWorkItem).toHaveBeenCalledTimes(1);
-    expect(runWorkItem).toHaveBeenCalledWith(5, expect.anything(), expect.anything());
+    expect(runWorkItem).toHaveBeenCalledWith('5', expect.anything(), expect.anything());
     expect(runIssue).not.toHaveBeenCalled();
 
-    const legacyRun: CliDeps['runIssue'] = vi.fn(async (_issue: number) => 0);
+    const legacyRun: CliDeps['runIssue'] = vi.fn(async (_issue: WorkItemId) => 0);
     await main(['5', '--runner', 'claude', '--yes'], cliDeps({ runIssue: legacyRun }));
     expect(legacyRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('dispatches a string work-item id unchanged', async () => {
+    const runWorkItem: NonNullable<CliDeps['runWorkItem']> = vi.fn(async () => 0);
+    const deps = cliDeps({ runWorkItem });
+
+    expect(await main(['PROJ-123', '--runner', 'claude', '--no-merge'], deps)).toBe(0);
+    expect(runWorkItem).toHaveBeenCalledWith('PROJ-123', expect.anything(), { noMerge: true });
   });
 });
 
@@ -305,8 +338,8 @@ describe('main — engine dispatch', () => {
     expect(rc).toBe(0);
     expect(loadRunner).toHaveBeenCalledWith('opencode');
     expect(runIssue).toHaveBeenCalledTimes(1);
-    const [issue, boundRunner, options] = runIssue.mock.calls[0] as unknown as [number, AgentRunner, object];
-    expect(issue).toBe(9);
+    const [issue, boundRunner, options] = runIssue.mock.calls[0] as unknown as [WorkItemId, AgentRunner, object];
+    expect(issue).toBe('9');
     expect(boundRunner).toBe(runner);
     expect(options).toEqual({ yes: true, timeoutMs: 30_000 });
   });
@@ -420,7 +453,7 @@ describe('main — engine dispatch', () => {
     });
     expect(await main(['5', '--runner', 'codex', '--dry-run'], deps)).toBe(0);
     expect(loadRunner).not.toHaveBeenCalled();
-    const [, runner, options] = runIssue.mock.calls[0] as unknown as [number, AgentRunner, { dryRun?: boolean }];
+    const [, runner, options] = runIssue.mock.calls[0] as unknown as [WorkItemId, AgentRunner, { dryRun?: boolean }];
     expect(runner.id).toBe('codex');
     expect(options.dryRun).toBe(true);
     // The stub is preview-only: it must never be able to execute a phase.

@@ -27,6 +27,7 @@ import { note } from './exec.js';
 import type { AgentRunner, RunnerId } from './invoker.js';
 import { run, type RunOptions } from './orchestrator.js';
 import { loadRunner, resolveRunnerId } from './registry.js';
+import type { WorkItemId } from './work-item.js';
 
 // --- engine selection ---------------------------------------------------------
 
@@ -120,9 +121,9 @@ export interface ParsedCli {
   /** -h/--help was requested; print usage and exit 0 (the rest is unset). */
   help?: true;
   /** Backward-compatible GitHub issue id field. Prefer workItem in new code. */
-  issue: number;
+  issue: WorkItemId;
   /** Provider-neutral work item id. */
-  workItem: number;
+  workItem: WorkItemId;
   /** Free-form notes after the work item id (accepted for CLI parity; the
    * phased pipeline derives context from the work item itself, as in Python). */
   notes: string[];
@@ -154,6 +155,7 @@ const BOOLEAN_FLAGS = new Set([
   '--allow-dirty',
   '-y',
   '--yes',
+  '--no-merge',
   '--dry-run',
 ]);
 
@@ -221,12 +223,13 @@ use --engine ts (the default). Flags below apply to the ts engine:
   --force                  run even if the work item is already CLOSED
   --allow-dirty            skip the clean-working-tree precondition
   -y, --yes                do not prompt for confirmation
+  --no-merge               leave the green change request open; resume later to merge
   --dry-run                preview the plan; do not run
   -h, --help               show this help and exit`;
 
 /**
  * Parse the ts-engine argv (post `--engine` extraction, pre `--` split) into
- * the issue number plus orchestrator RunOptions. Defaults mirror
+ * the work-item id plus orchestrator RunOptions. Defaults mirror
  * adw/issue.py build_parser, including the ADW_TEST_CMD / REPO env
  * fallbacks; second-based CLI flags become the milliseconds RunOptions uses.
  */
@@ -302,8 +305,8 @@ export function parseCliArgs(
     throw new AdwError('missing work item id; usage: issue <work-item-id> [notes]');
   }
   const issueStr = tokens[0]!;
-  if (!/^\d+$/.test(issueStr)) {
-    throw new AdwError(`work item id must be a number, got: ${issueStr}`);
+  if (issueStr.trim() === '') {
+    throw new AdwError('work item id must be non-empty');
   }
 
   const str = (name: string): string | undefined => {
@@ -322,6 +325,12 @@ export function parseCliArgs(
   const ciMaxPolls = str('--ci-max-polls');
   const timeout = str('--timeout');
   const maxBudgetUsd = str('--max-budget-usd');
+  const yes = has('-y') || has('--yes');
+  const noMerge = has('--no-merge');
+
+  if (yes && noMerge) {
+    throw new AdwError('--yes and --no-merge are mutually exclusive');
+  }
 
   const options: RunOptions = {
     ...(str('--phases') !== undefined ? { phases: str('--phases')! } : {}),
@@ -345,7 +354,8 @@ export function parseCliArgs(
     ...(has('--no-verify') ? { verify: false } : {}),
     ...(has('--force') ? { force: true } : {}),
     ...(has('--allow-dirty') ? { allowDirty: true } : {}),
-    ...(has('-y') || has('--yes') ? { yes: true } : {}),
+    ...(yes ? { yes: true } : {}),
+    ...(noMerge ? { noMerge: true } : {}),
     ...(has('--dry-run') ? { dryRun: true } : {}),
     ...(maxBudgetUsd !== undefined
       ? { maxBudgetUsd: parseFloatFlag('--max-budget-usd', maxBudgetUsd) }
@@ -353,7 +363,11 @@ export function parseCliArgs(
   };
 
   const runner = str('--runner');
-  const workItem = Number(issueStr);
+  // Preserve every provider-owned id byte-for-byte. GitHub's numeric adapter
+  // validates and converts its own ids at the provider boundary; converting
+  // here would corrupt digit-only external ids such as "000123" or a 64-digit
+  // event key before a CLI/REST provider ever saw them.
+  const workItem: WorkItemId = issueStr;
   return {
     issue: workItem,
     workItem,

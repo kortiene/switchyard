@@ -13,6 +13,7 @@ import { join, resolve } from 'node:path';
 import { z } from 'zod';
 
 import { projectRoot, REPO_ROOT } from './common.js';
+import { ENV_DENY_PREFIXES, RUNNER_ENV_ALLOW } from './env.js';
 import { AdwError } from './errors.js';
 
 /** Path to the project's .adw/config.json, resolved under the current project root. */
@@ -36,6 +37,51 @@ const RunnerModelMapSchema = z
     pi: z.string().min(1),
   })
   .catchall(z.string().min(1));
+
+/**
+ * One explicitly named credential may be forwarded to the OpenCode server for
+ * use through OpenCode's `{env:NAME}` config substitution. Keep GitHub
+ * authority and control-plane secrets outside that opt-in channel, and reject
+ * OpenCode's own config selectors so an auth indirection cannot replace the
+ * runner-authored permission policy through a second config source.
+ */
+const OPENCODE_FIXED_ENV = new Set<string>(RUNNER_ENV_ALLOW.opencode);
+const RESERVED_OPENCODE_AUTH_ENV = new Set<string>([
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
+  'GH_ENTERPRISE_TOKEN',
+  'GITHUB_ENTERPRISE_TOKEN',
+  'GH_BIN',
+  'OPENCODE_CONFIG',
+  'OPENCODE_CONFIG_CONTENT',
+  'OPENCODE_CONFIG_DIR',
+  // Do not turn authEnv into a route for another runner's known credential or
+  // config knob. Names already in OpenCode's fixed row remain valid/no-op.
+  ...Object.values(RUNNER_ENV_ALLOW).flat().filter((name) => !OPENCODE_FIXED_ENV.has(name)),
+]);
+
+const OpencodeAuthEnvSchema = z
+  .string()
+  .min(1)
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'must be an environment-variable name')
+  .superRefine((name, ctx) => {
+    if (ENV_DENY_PREFIXES.some((prefix) => name.startsWith(prefix))) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `matches denied prefix ${ENV_DENY_PREFIXES.find((prefix) => name.startsWith(prefix))}`,
+      });
+    }
+    if (RESERVED_OPENCODE_AUTH_ENV.has(name)) {
+      ctx.addIssue({ code: 'custom', message: 'is reserved and cannot be used as an OpenCode provider credential' });
+    }
+  });
+
+const OpencodeRunnerConfigSchema = z.object({
+  /** Operator-owned OpenCode server config; the adapter always replaces `permission`. */
+  config: z.record(z.string(), z.unknown()).default({}),
+  /** Optional provider credential env name referenced as `{env:NAME}` in `config`. */
+  authEnv: OpencodeAuthEnvSchema.optional(),
+});
 
 /**
  * A conditional-gate predicate for a custom phase: the phase runs when the
@@ -73,6 +119,10 @@ export const AdwConfigSchema = z.object({
     defaultRoot: z.string().min(1),
     /** Runner-specific template roots (e.g. claude -> .claude/commands). */
     runnerRoots: z.record(z.string(), z.string().min(1)),
+  }),
+  /** Runner-specific server configuration that does not belong in model routing. */
+  runners: z.object({
+    opencode: OpencodeRunnerConfigSchema,
   }),
   /**
    * Ordered agent-phase chain for the run. Optional: when omitted the kernel
@@ -236,6 +286,9 @@ export const DEFAULT_ADW_CONFIG: AdwConfig = {
   prompts: {
     defaultRoot: '.adw/prompts',
     runnerRoots: {},
+  },
+  runners: {
+    opencode: { config: {} },
   },
   providers: {
     cli: { type: 'github' },

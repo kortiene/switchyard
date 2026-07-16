@@ -2,7 +2,7 @@
  * Minimal subset-JSON-Schema validator for the cross-language state contract
  * (PLAN.md D4): the TS mirror of adw/test_state.py _validate, covering
  * exactly the keywords adw/state.schema.json uses
- * (type/required/properties/items/pattern/minimum). Shared by the state
+ * (type/required/properties/items/pattern/minimum/enum). Shared by the state
  * contract suite and the engine-parity suite — not a test file itself.
  */
 
@@ -32,6 +32,10 @@ function isType(value: unknown, jsonType: string): boolean {
 /** Validate `instance` against the schema subset; returns [] when valid. */
 export function validate(instance: unknown, schema: Schema, path = '$'): string[] {
   const errors: string[] = [];
+  const allowed = schema['enum'];
+  if (Array.isArray(allowed) && !allowed.some((candidate) => Object.is(candidate, instance))) {
+    errors.push(`${path}: ${JSON.stringify(instance)} is not one of ${JSON.stringify(allowed)}`);
+  }
   const declared = schema['type'];
   if (declared !== undefined) {
     const types = Array.isArray(declared) ? declared : [declared];
