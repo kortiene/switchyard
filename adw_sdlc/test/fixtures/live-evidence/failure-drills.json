@@ -1,0 +1,224 @@
+{
+  "schema_version": 1,
+  "observed_on": "2026-07-16",
+  "issues": [20, 22],
+  "runner": "claude",
+  "sanitization": {
+    "full_prompts_archived": false,
+    "full_transcripts_archived": false,
+    "environment_values_archived": false,
+    "absolute_paths_archived": false
+  },
+  "timeout": {
+    "run_id": "a6b4e6dc",
+    "issue_number": 20,
+    "phase": "plan",
+    "cli_exit_code": 1,
+    "requested_timeout_seconds": 1,
+    "requested_max_budget_usd": 45,
+    "signal": "timeout",
+    "error_excerpt": "error: plan phase runner timed out without parseable output",
+    "completed_phases": ["setup"],
+    "no_nudge": {
+      "attempt_transcript_names": ["transcript.log"],
+      "nudge_transcript_present": false,
+      "metrics_present": false
+    },
+    "artifacts": [
+      {
+        "role": "state",
+        "relative_name": "state.json",
+        "bytes": 613,
+        "sha256": "7db6d66462b18ffc040c5a65d0c96f15cb74ea41d2c83a8071f0c6a0312ffb30"
+      },
+      {
+        "role": "prompt-presence-marker",
+        "relative_name": "plan/prompt.txt",
+        "bytes": 7288,
+        "content_archived": false
+      },
+      {
+        "role": "transcript-presence-marker",
+        "relative_name": "plan/transcript.log",
+        "bytes": 227,
+        "sha256": "07d4ad59781a26d5ea0cec10ddd6d3cc8ed4b749c0b40084e29af5477b10248a",
+        "content_archived": false
+      }
+    ],
+    "raw_cli_log_sha256": "454cb1053791989d17e61fa71a820481641506328bd008e27c83705e39fe0219",
+    "spawn_audit_id": "timeout-plan"
+  },
+  "budget": {
+    "run_id": "b20d9e02",
+    "issue_number": 20,
+    "phase": "plan",
+    "cli_exit_code": 1,
+    "requested_timeout_seconds": 3600,
+    "requested_max_budget_usd": 0.01,
+    "signal": "budget",
+    "error_excerpt": "error: plan phase hit the native budget cap without parseable output",
+    "completed_phases": ["setup"],
+    "no_nudge": {
+      "attempt_transcript_names": ["transcript.log"],
+      "nudge_transcript_present": false,
+      "metrics_present": false
+    },
+    "artifacts": [
+      {
+        "role": "state",
+        "relative_name": "state.json",
+        "bytes": 613,
+        "sha256": "22513d8962aac26c9cef1d34ad0725ff3600b39a23ef5736752b63c87f68b7f2"
+      },
+      {
+        "role": "prompt-presence-marker",
+        "relative_name": "plan/prompt.txt",
+        "bytes": 7288,
+        "content_archived": false
+      },
+      {
+        "role": "transcript-presence-marker",
+        "relative_name": "plan/transcript.log",
+        "bytes": 226,
+        "sha256": "8071c27bbe3dd6eade97e5588e4f371433b318abe9e578c82451e933aab247e2",
+        "content_archived": false
+      }
+    ],
+    "raw_cli_log_sha256": "e1819cb6e2e7e03a916da03add4863d624fa82352f08e489a8e4d2f974ae4433",
+    "spawn_audit_id": "budget-plan"
+  },
+  "kill_resume": {
+    "run_id": "c20e5a01",
+    "issue_number": 20,
+    "interrupted_execution": {
+      "requested_phase": "review",
+      "cli_exit_code": 130,
+      "interrupt_point": "downstream sleep gate after the review phase persisted",
+      "completed_phases": ["setup", "review"],
+      "process_group_before_interrupt_count": 4,
+      "observed_process_kinds_before_interrupt": ["node", "node", "esbuild", "sleep"],
+      "process_group_after_interrupt_count": 0,
+      "state_bytes": 4416,
+      "state_sha256": "1cf058af43470c0c0bf288d96a2eb86b60bef281807f7b77b5fcc4feb4570081",
+      "raw_cli_log_sha256": "936accf3fdc0f4fcb311b011c7f46305d430cf0435b3900481e5f17d9164960c",
+      "phase_metrics": {
+        "phase": "review",
+        "model": "claude-opus-4-8",
+        "attempts": 1,
+        "nudged_phases": 0,
+        "duration_ms": 139850,
+        "cost_usd": 0.8932829999999999,
+        "input_tokens": 18,
+        "output_tokens": 10131,
+        "cached_input_tokens": 284736,
+        "raw_sha256": "e111d4fad7e8b6c73b9d84816cc116497518a76c482fa7abb4315b7cc6d3fe44"
+      },
+      "spawn_audit_id": "interrupted-review"
+    },
+    "resumed_execution": {
+      "cli_exit_code": 130,
+      "resume_log_excerpt": ">> skipping review (already completed)",
+      "completed_phases": ["setup", "review"],
+      "process_group_before_interrupt_count": 4,
+      "observed_process_kinds_before_interrupt": ["node", "node", "esbuild", "sleep"],
+      "process_group_after_interrupt_count": 0,
+      "state_bytes": 4416,
+      "state_sha256": "1cf058af43470c0c0bf288d96a2eb86b60bef281807f7b77b5fcc4feb4570081",
+      "raw_cli_log_sha256": "79c24e9f4a82f44adbf71263d031460243d6266987deeec172d8d51cf32aa199",
+      "metrics_sha256": "e111d4fad7e8b6c73b9d84816cc116497518a76c482fa7abb4315b7cc6d3fe44"
+    },
+    "persisted_state_reused": true,
+    "completed_phase_was_not_rerun": true,
+    "state_unchanged_across_resume": true,
+    "recorded_process_group_empty_after_each_interrupt": true,
+    "cost_envelope": {
+      "reused_run_id": "c20e5a01",
+      "configured_max_budget_usd": 45,
+      "snapshot_point": "after review persisted and before the first interrupt",
+      "observed_phase_costs": [
+        {
+          "phase": "review",
+          "model": "claude-opus-4-8",
+          "cost_usd": 0.8932829999999999,
+          "metrics_sha256": "e111d4fad7e8b6c73b9d84816cc116497518a76c482fa7abb4315b7cc6d3fe44"
+        }
+      ],
+      "summed_total_cost_usd": 0.8932829999999999,
+      "persisted_total_cost_usd": 0.8932829999999999,
+      "within_configured_cap": true
+    }
+  },
+  "mid_phase_kill_resume": {
+    "run_id": "57b6bfea",
+    "issue_number": 20,
+    "requested_phase": "review",
+    "initial_execution": {
+      "cli_exit_code": 130,
+      "interrupt_point": "review phase while the real Claude subprocess was active and before a structured result persisted",
+      "completed_phases_before_interrupt": ["setup"],
+      "completed_phases_after_interrupt": ["setup"],
+      "active_runner_process_kind": "claude",
+      "active_runner_process_count": 1,
+      "process_group_before_interrupt_count": 6,
+      "observed_process_kinds_before_interrupt": ["bash", "node", "tee", "node", "esbuild", "claude"],
+      "process_group_after_interrupt_count": 0,
+      "state_bytes": 613,
+      "state_sha256": "d33420a7834395255a3c9f4faa4429aedf484659dc4d4527678078929df1deba",
+      "state_unchanged_across_interrupt": true,
+      "transcript_present_at_interrupt": true,
+      "transcript_snapshot_archived": false,
+      "exit_code_artifact_bytes": 4,
+      "exit_code_artifact_sha256": "f5bde7eb9f6c71611dc5726e8aca3eb4eba3e386da49e0a4ed5c295a90a73a0d",
+      "raw_cli_log_bytes": 231,
+      "raw_cli_log_sha256": "3ffecaa786bb3b5e97880ba0c284529fd109d6a6eb1425d41e0812739b2488a5",
+      "spawn_audit_sha256": "c0f21e90490aa05166c546fca8b80d232134df1844b48968049e26c145954199",
+      "process_group_before_sha256": "5dc1eb06d07c2fc0420a7c31f49e11260c24ad6cc88b543ad2b4dd67daaf30ca",
+      "process_group_after_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "worktree_status_sha256": "74039371e61e79b3faff812300a7fe99a70e415be7f764cb00fa94ab4b588449",
+      "tracked_worktree_clean": true
+    },
+    "resumed_execution": {
+      "cli_exit_code": 130,
+      "resume_behavior": "the incomplete review phase reran, persisted successfully, and reached the inert pre-commit gate",
+      "completed_phases": ["setup", "review"],
+      "incomplete_phase_was_reexecuted": true,
+      "process_group_before_final_stop_count": 6,
+      "observed_process_kinds_before_final_stop": ["bash", "node", "tee", "node", "esbuild", "sleep"],
+      "process_group_after_final_stop_count": 0,
+      "state_bytes": 3486,
+      "state_sha256": "375bd40367701870bc0d53eaf80fa97d88a5fc0d2e7b60cd24668ba4c947ff7f",
+      "state_unchanged_across_final_stop": true,
+      "transcript_bytes": 4096,
+      "transcript_sha256": "3a2ec09c16a69e03811ff9cac1ca792d22c5a288942efb49c9373bfbac5e26dc",
+      "raw_cli_log_bytes": 100,
+      "raw_cli_log_sha256": "0740b37b6369462c78f1dbb8727a75bb55bafbfc43d0d883de634afeeecb4a04",
+      "exit_code_artifact_bytes": 4,
+      "exit_code_artifact_sha256": "f5bde7eb9f6c71611dc5726e8aca3eb4eba3e386da49e0a4ed5c295a90a73a0d",
+      "spawn_audit_sha256": "c0f21e90490aa05166c546fca8b80d232134df1844b48968049e26c145954199",
+      "process_group_before_final_stop_sha256": "133fc86f6a9f552dd044d6f3ddd87ab1163b4d1f21748572769240dc1c1c79fd",
+      "process_group_after_final_stop_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "worktree_status_sha256": "74039371e61e79b3faff812300a7fe99a70e415be7f764cb00fa94ab4b588449",
+      "tracked_worktree_clean": true,
+      "phase_metrics": {
+        "phase": "review",
+        "model": "claude-opus-4-8",
+        "duration_ms": 121182,
+        "attempts": 1,
+        "cost_usd": 1.1385020000000001,
+        "input_tokens": 14,
+        "output_tokens": 8840,
+        "cached_input_tokens": 275704,
+        "metrics_sha256": "222789ee588d8b72e62e1e7f744f1de9f9ed935f23388a8515db79a0fa780ad7"
+      }
+    },
+    "active_runner_cleanup_observed": true,
+    "persisted_incomplete_phase_was_reexecuted": true,
+    "recorded_process_group_empty_after_each_interrupt": true,
+    "cost_envelope": {
+      "configured_max_budget_usd": 45,
+      "persisted_completed_phase_cost_usd": 1.1385020000000001,
+      "interrupted_attempt_cost_usd_known": false,
+      "persisted_completed_phase_within_configured_cap": true
+    }
+  }
+}

@@ -1,4 +1,4 @@
-# Secret-boundary audit (live-oriented, no secret printing)
+# Secret-boundary audit (preflight + real Claude spawn, no secret printing)
 
 How to assert, on a **real spawned runner environment**, that the denied
 secrets — `GH_TOKEN` / `MATRIX_*` / `ADW_*` / legacy `MX_AGENT_*` — are absent,
@@ -7,34 +7,33 @@ only).
 
 - **Boundary audited:** [`src/env.ts`](../src/env.ts) — `ENV_DENY_PREFIXES`,
   `safeSubprocessEnv()`.
-- **Deterministic check:** [`test/secret-boundary-audit.test.ts`](../test/secret-boundary-audit.test.ts)
-  (runs inside `npm run verify`).
+- **Deterministic preflight:**
+  [`test/secret-boundary-audit.test.ts`](../test/secret-boundary-audit.test.ts) (runs inside
+  `npm run verify`; uses a trivial Node child, not Claude).
+- **Real-runner probe:**
+  [`tools/claude-env-audit-wrapper.sh`](../tools/claude-env-audit-wrapper.sh) (the Claude Agent SDK
+  spawns it, it audits key names, then `exec`s the real Claude executable).
 - **Advances:** [`MVP-READINESS.md`](../MVP-READINESS.md) §1 "operational basics"
   — moves the secret boundary from *statically linted* + *mocked-in-process* to
   *observed on a real spawned child*. Live-run batch row 7
   ([`docs/LIVE-RUN-BATCH.md`](./LIVE-RUN-BATCH.md)).
 
-## 1. Why a third layer — the three layers of one boundary
+## 1. Why a fourth layer — four views of one boundary
 
 | Layer | Where | What it proves | Limitation this audit addresses |
 | --- | --- | --- | --- |
 | **Static lint** | [`scripts/check-adw-sdlc-env.sh`](../../scripts/check-adw-sdlc-env.sh) (`npm run lint:env`) | No source file spreads `...process.env`; opencode factory/import rules | Reads *source text*, not a built env |
 | **Mocked unit** | [`test/env.test.ts`](../test/env.test.ts) | `safeSubprocessEnv()` returns an object with no denied keys | Inspects the in-process **object**, never a spawned child |
-| **Live audit (here)** | this doc + [`test/secret-boundary-audit.test.ts`](../test/secret-boundary-audit.test.ts) | A **child process spawned with that env** observes no denied key in its own `process.env` | — |
+| **Spawn preflight** | [`test/secret-boundary-audit.test.ts`](../test/secret-boundary-audit.test.ts) + §5 | A trivial Node child spawned with that env observes no denied key | Does not enter the Claude SDK or runner |
+| **Real Claude spawn** | [`tools/claude-env-audit-wrapper.sh`](../tools/claude-env-audit-wrapper.sh) + §6 | The executable actually spawned by the Claude Agent SDK sees no denied key, then becomes real Claude via `exec` | Requires credentials and a live, money-spending run |
 
-The distinguishing value over `env.test.ts` is that this audit crosses the
-**spawn boundary**. It verifies that `spawnSync(bin, args, { env })` actually
-**replaces** (does not merge) the parent environment on the running platform, so
-a real runner grandchild (the agent's `bash` / `edit` / `write` tools) cannot
-see an ambient secret. `env.test.ts` inspects only the in-process allowlist
-object and so cannot catch a spawn-time merge regression; this audit can — e.g.
-a future change that merged parent env, or a platform where `spawnSync` env
-semantics differ.
-
-This issue **scaffolds** the audit and ships its deterministic, CI-safe form. It
-does **not** require a live `claude` / money-spending run; the operator
-"live mode" against the real `process.env` (§5) is a documented, human-driven
-step that spends no money and makes no agent call.
+The deterministic preflight distinguishes itself from `env.test.ts` by crossing a generic
+`spawnSync(bin, args, { env })` boundary. It can catch an accidental parent-env merge, but it is
+still only `node -e`; by itself it is **not** evidence about a real runner. Section 6 closes that
+gap at the exact executable boundary used by the Claude Agent SDK. The wrapper sees the SDK-built
+child environment, fails closed if a denied key is present, and otherwise replaces itself with real
+Claude without changing argv or env. Any tool process inheriting Claude's environment therefore
+cannot regain one of the parent keys that was absent at this boundary.
 
 ## 2. The no-secret-printing rule (load-bearing)
 
@@ -46,13 +45,14 @@ This is structural, not just a promise:
    secrets: every denied key in the fixture holds the value
    `SENTINEL-DENIED-MUST-NOT-APPEAR`. So even a hypothetical bug that printed a
    value could only ever leak a sentinel, never a credential.
-3. The spawned child emits the **names** of any denied keys it can see
-   (expected: none). It never echoes `process.env` wholesale and never prints a
-   value.
-4. Operator **live mode** (real `process.env` as source, §5) inherits rules 1
-   and 3: it still prints only the *names* of any leaked denied keys, so running
-   it on a machine where a real `GH_TOKEN` / `MATRIX_*` is set cannot disclose
-   the value even on failure.
+3. Both spawn probes emit the **names** of any denied keys they can see (expected: none). Neither
+   echoes `process.env` wholesale or reads an environment value for reporting.
+4. The operator preflight (real `process.env` as source, §5) still prints only the *names* of any
+   leaked denied keys, so running it on a machine where a real `GH_TOKEN` / `MATRIX_*` is set cannot
+   disclose the value even on failure.
+5. The real-runner wrapper (§6) writes a mode-`0600` JSON result under its private `TMPDIR`. Its
+   report contains expected/observed **key names**, requested model/budget arguments, and PASS/FAIL
+   only; it never serializes an environment value.
 
 ## 3. The denied set is mode-conditional
 
@@ -98,12 +98,13 @@ The deny prefixes come from `ENV_DENY_PREFIXES` in `src/env.ts` (single source
 of truth) — the audit never re-hardcodes the list, so it tracks the boundary
 automatically.
 
-## 5. Operator live mode (real env, human-driven)
+## 5. Operator spawn preflight (real env, no Claude call)
 
-To confirm the boundary on a real operator box — where `GH_TOKEN` / `MATRIX_*`
-may genuinely be set — run the audit against the **real** `process.env` as the
-source. This spends no money and makes no agent call; it only spawns a trivial
-`node -e` child and prints **names / booleans only, never values**:
+Before spending money, exercise the generic spawn boundary on a real operator box—where
+`GH_TOKEN` / `MATRIX_*` may genuinely be set—using the **real** `process.env` as the source. This
+spends no money and makes no agent call; it only spawns a trivial `node -e` child and prints
+**names / booleans only, never values**. It is useful preflight, but it cannot satisfy an
+"observed on a real runner" claim by itself:
 
 ```bash
 cd adw_sdlc
@@ -129,7 +130,69 @@ denied keys that reached the child (never values). A dedicated
 `npm run audit:secrets` CLI is intentionally **deferred** — the snippet above is
 the manual equivalent and the deterministic test (§4) is the CI-safe form.
 
-## 6. Why this stays separate from `check-adw-sdlc-env.sh`
+## 6. Real Claude Agent SDK spawn probe
+
+For real-runner evidence, point the supported `CLAUDE_BIN` override at
+[`tools/claude-env-audit-wrapper.sh`](../tools/claude-env-audit-wrapper.sh) and put the actual
+Claude executable in `CLAUDE_CODE_PATH`. Both names are in Claude's runner-specific allowlist. Use
+a private `TMPDIR`, poison the parent, and carry the probe on one of the isolated
+[`FAILURE-DRILLS.md`](./FAILURE-DRILLS.md) commands:
+
+```bash
+cd adw_sdlc
+AUDIT_DIR="$(mktemp -d)"
+chmod 700 "$AUDIT_DIR"
+export TMPDIR="$AUDIT_DIR"
+export CLAUDE_CODE_PATH="$(command -v claude)"
+export CLAUDE_BIN="$PWD/tools/claude-env-audit-wrapper.sh"
+
+# GH_TOKEN/GH_BIN are real parent inputs; the other families use non-secret sentinels.
+# None of these commands prints a value.
+export GH_TOKEN="$(gh auth token)"
+export GH_BIN="$(command -v gh)"
+export MATRIX_LIVE_AUDIT="SENTINEL-DENIED-MUST-NOT-APPEAR"
+export ADW_LIVE_AUDIT="SENTINEL-DENIED-MUST-NOT-APPEAR"
+export MX_AGENT_LIVE_AUDIT="SENTINEL-DENIED-MUST-NOT-APPEAR"
+
+# Run one isolated command from FAILURE-DRILLS.md, then inspect the names-only record.
+jq . "$AUDIT_DIR/claude-runner-env-audit.json"
+unset GH_TOKEN GH_BIN MATRIX_LIVE_AUDIT ADW_LIVE_AUDIT MX_AGENT_LIVE_AUDIT
+```
+
+Use a fresh `AUDIT_DIR` per carrier call, or archive the JSON before another Claude spawn; the
+fixed names-only evidence file is intentionally replaced on each invocation.
+
+The boundary is exact:
+
+1. The ADW gives `safeSubprocessEnv({ allowGhToken: false, runner: 'claude' })` to the Claude Agent
+   SDK.
+2. The SDK spawns `CLAUDE_BIN`; that executable is the probe, so it observes the environment of the
+   real runner process—not a separately spawned `node -e` approximation.
+3. The probe enumerates exported key **names** with Bash built-ins. If it sees `GH_TOKEN`, `GH_BIN`,
+   `MATRIX_*`, `ADW_*`, or `MX_AGENT_*`, it records FAIL and exits `97` **before** invoking Claude.
+4. On PASS it `exec`s `CLAUDE_CODE_PATH` with the identical argv and environment. Real Claude then
+   produces the carrier run's normal transcript/error, proving the probe did not stop at a mock.
+
+The SDK itself adds `CLAUDE_CODE_ENTRYPOINT` and `CLAUDE_AGENT_SDK_VERSION` before spawning the
+executable. Those two observed control-key names are expected SDK metadata, not inherited parent
+secrets; they are included in the names-only audit alongside `CLAUDE_BIN`, `CLAUDE_CODE_PATH`,
+`HOME`, `PATH`, and `TMPDIR`.
+
+### Observed 2026-07-16 evidence
+
+The probe rode all three issue #20 live calls: timeout run `a6b4e6dc`, native-budget run
+`b20d9e02`, and kill/resume run `c20e5a01`. Each real SDK spawn recorded `result: "PASS"` and an
+empty `observed_denied_key_names` array despite the five poisoned parent key names. Claude then
+produced the expected live timeout, budget, or phase result. A direct positive control that injected
+`GH_TOKEN` into the wrapper environment exited `97` before Claude, demonstrating that PASS was not
+vacuous.
+
+Sanitized names-only reports and carrier summaries are archived in
+[`test/fixtures/live-evidence`](../test/fixtures/live-evidence). These are the issue #21
+observed-live artifact; the §5 Node preflight remains a reproducible CI-safe guard, not the evidence
+used to claim a real spawned Claude runner.
+
+## 7. Why this stays separate from `check-adw-sdlc-env.sh`
 
 [`scripts/check-adw-sdlc-env.sh`](../../scripts/check-adw-sdlc-env.sh) is a
 **static source** gate (no `...process.env` spread; opencode factory/import
@@ -140,13 +203,15 @@ the audit catches an actual leak across the spawn boundary. They are kept in
 separate files so each gate's intent stays legible. Do **not** fold this into
 the bash lint.
 
-## 7. Cross-references
+## 8. Cross-references
 
 - [`src/env.ts`](../src/env.ts) — the boundary (`ENV_DENY_PREFIXES`,
   `safeSubprocessEnv`).
 - [`scripts/check-adw-sdlc-env.sh`](../../scripts/check-adw-sdlc-env.sh) — the
   static lint layer (`npm run lint:env`).
 - [`test/env.test.ts`](../test/env.test.ts) — the mocked in-process unit layer.
+- [`test/fixtures/live-evidence`](../test/fixtures/live-evidence) — sanitized evidence from real
+  Claude carrier runs `a6b4e6dc`, `b20d9e02`, and `c20e5a01`.
 - [`PARITY.md`](../PARITY.md) "Secret withholding (fail-closed)" row (Section 10)
   — the env-isolation guarantee this audit observes on a spawned child.
 - [`docs/LIVE-RUN-BATCH.md`](./LIVE-RUN-BATCH.md) row 7 — the originating
