@@ -38,10 +38,12 @@ vi.mock('@opencode-ai/sdk/v2/client', () => ({
   createOpencodeClient: createClientMock,
 }));
 
+import { parseAdwConfig, setAdwConfigForTests } from '../src/config.js';
 import { safeSubprocessEnv } from '../src/env.js';
 import { PHASE_TIMEOUT_ABORT_REASON } from '../src/invoker.js';
 import type { AgentRunner, PhaseRequest } from '../src/invoker.js';
 import {
+  buildOpencodeServerConfig,
   createRunner,
   OPENCODE_CAPS,
   OPENCODE_PERMISSION,
@@ -127,6 +129,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   await runner.stop?.();
+  setAdwConfigForTests(null);
   rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -184,6 +187,58 @@ describe('server spawn (the D5 boundary)', () => {
     expect(bash['git *']).toBe('deny');
     expect(bash['gh *']).toBe('deny');
     expect(JSON.stringify(config)).not.toContain('"ask"');
+  });
+
+  it('includes deep operator server config but replaces an operator permission override', async () => {
+    const projectConfig = parseAdwConfig({
+      runners: {
+        opencode: {
+          config: {
+            enabled_providers: ['local'],
+            small_model: 'local/qwen',
+            provider: {
+              local: {
+                npm: '@ai-sdk/openai-compatible',
+                options: {
+                  baseURL: 'http://127.0.0.1:8000/v1',
+                  apiKey: '{env:LOCAL_MODEL_API_KEY}',
+                  headers: { 'X-Deployment': 'spark' },
+                },
+                models: {
+                  qwen: { name: 'Qwen local', limit: { context: 131_072, output: 16_384 } },
+                },
+              },
+            },
+            // This must be ignored as a whole field, including nested bash rules.
+            permission: { '*': 'allow', bash: { 'git *': 'allow', 'gh *': 'allow' } },
+          },
+        },
+      },
+    });
+    setAdwConfigForTests(projectConfig);
+
+    await runner.runPhase(makeReq());
+
+    const env = (spawnMock.mock.calls[0]![2] as { env: Record<string, string> }).env;
+    const serverConfig = JSON.parse(env['OPENCODE_CONFIG_CONTENT']!) as Record<string, unknown>;
+    expect(serverConfig).toMatchObject({
+      enabled_providers: ['local'],
+      small_model: 'local/qwen',
+      provider: {
+        local: {
+          npm: '@ai-sdk/openai-compatible',
+          options: {
+            baseURL: 'http://127.0.0.1:8000/v1',
+            apiKey: '{env:LOCAL_MODEL_API_KEY}',
+            headers: { 'X-Deployment': 'spark' },
+          },
+          models: { qwen: { limit: { context: 131_072, output: 16_384 } } },
+        },
+      },
+    });
+    expect(serverConfig['permission']).toEqual(OPENCODE_PERMISSION);
+    expect((serverConfig['permission'] as typeof OPENCODE_PERMISSION).bash['git *']).toBe('deny');
+    expect(buildOpencodeServerConfig(projectConfig)).toEqual(serverConfig);
   });
 
   it('reuses one server across phases (sessions are per-phase)', async () => {

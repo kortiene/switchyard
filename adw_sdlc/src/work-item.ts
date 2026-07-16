@@ -15,8 +15,10 @@ export {
   fetchWorkItem,
   setStatus,
   slugifyTitle,
+  slugifyWorkItemId,
   slugifyWorkItemTitle,
   workItemBranchPrefix,
   type IssueContext,
   type WorkItemContext,
+  type WorkItemId,
 } from './issue.js';

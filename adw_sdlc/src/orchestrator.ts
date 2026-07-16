@@ -31,7 +31,7 @@ import { assumeYes, capture, confirm, note, postProgress, type Captured } from '
 import * as git from './git.js';
 import { prNumberFromUrl } from './git.js';
 import type { AgentRunner } from './invoker.js';
-import { deriveBranch, type WorkItemContext } from './work-item.js';
+import { deriveBranch, type WorkItemContext, type WorkItemId } from './work-item.js';
 import {
   commitMessagePath,
   composePhasePrompt,
@@ -133,6 +133,8 @@ export interface RunOptions {
   force?: boolean;
   allowDirty?: boolean;
   yes?: boolean;
+  /** Complete the PR/CI tail but deliberately leave the change request open. */
+  noMerge?: boolean;
   dryRun?: boolean;
   maxBudgetUsd?: number;
   /**
@@ -153,6 +155,9 @@ type ResolvedOptions = Required<Omit<RunOptions, 'phases' | 'adwId' | 'repo' | '
 
 /** Defaults mirror adw/issue.py build_parser. */
 function resolveOptions(options: RunOptions): ResolvedOptions {
+  if (options.yes === true && options.noMerge === true) {
+    throw new AdwError('--yes and --no-merge are mutually exclusive');
+  }
   return {
     base: options.base ?? 'main',
     resume: options.resume ?? false,
@@ -172,6 +177,7 @@ function resolveOptions(options: RunOptions): ResolvedOptions {
     force: options.force ?? false,
     allowDirty: options.allowDirty ?? false,
     yes: options.yes ?? false,
+    noMerge: options.noMerge ?? false,
     dryRun: options.dryRun ?? false,
     phases: options.phases,
     adwId: options.adwId,
@@ -264,7 +270,12 @@ export function defaultDeps(): OrchestratorDeps {
 }
 
 function numericWorkItemId(id: number | string): number {
-  return typeof id === 'number' ? id : Number.parseInt(String(id), 10);
+  const raw = String(id);
+  const parsed = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new AdwError(`GitHub work-item id must be a positive safe integer, got: ${JSON.stringify(id)}`);
+  }
+  return parsed;
 }
 
 /** Adapter for focused tests that still override legacy OrchestratorDeps seams. */
@@ -833,54 +844,65 @@ function workItemType(config: AdwConfig): string {
   return config.providers.workItems.type === 'github' ? 'issue' : 'work_item';
 }
 
-function workItemRef(issue: number, config: AdwConfig): string {
-  return `${workItemLabel(config)} #${issue}`;
+/** Keep provider-owned ids single-line when rendered into prompts, logs, commits, or CR text. */
+function displayWorkItemId(issue: WorkItemId): string {
+  return String(issue).replace(/[\u0000-\u001f\u007f]/g, (character) =>
+    `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
 }
 
-function defaultCommitMessage(config: AdwConfig, issue: number): string {
+function workItemRef(issue: WorkItemId, config: AdwConfig): string {
+  return `${workItemLabel(config)} #${displayWorkItemId(issue)}`;
+}
+
+function defaultCommitMessage(config: AdwConfig, issue: WorkItemId): string {
+  const id = displayWorkItemId(issue);
   return config.providers.workItems.type === 'github'
-    ? `feat: implement issue #${issue}\n\ncloses #${issue}`
-    : `feat: implement work item #${issue}`;
+    ? `feat: implement issue #${id}\n\ncloses #${id}`
+    : `feat: implement work item #${id}`;
 }
 
-function defaultChangeRequestTitle(config: AdwConfig, issue: number): string {
-  return config.providers.workItems.type === 'github' ? `Implement issue #${issue}` : `Implement work item #${issue}`;
+function defaultChangeRequestTitle(config: AdwConfig, issue: WorkItemId): string {
+  const id = displayWorkItemId(issue);
+  return config.providers.workItems.type === 'github' ? `Implement issue #${id}` : `Implement work item #${id}`;
 }
 
-function defaultChangeRequestBody(config: AdwConfig, issue: number): string {
-  return config.providers.workItems.type === 'github' ? `Closes #${issue}` : `Work item #${issue}`;
+function defaultChangeRequestBody(config: AdwConfig, issue: WorkItemId): string {
+  const id = displayWorkItemId(issue);
+  return config.providers.workItems.type === 'github' ? `Closes #${id}` : `Work item #${id}`;
 }
 
-function issueBlob(issue: number, ctx: WorkItemContext, label: string): string {
-  return `${label} #${issue}: ${ctx.title}\nLabels: ${ctx.labels.join(' ')}\n\n${ctx.body}`.trim();
+function issueBlob(issue: WorkItemId, ctx: WorkItemContext, label: string): string {
+  return `${label} #${displayWorkItemId(issue)}: ${ctx.title}\nLabels: ${ctx.labels.join(' ')}\n\n${ctx.body}`.trim();
 }
 
 /** Assemble template arguments, injecting context the token-less agent lacks. */
 function phaseArgs(
   phase: string,
-  issue: number,
+  issue: WorkItemId,
   state: AdwState,
   ctx: WorkItemContext,
   files: readonly string[],
   label: string = workItemLabel(getAdwConfig()),
 ): string[] {
   const blob = issueBlob(issue, ctx, label);
+  const id = displayWorkItemId(issue);
   switch (phase) {
     case 'classify':
-      return [String(issue), blob];
+      return [id, blob];
     case 'plan':
       return [blob];
     case 'implement':
       return [state.planFile ?? `(no spec; implement directly from the ${label})`, blob];
     case 'tests':
-      return [`${label} #${issue} on branch ${state.branchName}: add focused coverage for this change.\n\n${blob}`];
+      return [`${label} #${id} on branch ${state.branchName}: add focused coverage for this change.\n\n${blob}`];
     case 'e2e':
-      return [`${label} #${issue} on branch ${state.branchName}: add e2e coverage if warranted.\n\n${blob}`];
+      return [`${label} #${id} on branch ${state.branchName}: add e2e coverage if warranted.\n\n${blob}`];
     case 'review':
       // review_phase.md: $1 = spec file (may be empty), ${@:2} = issue/change context.
       return [state.planFile ?? '', blob];
     case 'document':
-      return [`Change for ${label} #${issue}; files changed: ${files.join(', ') || 'n/a'}.\n\n${blob}`];
+      return [`Change for ${label} #${id}; files changed: ${files.join(', ') || 'n/a'}.\n\n${blob}`];
     default:
       return [blob];
   }
@@ -921,12 +943,23 @@ function applyResult(state: AdwState, phase: string, result: unknown): void {
   }
 }
 
-function recordWorkItemMetadata(state: AdwState, config: AdwConfig, issue: number, ctx?: WorkItemContext): void {
+function workItemNumberMetadata(config: AdwConfig, issue: WorkItemId): number | null {
+  if (typeof issue === 'number') {
+    return Number.isSafeInteger(issue) ? issue : null;
+  }
+  if (config.providers.workItems.type !== 'github' || !/^\d+$/.test(issue)) {
+    return null;
+  }
+  const parsed = Number(issue);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function recordWorkItemMetadata(state: AdwState, config: AdwConfig, issue: WorkItemId, ctx?: WorkItemContext): void {
   state.workItem = {
     provider: config.providers.workItems.type,
     type: workItemType(config),
     id: String(issue),
-    number: issue,
+    number: workItemNumberMetadata(config, issue),
     ...(ctx?.title ? { title: ctx.title } : {}),
   };
 }
@@ -947,7 +980,7 @@ function recordChangeRequestMetadata(state: AdwState, config: AdwConfig): void {
 function setup(
   state: AdwState,
   providerCtx: ProviderContext,
-  issue: number,
+  issue: WorkItemId,
   ctx: WorkItemContext,
   base: string,
   progress: ProgressFn,
@@ -980,7 +1013,7 @@ function setup(
 function transitionToDone(
   providers: AdwProviders,
   providerCtx: ProviderContext,
-  issue: number,
+  issue: WorkItemId,
   config: AdwConfig,
   progress: ProgressFn,
 ): void {
@@ -1017,7 +1050,7 @@ async function finalizeAndMerge(
   opts: ResolvedOptions,
   context: {
     providerCtx: ProviderContext;
-    issue: number;
+    issue: WorkItemId;
     agent: AgentCtx;
     progress: ProgressFn;
     providers: AdwProviders;
@@ -1223,6 +1256,23 @@ async function finalizeAndMerge(
     }
   }
 
+  // PR-only runs are a successful terminal outcome: the branch is current,
+  // gates and CI are green, and the change request is ready for a later,
+  // deliberately authorized resume. Do not mark merge complete; that absence
+  // is what lets `--resume --adw-id ... --yes` enter this tail again.
+  if (opts.noMerge) {
+    state.mergeSkipped = 'flag';
+    state.save();
+    const completed = state.completedPhases.join(', ') || 'none';
+    const cost = typeof state.totalCostUsd === 'number' ? `$${state.totalCostUsd.toFixed(4)}` : 'unknown';
+    progress(
+      'report',
+      `merge skipped (--no-merge); ${crLabel} ready: ${state.prUrl}; completed phases: ${completed}; cost: ${cost}`,
+    );
+    progress('report', `phased run ${state.adwId} complete`);
+    return 0;
+  }
+
   // Merge gate — confirmation; non-tty without --yes aborts.
   await confirmMerge({
     yes: assumeYes(opts.yes, deps.env),
@@ -1235,6 +1285,7 @@ async function finalizeAndMerge(
     throw new AdwError(`merge failed: ${merged.error}`);
   }
   providers.vcs.pullRebase(opts.base);
+  state.mergeSkipped = undefined;
   state.markDone('merge');
   state.save();
 
@@ -1257,13 +1308,20 @@ async function finalizeAndMerge(
 // --- plan rendering / entry ---------------------------------------------------------
 
 function printPlan(
-  issue: number,
+  issue: WorkItemId,
   runner: AgentRunner,
   phases: readonly string[],
   opts: ResolvedOptions,
   config: AdwConfig = getAdwConfig(),
 ): void {
-  const chain = ['setup(ts)', ...phases, 'finalize(ts)', 'ci-fix(ts)', 'merge(ts)', 'report(ts)'];
+  const chain = [
+    'setup(ts)',
+    ...phases,
+    'finalize(ts)',
+    'ci-fix(ts)',
+    ...(opts.noMerge ? [] : ['merge(ts)']),
+    'report(ts)',
+  ];
   console.log(`[dry-run] phased run for ${workItemRef(issue, config)} via ${runner.id}`);
   console.log(`[dry-run] phases: ${chain.join(' -> ')}`);
   console.log(`[dry-run] project root: ${projectRoot()}`);
@@ -1281,7 +1339,7 @@ function printPlan(
  * mismatched number rather than retargeting the wrong issue onto the
  * existing branch.
  */
-function resolveState(opts: ResolvedOptions, issue: number): { state: AdwState; resumed: boolean } {
+function resolveState(opts: ResolvedOptions, issue: WorkItemId): { state: AdwState; resumed: boolean } {
   if (opts.resume && !opts.adwId) {
     throw new AdwError('--resume requires --adw-id <id>');
   }
@@ -1299,8 +1357,10 @@ function resolveState(opts: ResolvedOptions, issue: number): { state: AdwState; 
   if (state === null) {
     state = new AdwState({ adwId: opts.adwId || makeAdwId(), issueNumber: String(issue), base: opts.base });
   }
-  if (resumed && state.issueNumber && state.issueNumber !== String(issue)) {
-    throw new AdwError(`adw_id ${state.adwId} belongs to work item #${state.issueNumber}, not #${issue}`);
+  if (resumed && state.issueNumber !== null && state.issueNumber !== String(issue)) {
+    throw new AdwError(
+      `adw_id ${state.adwId} belongs to work item #${displayWorkItemId(state.issueNumber)}, not #${displayWorkItemId(issue)}`,
+    );
   }
   state.issueNumber = String(issue);
   state.save();
@@ -1318,11 +1378,14 @@ function findingsFromState(state: AdwState): ReviewFinding[] {
 
 /** Execute the phased pipeline for one issue through `runner`. */
 export async function run(
-  issue: number,
+  issue: WorkItemId,
   runner: AgentRunner,
   options: RunOptions = {},
   depsOverride: Partial<OrchestratorDeps> = {},
 ): Promise<number> {
+  if ((typeof issue === 'string' && issue.trim() === '') || (typeof issue === 'number' && !Number.isFinite(issue))) {
+    throw new AdwError('work item id must be a non-empty string or finite number');
+  }
   // FIRST, before any config read: point the asset/command roots at the target
   // repo (or clear back to the package root when omitted). Validated + canonical
   // or a fail-closed AdwError. The root-aware config cache (getAdwConfig) then
@@ -1396,9 +1459,19 @@ export async function run(
     throw new AdwError('working tree is dirty; commit/stash first or pass --allow-dirty');
   }
 
+  // OpenCode provider credentials stay out of .adw/config.json: the config may
+  // name one env var for `{env:NAME}` substitution, and only that name is
+  // added to the otherwise fixed runner allowlist. Config validation rejects
+  // GitHub authority, denied prefixes, and alternate OpenCode config channels.
+  const opencodeAuthEnv = runner.id === 'opencode' ? config.runners.opencode.authEnv : undefined;
   const agentEnv = opts.inheritEnv
     ? definedEnv(deps.env)
-    : safeSubprocessEnv({ allowGhToken: false, runner: runner.id, source: deps.env });
+    : safeSubprocessEnv({
+        allowGhToken: false,
+        runner: runner.id,
+        source: deps.env,
+        extraAllow: opencodeAuthEnv === undefined ? [] : [opencodeAuthEnv],
+      });
 
   const post = !opts.noProgress;
   const progress: ProgressFn = (phase, message) => {

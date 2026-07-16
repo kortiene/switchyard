@@ -67,6 +67,61 @@ describe('ADW config', () => {
     expect(config.models.tiers.mid.codex).toBe(DEFAULT_ADW_CONFIG.models.tiers.mid.codex); // default retained
   });
 
+  it('accepts OpenCode server config plus one explicitly named provider credential', () => {
+    const config = parseAdwConfig({
+      runners: {
+        opencode: {
+          authEnv: 'LOCAL_MODEL_API_KEY',
+          config: {
+            enabled_providers: ['local'],
+            small_model: 'local/qwen',
+            provider: {
+              local: {
+                npm: '@ai-sdk/openai-compatible',
+                options: { baseURL: 'http://127.0.0.1:8000/v1', apiKey: '{env:LOCAL_MODEL_API_KEY}' },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(config.runners.opencode.authEnv).toBe('LOCAL_MODEL_API_KEY');
+    expect(config.runners.opencode.config).toMatchObject({
+      enabled_providers: ['local'],
+      small_model: 'local/qwen',
+      provider: {
+        local: {
+          options: { baseURL: 'http://127.0.0.1:8000/v1', apiKey: '{env:LOCAL_MODEL_API_KEY}' },
+        },
+      },
+    });
+  });
+
+  it('rejects unsafe OpenCode auth indirection names and non-object server config', () => {
+    for (const authEnv of [
+      'GH_TOKEN',
+      'GITHUB_TOKEN',
+      'GH_ENTERPRISE_TOKEN',
+      'GITHUB_ENTERPRISE_TOKEN',
+      'GH_BIN',
+      'ADW_LOCAL_KEY',
+      'MX_AGENT_LOCAL_KEY',
+      'MATRIX_TOKEN',
+      'OPENCODE_CONFIG',
+      'OPENCODE_CONFIG_CONTENT',
+      'OPENCODE_CONFIG_DIR',
+      'CODEX_API_KEY',
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'PI_CODING_AGENT_DIR',
+      'NOT-A-NAME',
+    ]) {
+      expect(() => parseAdwConfig({ runners: { opencode: { authEnv } } }), authEnv).toThrow(/invalid/);
+    }
+    expect(() => parseAdwConfig({ runners: { opencode: { config: [] } } })).toThrow(/invalid/);
+    expect(() => parseAdwConfig({ runners: { opencode: { config: 'provider' } } })).toThrow(/invalid/);
+  });
+
   it('fails loudly for invalid config', () => {
     expect(() => loadAdwConfig(tempJson({ version: 2 }))).toThrow(/invalid/);
     expect(() => parseAdwConfig({ branching: { slug: { maxLength: 0 } } })).toThrow(/maxLength/);

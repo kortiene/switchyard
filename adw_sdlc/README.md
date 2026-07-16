@@ -8,7 +8,7 @@ is one invocation of an interchangeable coding-agent runner.
 ```
 setup → classify → plan → implement → tests → resolve(loop) → e2e(gated)
       → review → patch(loop) → document(gated) → finalize → ci-fix(loop)
-      → merge → report
+      → merge(optional) → report
 ```
 
 Four runner backends sit behind a single `AgentRunner.runPhase()` seam —
@@ -56,7 +56,9 @@ npm run issue -- <work-item-id> --runner claude
 ```
 
 `npm run issue` maps to `tsx src/cli.ts`. The command name `issue` is kept as a
-backward-compatible GitHub alias.
+backward-compatible GitHub alias. Work-item ids may be numeric GitHub issue
+numbers or provider-native strings such as `PROJ-123`, UUIDs, and slugs; each
+provider validates its own shape, and the GitHub adapter remains numeric-only.
 
 Frequently used flags (`-h` / `--help` prints the full list):
 
@@ -72,6 +74,12 @@ Frequently used flags (`-h` / `--help` prints the full list):
 | `--repo <owner/repo>` | work-item/repo locator (env: `REPO`) |
 | `--project-root <dir>` | target repo root for config/prompts/state/worktree (env: `ADW_PROJECT_ROOT`) |
 | `-y, --yes` | do not prompt before the irreversible squash-merge |
+| `--no-merge` | run through PR creation and green CI, then report success with the change request left open |
+
+`--no-merge` and `--yes` are mutually exclusive. A PR-only run records
+`merge_skipped: "flag"` without completing the `merge` phase; merge it later
+with an explicitly authorized resume, for example
+`--resume --adw-id <id> --yes`.
 
 Control-plane env vars are canonicalized under `ADW_*` (for example
 `ADW_RUNNER`, `ADW_TEST_CMD`, `ADW_ASSUME_YES`, `ADW_PROJECT_ROOT`, and
@@ -123,6 +131,7 @@ The validated surface (see `src/config.ts` for the authoritative Zod schema):
 | --- | --- |
 | `project` | id / display name |
 | `prompts` | template `defaultRoot` + per-runner roots. This repo points the HealthTech project pack at `../.adw/prompts`; `.pi/prompts` and `.claude/commands` are neutral fallback command templates. |
+| `runners` | runner-specific settings; `runners.opencode.config` supplies OpenCode server/provider config and optional `authEnv` names one provider credential |
 | `phases` | optional ordered agent-phase chain (reorder/drop known phases) |
 | `schemas` | optional per-phase JSON Schema overrides for `tests`/`e2e`/`document` (`root` dir + `overrides` map) |
 | `customPhases` | optional new phase names (each needs a `<name>.md` template + `.adw/schemas/<name>.json`); may opt into a `gates.custom` gate and/or a `loops` loop |
@@ -138,6 +147,62 @@ A non-HealthTech example pack lives at
 [`docs/examples/payments-api.config.json`](./docs/examples/payments-api.config.json).
 This repository's committed pack is at `../.adw/config.json` with HealthTech
 prompt templates under `../.adw/prompts`.
+
+### Local / OpenAI-compatible models with OpenCode
+
+The self-spawned OpenCode server can receive an operator-supplied provider
+block from `.adw/config.json`. For example, this partial project config routes
+all OpenCode tiers to a local OpenAI-compatible Qwen server:
+
+```json
+{
+  "runners": {
+    "opencode": {
+      "authEnv": "LOCAL_MODEL_API_KEY",
+      "config": {
+        "enabled_providers": ["local"],
+        "small_model": "local/qwen",
+        "provider": {
+          "local": {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "Local vLLM",
+            "options": {
+              "baseURL": "http://127.0.0.1:8000/v1",
+              "apiKey": "{env:LOCAL_MODEL_API_KEY}"
+            },
+            "models": {
+              "qwen": {
+                "name": "Qwen local",
+                "limit": { "context": 131072, "output": 16384 }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "models": {
+    "tiers": {
+      "cheap": { "opencode": "local/qwen" },
+      "mid": { "opencode": "local/qwen" },
+      "capable": { "opencode": "local/qwen" }
+    }
+  }
+}
+```
+
+Set `LOCAL_MODEL_API_KEY` in the parent environment before the run (a local
+server that does not authenticate can use a non-secret placeholder). `authEnv`
+is the only additional name admitted to the OpenCode child allowlist; it is not
+forwarded to other runners. GitHub authority, known credentials/config knobs
+belonging to other runners, `ADW_*` / `MX_AGENT_*` / `MATRIX_*`, and alternate
+OpenCode config-channel names are rejected. OpenCode performs the `{env:NAME}`
+substitution, keeping the value out of the project file.
+
+The adapter always replaces any operator-supplied `permission` field with its
+own headless policy, including the `bash` denials for `git` and `gh`. Provider,
+model, and other server fields are preserved; the security policy is not
+project-configurable.
 
 ### Prompt-pack generation
 
@@ -231,8 +296,12 @@ run.
 `npm run lint:env` enforces the non-negotiable secret boundary: no
 `...process.env` spread in `src/`, no banned opencode factory calls, and
 opencode imports only via `@opencode-ai/sdk/v2/client`. The env allowlist in
-`src/env.ts` and this lint are **not** project-configurable — they are
-hardcoded for security and must not be relaxed by a project pack.
+`src/env.ts` and this lint are hardcoded for security and cannot be broadly
+relaxed by a project pack. The sole narrow extension is the validated
+`runners.opencode.authEnv`: one exact provider-credential name, still filtered
+through `safeSubprocessEnv`; it cannot name GitHub authority, a denied prefix,
+another runner's known credential/config knob, or an alternate OpenCode config
+channel.
 
 ## Documentation map
 

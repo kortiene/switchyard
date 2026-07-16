@@ -9,7 +9,7 @@ runner.
 ```
 setup → classify → plan → implement → tests → resolve(loop) → e2e(gated)
       → review → patch(loop) → document(gated) → finalize → ci-fix(loop)
-      → merge → report
+      → merge(optional) → report
 ```
 
 The **orchestrator owns all git and GitHub work** and withholds secrets from the
@@ -92,3 +92,7 @@ gate (`ADW_TEST_CMD="npm run verify"`).
   universal kernel / project-pack architecture.
 - **[`adw_sdlc/HANDOVER.md`](./adw_sdlc/HANDOVER.md)** — session-to-session
   status and roadmap.
+
+## License
+
+Switchyard is available under the [MIT License](./LICENSE).

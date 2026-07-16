@@ -125,6 +125,16 @@ describe('persistence', () => {
     expect(loaded?.changeRequest).toEqual({ provider: 'github', type: 'pull_request', id: '42', number: 42 });
   });
 
+  it('round-trips deliberate no-merge bookkeeping', () => {
+    const state = new AdwState({ adwId: 'a1b2c3d4', mergeSkipped: 'flag' });
+    state.save();
+
+    const raw = JSON.parse(readFileSync(state.statePath(), 'utf8'));
+    expect(raw.merge_skipped).toBe('flag');
+    expect(raw.completed_phases).not.toContain('merge');
+    expect(AdwState.load('a1b2c3d4')?.mergeSkipped).toBe('flag');
+  });
+
   it('loads a Python-written document, dropping unknown keys and junk findings', () => {
     const ws = join(tmp, 'a1b2c3d4');
     mkdirSync(ws, { recursive: true });
@@ -176,6 +186,18 @@ describe('persistence', () => {
     expect(future?.issueNumber).toBe('9');
   });
 
+  it('canonicalizes a legacy numeric issue_number for cross-version resume', () => {
+    const ws = join(tmp, 'a1b2c3d4');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(
+      join(ws, 'state.json'),
+      JSON.stringify({ adw_id: 'a1b2c3d4', schema_version: 1, issue_number: 123 }),
+      'utf8',
+    );
+
+    expect(AdwState.load('a1b2c3d4')?.issueNumber).toBe('123');
+  });
+
   it('returns null for missing, unreadable, or invalid documents', () => {
     expect(AdwState.load('deadbeef')).toBeNull();
     const ws = join(tmp, 'a1b2c3d4');
@@ -203,6 +225,7 @@ describe('state.schema.json contract', () => {
     state.save();
     const raw = JSON.parse(readFileSync(state.statePath(), 'utf8'));
     expect(validate(raw, schema)).toEqual([]);
+    expect(validate({ ...raw, issue_number: 15 }, schema)).toEqual([]);
   });
 
   it('validates a fully populated TS-written document, including additive fields', () => {
@@ -221,6 +244,7 @@ describe('state.schema.json contract', () => {
       engine: 'ts',
       runner: 'claude',
       totalCostUsd: 1.23,
+      mergeSkipped: 'flag',
     });
     state.markDone('setup');
     state.markDone('plan');
@@ -255,6 +279,7 @@ describe('state.schema.json contract', () => {
       [{ review_findings: [{ description: 'd' }] }, 'missing required'],
       [{ completed_phases: 'plan' }, 'not of type'],
       [{ review_findings: [['not-an-object']] }, 'not of type'],
+      [{ merge_skipped: 'accident' }, 'not one of'],
     ];
     for (const [mutation, expected] of cases) {
       const errors = validate({ ...base, ...mutation }, schema);

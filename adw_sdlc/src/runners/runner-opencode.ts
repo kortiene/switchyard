@@ -5,7 +5,8 @@
  *
  * The secret boundary is the orchestrator-owned spawn: the server child gets
  * exactly the `safeSubprocessEnv()` allowlist (plus OPENCODE_CONFIG_CONTENT,
- * which this adapter authors itself), and every tool the agent runs is a
+ * which this adapter renders from validated operator config and its own
+ * non-overridable permission policy), and every tool the agent runs is a
  * grandchild of that clean-env server. The SDK's own `createOpencodeServer`
  * is NEVER used — it hardcodes a full parent-process-env spread onto the
  * child (verified on the installed 1.17.3 `dist/v2/server.js`), which is
@@ -55,6 +56,7 @@ import type {
   Part,
 } from '@opencode-ai/sdk/v2/client';
 
+import { getAdwConfig, type AdwConfig } from '../config.js';
 import type {
   AgentRunner,
   PhaseRequest,
@@ -95,6 +97,20 @@ export const OPENCODE_PERMISSION = {
     '*': 'allow',
   },
 } as const;
+
+/**
+ * Compose the config injected into the self-spawned server. Operator fields
+ * (provider, enabled_providers, small_model, and future OpenCode settings) are
+ * preserved, but `permission` is always authored last by the runner. This is
+ * intentionally a whole-field replacement: an operator-supplied nested bash
+ * rule must not weaken the orchestrator-owned git/gh deny policy.
+ */
+export function buildOpencodeServerConfig(config: AdwConfig = getAdwConfig()): Record<string, unknown> {
+  return {
+    ...config.runners.opencode.config,
+    permission: OPENCODE_PERMISSION,
+  };
+}
 
 /** How long to wait for the readiness banner before failing the phase. */
 export const SERVER_START_TIMEOUT_MS = 30_000;
@@ -481,9 +497,10 @@ class OpencodeRunner implements AgentRunner {
   private spawnServerOnce(req: PhaseRequest, bin: string, port: number): Promise<Server> {
     const proc = spawn(bin, ['serve', '--hostname', '127.0.0.1', '--port', String(port)], {
       cwd: req.cwd,
-      // The allowlist verbatim, plus the permission config this adapter
-      // authors; grandchildren (the agent's tools) inherit this clean env.
-      env: { ...req.env, OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission: OPENCODE_PERMISSION }) },
+      // The allowlist verbatim, plus the config this adapter renders. The
+      // operator may supply providers/models, while buildOpencodeServerConfig
+      // keeps permission runner-owned; grandchildren inherit this clean env.
+      env: { ...req.env, OPENCODE_CONFIG_CONTENT: JSON.stringify(buildOpencodeServerConfig()) },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 

@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { branchPrefix, deriveBranch, slugifyTitle, type IssueContext, type WorkItemContext } from '../src/issue.js';
+import {
+  branchPrefix,
+  deriveBranch,
+  slugifyTitle,
+  slugifyWorkItemId,
+  type IssueContext,
+  type WorkItemContext,
+} from '../src/issue.js';
 
 describe('WorkItemContext', () => {
   it('is the provider-neutral context shape while IssueContext remains a compatibility alias', () => {
@@ -50,5 +57,14 @@ describe('deriveBranch', () => {
   it('builds {prefix}/{issue}-[{adw_id}-]{slug}', () => {
     expect(deriveBranch(5, 'Add the thing', ['type:bug'], 'a1b2c3d4')).toBe('fix/5-a1b2c3d4-add-the-thing');
     expect(deriveBranch(5, 'Add the thing', [])).toBe('feat/5-add-the-thing');
+  });
+
+  it('sanitizes provider-owned string ids before embedding them in a ref', () => {
+    expect(slugifyWorkItemId('../PROJ 123.lock')).toBe('proj-123-lock');
+    expect(slugifyWorkItemId('💥')).toBe('item');
+    expect(slugifyWorkItemId('x'.repeat(100))).toHaveLength(64);
+    expect(deriveBranch('PROJ/123', 'Add the thing', [], 'a1b2c3d4')).toBe(
+      'feat/proj-123-a1b2c3d4-add-the-thing',
+    );
   });
 });

@@ -17,6 +17,9 @@ import { ghJson, note, runInherit } from './exec.js';
  */
 export const TYPE_PREFIX: Record<string, string> = DEFAULT_ADW_CONFIG.branching.labelPrefixes;
 
+/** Provider-neutral work-item identifiers (GitHub numbers, ticket keys, UUIDs, slugs, ...). */
+export type WorkItemId = number | string;
+
 /** Pick a branch prefix from issue labels (last match wins, case-insensitive). */
 export function branchPrefix(labels: readonly string[], config: AdwConfig = getAdwConfig()): string {
   let prefix = config.branching.defaultPrefix;
@@ -45,18 +48,37 @@ export function slugifyTitle(title: string, config: AdwConfig = getAdwConfig()):
 }
 
 /**
+ * Sanitize a provider-owned work-item id for use as one Git branch segment.
+ * The raw id remains unchanged in provider calls and persistent state; this
+ * representation is deliberately conservative so slashes, whitespace, ref
+ * punctuation, and arbitrarily long external ids cannot create an invalid or
+ * unsafe ref.
+ */
+export function slugifyWorkItemId(id: WorkItemId): string {
+  const slug = String(id)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+    .replace(/-+$/g, '');
+  return slug || 'item';
+}
+
+/**
  * Derive a branch name `{prefix}/{issue}-[{adw_id}-]{slug}` for a phased run.
  * The optional adwId segment correlates the branch with its run state.
  */
 export function deriveBranch(
-  issue: number,
+  issue: WorkItemId,
   title: string,
   labels: readonly string[],
   adwId?: string | null,
   config: AdwConfig = getAdwConfig(),
 ): string {
   const mid = adwId ? `${adwId}-` : '';
-  return `${branchPrefix(labels, config)}/${issue}-${mid}${slugifyTitle(title, config)}`;
+  return `${branchPrefix(labels, config)}/${slugifyWorkItemId(issue)}-${mid}${slugifyTitle(title, config)}`;
 }
 
 /** Provider-neutral aliases for branch naming helpers. */

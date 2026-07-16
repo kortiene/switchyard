@@ -889,4 +889,15 @@ describe('built-in GitHub provider no-gh fallbacks', () => {
     expect(() => provider.setStatus({ ghBin: null, repo: 'owner/repo' }, 1, 'In Progress')).not.toThrow();
     expect(() => provider.setStatus({ ghBin: '/bin/gh', repo: '' }, 1, 'In Progress')).not.toThrow();
   });
+
+  it('validates string ids locally instead of retargeting a numeric prefix', () => {
+    const provider = createGitHubWorkItemProvider();
+    const ctx = { ghBin: null, repo: 'owner/repo' };
+
+    expect(provider.state(ctx, '12')).toBe('UNKNOWN');
+    for (const id of ['PROJ-123', '12junk', '0', String(Number.MAX_SAFE_INTEGER + 1)]) {
+      expect(() => provider.state(ctx, id)).toThrow(/GitHub work-item id must be a positive/);
+      expect(() => provider.assignSelf(ctx, id)).toThrow(/GitHub work-item id must be a positive/);
+    }
+  });
 });

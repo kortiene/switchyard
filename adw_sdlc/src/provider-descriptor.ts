@@ -200,6 +200,9 @@ export function evalScalarMapping(data: unknown, mapping: ScalarMapping): string
 
 const RESERVED_CREDENTIAL_NAMES = new Set<string>([
   'GH_TOKEN',
+  'GITHUB_TOKEN',
+  'GH_ENTERPRISE_TOKEN',
+  'GITHUB_ENTERPRISE_TOKEN',
   'GH_BIN',
   ...Object.values(RUNNER_ENV_ALLOW).flat(),
 ]);

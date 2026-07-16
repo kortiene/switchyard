@@ -191,7 +191,18 @@ describe('parseCliWorkItemDescriptor', () => {
   });
 
   it('rejects an authEnv that is GH_TOKEN, deny-prefixed, or a model credential', () => {
-    for (const authEnv of ['GH_TOKEN', 'GH_BIN', 'ADW_ASSUME_YES', 'MX_AGENT_YES', 'MATRIX_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY']) {
+    for (const authEnv of [
+      'GH_TOKEN',
+      'GITHUB_TOKEN',
+      'GH_ENTERPRISE_TOKEN',
+      'GITHUB_ENTERPRISE_TOKEN',
+      'GH_BIN',
+      'ADW_ASSUME_YES',
+      'MX_AGENT_YES',
+      'MATRIX_TOKEN',
+      'ANTHROPIC_API_KEY',
+      'OPENAI_API_KEY',
+    ]) {
       expect(() => parseCliWorkItemDescriptor({ ...valid, authEnv })).toThrow(
         /reserved \(GitHub or model credential\)|denied secret prefix/,
       );

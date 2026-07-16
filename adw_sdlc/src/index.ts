@@ -59,10 +59,12 @@ export {
   fetchIssue,
   fetchWorkItem,
   slugifyTitle,
+  slugifyWorkItemId,
   slugifyWorkItemTitle,
   workItemBranchPrefix,
   type IssueContext,
   type WorkItemContext,
+  type WorkItemId,
 } from './work-item.js';
 export {
   ISSUE_CLASSES,
