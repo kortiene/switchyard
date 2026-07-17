@@ -347,6 +347,9 @@ class OpencodeRunner implements AgentRunner {
         { signal: req.signal },
       );
       if (created.error !== undefined || created.data === undefined) {
+        if (req.signal.aborted) {
+          return this.failed(transcript, abortKind(req.signal), TIMEOUT_RC, null);
+        }
         transcript.note(`[opencode runner error] session.create failed: ${describe(created.error)}\n`);
         return this.failed(transcript, 'none', 1, null);
       }
@@ -377,6 +380,14 @@ class OpencodeRunner implements AgentRunner {
         { signal: req.signal },
       );
       if (res.error !== undefined || res.data === undefined) {
+        // The SDK resolves with an error envelope when its signal is
+        // aborted; it does not necessarily reject into the catch below.
+        if (req.signal.aborted) {
+          if (sessionId !== undefined) {
+            void server.client.session.abort({ sessionID: sessionId, directory: req.cwd }).catch(() => {});
+          }
+          return this.failed(transcript, abortKind(req.signal), TIMEOUT_RC, null, sessionId);
+        }
         transcript.note(`[opencode runner error] prompt failed: ${describe(res.error)}\n`);
         return this.failed(transcript, 'none', 1, null, sessionId);
       }
