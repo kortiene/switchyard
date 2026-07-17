@@ -1026,9 +1026,10 @@ self-spawned-server wrapper), **pi** (in-process SDK; no native schema → fence
     cost/usage and structured-output hard-failure rates; assert cross-language state equivalence.
     **Verify:** all checklist boxes ticked for `claude` (cutover gate); other runners' capability-matrix
     rows green or documented.
-    *Landed notes — MOCKED-SEAMS HALF DONE (PR #335, squash `fc6495d`); live real-issue runs still
-    owed:* the step splits cleanly into a mocked-seams half (automatable, now landed) and a live half
-    (real-issue runs per runner — credentials + spend + a human, not autonomously runnable). **Landed
+    *Landed notes — MOCKED-SEAMS HALF DONE (PR #335, squash `fc6495d`); live real-issue runs tracked
+    separately:* the step splits cleanly into a mocked-seams half (automatable, now landed) and a live half
+    (real-issue runs per runner — provider access + a human, not autonomously runnable; a local provider
+    can make cost zero). **Landed
     (mocked seams):** (a) the named-but-previously-unproven **cutover criterion #2** (cross-language state
     equivalence) is now an automated cross-language fixture test, tested from BOTH languages since no code
     is shared across the boundary — `adw/test_cross_language_state.py` + `adw_sdlc/test/
@@ -1047,10 +1048,11 @@ self-spawned-server wrapper), **pi** (in-process SDK; no native schema → fence
     three. `adw/` production code stays untouched (test + fixtures only; the dual-language contract test is
     mandated by the §8 schema-drift-guard design). Gates: `pytest adw/` 192 passed; `adw-sdlc` typecheck +
     317 vitest + env-lint green. Adversarial review: 1 confirmed minor (asymmetric fixture key-set guard),
-    fixed. **Still owed (live half):** one real GitHub issue end-to-end per runner recording cost +
-    structured-output hard-failure rate — `claude` done (#304→#331, fix #332); **`codex` blocked** on an
+    fixed. **Live-half status:** one real GitHub issue end-to-end per runner recording cost +
+    structured-output hard-failure rate — `claude` done (#304→#331, fix #332); `opencode` done (#31:
+    two real-issue runs, 0/6 hard-fails, 0/6 nudges, $0 local-provider cost); **`codex` blocked** on an
     OAuth refresh token revoked server-side (unblock with `OPENAI_API_KEY`, which skips the OAuth refresh);
-    `opencode`/`pi` owed (real provider key; pi also needs Node ≥ 22.19). The `claude` cutover gate
+    `pi` owed (real provider key + Node ≥ 22.19). The `claude` cutover gate
     (criteria 1–6) is met under automated tests + the completed #331 run, so **step 12 is unblocked for
     `claude` pending the maintainer's sign-off on the live evidence**.
 12. **Cutover:** flip `MX_AGENT_ENGINE` default `py → ts` once the `claude` runner satisfies the cutover

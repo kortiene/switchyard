@@ -627,6 +627,25 @@ describe('transcript', () => {
 });
 
 describe('timeout / cancellation', () => {
+  it("maps an aborted session.create that resolves with an error to signal 'timeout'", async () => {
+    const controller = new AbortController();
+    sessionCreateMock.mockImplementation(() => {
+      controller.abort(new Error(PHASE_TIMEOUT_ABORT_REASON));
+      // Generated SDK calls resolve error envelopes on abort instead of rejecting.
+      return Promise.resolve({
+        data: undefined,
+        error: { name: 'AbortError', data: { message: PHASE_TIMEOUT_ABORT_REASON } },
+      });
+    });
+    const result = await runner.runPhase(makeReq({ signal: controller.signal }));
+
+    expect(result.ok).toBe(false);
+    expect(result.signal).toBe('timeout');
+    expect(result.rc).toBe(124);
+    expect(sessionPromptMock).not.toHaveBeenCalled();
+    expect(sessionAbortMock).not.toHaveBeenCalled();
+  });
+
   it("maps an aborted prompt to signal 'timeout' and stops the session server-side", async () => {
     const controller = new AbortController();
     sessionPromptMock.mockImplementation(() => {
@@ -641,6 +660,31 @@ describe('timeout / cancellation', () => {
     expect(result.signal).toBe('timeout');
     expect(sessionAbortMock).toHaveBeenCalledWith({ sessionID: 'sess-1', directory: req.cwd });
   });
+
+  it.each([
+    ['timeout', new Error(PHASE_TIMEOUT_ABORT_REASON), 'timeout'],
+    ['cancel', new Error('user requested stop'), 'cancelled'],
+  ] as const)(
+    "maps a %s abort when the prompt resolves with an error and stops the session server-side",
+    async (_kind, reason, expectedSignal) => {
+      const controller = new AbortController();
+      sessionPromptMock.mockImplementation(() => {
+        controller.abort(reason);
+        // The real SDK resolves this envelope on abort instead of rejecting.
+        return Promise.resolve({
+          data: undefined,
+          error: { name: 'AbortError', data: { message: reason.message } },
+        });
+      });
+      const req = makeReq({ signal: controller.signal });
+      const result = await runner.runPhase(req);
+
+      expect(result.ok).toBe(false);
+      expect(result.signal).toBe(expectedSignal);
+      expect(result.rc).toBe(124);
+      expect(sessionAbortMock).toHaveBeenCalledWith({ sessionID: 'sess-1', directory: req.cwd });
+    },
+  );
 
   it("maps a late abort after a completed prompt to 'timeout' but keeps the structured payload (parse-first parity)", async () => {
     const controller = new AbortController();
