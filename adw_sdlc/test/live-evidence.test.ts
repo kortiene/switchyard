@@ -13,18 +13,22 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { REPO_ROOT } from '../src/common.js';
 
 const EVIDENCE = join(REPO_ROOT, 'adw_sdlc', 'test', 'fixtures', 'live-evidence');
+const PARITY = join(REPO_ROOT, 'adw_sdlc', 'PARITY.md');
+const MVP_READINESS = join(REPO_ROOT, 'adw_sdlc', 'MVP-READINESS.md');
 
 function loadJson(name: string): any {
   return JSON.parse(readFileSync(join(EVIDENCE, name), 'utf8'));
 }
 
-describe('committed live evidence for issues #20–#23', () => {
+describe('committed live evidence', () => {
   let failure: any;
   let boundary: any;
   let routing: any;
   let veto: any;
   let merge: any;
   let crossLanguage: any;
+  let pi: any;
+  let codex: any;
 
   beforeAll(() => {
     failure = loadJson('failure-drills.json');
@@ -33,6 +37,8 @@ describe('committed live evidence for issues #20–#23', () => {
     veto = loadJson('tool-veto.json');
     merge = loadJson('merge-refusal.json');
     crossLanguage = loadJson('cross-language-resume.json');
+    pi = loadJson('pi-live-run.json');
+    codex = loadJson('codex-live-run.json');
   });
 
   it('archives timeout and native-budget fast-fails with one attempt and no nudge', () => {
@@ -402,13 +408,239 @@ describe('committed live evidence for issues #20–#23', () => {
     ]);
   });
 
+  it('records the Pi issue-to-PR result without claiming uninterrupted autonomy', () => {
+    expect(pi).toMatchObject({
+      source_commit: '8962770be687be0ac818983ebc54e71df4a4d0ad',
+      runner: 'pi',
+      validation_status: 'issue_to_pr_completed_with_operator_scope_recovery',
+      run_id: 'babe0070',
+      issue_number: 70,
+      runtime: {
+        node_version: '24.18.0',
+        spawned_binary_version: '0.80.6',
+        package_lock_version: '0.79.8',
+        model: 'local/qwen3.6-35b-a3b',
+      },
+      timeout_resume: {
+        phase: 'classify',
+        requested_timeout_seconds: 1,
+        initial_cli_exit_code: 1,
+        completed_phases_at_checkpoint: ['setup'],
+        resumed_same_run_id: true,
+      },
+      persisted_run: {
+        state_bytes: 4089,
+        state_sha256: '6ea84aa604a3935589f54772d7633a355fbb743d64893ca742e5cdeb03a95f47',
+        document_completed: false,
+        total_cost_usd: 0,
+        merge_skipped: 'flag',
+      },
+      metrics: {
+        recorded_agent_phases: 5,
+        attempts: 7,
+        nudged_phases: 2,
+        phase_nudge_rate: 0.4,
+        total_duration_ms: 491119,
+        provider_reported_cost_usd: 0,
+      },
+    });
+    expect(pi.persisted_run.completed_phases).toEqual([
+      'setup',
+      'classify',
+      'plan',
+      'implement',
+      'tests',
+      'resolve',
+      'e2e',
+      'review',
+      'patch',
+    ]);
+    expect(pi.persisted_run.completed_phases).not.toContain('document');
+    expect(pi.structured_output).toEqual({
+      path: 'fenced',
+      counted_attempts: 4,
+      clean: 2,
+      nudged_to_success: 2,
+      hard_failures: 0,
+      hard_failure_rate: 0,
+      counted_nudge_rate: 0.5,
+      classify_clean_excluded_from_bar: 1,
+      uncounted: 1,
+      uncounted_phase: 'document',
+      verdict: 'INSUFFICIENT DATA',
+    });
+    expect(pi.scope_recovery).toMatchObject({
+      document_phase_interrupted_by_operator: true,
+      unauthorized_untracked_files_removed: 3,
+      final_changed_files: ['README.md'],
+      operator_edited_final_target: true,
+      autonomous_uninterrupted_chain_claimed: false,
+    });
+    expect(pi.pull_request).toMatchObject({
+      number: 73,
+      state: 'OPEN',
+      draft: false,
+      merged: false,
+      head_commit: '8e5b65edb2798e61b21734d43a7bcc2c57529379',
+      changed_files: ['README.md'],
+      additions: 8,
+      deletions: 5,
+    });
+    expect(pi.pull_request.checks).toEqual([
+      { name: 'verify (node 20.19.0)', conclusion: 'SUCCESS' },
+      { name: 'verify (node 22)', conclusion: 'SUCCESS' },
+    ]);
+  });
+
+  it('records Codex as authenticated but incomplete, including the adapter and sandbox failures', () => {
+    expect(codex).toMatchObject({
+      source_commit: '8962770be687be0ac818983ebc54e71df4a4d0ad',
+      runner: 'codex',
+      validation_status: 'authenticated_structured_phases_only_host_blocked',
+      run_id: 'c0de0069',
+      issue_number: 69,
+      runtime: {
+        sdk_package_version: '0.139.0',
+        spawned_binary_version: '0.139.0',
+        auth_mode: 'ChatGPT login',
+      },
+      persisted_run: {
+        completed_phases: ['setup', 'classify', 'plan'],
+        pr_number: null,
+        pr_url: null,
+        commit_created: false,
+        target_diff_present: false,
+        worktree_clean: true,
+        persisted_total_cost_usd: 0.27709304999999995,
+      },
+    });
+    expect(codex.latest_metrics_snapshot).toMatchObject({
+      phases: 2,
+      attempts: 2,
+      nudged_phases: 0,
+      total_cost_usd: 0.21723194999999998,
+      earlier_persisted_cost_usd: 0.0598611,
+      failed_or_interrupted_attempt_cost_complete: false,
+    });
+    expect(
+      codex.latest_metrics_snapshot.total_cost_usd +
+        codex.latest_metrics_snapshot.earlier_persisted_cost_usd,
+    ).toBeCloseTo(codex.persisted_run.persisted_total_cost_usd, 10);
+    expect(codex.structured_output).toMatchObject({
+      path: 'native',
+      counted_attempts: 2,
+      clean: 1,
+      nudged_to_success: 0,
+      hard_failures: 1,
+      hard_failure_rate: 0.5,
+      uncounted: 2,
+      verdict: 'INSUFFICIENT DATA',
+    });
+    expect(codex.structured_output.chronology_caveat).toContain('predates later overwritten');
+    expect(codex.completed_plan_integrity).toMatchObject({
+      tracking_issue: 74,
+      recorded_plan_file_present: false,
+      structured_spec_created: false,
+      plan_still_marked_completed: true,
+      completed_phase_skip_safety: 'FAIL',
+    });
+    expect(codex.adapter_failure).toMatchObject({
+      phase: 'implement',
+      attempts: 2,
+      error_excerpt: "TypeError: Cannot read properties of null (reading 'message')",
+      fix_pull_request: 72,
+      fix_pull_request_state: 'OPEN_DRAFT',
+    });
+    expect(codex.sandbox_blocker).toMatchObject({
+      failed_file_change_events: 10,
+      raw_cli_control_error_excerpt: 'bwrap: setting up uid map: Permission denied',
+      unprivileged_user_namespace_probe: 'blocked',
+      docker_socket_probe: 'permission denied',
+      unsafe_danger_full_access_bypass_used: false,
+      issue_to_pr_completed: false,
+      sdk_write_probe: {
+        file_change_status: 'failed',
+        structured_claim: { wrote: true },
+        target_file_present: false,
+        private_session_archived: false,
+      },
+      raw_cli_control_probe: {
+        target_file_present: false,
+        private_session_archived: false,
+      },
+    });
+    expect(codex.sandbox_blocker.phase_error_excerpts).toContain(
+      'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted',
+    );
+    expect(codex.residual_connector_authority).toEqual({
+      tracking_issue: 75,
+      observed: true,
+      github_reads_completed: 3,
+      github_update_attempts: 1,
+      github_update_cancelled: true,
+      external_write_completed: false,
+      tool_inputs_archived: false,
+      interpretation:
+        'environment isolation did not remove MCP connector authority available through the Codex home',
+    });
+  });
+
+  it('pairs poisoned parent names with successful real Pi and Codex child-env probes', () => {
+    const required = [
+      'GH_TOKEN',
+      'ADW_LIVE_DENIED_SENTINEL',
+      'MATRIX_LIVE_DENIED_SENTINEL',
+      'MX_AGENT_LIVE_DENIED_SENTINEL',
+    ];
+    const deniedName = /^(?:GH_TOKEN|(?:ADW|MATRIX|MX_AGENT)_|(?:ANTHROPIC|OPENAI|CODEX)_API_KEY)/;
+
+    for (const manifest of [pi, codex]) {
+      const boundary = manifest.secret_boundary;
+      expect(boundary.parent_required_key_names).toEqual(required);
+      expect(boundary.parent_present_key_names).toEqual(required);
+      expect(boundary.observed_denied_key_names).toEqual([]);
+      expect(boundary.child_environment_key_names.filter((name: string) => deniedName.test(name)))
+        .toEqual([]);
+      expect(boundary.environment_values_archived).toBe(false);
+      expect(boundary.successful_probe).toMatchObject({
+        ok: true,
+        rc: 0,
+        signal: 'none',
+        session_id_present: true,
+      });
+      expect(boundary.result).toBe('PASS');
+    }
+  });
+
+  it('keeps PARITY and MVP readiness aligned with the sanitized runner evidence', () => {
+    const parity = readFileSync(PARITY, 'utf8');
+    const readiness = readFileSync(MVP_READINESS, 'utf8');
+    const remains = parity.slice(parity.indexOf('## What remains for step 11'));
+
+    for (const content of [parity, readiness]) {
+      expect(content).toContain('babe0070');
+      expect(content).toContain('c0de0069');
+      expect(content).toContain('PR #73');
+      expect(content).toContain('PR #72');
+      expect(content).toContain('bwrap');
+      expect(content).toMatch(/operator.*scope|scope.*operator/is);
+      expect(content).not.toMatch(/cannot authenticate|refresh token was revoked/i);
+    }
+    expect(parity).toContain('9 attempts: 7 clean, 2 nudged→ok, 0 hard-fails');
+    expect(parity).toContain('INSUFFICIENT DATA');
+    expect(remains).toMatch(/codex/i);
+    expect(remains).not.toMatch(/pi.*live run/i);
+  });
+
   it('commits manifests and hashes only—never raw prompts, transcripts, paths, or secrets', () => {
     const expectedFiles = [
       'README.md',
+      'codex-live-run.json',
       'cross-language-resume.json',
       'failure-drills.json',
       'merge-refusal.json',
       'model-routing.json',
+      'pi-live-run.json',
       'secret-boundary.json',
       'tool-veto.json',
     ];
@@ -431,5 +663,7 @@ describe('committed live evidence for issues #20–#23', () => {
       absolute_paths_archived: false,
     });
     expect(boundary.environment_values_archived).toBe(false);
+    expect(Object.values(pi.sanitization).every((value) => value === false)).toBe(true);
+    expect(Object.values(codex.sanitization).every((value) => value === false)).toBe(true);
   });
 });

@@ -9,8 +9,9 @@ transport loopback suite (`test/providers-rest-transport.test.ts`) drives a real
 localhost round-trip). Contact with reality now spans **thirteen** live `claude` ADW
 run ids — the original seed, an 8-issue self-hosting batch, three issue-#20
 failure-drill carriers, and the active-phase recovery run — plus targeted
-real-spawn boundary/routing/veto probes and two OpenCode real-issue runs recorded
-in issue #31. See
+real-spawn boundary/routing/veto probes, two OpenCode real-issue runs recorded
+in issue #31, Pi run `babe0070` to open PR #73, and partial authenticated Codex
+run `c0de0069`. See
 [`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md) and the sanitized
 [`test/fixtures/live-evidence/`](./test/fixtures/live-evidence/) corpus. Measured
 over the Claude batch, native structured output has **0/36 hard-fails (0.0%)** but
@@ -20,8 +21,8 @@ induced live and archived. The sample is still self-referential (Claude editing
 this repo's own docs/tests), so this doc keeps the remaining breadth and
 maintainer-sign-off caveats explicit.
 
-Status legend: ✅ done · ⏳ owed (human/credential-gated) · ❌ not started ·
-🔧 automatable in-repo.
+Status legend: ✅ done/observed · 🟡 partial/blocked · ⏳ owed
+(human/credential-gated) · ❌ not started · 🔧 automatable in-repo.
 
 ---
 
@@ -125,15 +126,21 @@ _Post-MVP: not required for the (A) MVP. Listed for completeness._
   through OpenCode 1.17.18 on a local vLLM Qwen provider: 6 completed agent phases,
   0 hard-fails, 0 nudges, and $0 provider cost. The second run also exercised
   kill-then-resume; the first observed the unattended merge refusal after PR creation.
-- [ ] ⛔ **codex credential — shelved to post-MVP (decided #33, 2026-06-28).** It
-  currently *cannot authenticate* (OAuth refresh revoked, possibly account-level —
-  PARITY.md "real-issue runs"). Revisit via `OPENAI_API_KEY` (skips the OAuth
-  refresh) when (B) is taken up.
-- [ ] ⏳ **pi needs Node ≥ 22.19** — the CI Node-version matrix (#37) now runs a
-  Node-20.19.0 floor leg alongside Node 22, and the 20.19.0 leg cannot load pi
-  (its npm engines floor is `>=22.19.0`, optional dep skipped), so pi is
-  exercised only on the Node-22 leg. That leg runs the mocked suite; a real-issue
-  pi run (live provider key) is still owed — see PARITY.md.
+- [ ] 🟡 **Codex real-issue validation is partial / host-blocked (#33).**
+  Credentialed run `c0de0069` authenticated and produced structured `classify`
+  and `plan` results. It did not complete an edit: the plan file was never created (#74),
+  draft PR #72 fixes the null-MCP-error crash exposed by the first implement nudge,
+  and this host's `bwrap` cannot create the unprivileged user namespace required by
+  the workspace-write path. The paired child-env probe passed, but Codex still saw
+  residual MCP connector read authority through its home (#75). No issue-to-PR completion
+  or full-run cost/rate is claimed.
+- [x] ✅ **Pi real-issue validation observed with operator scope recovery (#32).**
+  Run `babe0070` drove issue #70 to open PR #73 with Pi 0.80.6 on Node 24.18.0
+  and local Qwen: 4 counted fenced attempts (2 clean, 2 nudged→ok, 0 hard-fails),
+  $0 provider cost, and a successful timeout-then-resume. The operator interrupted
+  an out-of-scope document phase, removed three untracked files, corrected the target,
+  and resumed without document, so this is not an uninterrupted-autonomy claim. Both
+  PR checks passed; live Pi itself did not run on either CI Node version.
 
 ## 3. Gates that (C) — cutover — adds (post-MVP)
 
@@ -178,17 +185,19 @@ GitLab). **Decide scope:**
 - `test/fixtures/live-evidence/` — sanitized issues #20–#23 operational evidence:
   timeout/budget no-retry, active-phase restart, completed-phase skip, cleanup and
   cost, real-spawn secret names, exact model routes, live git/gh veto, merge refusal,
-  and cross-language state resume. `test/live-evidence.test.ts` guards the claims
-  without vendoring prompts, full transcripts, or secret values.
+  and cross-language state resume; plus Pi/Codex live-run manifests recording the
+  issue-to-PR outcome, cost/rate, timeout/resume, paired executable-boundary probes,
+  and Codex failures. `test/live-evidence.test.ts` guards the claims without vendoring
+  prompts, full transcripts, tool inputs, auth files, provider config, or secret values.
 
 ## What I can do vs. what needs a human
 
 - **Automatable in-repo (🔧):** the measurement instruments, failure-drill
   harness/runbook, observed-live ledger, cost/secret-boundary audit, and
   universalization scope-line are done.
-- **Not automatable (human + provider access; credentials/spend where applicable):**
-  the remaining live runs, unblocking codex's auth, real provider keys (pi /
-  GitLab), and the maintainer's cutover sign-off.
+- **Not automatable in this environment:** the remaining Codex edit-to-PR run on a
+  `bwrap`/user-namespace-compatible host, a real GitLab provider credential, and the
+  maintainer's cutover sign-off.
 
 ## Recommended minimal path to a defensible (A)-MVP
 

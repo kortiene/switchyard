@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "observed_on": "2026-07-18",
+  "source_commit": "8962770be687be0ac818983ebc54e71df4a4d0ad",
+  "runner": "pi",
+  "validation_status": "issue_to_pr_completed_with_operator_scope_recovery",
+  "run_id": "babe0070",
+  "issue_number": 70,
+  "runtime": {
+    "node_version": "24.18.0",
+    "spawned_binary_version": "0.80.6",
+    "package_lock_version": "0.79.8",
+    "provider": "local",
+    "model": "local/qwen3.6-35b-a3b"
+  },
+  "timeout_resume": {
+    "phase": "classify",
+    "requested_timeout_seconds": 1,
+    "initial_cli_exit_code": 1,
+    "completed_phases_at_checkpoint": ["setup"],
+    "resumed_same_run_id": true,
+    "timeout_log_archived": false
+  },
+  "persisted_run": {
+    "state_bytes": 4089,
+    "state_sha256": "6ea84aa604a3935589f54772d7633a355fbb743d64893ca742e5cdeb03a95f47",
+    "completed_phases": [
+      "setup",
+      "classify",
+      "plan",
+      "implement",
+      "tests",
+      "resolve",
+      "e2e",
+      "review",
+      "patch"
+    ],
+    "document_completed": false,
+    "total_cost_usd": 0,
+    "merge_skipped": "flag"
+  },
+  "metrics": {
+    "metrics_bytes": 1413,
+    "metrics_sha256": "faf094395d32edaca9d0f9eda6b7cfbc6f093f7f1af120ec52fb9ced97f3702a",
+    "recorded_agent_phases": 5,
+    "attempts": 7,
+    "nudged_phases": 2,
+    "phase_nudge_rate": 0.4,
+    "total_duration_ms": 491119,
+    "provider_reported_cost_usd": 0
+  },
+  "structured_output": {
+    "path": "fenced",
+    "counted_attempts": 4,
+    "clean": 2,
+    "nudged_to_success": 2,
+    "hard_failures": 0,
+    "hard_failure_rate": 0,
+    "counted_nudge_rate": 0.5,
+    "classify_clean_excluded_from_bar": 1,
+    "uncounted": 1,
+    "uncounted_phase": "document",
+    "verdict": "INSUFFICIENT DATA"
+  },
+  "scope_recovery": {
+    "document_phase_interrupted_by_operator": true,
+    "reason": "runner proposed files outside the issue's one-file documentation scope",
+    "unauthorized_untracked_files_removed": 3,
+    "final_changed_files": ["README.md"],
+    "operator_edited_final_target": true,
+    "autonomous_uninterrupted_chain_claimed": false
+  },
+  "pull_request": {
+    "number": 73,
+    "url": "https://github.com/kortiene/switchyard/pull/73",
+    "state": "OPEN",
+    "draft": false,
+    "merged": false,
+    "head_commit": "8e5b65edb2798e61b21734d43a7bcc2c57529379",
+    "changed_files": ["README.md"],
+    "additions": 8,
+    "deletions": 5,
+    "checks": [
+      {"name": "verify (node 20.19.0)", "conclusion": "SUCCESS"},
+      {"name": "verify (node 22)", "conclusion": "SUCCESS"}
+    ]
+  },
+  "secret_boundary": {
+    "audit_method": "names-only wrapper at the executable spawned by the production Pi adapter",
+    "parent_required_key_names": [
+      "GH_TOKEN",
+      "ADW_LIVE_DENIED_SENTINEL",
+      "MATRIX_LIVE_DENIED_SENTINEL",
+      "MX_AGENT_LIVE_DENIED_SENTINEL"
+    ],
+    "parent_present_key_names": [
+      "GH_TOKEN",
+      "ADW_LIVE_DENIED_SENTINEL",
+      "MATRIX_LIVE_DENIED_SENTINEL",
+      "MX_AGENT_LIVE_DENIED_SENTINEL"
+    ],
+    "child_environment_key_names": [
+      "HOME",
+      "LANG",
+      "LC_ALL",
+      "PATH",
+      "PI_BIN",
+      "PI_CODING_AGENT_DIR",
+      "PI_CODING_AGENT_SESSION_DIR",
+      "PWD",
+      "SHELL",
+      "SHLVL",
+      "TERM",
+      "USER",
+      "_"
+    ],
+    "observed_denied_key_names": [],
+    "environment_values_archived": false,
+    "child_names_bytes": 105,
+    "child_names_sha256": "4cc3885aa7ed684d81215f49f73e6336a13978425a40fa531bde4f1db301d443",
+    "successful_probe": {
+      "ok": true,
+      "rc": 0,
+      "signal": "none",
+      "session_id_present": true,
+      "cost_usd": 0,
+      "transcript_bytes": 26,
+      "transcript_sha256": "2be64bcdfbbdbdc57b212e8196eb4ad19d10ca72f6d5d20a0e9d8278b852d5d7"
+    },
+    "result": "PASS"
+  },
+  "sanitization": {
+    "full_prompts_archived": false,
+    "full_transcripts_archived": false,
+    "tool_inputs_archived": false,
+    "environment_values_archived": false,
+    "provider_configuration_archived": false,
+    "absolute_paths_archived": false
+  }
+}

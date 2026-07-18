@@ -62,15 +62,15 @@ the maintainer's sign-off on the live evidence below.
 
 The capability-matrix rows are all green under mocks (per-adapter suites, steps 6–9). The **live** half
 of step 11 requires one real GitHub issue driven end-to-end per runner, recording cost and the
-structured-output hard-failure rate; status follows. These runs need provider access + a human and are
-**not** autonomously runnable; cost can be zero for a local provider.
+structured-output hard-failure rate; status follows. These operator-run validations need provider and
+runtime access outside CI; cost can be zero for a local provider.
 
 | Runner | Live status | Detail / how to unblock |
 |---|---|---|
 | **claude** | ✅ done | Seed: Issue #304 → PR #331 (squash-merged), parity bug fixed in #332, cost ≈ $34.76, run `007fd5ba`. Plus an 8-issue self-hosting batch: issues #1–#8 → squash-merged PRs #9–#16 on `kortiene/switchyard` (`docs/LIVE-RUN-BATCH.md`). Over the batch, `parity:rate` measures native **0/36 hard-fails (0.0%)**, **88.9% nudge rate**, fenced **5/5 clean** (evidence committed at `test/fixtures/parity-runs/`, reproducible from a clean clone and guarded by `test/parity-evidence.test.ts`). On a box with no `ANTHROPIC_API_KEY` (CLI-OAuth only), the D1 default classify path fails — run with `ADW_CLASSIFY_ON_RUNNER=1`. |
-| **codex** | ⛔ blocked | Live phase dies at classify: `refresh token was revoked` (OAuth access token expires ~1h; the refresh token comes back revoked server-side). `codex login status` reports success on local-file presence only. **Unblock:** `export OPENAI_API_KEY=…` (codex `RUNNER_ENV_ALLOW` already passes it; API-key mode skips the OAuth refresh entirely), or `codex logout && codex login` then run codex **immediately** (no long run in between). If a fresh token is also revoked within hours it is account-level — resolve with OpenAI. The transport is verified live (binary spawn, JSONL stream, `turn.failed` mapping); only the credential blocks a real phase. |
+| **codex** | 🟡 partial / host-blocked | Authenticated run `c0de0069` cleared the former OAuth blocker and produced structured `classify` and `plan` results, but it did **not** complete an edit or PR. The completed `plan` recorded `spec_created:false` and its plan file is absent. The first `implement` nudge then exposed a null `mcp_tool_call.error` adapter crash (fixed in draft PR #72); with that fix applied, Codex still could not write because this host's `bwrap` cannot create the required user namespace. An isolated SDK probe even returned `{"wrote":true}` after a failed file change while the target remained absent. The incomplete state records **$0.27709305** of accumulated persisted spend, but failed/interrupted-attempt spend is not claimed; the diagnostic native sample is 1 hard-fail in 2 counted attempts and is not a full-run rate. A paired names-only child-env probe withheld all four poisoned names, while separate MCP activity showed residual connector read authority and one cancelled write attempt. Sanitized evidence: `test/fixtures/live-evidence/codex-live-run.json`. |
 | **opencode** | ✅ done | Issue #31: two real GitHub issues were driven through OpenCode to PRs on a scratch repo using binary **1.17.18** and local vLLM model `dgx-spark/qwen3.6-35b-a3b`. Runs `2036c7dd` and `f686b843` completed **6 agent phases with 0/6 hard-fails and 0/6 nudges**; a separate classify-schema probe was **5/5 conforming** (3.3 s average). Run `2036c7dd` took 215.5 s; both runs cost **$0** on the local provider. The unattended merge refusal fired after PR creation, and `f686b843` survived a mid-run kill then resumed from persisted state. |
-| **pi** | ⏳ owed | Adapter + `--mode json` stream verified live against the real 0.79.1 binary via a scrubbed-agentDir stub provider (no credential) in step 9. A real-issue run needs a real provider key + Node ≥ 22.19 (the pi npm engines floor; the CI Node-20.19.0 floor leg (#37) skips pi — only the Node-22 leg can load it). |
+| **pi** | ✅ observed / operator-recovered | Issue #70 reached open PR #73 through run `babe0070`, using Pi CLI **0.80.6** on Node **24.18.0** and local `qwen3.6-35b-a3b`. Five agent phases persisted in 7 attempts at provider-reported cost **$0**. The rate-counted fenced sample is **2 clean + 2 nudged→ok + 0 hard-fails** (4 attempts, 50% nudge); classify was clean/excluded and an interrupted document phase was uncounted. An intentional classify timeout resumed from the setup checkpoint. The operator interrupted document after Pi expanded beyond the one-file scope, removed three untracked files, corrected the target README, and resumed without document; therefore this is issue-to-PR evidence, **not** a claim of an uninterrupted autonomous chain. Merge was disabled and both PR checks passed. A paired names-only child-env probe withheld all four poisoned names. CI still exercises Pi only under mocks on Node 22; the live run itself used Node 24. Sanitized evidence: `test/fixtures/live-evidence/pi-live-run.json`. |
 
 A runner ships only when its capability-matrix row is satisfied **or** its phase falls back to the shared
 `structuredCall` (classify) / another runner. Per-runner cutover is independent (PLAN.md Section 8);
@@ -105,11 +105,23 @@ parity runs.
   real-issue runs (`2036c7dd`, `f686b843`) on a local vLLM Qwen provider. A separate
   classify-schema probe was **5/5 conforming** at 3.3 s average. These are native-path
   observations and do not add a fenced-path comparator.
+  Pi issue #70 adds **4 counted fenced attempts** from run `babe0070`: **2 clean,
+  2 nudged→ok, 0 hard-fails** (50% nudge rate) on a $0 local provider. Combined with
+  Claude's committed 5/5 clean fenced baseline, the described live fenced total is
+  **9 attempts: 7 clean, 2 nudged→ok, 0 hard-fails**, still below the 20-attempt
+  comparative threshold. Only the original five Claude attempts are vendored under
+  `test/fixtures/parity-runs/`; Pi's observations are retained in the sanitized
+  `pi-live-run.json` manifest rather than as raw prompts/transcripts.
+  Codex run `c0de0069` diagnostically adds **1 native clean + 1 native hard-fail**,
+  with two more attempts uncounted. Because the run did not reach a PR and its older
+  implement nudge artifact predates later overwritten retry artifacts, it is retained
+  only as sanitized failure evidence, not added to the reproducible parity corpus.
   - **Measure it:** `npm run parity:rate -- test/fixtures/parity-runs/` (the committed corpus; or a fresh `agents/` run) (`tools/parity-rate.ts`) classifies every phase
     invocation from those artifacts and reports the per-path hard-fail rate. It deliberately prints
     **INSUFFICIENT DATA** rather than a verdict until each path has enough live attempts, so the bar is an
-    audited measurement — not the structural argument above standing in for one. The fenced sample has only
-    5 attempts (< 20), so the **comparative** bar is **not yet measured** — but two knobs
+    audited measurement — not the structural argument above standing in for one. The committed Claude
+    corpus has 5 fenced attempts; the additional Pi run brings the described live total to 9,
+    still below 20, so the **comparative** bar is **not yet measured** — but two knobs
     make it evaluable now: `--max-native-rate PCT` gates the native path's *absolute* hard-fail rate from
     `claude`-only runs, and `ADW_PARITY_FORCE_FENCED_JSON=1` harvests a fenced baseline from `claude` (routes a
     native-schema runner through the fenced path). See `MVP-READINESS.md` for the full readiness gate.
@@ -118,9 +130,13 @@ parity runs.
 
 ## What remains for step 11
 
-1. **codex** live run — unblock the credential (prefer `OPENAI_API_KEY`), run one real issue.
-2. **pi** live run — real provider key + Node ≥ 22.19, one real issue.
-3. Append measured cost + hard-failure rate for codex and pi to the tables above.
+1. Land the null-MCP-error fix in draft PR #72 and prevent a `spec_created:false` plan
+   with no file from being persisted as completed (#74).
+2. Decide how a scrubbed Codex home must constrain residual MCP connector authority
+   (#75).
+3. Retry **codex** on a host where `bwrap` can create unprivileged user namespaces,
+   drive issue #69 (or another real issue) to a PR, and append the complete cost and
+   structured-output rate. Run `c0de0069` is authenticated failure evidence only.
 
-Step 12 (cutover) is gated only on `claude` and is unblocked. The remaining codex/pi work can land after
+Step 12 (cutover) is gated only on `claude` and is unblocked. The remaining Codex work can land after
 the default flip (per-runner cutover is independent).
