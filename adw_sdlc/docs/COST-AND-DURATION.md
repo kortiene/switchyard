@@ -96,8 +96,10 @@ Do **not** use a global `--model` for this — it overrides every phase, includi
   - **Parent-side soft cap** (runner-agnostic): after each phase the
     orchestrator compares the *accumulated* `state.totalCostUsd` to the cap and
     aborts before the next phase. This is the only spend stop for
-    codex/opencode/pi, which have no native cap. (If the total is `null`/unknown
-    the soft gate stays quiet; the native cap and `--timeout` remain backstops.)
+    codex/opencode/pi, which have no native cap. If the total is `null`/unknown,
+    the soft gate stays quiet; if a local provider reports `$0`, the accumulated
+    total never exceeds a positive cap. In either case, `--timeout` is the only
+    effective bound for a runner without a native cap.
 - `--timeout <s>` aborts a runaway phase (`signal:'timeout'`, no nudge).
 
 ### 4. Trim repeated full-verify work
