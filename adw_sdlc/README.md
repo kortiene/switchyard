@@ -76,6 +76,10 @@ Frequently used flags (`-h` / `--help` prints the full list):
 | `-y, --yes` | do not prompt before the irreversible squash-merge |
 | `--no-merge` | run through PR creation and green CI, then report success with the change request left open |
 
+For runners without a native spend cap, `--max-budget-usd` is checked between
+phases against reported accumulated cost. A local provider that reports `$0`
+will never trip a positive budget cap, so use `--timeout` as the effective bound.
+
 `--no-merge` and `--yes` are mutually exclusive. A PR-only run records
 `merge_skipped: "flag"` without completing the `merge` phase; merge it later
 with an explicitly authorized resume, for example

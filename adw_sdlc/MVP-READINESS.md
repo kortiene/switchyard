@@ -9,7 +9,8 @@ transport loopback suite (`test/providers-rest-transport.test.ts`) drives a real
 localhost round-trip). Contact with reality now spans **thirteen** live `claude` ADW
 run ids — the original seed, an 8-issue self-hosting batch, three issue-#20
 failure-drill carriers, and the active-phase recovery run — plus targeted
-real-spawn boundary/routing/veto probes. See
+real-spawn boundary/routing/veto probes and two OpenCode real-issue runs recorded
+in issue #31. See
 [`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md) and the sanitized
 [`test/fixtures/live-evidence/`](./test/fixtures/live-evidence/) corpus. Measured
 over the Claude batch, native structured output has **0/36 hard-fails (0.0%)** but
@@ -118,8 +119,12 @@ npm run parity:rate -- agents/
 
 _Post-MVP: not required for the (A) MVP. Listed for completeness._
 
-- [x] ✅ **Decided (2026-06-28): ship claude-only for the MVP**; codex / opencode / pi
-  live runs are demoted to post-MVP (tracked as issues #31 / #32 / #33 under M4).
+- [x] ✅ **Decided (2026-06-28): ship claude-only for the MVP**; per-runner live
+  validation is post-MVP (tracked as issues #31 / #32 / #33 under M4; #31 is done).
+- [x] ✅ **OpenCode real-issue validation complete (#31).** Two issues reached PRs
+  through OpenCode 1.17.18 on a local vLLM Qwen provider: 6 completed agent phases,
+  0 hard-fails, 0 nudges, and $0 provider cost. The second run also exercised
+  kill-then-resume; the first observed the unattended merge refusal after PR creation.
 - [ ] ⛔ **codex credential — shelved to post-MVP (decided #33, 2026-06-28).** It
   currently *cannot authenticate* (OAuth refresh revoked, possibly account-level —
   PARITY.md "real-issue runs"). Revisit via `OPENAI_API_KEY` (skips the OAuth
@@ -178,12 +183,12 @@ GitLab). **Decide scope:**
 
 ## What I can do vs. what needs a human
 
-- **Automatable in-repo (🔧):** the measurement instruments above (done); a
-  failure-induction harness; the "mocked → observed-live" ledger; a cost /
-  secret-boundary live-audit scaffold; the universalization scope-line.
-- **Not automatable (human + credentials + spend):** the actual live runs,
-  unblocking codex's auth, real provider keys (opencode / pi / GitLab), and the
-  maintainer's cutover sign-off.
+- **Automatable in-repo (🔧):** the measurement instruments, failure-drill
+  harness/runbook, observed-live ledger, cost/secret-boundary audit, and
+  universalization scope-line are done.
+- **Not automatable (human + provider access; credentials/spend where applicable):**
+  the remaining live runs, unblocking codex's auth, real provider keys (pi /
+  GitLab), and the maintainer's cutover sign-off.
 
 ## Recommended minimal path to a defensible (A)-MVP
 
