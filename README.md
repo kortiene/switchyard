@@ -243,6 +243,29 @@ It runs, in order:
 typecheck → lint:env → pack:check → mirror:check → wiki:check → coverage → build → clean
 ```
 
+## ADW Cockpit (TUI)
+
+The project's only graphical surface is the **ADW Cockpit**, a read-only-by-default
+[Pi](https://github.com/earendil-works/pi) TUI extension at
+[`.pi/extensions/adw-cockpit/index.ts`](./.pi/extensions/adw-cockpit/index.ts).
+It observes config, git, and `agents/*/state.json` to render a mission-control
+dashboard (overview, latest run, pipeline). Its sole state-mutating entry point,
+`/adw-run`, requires explicit confirmation and delegates to the orchestrator,
+which owns all git and forge mutations.
+
+Slash commands include `/adw-menu`, `/adw-runs`, `/adw-config`, `/adw-mvp`, and
+`/adw-run`. Design rationale is in [`.impeccable.md`](./.impeccable.md).
+
+## Quality gate
+
+`npm run verify` (from `adw_sdlc/`) is the canonical local **and** CI quality
+gate. It runs every check in order and fails fast:
+
+```bash
+cd adw_sdlc
+npm run verify   # typecheck → lint:env → pack:check → mirror:check → wiki:check → coverage → build → clean
+```
+
 CI runs the same command on Node 20.19 and Node 22. When using this check as a
 live-run test gate for the Switchyard repository, pass
 `--test-cmd "npm run verify"` as shown above.
