@@ -109,6 +109,11 @@ describe('CLI usage', () => {
     expect(CLI_USAGE).toContain('--no-merge');
     expect(CLI_USAGE).toContain('leave the green change request open');
   });
+
+  it('documents managed worktree mode', () => {
+    expect(CLI_USAGE).toContain('--worktree');
+    expect(CLI_USAGE).toContain('--worktree-root');
+  });
 });
 
 describe('parseCliArgs', () => {
@@ -206,6 +211,16 @@ describe('parseCliArgs', () => {
     );
   });
 
+  it('parses managed worktree flags without changing legacy RunOptions', () => {
+    const parsed = parseCliArgs(['5', '--worktree', '--worktree-root', '/tmp/lanes']);
+    expect(parsed.worktree).toBe(true);
+    expect(parsed.worktreeRoot).toBe('/tmp/lanes');
+    expect(parsed.options).toEqual({});
+    expect(() => parseCliArgs(['5', '--worktree-root', '/tmp/lanes'])).toThrow(
+      /--worktree-root requires --worktree/,
+    );
+  });
+
   it('defaults --test-cmd and --repo from the environment like adw/issue.py', () => {
     const parsed = parseCliArgs(['5'], { ADW_TEST_CMD: 'cargo test -p y', REPO: 'a/b' });
     expect(parsed.options.testCmd).toBe('cargo test -p y');
@@ -284,6 +299,28 @@ describe('runWorkItem dispatch', () => {
     const legacyRun: CliDeps['runIssue'] = vi.fn(async (_issue: WorkItemId) => 0);
     await main(['5', '--runner', 'claude', '--yes'], cliDeps({ runIssue: legacyRun }));
     expect(legacyRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('dispatches --worktree through the managed lifecycle hook', async () => {
+    const runManagedWorkItem = vi.fn(async () => 0);
+    const deps = cliDeps({ runManagedWorkItem });
+    expect(await main(['5', '--worktree', '--worktree-root', '/tmp/lanes', '--yes'], deps)).toBe(0);
+    expect(runManagedWorkItem).toHaveBeenCalledWith(
+      '5',
+      expect.anything(),
+      { yes: true, worktreeRoot: '/tmp/lanes' },
+    );
+    expect(deps.runIssue).not.toHaveBeenCalled();
+  });
+
+  it('runs read-only worktree commands without loading a runner', async () => {
+    const inspectManagedRuns = vi.fn(() => []);
+    const stdout = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const deps = cliDeps({ inspectManagedRuns });
+    expect(await main(['worktree', 'list', '--json', '--project-root', '/repo'], deps)).toBe(0);
+    expect(inspectManagedRuns).toHaveBeenCalledWith('/repo');
+    expect(stdout).toHaveBeenCalledWith('[]');
+    expect(deps.loadRunner).not.toHaveBeenCalled();
   });
 
   it('dispatches a string work-item id unchanged', async () => {

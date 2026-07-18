@@ -48,6 +48,8 @@ export interface RunAgentPhaseOptions {
   cwd?: string;
   /** Per-call timeout in milliseconds; 0/undefined = none. */
   timeoutMs?: number;
+  /** Parent cancellation (managed supervisor / embedding). */
+  signal?: AbortSignal;
   /** Forwarded to backends with native budget gating (claude). */
   maxBudgetUsd?: number;
   /**
@@ -108,6 +110,9 @@ export async function runAgentPhase<P extends SchemaPhase>(
       timeoutMs > 0
         ? setTimeout(() => controller.abort(new Error(PHASE_TIMEOUT_ABORT_REASON)), timeoutMs)
         : null;
+    const abortFromParent = (): void => controller.abort(options.signal?.reason);
+    if (options.signal?.aborted) abortFromParent();
+    else options.signal?.addEventListener('abort', abortFromParent, { once: true });
     try {
       const request = {
         phase,
@@ -122,6 +127,7 @@ export async function runAgentPhase<P extends SchemaPhase>(
       };
       return await runner.runPhase(request);
     } finally {
+      options.signal?.removeEventListener('abort', abortFromParent);
       if (timer !== null) {
         clearTimeout(timer);
       }

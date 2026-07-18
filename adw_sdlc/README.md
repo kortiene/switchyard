@@ -73,6 +73,8 @@ Frequently used flags (`-h` / `--help` prints the full list):
 | `--test-cmd <cmd>` | the test-gate command (env: `ADW_TEST_CMD`) |
 | `--repo <owner/repo>` | work-item/repo locator (env: `REPO`) |
 | `--project-root <dir>` | target repo root for config/prompts/state/worktree (env: `ADW_PROJECT_ROOT`) |
+| `--worktree` | allocate and own an isolated linked Git worktree for this run |
+| `--worktree-root <dir>` | override the machine-local managed-worktree parent (requires `--worktree`) |
 | `-y, --yes` | do not prompt before the irreversible squash-merge |
 | `--no-merge` | run through PR creation and green CI, then report success with the change request left open |
 
@@ -98,6 +100,34 @@ prompts/schemas, and `agents/` state, and edits/git-operates/gates in its
 worktree. Omit it and behavior is unchanged — the project root defaults to this
 repository. A relative value resolves against the invocation directory, and a
 non-existent or non-directory path fails closed with an actionable error.
+
+### Managed Git worktrees
+
+Managed mode is opt-in and leaves the primary checkout's branch and working
+tree untouched:
+
+```bash
+adw-sdlc issue <work-item-id> --worktree
+adw-sdlc issue <work-item-id> --worktree --worktree-root /path/to/lanes
+adw-sdlc issue <work-item-id> --worktree --resume --adw-id a1b2c3d4
+
+adw-sdlc worktree list
+adw-sdlc worktree status a1b2c3d4 --json
+adw-sdlc worktree remove a1b2c3d4
+adw-sdlc worktree prune --dry-run
+```
+
+The ownership registry and durable run state live under the repository's
+common Git directory (`<git-common-dir>/switchyard/`). Agent-authored commit
+and change-request text stays in an ignored `agents/<adw-id>/` directory inside
+the linked worktree. A missing ignore rule is a hard preflight failure.
+
+Failed, interrupted, conflicted, PR-only, dirty, or remotely uncertain lanes
+are retained. Automatic and explicit normal cleanup never use force and require
+an authoritative merged-head proof, or a pristine already-closed allocation;
+the durable registry/state remains after the linked worktree is removed. See
+[`docs/DESIGN-managed-git-worktrees.md`](./docs/DESIGN-managed-git-worktrees.md)
+for the invariants and recovery model.
 
 ### Troubleshooting: classify and Anthropic API billing
 
@@ -251,7 +281,7 @@ below in order, exits non-zero if any fails, and removes the `dist/` build
 artifact at the end:
 
 ```bash
-npm run verify   # typecheck → lint:env → pack:check → mirror:check → coverage → build → rm -rf dist
+npm run verify   # typecheck → lint:env → pack:check → mirror:check → wiki:check → coverage → build → rm -rf dist
 ```
 
 ADW live runs use it as the single test command (the gate is shell-split and run
@@ -283,6 +313,7 @@ npm run typecheck     # tsc --noEmit
 npm run lint:env      # static secret-boundary lint (fail-closed)
 npm run pack:check    # generated prompt-pack drift guard
 npm run mirror:check  # .pi/prompts ↔ .claude/commands byte-identity guard
+npm run wiki:check    # OKF structure + Switchyard-strict local-link validation
 npm run coverage      # vitest suite + v8 coverage (modest thresholds; the verify test stage)
 npm test              # vitest suite, coverage-free (fast focused/full runs)
 npm run build         # tsc -p tsconfig.build.json  (dist/ is a build artifact)
@@ -311,6 +342,7 @@ channel.
 
 | Document | Purpose |
 | --- | --- |
+| [`../wiki/index.md`](../wiki/index.md) | OKF v0.1 knowledge map for humans and agents; summarizes and links canonical package sources rather than replacing this README or exact API/config docs |
 | [`docs/UNIVERSAL.md`](./docs/UNIVERSAL.md) | Universal kernel/project-pack architecture and the config surface |
 | [`HEALTHTECH_PORT.md`](./HEALTHTECH_PORT.md) | This repository's setup and the standalone-port deltas from upstream |
 | [`PLAN.md`](./PLAN.md) | Full migration plan and the settled D1–D6 design decisions |
@@ -321,6 +353,8 @@ channel.
 | [`docs/FAILURE-DRILLS.md`](./docs/FAILURE-DRILLS.md) | Safe isolated `claude` runbook plus observed timeout / native-budget / kill-resume evidence |
 | [`docs/COST-AND-DURATION.md`](./docs/COST-AND-DURATION.md) | Cost/duration levers (tier routing, nudge-retry rate, budget/timeout caps) + the per-run `agents/{adw_id}/metrics.json` artifact and measurement plan |
 | [`docs/SECRET-BOUNDARY-AUDIT.md`](./docs/SECRET-BOUNDARY-AUDIT.md) | Generic spawn preflight and real Claude SDK boundary probe; denied-key names/booleans only, never values |
+| [`docs/PARALLEL-BATCH.md`](./docs/PARALLEL-BATCH.md) | Operator guide and observed evidence for externally managed worktree-per-run parallel batches |
+| [`docs/DESIGN-managed-git-worktrees.md`](./docs/DESIGN-managed-git-worktrees.md) | Proposed first-class managed Git worktrees: ownership, lifecycle, recovery, concurrency, compatibility, and rollout |
 | [`MEMORY_STACK.md`](./MEMORY_STACK.md) | Decision record for the deferred cross-run memory feature |
 | [`docs/DESIGN-schema-overrides.md`](./docs/DESIGN-schema-overrides.md) | Design + rollout for per-phase schema overrides / custom phases (implemented) |
 | [`docs/DESIGN-custom-phase-control-flow.md`](./docs/DESIGN-custom-phase-control-flow.md) | Design for loop/gated custom phases (custom gates + resolve-style loops; implemented) |

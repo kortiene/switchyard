@@ -6,6 +6,11 @@ one 23h run for $631.69 — this doc pins the design and the operational
 knowledge that run bought. The sequential `/issues` skill contract ("do not
 parallelize") is unchanged: this runner is a separate operator tool.
 
+> **First-class follow-up:** this remains the field-proven operator wrapper.
+> The proposed generic ownership, recovery, cleanup, and CLI lifecycle is in
+> [`DESIGN-managed-git-worktrees.md`](./DESIGN-managed-git-worktrees.md). Nothing
+> in that proposal is implemented merely by this script.
+
 ## Design
 
 - **One linked git worktree per issue run**, passed as `--project-root`.

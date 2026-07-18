@@ -14,6 +14,7 @@ export const ENGINE = 'ts' as const;
 export {
   DEFAULT_ENGINE,
   ENGINE_IDS,
+  WORKTREE_USAGE,
   extractEngineFlag,
   main as cliMain,
   parseCliArgs,
@@ -114,6 +115,7 @@ export {
   setAgentsDir,
   validateAdwId,
   type AdwStateInit,
+  type AdwStateLocation,
   type FindingRecord,
 } from './state.js';
 export {
@@ -249,11 +251,52 @@ export {
   renderFindings,
   resolveLoop,
   run,
+  runDetailed,
   truncate,
   type GitOps,
   type OrchestratorDeps,
   type ProgressFn,
   type RunCmdResult,
   type RunOptions,
+  type ManagedExecutionOptions,
 } from './orchestrator.js';
+export {
+  createManagedRunContext,
+  defaultManagedWorktreeRoot,
+  discoverRepository,
+  managedControlRoot,
+  type RepositoryLayout,
+  type RunContext,
+  type RunMode,
+} from './run-context.js';
+export {
+  acquireFileLease,
+  contextFromRecord,
+  MANAGED_RUN_SCHEMA_VERSION,
+  RunRegistry,
+  type FileLease,
+  type ManagedLeaseMetadata,
+  type ManagedLifecycleState,
+  type ManagedRunRecord,
+} from './run-registry.js';
+export { type RunOutcome, type RunOutcomeKind } from './run-outcome.js';
+export {
+  cleanupManagedRun,
+  inspectManagedRuns,
+  previewManagedPrune,
+  removeManagedRun,
+  runManagedDetailed,
+  runManagedWorktree,
+  type ManagedRunInspection,
+  type ManagedRunOptions,
+  type ManagedProviderResolver,
+  type ManagedProviderSetup,
+  type ManagedSupervisorDeps,
+} from './run-supervisor.js';
+export {
+  parseWorktreePorcelain,
+  WorktreeManager,
+  type GitWorktreeEntry,
+  type WorktreeValidation,
+} from './worktree-manager.js';
 export { createMockRunner, type MockRunner, type MockRunnerOptions, type MockScript } from './runners/runner-mock.js';

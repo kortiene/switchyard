@@ -394,12 +394,12 @@ export const ARTIFACT_PHASES: ReadonlySet<string> = new Set(['review', 'document
 
 /** Workspace path where the authoring phase writes the commit message. */
 export function commitMessagePath(state: AdwState): string {
-  return join(state.workspace(), 'commit_message.txt');
+  return join(state.artifactWorkspace(), 'commit_message.txt');
 }
 
 /** Workspace path where the authoring phase writes the PR body. */
 export function prBodyPath(state: AdwState): string {
-  return join(state.workspace(), 'pr_body.md');
+  return join(state.artifactWorkspace(), 'pr_body.md');
 }
 
 /**

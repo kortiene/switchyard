@@ -78,9 +78,11 @@ export interface VcsProvider {
   workingTreeDirty(): boolean;
   changedFiles(base: string): string[];
   createOrCheckoutBranch(branch: string, base: string): OperationResult;
-  commitAll(message: string): OperationResult;
+  commitAll(message: string, forbiddenPathspec?: string): OperationResult;
   push(branch: string, force?: boolean): OperationResult;
   pullRebase(base: string): OperationResult;
+  /** Fetch-only refresh used by managed lanes after merge. */
+  fetchRemote?(): OperationResult;
   /** Rebase the current branch onto origin/<base> when the base has moved. */
   syncWithBase(base: string): SyncWithBaseResult;
 }
@@ -130,6 +132,8 @@ export interface ChangeRequestProvider {
   /** Compatibility alias for older callers/tests. Prefer pipelineStatus(). */
   ciStatus?(ctx: ProviderContext, id: number | string): PipelineStatus;
   squashMerge(ctx: ProviderContext, id: number | string): OperationResult;
+  /** Query a saved request in open/closed/merged states for recovery/cleanup. */
+  status?(ctx: ProviderContext, id: number | string): git.ChangeRequestStatus;
   /**
    * Bounded, error-focused log excerpt of the failing pipeline run, or ''.
    * Optional: providers without log access simply yield no excerpt. Callers
@@ -200,9 +204,10 @@ export function createGitVcsProvider(captureChangedFiles: (base: string) => stri
     workingTreeDirty,
     changedFiles: captureChangedFiles,
     createOrCheckoutBranch: (branch, base) => git.createOrCheckoutBranch(branch, base),
-    commitAll: (message) => git.commitAll(message),
+    commitAll: (message, forbiddenPathspec) => git.commitAll(message, false, forbiddenPathspec),
     push: (branch, force) => git.push(branch, force ?? false),
     pullRebase: (base) => git.pullRebase(base),
+    fetchRemote: () => git.fetchRemote(),
     syncWithBase: (base) => git.syncWithBase(base),
   };
 }
@@ -244,6 +249,10 @@ export function createGitHubChangeRequestProvider(): ChangeRequestProvider {
       }
       return git.squashMerge(id, ctx.ghBin, ctx.repo);
     },
+    status: (ctx, id) =>
+      ctx.ghBin
+        ? git.changeRequestStatus(id, ctx.ghBin, ctx.repo)
+        : { state: 'unknown', id: null, number: null, url: null, headBranch: null, headOid: null, baseOid: null },
   };
 }
 

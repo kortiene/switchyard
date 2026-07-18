@@ -2,8 +2,8 @@ name: verify
 
 # Server-side quality gate for switchyard. Runs the same single command the ADW
 # orchestrator runs locally before it squash-merges (ADW_TEST_CMD="npm run
-# verify"): typecheck -> lint:env -> pack:check -> mirror:check -> coverage ->
-# build -> clean.
+# verify"): typecheck -> lint:env -> pack:check -> mirror:check -> wiki:check ->
+# coverage -> build -> clean.
 #
 # Node-version matrix (#37): the gate runs on BOTH the package engines floor
 # (Node 20.19.0 — `package.json` `"engines": { "node": ">=20.19" }`) and the
@@ -80,6 +80,6 @@ jobs:
       - name: Install (npm ci)
         run: npm ci
 
-      # typecheck -> lint:env -> pack:check -> mirror:check -> coverage -> build -> rm -rf dist
+      # typecheck -> lint:env -> pack:check -> mirror:check -> wiki:check -> coverage -> build -> rm -rf dist
       - name: Verify
         run: npm run verify

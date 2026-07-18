@@ -54,6 +54,7 @@ describe('verify quality-gate script — issue #2 acceptance criteria', () => {
       'lint:env',
       'pack:check',
       'mirror:check',
+      'wiki:check',
       'coverage',
       'build',
       'rm -rf dist',
@@ -74,11 +75,12 @@ describe('verify quality-gate script — issue #2 acceptance criteria', () => {
 
   it('scripts.verify runs stages in canonical order', () => {
     const idx = (s: string) => verifyScript.indexOf(s);
-    // typecheck → lint:env → pack:check → mirror:check → npm run coverage → build → rm -rf dist
+    // typecheck → lint:env → pack:check → mirror:check → wiki:check → coverage → build → clean
     expect(idx('typecheck')).toBeLessThan(idx('lint:env'));
     expect(idx('lint:env')).toBeLessThan(idx('pack:check'));
     expect(idx('pack:check')).toBeLessThan(idx('mirror:check'));
-    expect(idx('mirror:check')).toBeLessThan(idx('npm run coverage'));
+    expect(idx('mirror:check')).toBeLessThan(idx('wiki:check'));
+    expect(idx('wiki:check')).toBeLessThan(idx('npm run coverage'));
     expect(idx('npm run coverage')).toBeLessThan(idx('npm run build'));
     expect(idx('npm run build')).toBeLessThan(idx('rm -rf dist'));
   });

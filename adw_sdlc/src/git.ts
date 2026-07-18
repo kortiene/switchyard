@@ -166,15 +166,16 @@ export function syncWithBase(base: string, dryRun = false): SyncWithBaseResult {
 }
 
 /** Stage all changes and commit `message`; a clean tree is a no-op success. */
-export function commitAll(message: string, dryRun = false): GitResult {
+export function commitAll(message: string, dryRun = false, forbiddenPathspec?: string): GitResult {
   if (!dryRun && !capture(['git', 'status', '--porcelain']).stdout.trim()) {
     return { ok: true, error: null }; // nothing to commit
   }
 
-  for (const cmd of [
+  const commands = [
     ['git', 'add', '-A'],
     ['git', 'commit', '-m', message],
-  ]) {
+  ];
+  for (const [index, cmd] of commands.entries()) {
     const emitted = emit(cmd, dryRun);
     if (emitted !== null) {
       continue;
@@ -182,6 +183,19 @@ export function commitAll(message: string, dryRun = false): GitResult {
     const result = capture(cmd);
     if (result.returncode !== 0) {
       return { ok: false, error: result.stderr.trim() || 'git commit failed' };
+    }
+    if (index === 0 && forbiddenPathspec) {
+      const staged = capture(['git', 'diff', '--cached', '--name-only', '--', forbiddenPathspec]);
+      if (staged.returncode !== 0) {
+        return { ok: false, error: staged.stderr.trim() || 'could not prove managed artifacts are unstaged' };
+      }
+      if (staged.stdout.trim()) {
+        capture(['git', 'reset', '--quiet', '--', forbiddenPathspec]);
+        return {
+          ok: false,
+          error: `managed artifact root entered the Git index (${staged.stdout.trim()}); refusing to commit`,
+        };
+      }
     }
   }
   return { ok: true, error: null };
@@ -227,6 +241,17 @@ export function pullRebase(base: string, dryRun = false): GitResult {
   return { ok: true, error: null };
 }
 
+/** Refresh remote refs without switching, rebasing, or pulling any checkout. */
+export function fetchRemote(dryRun = false): GitResult {
+  const cmd = ['git', 'fetch', 'origin', '--quiet'];
+  const emitted = emit(cmd, dryRun);
+  if (emitted !== null) return emitted;
+  const result = capture(cmd);
+  return result.returncode === 0
+    ? { ok: true, error: null }
+    : { ok: false, error: result.stderr.trim() || 'git fetch origin failed' };
+}
+
 /** Return the URL of an existing open PR for `branch`, or null. */
 export function prForBranch(branch: string, ghBin: string, repo: string): string | null {
   const args = [ghBin, 'pr', 'list', '--head', branch, '--json', 'url', '--state', 'open'];
@@ -245,6 +270,54 @@ export interface CreatePrResult {
   number: number | null;
   url: string | null;
   error: string | null;
+}
+
+export type ChangeRequestState = 'open' | 'closed' | 'merged' | 'unknown';
+
+export interface ChangeRequestStatus {
+  state: ChangeRequestState;
+  id: string | null;
+  number: number | null;
+  url: string | null;
+  headBranch: string | null;
+  headOid: string | null;
+  baseOid: string | null;
+}
+
+/** Query a saved GitHub PR in any state, including its immutable head identity. */
+export function changeRequestStatus(
+  pr: number | string,
+  ghBin: string,
+  repo: string,
+): ChangeRequestStatus {
+  const args = [
+    ghBin,
+    'pr',
+    'view',
+    String(pr),
+    '--json',
+    'state,number,url,headRefName,headRefOid,baseRefOid',
+  ];
+  if (repo) args.push('--repo', repo);
+  const value = ghJson(args);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return { state: 'unknown', id: null, number: null, url: null, headBranch: null, headOid: null, baseOid: null };
+  }
+  const doc = value as Record<string, unknown>;
+  const rawState = typeof doc['state'] === 'string' ? doc['state'].toUpperCase() : '';
+  const state: ChangeRequestState =
+    rawState === 'MERGED' ? 'merged' : rawState === 'OPEN' ? 'open' : rawState === 'CLOSED' ? 'closed' : 'unknown';
+  const number = typeof doc['number'] === 'number' ? doc['number'] : null;
+  const url = typeof doc['url'] === 'string' ? doc['url'] : null;
+  return {
+    state,
+    id: number !== null ? String(number) : url,
+    number,
+    url,
+    headBranch: typeof doc['headRefName'] === 'string' ? doc['headRefName'] : null,
+    headOid: typeof doc['headRefOid'] === 'string' ? doc['headRefOid'] : null,
+    baseOid: typeof doc['baseRefOid'] === 'string' ? doc['baseRefOid'] : null,
+  };
 }
 
 /** Open a PR for `branch`; return its number/url or an error. */
