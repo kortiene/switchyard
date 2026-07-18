@@ -20,7 +20,7 @@
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 
 import { projectRoot, setProjectRoot, shellSplit } from './common.js';
 import { DEFAULT_ADW_CONFIG, getAdwConfig, isClosedWorkItemState, type AdwConfig } from './config.js';
@@ -55,6 +55,9 @@ import {
   type ReviewResult,
 } from './schemas.js';
 import { AdwState, makeAdwId } from './state.js';
+import type { RunContext } from './run-context.js';
+import type { RunOutcome } from './run-outcome.js';
+import { acquireFileLease } from './run-registry.js';
 import {
   StructuredCallApiError,
   structuredCall,
@@ -146,12 +149,35 @@ export interface RunOptions {
    * before resolveOptions reads the now-target config).
    */
   projectRoot?: string;
+  /** Explicit immutable roots for a managed worker. Legacy callers omit it. */
+  runContext?: RunContext;
+  /** Ownership snapshot provisioned by WorktreeManager; internal managed seam. */
+  managed?: ManagedExecutionOptions;
+  /** Parent cancellation propagated to every runner call. */
+  signal?: AbortSignal;
+}
+
+export interface ManagedExecutionOptions {
+  branch: string;
+  generationId: string;
+  mergeLockPath: string;
+  workItemSnapshot?: WorkItemContext;
+  checkpointMergeIntent?: (intent: {
+    changeRequestId: string;
+    headOid: string;
+    baseOid: string;
+  }) => void;
+  checkpointMergeOutcome?: (outcome: { changeRequestId: string; headOid: string }) => void;
 }
 
 // projectRoot is omitted entirely: it is consumed from the raw options at the
 // top of run() (setProjectRoot) before resolveOptions runs, never carried here.
-type ResolvedOptions = Required<Omit<RunOptions, 'phases' | 'adwId' | 'repo' | 'maxBudgetUsd' | 'projectRoot'>> &
-  Pick<RunOptions, 'phases' | 'adwId' | 'repo' | 'maxBudgetUsd'>;
+type ResolvedOptions = Required<
+  Omit<
+    RunOptions,
+    'phases' | 'adwId' | 'repo' | 'maxBudgetUsd' | 'projectRoot' | 'runContext' | 'managed' | 'signal'
+  >
+> & Pick<RunOptions, 'phases' | 'adwId' | 'repo' | 'maxBudgetUsd' | 'runContext' | 'managed' | 'signal'>;
 
 /** Defaults mirror adw/issue.py build_parser. */
 function resolveOptions(options: RunOptions): ResolvedOptions {
@@ -183,6 +209,9 @@ function resolveOptions(options: RunOptions): ResolvedOptions {
     adwId: options.adwId,
     repo: options.repo,
     maxBudgetUsd: options.maxBudgetUsd,
+    runContext: options.runContext,
+    managed: options.managed,
+    signal: options.signal,
   };
 }
 
@@ -198,6 +227,7 @@ export interface GitOps {
   commitAll: typeof git.commitAll;
   push: typeof git.push;
   pullRebase: typeof git.pullRebase;
+  fetchRemote?: typeof git.fetchRemote;
   syncWithBase: typeof git.syncWithBase;
   prForBranch: typeof git.prForBranch;
   createPr: typeof git.createPr;
@@ -314,9 +344,13 @@ function legacyProvidersFromDeps(deps: OrchestratorDeps): AdwProviders {
       workingTreeDirty: () => deps.workingTreeDirty(),
       changedFiles: (base) => deps.changedFiles(base),
       createOrCheckoutBranch: (branch, base) => deps.git.createOrCheckoutBranch(branch, base),
-      commitAll: (message) => deps.git.commitAll(message),
+      commitAll: (message, forbiddenPathspec) =>
+        forbiddenPathspec === undefined
+          ? deps.git.commitAll(message)
+          : deps.git.commitAll(message, false, forbiddenPathspec),
       push: (branch, force) => deps.git.push(branch, force ?? false),
       pullRebase: (base) => deps.git.pullRebase(base),
+      fetchRemote: () => deps.git.fetchRemote?.() ?? { ok: true, error: null },
       syncWithBase: (base) => deps.git.syncWithBase(base),
     },
     changeRequests: {
@@ -377,6 +411,11 @@ interface AgentCtx {
   cliModel: string;
   env: Record<string, string>;
   timeoutMs: number;
+  /** Explicit checkout for every runner call. */
+  cwd?: string;
+  /** Managed worktree-local artifact path forbidden from the Git index. */
+  artifactPathspec?: string;
+  signal?: AbortSignal;
   maxBudgetUsd?: number;
   /** ADW_PARITY_FORCE_FENCED_JSON measurement mode — see run-phase RunAgentPhaseOptions. */
   forceFenced?: boolean;
@@ -769,7 +808,7 @@ export async function ciFixLoop(
       config.progress('ci-fix', 'agent reported a fix but changed nothing; stopping');
       return false;
     }
-    const { ok } = providers.vcs.commitAll(`fix: address CI failures (${names})`);
+    const { ok } = providers.vcs.commitAll(`fix: address CI failures (${names})`, agent.artifactPathspec);
     if (ok) {
       providers.vcs.push(state.branchName ?? '');
       polls = 0; // a new commit kicks off a fresh CI run; reset the budget
@@ -800,6 +839,8 @@ async function invokeAgent<P extends 'resolve' | 'patch'>(
       runner: agent.runner,
       cliModel: agent.cliModel,
       env: agent.env,
+      cwd: agent.cwd,
+      signal: agent.signal,
       timeoutMs: agent.timeoutMs,
       ...(agent.maxBudgetUsd !== undefined ? { maxBudgetUsd: agent.maxBudgetUsd } : {}),
       ...(agent.forceFenced ? { forceFenced: true } : {}),
@@ -986,12 +1027,15 @@ function setup(
   progress: ProgressFn,
   providers: AdwProviders,
   config: AdwConfig,
+  managed?: ManagedExecutionOptions,
 ): void {
-  const branch = deriveBranch(issue, ctx.title, ctx.labels, state.adwId);
+  const branch = managed?.branch ?? deriveBranch(issue, ctx.title, ctx.labels, state.adwId);
   state.branchName = branch;
-  const { ok, error } = providers.vcs.createOrCheckoutBranch(branch, base);
-  if (!ok) {
-    throw new AdwError(`failed to create/checkout branch ${branch}: ${error}`);
+  if (managed === undefined) {
+    const { ok, error } = providers.vcs.createOrCheckoutBranch(branch, base);
+    if (!ok) {
+      throw new AdwError(`failed to create/checkout branch ${branch}: ${error}`);
+    }
   }
   progress('setup', `on branch ${branch}`);
   providers.workItems.assignSelf(providerCtx, issue);
@@ -1137,7 +1181,7 @@ async function finalizeAndMerge(
   progress('finalize', 'all pre-merge gates green');
 
   const commitMessage = state.commitMessage ?? defaultCommitMessage(config, issue);
-  const committed = providers.vcs.commitAll(commitMessage);
+  const committed = providers.vcs.commitAll(commitMessage, agent.artifactPathspec);
   if (!committed.ok) {
     throw new AdwError(`commit failed: ${committed.error}`);
   }
@@ -1170,7 +1214,7 @@ async function finalizeAndMerge(
   if (synced.rebased) {
     progress('finalize', `origin/${opts.base} moved underneath this run; rebased — re-running pre-merge gates`);
     await runPreMergeGates();
-    const recommitted = providers.vcs.commitAll(commitMessage);
+    const recommitted = providers.vcs.commitAll(commitMessage, agent.artifactPathspec);
     if (!recommitted.ok) {
       throw new AdwError(`commit failed: ${recommitted.error}`);
     }
@@ -1246,7 +1290,7 @@ async function finalizeAndMerge(
     }
     progress('finalize', `origin/${opts.base} moved during the CI watch; rebased — re-proving gates before merge`);
     await runPreMergeGates();
-    const recommitted = providers.vcs.commitAll(commitMessage);
+    const recommitted = providers.vcs.commitAll(commitMessage, agent.artifactPathspec);
     if (!recommitted.ok) {
       throw new AdwError(`commit failed: ${recommitted.error}`);
     }
@@ -1280,11 +1324,50 @@ async function finalizeAndMerge(
     confirm: deps.confirm,
     changeRequestLabel: crLabel,
   });
-  const merged = providers.changeRequests.squashMerge(providerCtx, state.prNumber ?? state.prUrl ?? '');
-  if (!merged.ok) {
-    throw new AdwError(`merge failed: ${merged.error}`);
+  const mergeLease = opts.managed ? acquireFileLease(opts.managed.mergeLockPath) : null;
+  try {
+    if (opts.managed) {
+      // Serialize sibling Switchyard merges and re-prove the base only inside
+      // the protected boundary. A moved base is retained for a safe resume.
+      const finalProof = requireSynced('at the managed merge boundary');
+      if (finalProof.rebased) {
+        throw new AdwError(
+          `origin/${opts.base} moved at the final merge boundary; branch rebased and retained — resume to re-run gates and CI`,
+        );
+      }
+    }
+    const changeRequestIdentity = state.prNumber ?? state.prUrl ?? '';
+    const changeRequestId = String(changeRequestIdentity);
+    let managedMergeHead = '';
+    if (opts.managed) {
+      const mergeHead = deps.capture(['git', 'rev-parse', 'HEAD']);
+      const mergeBase = deps.capture(['git', 'rev-parse', `origin/${opts.base}`]);
+      if (mergeHead.returncode !== 0 || mergeBase.returncode !== 0) {
+        throw new AdwError('could not resolve managed merge head/base identities');
+      }
+      managedMergeHead = mergeHead.stdout.trim();
+      opts.managed.checkpointMergeIntent?.({
+        changeRequestId,
+        headOid: managedMergeHead,
+        baseOid: mergeBase.stdout.trim(),
+      });
+    }
+    const merged = providers.changeRequests.squashMerge(providerCtx, changeRequestIdentity);
+    if (!merged.ok) {
+      throw new AdwError(`merge failed: ${merged.error}`);
+    }
+    if (opts.managed) {
+      opts.managed.checkpointMergeOutcome?.({ changeRequestId, headOid: managedMergeHead });
+    }
+  } finally {
+    mergeLease?.release();
   }
-  providers.vcs.pullRebase(opts.base);
+  if (opts.managed) {
+    const refreshed = providers.vcs.fetchRemote?.() ?? { ok: true, error: null };
+    if (!refreshed.ok) note(`post-merge remote refresh failed: ${refreshed.error}`);
+  } else {
+    providers.vcs.pullRebase(opts.base);
+  }
   state.mergeSkipped = undefined;
   state.markDone('merge');
   state.save();
@@ -1343,7 +1426,19 @@ function resolveState(opts: ResolvedOptions, issue: WorkItemId): { state: AdwSta
   if (opts.resume && !opts.adwId) {
     throw new AdwError('--resume requires --adw-id <id>');
   }
-  const existing = opts.adwId ? AdwState.load(opts.adwId) : null;
+  const managedLocation =
+    opts.runContext?.mode === 'managed'
+      ? {
+          controlRoot: opts.runContext.stateRoot,
+          artifactRoot: opts.runContext.artifactRoot,
+          strictPersistence: true,
+        }
+      : undefined;
+  const existing = opts.adwId
+    ? managedLocation
+      ? AdwState.loadManaged(opts.adwId, managedLocation)
+      : AdwState.load(opts.adwId)
+    : null;
   let state: AdwState | null = null;
   if (opts.resume) {
     state = existing;
@@ -1355,7 +1450,18 @@ function resolveState(opts: ResolvedOptions, issue: WorkItemId): { state: AdwSta
   }
   const resumed = state !== null;
   if (state === null) {
-    state = new AdwState({ adwId: opts.adwId || makeAdwId(), issueNumber: String(issue), base: opts.base });
+    state = new AdwState({
+      adwId: opts.adwId || makeAdwId(),
+      issueNumber: String(issue),
+      base: opts.base,
+      ...(managedLocation !== undefined
+        ? {
+            controlRoot: managedLocation.controlRoot,
+            artifactRoot: managedLocation.artifactRoot,
+            strictPersistence: true,
+          }
+        : {}),
+    });
   }
   if (resumed && state.issueNumber !== null && state.issueNumber !== String(issue)) {
     throw new AdwError(
@@ -1392,7 +1498,14 @@ export async function run(
   // self-heals, so resolveOptions and defaultDeps below both see the target
   // config. run() does not reset this (the CLI process exits after one run);
   // tests own the teardown reset to setProjectRoot(null).
-  setProjectRoot(options.projectRoot ?? null);
+  if (
+    options.runContext?.mode === 'managed' &&
+    options.projectRoot !== undefined &&
+    options.projectRoot !== options.runContext.projectRoot
+  ) {
+    throw new AdwError('managed run context and --project-root disagree');
+  }
+  setProjectRoot(options.runContext?.projectRoot ?? options.projectRoot ?? null);
   const opts = resolveOptions(options);
   const config = getAdwConfig();
   const itemLabel = workItemLabel(config);
@@ -1483,12 +1596,15 @@ export async function run(
   progress('ops', `starting phased run ${state.adwId}`);
 
   // Issue context (fetched by the orchestrator; injected into token-less agent phases).
-  const ctx = providers.workItems.fetch(pctx, issue) ?? { title: '', body: '', labels: [] };
+  const ctx =
+    opts.managed?.workItemSnapshot ??
+    providers.workItems.fetch(pctx, issue) ??
+    { title: '', body: '', labels: [] };
   recordWorkItemMetadata(state, config, issue, ctx);
   state.save();
 
   if (!state.isDone('setup')) {
-    setup(state, pctx, issue, ctx, opts.base, progress, providers, config);
+    setup(state, pctx, issue, ctx, opts.base, progress, providers, config, opts.managed);
     state.markDone('setup');
     state.save();
   }
@@ -1501,6 +1617,11 @@ export async function run(
     cliModel: opts.model,
     env: agentEnv,
     timeoutMs: opts.timeoutMs,
+    cwd: projectRoot(),
+    ...(opts.runContext?.mode === 'managed'
+      ? { artifactPathspec: relative(projectRoot(), opts.runContext.artifactRoot) }
+      : {}),
+    signal: opts.signal,
     ...(opts.maxBudgetUsd !== undefined ? { maxBudgetUsd: opts.maxBudgetUsd } : {}),
     ...(readEnvFlag(deps.env, ENV_ALIASES.forceFenced) ? { forceFenced: true } : {}),
   };
@@ -1598,8 +1719,12 @@ export async function run(
         writeFileSync(join(phaseDir, 'prompt.txt'), prompt, 'utf8');
         const mark = metrics.start();
         try {
+          const classifySignals = [
+            ...(opts.signal ? [opts.signal] : []),
+            ...(opts.timeoutMs > 0 ? [AbortSignal.timeout(opts.timeoutMs)] : []),
+          ];
           const { value, usage } = await deps.classify(prompt, {
-            ...(opts.timeoutMs > 0 ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
+            ...(classifySignals.length > 0 ? { signal: AbortSignal.any(classifySignals) } : {}),
           });
           writeFileSync(join(phaseDir, 'transcript.log'), `${JSON.stringify(value, null, 2)}\n`, 'utf8');
           recordUsage(state, usage);
@@ -1645,6 +1770,8 @@ export async function run(
           runner: agent.runner,
           cliModel: agent.cliModel,
           env: agent.env,
+          cwd: agent.cwd,
+          signal: agent.signal,
           timeoutMs: agent.timeoutMs,
           ...(agent.maxBudgetUsd !== undefined ? { maxBudgetUsd: agent.maxBudgetUsd } : {}),
           ...(agent.forceFenced ? { forceFenced: true } : {}),
@@ -1712,6 +1839,61 @@ export async function run(
     return await finalizeAndMerge(state, opts, { providerCtx: pctx, issue, agent, progress, providers, config, metrics }, deps);
   } finally {
     await runner.stop?.();
+  }
+}
+
+/**
+ * Structured compatibility API used by the managed supervisor. Expected run
+ * failures become durable outcome data; the existing run() keeps throwing and
+ * returning its numeric compatibility code unchanged.
+ */
+export async function runDetailed(
+  issue: WorkItemId,
+  runner: AgentRunner,
+  options: RunOptions = {},
+  depsOverride: Partial<OrchestratorDeps> = {},
+): Promise<RunOutcome> {
+  const adwId = options.adwId ?? (options.resume ? undefined : makeAdwId());
+  const effective: RunOptions = { ...options, ...(adwId !== undefined ? { adwId } : {}) };
+  try {
+    await run(issue, runner, effective, depsOverride);
+    let state: AdwState | null = null;
+    if (adwId !== undefined) {
+      state =
+        effective.runContext?.mode === 'managed'
+          ? AdwState.loadManaged(adwId, {
+              controlRoot: effective.runContext.stateRoot,
+              artifactRoot: effective.runContext.artifactRoot,
+              strictPersistence: true,
+            })
+          : AdwState.load(adwId);
+    }
+    const base = {
+      workItemId: String(issue),
+      ...(adwId !== undefined ? { adwId } : {}),
+      ...(state?.branchName ? { branch: state.branchName } : {}),
+      ...(state?.prNumber !== null && state?.prNumber !== undefined
+        ? { changeRequestId: String(state.prNumber) }
+        : {}),
+      ...(state?.prUrl ? { changeRequestUrl: state.prUrl } : {}),
+    };
+    if (state?.isDone('merge')) return { kind: 'merged', ...base };
+    if (state?.mergeSkipped === 'flag' || effective.noMerge === true || effective.dryRun === true) {
+      return { kind: 'pr_ready', ...base };
+    }
+    // A successful no-state return is the orchestrator's already-closed skip.
+    if (state === null) return { kind: 'skipped_closed', ...base };
+    return { kind: 'pr_ready', ...base };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const interrupted =
+      (error instanceof Error && error.name === 'AbortError') || /\b(cancelled|interrupted|sig(?:int|term))\b/i.test(message);
+    return {
+      kind: interrupted ? 'interrupted' : 'failed',
+      workItemId: String(issue),
+      ...(adwId !== undefined ? { adwId } : {}),
+      error: message,
+    };
   }
 }
 

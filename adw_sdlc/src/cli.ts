@@ -27,6 +27,13 @@ import { note } from './exec.js';
 import type { AgentRunner, RunnerId } from './invoker.js';
 import { run, type RunOptions } from './orchestrator.js';
 import { loadRunner, resolveRunnerId } from './registry.js';
+import {
+  inspectManagedRuns,
+  previewManagedPrune,
+  removeManagedRun,
+  runManagedWorktree,
+  type ManagedRunInspection,
+} from './run-supervisor.js';
 import type { WorkItemId } from './work-item.js';
 
 // --- engine selection ---------------------------------------------------------
@@ -130,6 +137,10 @@ export interface ParsedCli {
   /** Raw --runner value; undefined falls back to ADW_RUNNER/default. */
   runner?: string;
   options: RunOptions;
+  /** Opt in to Switchyard-owned linked-worktree lifecycle. */
+  worktree?: true;
+  /** Machine-local parent for managed linked worktrees. */
+  worktreeRoot?: string;
 }
 
 /**
@@ -157,6 +168,7 @@ const BOOLEAN_FLAGS = new Set([
   '--yes',
   '--no-merge',
   '--dry-run',
+  '--worktree',
 ]);
 
 const VALUE_FLAGS = new Set([
@@ -175,6 +187,7 @@ const VALUE_FLAGS = new Set([
   '--timeout',
   '--max-budget-usd',
   '--project-root',
+  '--worktree-root',
 ]);
 
 function parseIntFlag(flag: string, value: string): number {
@@ -216,6 +229,8 @@ use --engine ts (the default). Flags below apply to the ts engine:
   --model <id>             model override (overrides per-phase routing)
   --repo <owner/repo>      provider repo/project locator for work-item lookups. Env: REPO
   --project-root <dir>     target repo root for config/prompts/state/worktree (env: ADW_PROJECT_ROOT)
+  --worktree               run in a Switchyard-owned linked Git worktree
+  --worktree-root <dir>    machine-local parent for managed worktrees
   --base <branch>          base branch to fork from / merge into (default: main)
   --timeout <s>            abort a runner call after N seconds (0 = none)
   --max-budget-usd <usd>   native budget cap (runners that support it)
@@ -226,6 +241,18 @@ use --engine ts (the default). Flags below apply to the ts engine:
   --no-merge               leave the green change request open; resume later to merge
   --dry-run                preview the plan; do not run
   -h, --help               show this help and exit`;
+
+export const WORKTREE_USAGE = `usage: adw-sdlc worktree <command> [args] [flags]
+
+Inspect and conservatively clean managed Git worktrees for the selected repository:
+
+  worktree list [--json] [--project-root <dir>]
+  worktree status <adw-id> [--json] [--project-root <dir>]
+  worktree remove <adw-id> [--project-root <dir>]
+  worktree prune --dry-run [--json] [--project-root <dir>]
+
+Removal is allowed only for an authoritatively merged run or a pristine skipped-closed
+allocation. It never uses force and durable state is retained.`;
 
 /**
  * Parse the ts-engine argv (post `--engine` extraction, pre `--` split) into
@@ -327,9 +354,14 @@ export function parseCliArgs(
   const maxBudgetUsd = str('--max-budget-usd');
   const yes = has('-y') || has('--yes');
   const noMerge = has('--no-merge');
+  const worktree = has('--worktree');
+  const worktreeRoot = str('--worktree-root');
 
   if (yes && noMerge) {
     throw new AdwError('--yes and --no-merge are mutually exclusive');
+  }
+  if (worktreeRoot !== undefined && !worktree) {
+    throw new AdwError('--worktree-root requires --worktree');
   }
 
   const options: RunOptions = {
@@ -374,6 +406,8 @@ export function parseCliArgs(
     notes: tokens.slice(1),
     ...(runner !== undefined ? { runner } : {}),
     options,
+    ...(worktree ? { worktree: true as const } : {}),
+    ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
   };
 }
 
@@ -390,6 +424,98 @@ export interface CliDeps {
    */
   runWorkItem?: typeof run;
   runIssue: typeof run;
+  runManagedWorkItem?: typeof runManagedWorktree;
+  inspectManagedRuns?: typeof inspectManagedRuns;
+  removeManagedRun?: typeof removeManagedRun;
+  previewManagedPrune?: typeof previewManagedPrune;
+}
+
+function parseWorktreeFlags(argv: readonly string[], env: Record<string, string | undefined>): {
+  command: 'list' | 'status' | 'remove' | 'prune';
+  adwId?: string;
+  sourceRoot: string;
+  json: boolean;
+  dryRun: boolean;
+} {
+  const command = argv[1];
+  if (!['list', 'status', 'remove', 'prune'].includes(command ?? '')) {
+    throw new AdwError(`unknown worktree command: ${command ?? '(missing)'}\n${WORKTREE_USAGE}`);
+  }
+  let sourceRoot = readEnvAlias(env, ENV_ALIASES.projectRoot) ?? process.cwd();
+  let json = false;
+  let dryRun = false;
+  let adwId: string | undefined;
+  for (let index = 2; index < argv.length; index += 1) {
+    const arg = argv[index]!;
+    if (arg === '--json') {
+      json = true;
+    } else if (arg === '--dry-run') {
+      dryRun = true;
+    } else if (arg === '--project-root') {
+      const value = argv[index + 1];
+      if (!value || value.startsWith('-')) throw new AdwError('--project-root requires a value');
+      sourceRoot = value;
+      index += 1;
+    } else if (arg.startsWith('--project-root=')) {
+      sourceRoot = arg.slice('--project-root='.length);
+      if (!sourceRoot) throw new AdwError('--project-root requires a value');
+    } else if (!arg.startsWith('-') && adwId === undefined) {
+      adwId = arg;
+    } else {
+      throw new AdwError(`unknown worktree argument: ${arg}`);
+    }
+  }
+  if ((command === 'status' || command === 'remove') && !adwId) {
+    throw new AdwError(`worktree ${command} requires an adw-id`);
+  }
+  if ((command === 'list' || command === 'prune') && adwId) {
+    throw new AdwError(`worktree ${command} does not take an adw-id`);
+  }
+  if (command === 'prune' && !dryRun) {
+    throw new AdwError('worktree prune requires --dry-run in this release');
+  }
+  return {
+    command: command as 'list' | 'status' | 'remove' | 'prune',
+    ...(adwId !== undefined ? { adwId } : {}),
+    sourceRoot,
+    json,
+    dryRun,
+  };
+}
+
+function printInspection(item: ManagedRunInspection): void {
+  const { record, git } = item;
+  console.log(
+    `${record.adwId}\t${record.lifecycle}\t${record.workItemProvider}:${record.workItemId}\t` +
+      `${git.branch ?? '(detached/missing)'}\t${record.worktreePath}`,
+  );
+  if (git.error) console.log(`  warning: ${git.error}`);
+}
+
+async function dispatchWorktreeCommand(
+  argv: readonly string[],
+  deps: CliDeps,
+): Promise<number> {
+  const parsed = parseWorktreeFlags(argv, deps.env);
+  const inspect = deps.inspectManagedRuns ?? inspectManagedRuns;
+  const remove = deps.removeManagedRun ?? removeManagedRun;
+  const preview = deps.previewManagedPrune ?? previewManagedPrune;
+  if (parsed.command === 'remove') {
+    const result = remove(parsed.sourceRoot, parsed.adwId!);
+    if (!result.cleaned) throw new AdwError(`managed worktree was retained: ${result.reason}`);
+    console.log(result.reason);
+    return 0;
+  }
+  const items = parsed.command === 'prune' ? preview(parsed.sourceRoot) : inspect(parsed.sourceRoot);
+  const selected = parsed.command === 'status'
+    ? items.filter(({ record }) => record.adwId === parsed.adwId)
+    : items;
+  if (parsed.command === 'status' && selected.length === 0) {
+    throw new AdwError(`unknown managed run: ${parsed.adwId}`);
+  }
+  if (parsed.json) console.log(JSON.stringify(selected, null, 2));
+  else selected.forEach(printInspection);
+  return 0;
 }
 
 function defaultCliDeps(): CliDeps {
@@ -451,6 +577,9 @@ export async function main(argv: readonly string[], depsOverride: Partial<CliDep
         'runner passthru flags (after --) are a py-engine feature; the ts engine has no runner command line',
       );
     }
+    if (rest[0] === 'worktree') {
+      return await dispatchWorktreeCommand(rest, deps);
+    }
     const parsed = parseCliArgs(rest, deps.env);
     if (parsed.help === true) {
       console.log(CLI_USAGE);
@@ -465,6 +594,13 @@ export async function main(argv: readonly string[], depsOverride: Partial<CliDep
     const runnerId = resolveRunnerId(parsed.runner ?? readEnvAlias(deps.env, ENV_ALIASES.runner));
     const runner =
       parsed.options.dryRun === true ? dryRunRunner(runnerId) : await deps.loadRunner(runnerId);
+    if (parsed.worktree) {
+      const dispatchManaged = deps.runManagedWorkItem ?? runManagedWorktree;
+      return await dispatchManaged(parsed.workItem, runner, {
+        ...parsed.options,
+        ...(parsed.worktreeRoot !== undefined ? { worktreeRoot: parsed.worktreeRoot } : {}),
+      });
+    }
     const dispatch = deps.runWorkItem ?? deps.runIssue;
     return await dispatch(parsed.workItem, runner, parsed.options);
   } catch (err) {

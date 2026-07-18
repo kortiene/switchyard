@@ -14,7 +14,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { projectRoot } from './common.js';
@@ -95,6 +95,18 @@ export interface AdwStateInit {
   totalCostUsd?: number | null;
   /** Why the merge stage was intentionally skipped; absent once merged. */
   mergeSkipped?: 'flag';
+  /** Exact durable workspace for managed mode; omitted keeps agents/<id>. */
+  controlRoot?: string;
+  /** Worktree-local agent-authored artifact directory; defaults to controlRoot. */
+  artifactRoot?: string;
+  /** Managed state is load-bearing: use atomic writes and surface I/O failures. */
+  strictPersistence?: boolean;
+}
+
+export interface AdwStateLocation {
+  controlRoot: string;
+  artifactRoot: string;
+  strictPersistence?: boolean;
 }
 
 /** Minimal persistent state connecting phased-run steps (adw/_state.py:51). */
@@ -122,6 +134,9 @@ export class AdwState {
   totalCostUsd: number | null | undefined;
   /** Additive PR-only bookkeeping; merge remains incomplete and resumable. */
   mergeSkipped: 'flag' | undefined;
+  private readonly controlRoot: string | undefined;
+  private readonly artifactRoot: string | undefined;
+  private readonly strictPersistence: boolean;
 
   constructor(init: AdwStateInit) {
     this.adwId = validateAdwId(init.adwId);
@@ -143,13 +158,21 @@ export class AdwState {
     this.changeRequest = init.changeRequest;
     this.totalCostUsd = init.totalCostUsd;
     this.mergeSkipped = init.mergeSkipped;
+    this.controlRoot = init.controlRoot;
+    this.artifactRoot = init.artifactRoot;
+    this.strictPersistence = init.strictPersistence ?? false;
   }
 
   // --- paths -----------------------------------------------------------------
 
   /** This run's workspace directory agents/{adw_id}/. */
   workspace(): string {
-    return join(agentsDir(), this.adwId);
+    return this.controlRoot ?? join(agentsDir(), this.adwId);
+  }
+
+  /** Directory whose paths may be handed to the coding agent. */
+  artifactWorkspace(): string {
+    return this.artifactRoot ?? this.workspace();
   }
 
   /** The path to this run's state.json. */
@@ -219,41 +242,73 @@ export class AdwState {
   }
 
   /**
-   * Persist state to agents/{adw_id}/state.json (best effort). State is a
-   * convenience for resume/observability; a write failure must never abort a
-   * run, so I/O errors are swallowed (adw/_state.py:110-122).
+   * Persist state. Legacy state remains best-effort for cross-language parity;
+   * managed state uses a unique temporary plus atomic rename and fails loudly.
    */
   save(): void {
     try {
       const path = this.statePath();
       mkdirSync(this.workspace(), { recursive: true });
-      writeFileSync(path, `${JSON.stringify(this.toJSON(), null, 2)}\n`, 'utf8');
-    } catch {
-      // best effort
+      if (!this.strictPersistence) {
+        writeFileSync(path, `${JSON.stringify(this.toJSON(), null, 2)}\n`, 'utf8');
+        return;
+      }
+      const temporary = `${path}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
+      try {
+        writeFileSync(temporary, `${JSON.stringify(this.toJSON(), null, 2)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+        renameSync(temporary, path);
+      } catch (error) {
+        try {
+          unlinkSync(temporary);
+        } catch {
+          // The temporary may not have been created.
+        }
+        throw error;
+      }
+    } catch (error) {
+      if (this.strictPersistence) {
+        throw new AdwError(`could not persist managed run state ${this.statePath()}`, { cause: error });
+      }
+      // Legacy state is intentionally best effort.
     }
   }
 
   /** Load state for `adwId`, or null if it is missing or unreadable. */
   static load(adwId: string): AdwState | null {
+    return AdwState.loadFrom(adwId, undefined, false);
+  }
+
+  /** Managed reader: missing is null, while corrupt/unreadable is a hard error. */
+  static loadManaged(adwId: string, location: AdwStateLocation): AdwState | null {
+    return AdwState.loadFrom(adwId, location, true);
+  }
+
+  private static loadFrom(adwId: string, location: AdwStateLocation | undefined, strict: boolean): AdwState | null {
     validateAdwId(adwId);
-    const path = join(agentsDir(), adwId, STATE_FILENAME);
+    const path = join(location?.controlRoot ?? join(agentsDir(), adwId), STATE_FILENAME);
     let raw: string;
     try {
       raw = readFileSync(path, 'utf8');
-    } catch {
+    } catch (error) {
+      if (strict && (error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new AdwError(`could not read managed run state ${path}`, { cause: error });
+      }
       return null;
     }
     let data: unknown;
     try {
       data = JSON.parse(raw);
-    } catch {
+    } catch (error) {
+      if (strict) throw new AdwError(`corrupt managed run state ${path}: invalid JSON`, { cause: error });
       return null;
     }
     if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+      if (strict) throw new AdwError(`corrupt managed run state ${path}: expected an object`);
       return null;
     }
     const doc = data as Record<string, unknown>;
     if (typeof doc['adw_id'] !== 'string') {
+      if (strict) throw new AdwError(`corrupt managed run state ${path}: missing adw_id`);
       return null;
     }
     // Forward-compatible like the Python reader: keep only declared fields,
@@ -286,8 +341,16 @@ export class AdwState {
             ? doc['total_cost_usd']
             : undefined,
         mergeSkipped: doc['merge_skipped'] === 'flag' ? 'flag' : undefined,
+        ...(location !== undefined
+          ? {
+              controlRoot: location.controlRoot,
+              artifactRoot: location.artifactRoot,
+              strictPersistence: location.strictPersistence ?? true,
+            }
+          : {}),
       });
-    } catch {
+    } catch (error) {
+      if (strict) throw new AdwError(`corrupt managed run state ${path}: invalid fields`, { cause: error });
       return null;
     }
   }

@@ -16,7 +16,8 @@
  * docs/COST-AND-DURATION.md.
  */
 
-import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { PhaseUsage } from './invoker.js';
@@ -174,9 +175,18 @@ export class MetricsCollector {
       // Write-then-rename: consumers (budget accounting, parity tooling) read
       // this file while the run is live, so they must never see a torn write.
       const path = join(dir, METRICS_FILENAME);
-      const tmp = `${path}.tmp`;
-      writeFileSync(tmp, `${JSON.stringify(this.toJSON(), null, 2)}\n`, 'utf8');
-      renameSync(tmp, path);
+      const tmp = `${path}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
+      try {
+        writeFileSync(tmp, `${JSON.stringify(this.toJSON(), null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+        renameSync(tmp, path);
+      } catch (error) {
+        try {
+          unlinkSync(tmp);
+        } catch {
+          // The temporary file may not have been created.
+        }
+        throw error;
+      }
     } catch {
       // best effort
     }

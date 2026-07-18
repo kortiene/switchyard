@@ -14,12 +14,13 @@
     "test": "vitest run",
     "coverage": "vitest run --coverage",
     "lint:env": "bash ../scripts/check-adw-sdlc-env.sh",
-    "verify": "npm run typecheck && npm run lint:env && npm run pack:check && npm run mirror:check && npm run coverage && npm run build && rm -rf dist",
+    "verify": "npm run typecheck && npm run lint:env && npm run pack:check && npm run mirror:check && npm run wiki:check && npm run coverage && npm run build && rm -rf dist",
     "issue": "tsx src/cli.ts",
     "pack:generate": "tsx tools/pack-generate.ts",
     "pack:check": "tsx tools/pack-generate.ts --check",
     "mirror:check": "tsx tools/mirror-check.ts --check",
     "mirror:sync": "tsx tools/mirror-check.ts --write",
+    "wiki:check": "tsx tools/wiki-validate.ts --check",
     "parity:rate": "tsx tools/parity-rate.ts"
   },
   "dependencies": {
@@ -38,6 +39,7 @@
     "@vitest/coverage-v8": "^4.1.8",
     "tsx": "^4.22.4",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.8",
+    "yaml": "^2.9.0"
   }
 }

@@ -309,6 +309,30 @@ describe('runAgentPhase', () => {
     expect(existsSync(join(tmp, 'a1b2c3d4', 'resolve', 'transcript-2.log'))).toBe(false);
   });
 
+  it('propagates parent cancellation into the runner request', async () => {
+    const controller = new AbortController();
+    const reason = new Error('managed run interrupted by SIGTERM');
+    controller.abort(reason);
+    const runner = createMockRunner({
+      script: (request) => {
+        expect(request.signal.aborted).toBe(true);
+        expect(request.signal.reason).toBe(reason);
+        return { ok: false, rc: 1, signal: 'cancelled', transcriptText: '' };
+      },
+    });
+    await expect(
+      runAgentPhase({
+        phase: 'resolve',
+        templateArgs: ['x'],
+        state,
+        runner,
+        env: {},
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow(/cancelled/);
+    expect(runner.requests).toHaveLength(1);
+  });
+
   it('still accepts parseable output from a timed-out run (parse first, like Python)', async () => {
     const runner = createMockRunner({
       caps: { nativeSchema: false },
