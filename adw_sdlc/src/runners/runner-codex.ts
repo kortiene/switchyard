@@ -146,7 +146,7 @@ function itemNote(item: ThreadItem): string {
         .join(', ')}\n`;
     case 'mcp_tool_call':
       return `[mcp ${item.server}.${item.tool} ${item.status}]${
-        item.error !== undefined ? ` ${item.error.message}` : ''
+        item.error?.message !== undefined ? ` ${item.error.message}` : ''
       }\n`;
     case 'web_search':
       return `[web_search] ${item.query}\n`;

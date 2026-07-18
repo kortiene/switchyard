@@ -320,6 +320,18 @@ describe('result mapping', () => {
           error: { message: 'denied' },
         },
       },
+      {
+        type: 'item.completed',
+        item: {
+          id: 'mcp2',
+          type: 'mcp_tool_call',
+          server: 'fs',
+          tool: 'list',
+          arguments: {},
+          status: 'failed',
+          error: null,
+        },
+      },
       { type: 'item.completed', item: { id: 'w1', type: 'web_search', query: 'codex docs' } },
       {
         type: 'item.completed',
@@ -346,6 +358,7 @@ describe('result mapping', () => {
     expect(log).toContain('[reasoning] thinking');
     expect(log).toContain('[file_change completed] update src/x.ts');
     expect(log).toContain('[mcp fs.read failed] denied');
+    expect(log).toContain('[mcp fs.list failed]\n');
     expect(log).toContain('[web_search] codex docs');
     expect(log).toContain('[todo] [x] read file; [ ] write reply');
     expect(log).toContain('[codex error] tool exploded');
