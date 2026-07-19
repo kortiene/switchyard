@@ -79,7 +79,7 @@ describe('conditional gates', () => {
 
   it('dispatches via gateConditional and fails loudly for non-conditional phases', () => {
     expect(gateConditional('e2e', 'touches the scheduler').runIt).toBe(true);
-    expect(gateConditional('document', 'x', ['wiki/Home.md']).runIt).toBe(true);
+    expect(gateConditional('document', 'x', ['wiki/overview.md']).runIt).toBe(true);
     expect(() => gateConditional('plan', 'x')).toThrow(AdwError);
   });
 });
