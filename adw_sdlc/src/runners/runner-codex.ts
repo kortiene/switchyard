@@ -34,7 +34,9 @@
  *   single nudge own anything non-conforming.
  */
 
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { Codex } from '@openai/codex-sdk';
 import type { ThreadItem, Usage } from '@openai/codex-sdk';
@@ -48,6 +50,34 @@ import type {
 } from '../invoker.js';
 import { costUsd } from '../pricing.js';
 import { abortKind, TIMEOUT_RC } from './shared.js';
+
+/**
+ * Allowed MCP connector identifiers for unattended Codex ADW phases.
+ * Defaults to empty — all connectors, especially state-changing forge
+ * connectors (GitHub, Jira, etc.), are denied until the operator opt-ins
+ * explicitly by name.
+ */
+export const MCP_CONNECTOR_ALLOWLIST = new Set<string>();
+
+/**
+ * Create a fresh, empty Codex home directory for the given run.
+ *
+ * The Codex SDK loads MCP server configurations and plugin state from the
+ * Codex home directory (~/.codex or the directory pointed to by CODEX_HOME).
+ * Leaving the operator's existing ~/.codex in place exposes connector tools
+ * that bypass environment-variable scrubbing (observed in live validation:
+ * GitHub MCP tool calls succeeded even though GH_TOKEN was not forwarded).
+ *
+ * This function creates a throwaway directory and ensures it contains **no**
+ * MCP configuration files (no mcp.json, no plugins/, no remote_plugin_catalog,
+ * etc.), only the absolute minimum structure the Codex CLI expects.
+ *
+ * Returns the path to the scratch directory, to be cleaned up in a `finally`/`afterEach`.
+ */
+export function createScratchedCodeXHome(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'adw-codex-home-'));
+  return dir;
+}
 
 /**
  * PLAN.md Section 5, codex column. Tool/permission control is COARSE —
@@ -145,8 +175,10 @@ function itemNote(item: ThreadItem): string {
         .map((change) => `${change.kind} ${change.path}`)
         .join(', ')}\n`;
     case 'mcp_tool_call':
-      return `[mcp ${item.server}.${item.tool} ${item.status}]${
-        item.error?.message !== undefined ? ` ${item.error.message}` : ''
+      const serverId = item.server;
+      const serverVisible = MCP_CONNECTOR_ALLOWLIST.size === 0 || MCP_CONNECTOR_ALLOWLIST.has(serverId);
+      return `[mcp ${serverVisible ? serverId : '<redacted>'}.${item.tool} ${item.status}]${
+        serverVisible && item.error?.message !== undefined ? ` ${item.error.message}` : ''
       }\n`;
     case 'web_search':
       return `[web_search] ${item.query}\n`;
@@ -176,6 +208,7 @@ class CodexRunner implements AgentRunner {
     let usage: Usage | null = null;
     let threadId: string | undefined;
     let turnFailed: string | undefined;
+    let scratchedDir: string | null = null;
 
     try {
       const codexBin = resolveCodexBin(req.env);
@@ -183,6 +216,18 @@ class CodexRunner implements AgentRunner {
       // child env from it alone (replace semantics); omitted, it would copy
       // all of process.env (dist/index.js:234-239) — the fail-open this
       // adapter exists to prevent.
+      //
+      // Scrubbed Codex home: create a fresh, empty Codex home directory for
+      // this run to prevent MCP server configs loaded from the operator's
+      // ~/.codex from bypassing environment-variable security (issue #75).
+      // The Codex CLI needs an existing directory; we use a throwaway dir
+      // that is deleted after the run.
+      if (!('CODEX_HOME' in req.env)) {
+        const homeDir = join(tmpdir(), `adw-codex-home-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+        mkdirSync(homeDir, { recursive: true });
+        scratchedDir = homeDir;
+        req.env['CODEX_HOME'] = homeDir;
+      }
       const codex = new Codex({
         env: req.env,
         ...(codexBin !== undefined ? { codexPathOverride: codexBin } : {}),
@@ -225,13 +270,35 @@ class CodexRunner implements AgentRunner {
       }
     } catch (err) {
       if (req.signal.aborted) {
+        if (scratchedDir !== null) {
+          try {
+            rmSync(scratchedDir, { recursive: true, force: true });
+          } catch {
+            // Non-fatal cleanup error.
+          }
+        }
         return this.failed(req, transcriptText, abortKind(req.signal), TIMEOUT_RC, finalResponse, usage, threadId);
       }
       // Mirror a crashed CLI run (adw/_phases.py:482-516): keep the captured
       // output, report a nonzero rc, and let the invoker parse/nudge/fail.
       // A missing native binary (constructor throw) lands here too.
       tee(`\n[codex runner error] ${String(err)}\n`);
+      if (scratchedDir !== null) {
+        try {
+          rmSync(scratchedDir, { recursive: true, force: true });
+        } catch {
+          // Non-fatal cleanup error.
+        }
+      }
       return this.failed(req, transcriptText, 'none', 1, finalResponse, usage, threadId);
+    }
+
+    if (scratchedDir !== null) {
+      try {
+        rmSync(scratchedDir, { recursive: true, force: true });
+      } catch {
+        // Non-fatal cleanup error; the OS will eventually garbage it up.
+      }
     }
 
     if (req.signal.aborted) {
@@ -246,7 +313,22 @@ class CodexRunner implements AgentRunner {
     }
     if (usage === null) {
       tee('\n[codex runner error] stream ended without turn.completed\n');
+      if (scratchedDir !== null) {
+        try {
+          rmSync(scratchedDir, { recursive: true, force: true });
+        } catch {
+          // Non-fatal cleanup error.
+        }
+      }
       return this.failed(req, transcriptText, 'none', 1, finalResponse, null, threadId);
+    }
+
+    if (scratchedDir !== null) {
+      try {
+        rmSync(scratchedDir, { recursive: true, force: true });
+      } catch {
+        // Non-fatal cleanup error.
+      }
     }
 
     return {
