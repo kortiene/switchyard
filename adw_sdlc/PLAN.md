@@ -846,7 +846,8 @@ self-spawned-server wrapper), **pi** (in-process SDK; no native schema → fence
    assistant-text-only so the trailing-fenced-JSON fallback keeps parsing); the invoker's timeout abort
    reason is the shared `PHASE_TIMEOUT_ABORT_REASON` constant (invoker.ts). Live smoke verified: native
    `structured_output`, `total_cost_usd`, `session_id`, transcript tee.
-7. **Runner #2 = `codex` (`runner-codex.ts`).** `new Codex({env: allowlist, apiKey})` →
+7. **Runner #2 = `codex` (`runner-codex.ts`).** `new Codex({env: allowlist,
+   codexPathOverride: secureLauncher, config: unattendedDenyConfig})` →
    `startThread({model, modelReasoningEffort, workingDirectory, sandboxMode:'workspace-write',
    approvalPolicy:'never', skipGitRepoCheck:true})` → `thread.run(prompt, {outputSchema, signal})`;
    `JSON.parse(turn.finalResponse)`; compute `costUsd` from `pricing.ts`. **Always pass `env`** (test +
@@ -859,15 +860,23 @@ self-spawned-server wrapper), **pi** (in-process SDK; no native schema → fence
    low|medium|high|xhigh; the `-codex` suffix is gone — the last suffixed model is `gpt-5.3-codex`)
    and priced in `pricing.ts` from the OpenAI pricing docs ($0.75/$4.50, $2.50/$15, $5/$30 per MTok,
    cache read 0.1×, no cache-write charge). ChatGPT-login mode needs only `HOME` (auth.json under
-   `~/.codex`; `CODEX_HOME` is allowlisted so callers can point it at a scrubbed dir — the Section
-   4.4 residual-surface mitigation); API-key mode rides `CODEX_API_KEY`/`OPENAI_API_KEY` on the
-   allowlist, and the SDK `apiKey` option is deliberately **unused** (it injects `CODEX_API_KEY`
-   into the child env *after* the env override is applied, routing a credential around the
-   allowlist). Binary preflight: the `Codex` constructor resolves the lockstep vendored binary and
-   throws when the platform package is absent — constructed inside `runPhase`'s try, so it surfaces
-   as a failed `PhaseResult` (crashed-CLI parity), never an exception out of the seam. `CODEX_BIN`
-   (allowlist) overrides the binary; there is deliberately **no PATH search** — a PATH `codex` can
-   be any version and would silently break the SDK↔binary lockstep pin. `outputSchema` JSON-only
+   `~/.codex`; an allowlisted `CODEX_HOME` remains an alternate **auth** location, not connector
+   opt-in). The checked-in launcher inserts Codex 0.139's supported `--ignore-user-config` and
+   `--strict-config` flags, which preserve durable auth and token refresh while excluding user
+   `config.toml` and fail closed on config drift; forced config also
+   disables apps, plugins, plugin hooks/sharing, remote plugin discovery, and MCP/tool suggestions.
+   Connector exposure has no unattended opt-in: adding a server to
+   `MCP_TRANSCRIPT_SERVER_ALLOWLIST` changes transcript disclosure only and never enables authority.
+   API-key mode rides `CODEX_API_KEY`/`OPENAI_API_KEY` on the allowlist, and the SDK `apiKey` option
+   is deliberately **unused** (it injects `CODEX_API_KEY` into the child env *after* the env override
+   is applied, routing a credential around the allowlist). Binary preflight: the launcher resolves
+   the lockstep vendored package and its failure
+   surfaces through the SDK as a failed `PhaseResult` (crashed-CLI parity), never an exception out of
+   the seam. `CODEX_BIN` (allowlist) overrides the launcher's target; there is deliberately **no PATH
+   search** — a PATH `codex` can be any version and would silently break the SDK↔binary lockstep pin.
+   A real two-process names/metadata-only regression probe verifies the final executable receives
+   `--ignore-user-config`, `--strict-config`, `--ephemeral`, the connector/plugin deny config, and
+   none of the poisoned env names. `outputSchema` JSON-only
    output is documented (`AgentMessageItem.text`: "JSON when structured output is requested") but
    not contractual → the adapter `JSON.parse`s defensively and the invoker fenced-JSON
    fallback + single nudge own non-conforming replies. Codex token counts are OpenAI-API-shaped
@@ -1111,8 +1120,9 @@ Every uncertain runner fact is a **[VERIFY]** roadmap step, not an assertion.
   than relying solely on stdout scraping. → step 8.
 - **HOME-reachable credential files** (`~/.pi/agent/auth.json`, `~/.codex/auth.json`,
   `~/.local/share/opencode/auth.json`) are a residual exfiltration surface the env allowlist alone does
-  not close. Decide per runner whether HOME is required / point it at a scrubbed throwaway dir — landed
-  as the per-runner allowlist rows `CODEX_HOME` (step 7), `XDG_DATA_HOME` (step 8), and
+  not close. The Codex runner retains its durable auth path but ignores user config and disables
+  connector/plugin discovery; OpenCode/Pi use their dedicated state indirection rows. Landed as the
+  per-runner allowlist rows `CODEX_HOME` (step 7), `XDG_DATA_HOME` (step 8), and
   `PI_CODING_AGENT_DIR`/`PI_CODING_AGENT_SESSION_DIR` (step 9). → steps 7/8/9 (landed).
 - **Single-chokepoint discipline** degrades the instant any adapter hand-builds an env or spreads
   `process.env`. Mitigated by the env-isolation unit test + a lint/grep gate against `...process.env` in

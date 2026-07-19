@@ -25,7 +25,7 @@ vi.mock('child_process', () => ({ spawn: spawnMock }));
 
 import { safeSubprocessEnv } from '../src/env.js';
 import type { AgentRunner, PhaseRequest } from '../src/invoker.js';
-import { createRunner } from '../src/runners/runner-codex.js';
+import { CODEX_ADW_LAUNCHER, createRunner } from '../src/runners/runner-codex.js';
 
 type FakeChild = EventEmitter & {
   stdin: { write: ReturnType<typeof vi.fn>; end: ReturnType<typeof vi.fn> };
@@ -143,12 +143,12 @@ describe('the SDK-built child env (the load-bearing boundary)', () => {
       expect(key.startsWith('MX_AGENT_'), key).toBe(false);
     }
     expect(env['CODEX_API_KEY']).toBe('sk-requested');
-    // Allowlist + the SDK originator marker + CODEX_HOME (scratched).
+    // Exactly the allowlist plus the SDK originator marker.
     const extras = Object.keys(env).filter((key) => !(key in allowlist));
-    expect(extras).toEqual(['CODEX_HOME', 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE']);
+    expect(extras).toEqual(['CODEX_INTERNAL_ORIGINATOR_OVERRIDE']);
 
     // The same run, end to end through the real SDK stream parser:
-    expect(spawnMock.mock.calls[0]![0]).toBe('/fake/codex');
+    expect(spawnMock.mock.calls[0]![0]).toBe(CODEX_ADW_LAUNCHER);
     expect(result.ok).toBe(true);
     expect(result.structured).toEqual({ ok: true });
     expect(result.sessionId).toBe('th-spawn-1');
@@ -172,13 +172,11 @@ describe('the SDK-built child env (the load-bearing boundary)', () => {
     expect(env['GH_TOKEN']).toBeUndefined();
   });
 
-  it('keeps the boundary on the production-default path (no CODEX_BIN → SDK binary resolution)', async () => {
-    // Without the override the real CodexExec resolves the vendored lockstep
-    // binary in its constructor and may prepend its vendor dirs to the child
-    // PATH — the one SDK-side env mutation the CODEX_BIN tests never reach.
-    // Where the platform package is absent (e.g. a CI matrix without the
-    // optional dep), the constructor throws and the adapter must fail CLOSED
-    // as a failed PhaseResult without ever spawning.
+  it('keeps the boundary on the production-default path (no CODEX_BIN)', async () => {
+    // The SDK always starts the checked-in security launcher.  With no
+    // CODEX_BIN, that launcher resolves the lockstep @openai/codex package;
+    // this mocked-spawn layer verifies the SDK-facing boundary while the
+    // real-spawn test verifies the launcher's second boundary.
     vi.stubEnv('PATH', '/poisoned/parent/path');
     const allowlist = safeSubprocessEnv({
       allowGhToken: false,
@@ -188,20 +186,14 @@ describe('the SDK-built child env (the load-bearing boundary)', () => {
     const req = makeReq(allowlist);
     const result = await runner.runPhase(req);
 
-    if (spawnMock.mock.calls.length === 0) {
-      expect(result.ok).toBe(false);
-      expect(result.rc).toBe(1);
-      expect(result.signal).toBe('none');
-    } else {
-      const env = spawnedEnv();
-      expect(env['GH_TOKEN']).toBeUndefined();
-      expect(env['PATH']).toContain(join(tmp, 'bin'));
-      expect(env['PATH']).not.toContain('/poisoned/parent/path');
-      // Allowlist + scratch CODEX_HOME + SDK originator marker.
-      const extras = Object.keys(env).filter((key) => !(key in allowlist) && key !== 'PATH');
-      expect(extras).toEqual(['CODEX_HOME', 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE']);
-      expect(result.ok).toBe(true);
-    }
+    const env = spawnedEnv();
+    expect(spawnMock.mock.calls[0]![0]).toBe(CODEX_ADW_LAUNCHER);
+    expect(env['GH_TOKEN']).toBeUndefined();
+    expect(env['PATH']).toContain(join(tmp, 'bin'));
+    expect(env['PATH']).not.toContain('/poisoned/parent/path');
+    const extras = Object.keys(env).filter((key) => !(key in allowlist) && key !== 'PATH');
+    expect(extras).toEqual(['CODEX_INTERNAL_ORIGINATOR_OVERRIDE']);
+    expect(result.ok).toBe(true);
   });
 
   it('passes the planned coarse-sandbox argv to the real CLI surface', async () => {

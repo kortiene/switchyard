@@ -38,7 +38,12 @@ import type { CodexOptions, ThreadOptions, TurnOptions } from '@openai/codex-sdk
 import { safeSubprocessEnv } from '../src/env.js';
 import { PHASE_TIMEOUT_ABORT_REASON } from '../src/invoker.js';
 import type { AgentRunner, PhaseRequest } from '../src/invoker.js';
-import { CODEX_CAPS, createRunner, resolveCodexBin } from '../src/runners/runner-codex.js';
+import {
+  CODEX_ADW_LAUNCHER,
+  CODEX_CAPS,
+  CODEX_UNATTENDED_CONFIG,
+  createRunner,
+} from '../src/runners/runner-codex.js';
 
 let tmp: string;
 let runner: AgentRunner;
@@ -53,6 +58,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -123,15 +129,14 @@ describe('request shape', () => {
     const req = makeReq();
     await runner.runPhase(req);
 
-    // The env reaches the SDK unchanged (replace semantics make it the entire
-    // child env); a scratch home is created so CODEX_HOME was injected into a
-    // per-call copy, leaving req.env untouched for nudge retries.
+    // Identity, not just equality: the request allowlist is the complete child
+    // env.  HOME/CODEX_HOME remain the durable auth store; connector config is
+    // excluded by the launcher and forced config below.
     const ctorEnv = capturedCtorOptions().env as Record<string, string>;
-    for (const [k, v] of Object.entries(req.env)) {
-      expect(ctorEnv[k]).toBe(v);
-    }
+    expect(ctorEnv).toBe(req.env);
     expect('GH_TOKEN' in ctorEnv).toBe(false);
-    expect(ctorEnv).not.toBe(req.env); // scratch home created a new copy
+    expect(capturedCtorOptions().codexPathOverride).toBe(CODEX_ADW_LAUNCHER);
+    expect(capturedCtorOptions().config).toEqual(CODEX_UNATTENDED_CONFIG);
     const thread = capturedThreadOptions();
     expect(thread.model).toBe('gpt-5.5');
     expect(thread.sandboxMode).toBe('workspace-write');
@@ -174,16 +179,18 @@ describe('request shape', () => {
     expect(capturedThreadOptions().modelReasoningEffort).toBe('high');
   });
 
-  it('sets codexPathOverride from CODEX_BIN, or omits it for the lockstep vendored binary', async () => {
+  it('always uses the security launcher and leaves CODEX_BIN inside the allowlisted env', async () => {
     scriptedEvents([turnCompleted()]);
     await runner.runPhase(makeReq({ env: { ...makeReq().env, CODEX_BIN: '/opt/codex' } }));
-    expect(capturedCtorOptions().codexPathOverride).toBe('/opt/codex');
+    expect(capturedCtorOptions().codexPathOverride).toBe(CODEX_ADW_LAUNCHER);
+    expect(capturedCtorOptions().env!['CODEX_BIN']).toBe('/opt/codex');
 
     codexCtor.mockReset();
     runStreamedMock.mockReset();
     scriptedEvents([turnCompleted()]);
     await runner.runPhase(makeReq());
-    expect('codexPathOverride' in capturedCtorOptions()).toBe(false);
+    expect(capturedCtorOptions().codexPathOverride).toBe(CODEX_ADW_LAUNCHER);
+    expect(capturedCtorOptions().env!['CODEX_BIN']).toBeUndefined();
   });
 });
 
@@ -203,12 +210,11 @@ describe('env isolation (PLAN.md Section 10)', () => {
     await runner.runPhase(makeReq({ env: allowlist }));
 
     const env = capturedCtorOptions().env as Record<string, string>;
-    // When we create a scratch home the runner copies allowlist keys rather
-    // than mutating it — all allowlisted keys must still be present.
+    expect(env).toBe(allowlist);
     expect(env['CODEX_API_KEY']).toBe('sk-codex');
     expect(env['HOME']).toBe(allowlist['HOME']);
     expect(env['PATH']).toBe(allowlist['PATH']);
-    expect(env['CODEX_HOME']).toBeDefined();
+    expect(env['CODEX_HOME']).toBeUndefined();
     expect(env['GH_TOKEN']).toBeUndefined();
     for (const key of Object.keys(env)) {
       expect(key.startsWith('MATRIX_'), key).toBe(false);
@@ -367,7 +373,7 @@ describe('result mapping', () => {
     expect(log).toContain('[command completed rc 0] pnpm test\nok\n');
     expect(log).toContain('[reasoning] thinking');
     expect(log).toContain('[file_change completed] update src/x.ts');
-    // Default allowlist (empty) → deny-all: connector names are redacted.
+    // Default transcript allowlist is empty: unexpected server IDs/errors redact.
     expect(log).toContain('[mcp <redacted>.read failed]');
     expect(log).toContain('[mcp <redacted>.list failed]\n');
     expect(log).toContain('[web_search] codex docs');
@@ -376,42 +382,34 @@ describe('result mapping', () => {
     expect(log).toContain('[codex stream error] stream hiccup');
   });
 
-it('scratches a throwaway Codex home when CODEX_HOME is not provided (issue #75)', async () => {
+  it('uses only request HOME for durable auth and never reads ambient HOME (issue #75)', async () => {
     scriptedEvents([agentMessage('done'), turnCompleted()]);
     const req = makeReq();
-    // Ensure no CODEX_HOME in the request env
-    delete req.env['CODEX_HOME'];
+    vi.stubEnv('HOME', join(tmp, 'ambient-home-must-not-be-used'));
 
     await runner.runPhase(req);
 
-    // A scratch dir was injected into the env passed to the constructor
-    const ctorOpts = capturedCtorOptions();
-    const codexHome = ctorOpts.env!['CODEX_HOME'] as string;
-    // mkdtempSync produces a random suffix under tmpdir
-    expect(codexHome).toMatch(/tmp\/adw-codex-home-[\w]+$/);
-    // The scratch dir is cleaned up after run (dir no longer exists)
-    // We can't assert directly since the runner already deleted it,
-    // but a successful run is good enough — failure would leave it.
+    expect(capturedCtorOptions().env).toBe(req.env);
+    expect(capturedCtorOptions().env!['HOME']).toBe(join(tmp, 'home'));
+    expect(capturedCtorOptions().env!['CODEX_HOME']).toBeUndefined();
   });
 
-  it('uses an explicit CODEX_HOME as-is without overwriting (issue #75)', async () => {
+  it('keeps explicit CODEX_HOME as the durable auth location without treating it as connector opt-in', async () => {
     scriptedEvents([agentMessage('done'), turnCompleted()]);
-    const scratch = mkdtempSync(join(tmpdir(), 'explicit-codex-home-'));
-    try {
-      const baseReq = makeReq();
-      const req = makeReq({ env: { ...baseReq.env, CODEX_HOME: scratch } });
-      await runner.runPhase(req);
+    const explicitHome = join(tmp, 'explicit-codex-home');
+    const baseReq = makeReq();
+    const req = makeReq({ env: { ...baseReq.env, CODEX_HOME: explicitHome } });
+    await runner.runPhase(req);
 
-      expect(capturedCtorOptions().env!['CODEX_HOME']).toBe(scratch);
-    } finally {
-      rmSync(scratch, { recursive: true, force: true });
-    }
+    expect(capturedCtorOptions().env).toBe(req.env);
+    expect(capturedCtorOptions().env!['CODEX_HOME']).toBe(explicitHome);
+    expect(capturedCtorOptions().config).toEqual(CODEX_UNATTENDED_CONFIG);
   });
 
-  it('filters MCP tool-call transcript entries against MCP_CONNECTOR_ALLOWLIST', async () => {
-    const { MCP_CONNECTOR_ALLOWLIST } = await import('../src/runners/runner-codex.js');
-    MCP_CONNECTOR_ALLOWLIST.clear();
-    MCP_CONNECTOR_ALLOWLIST.add('safe-github');
+  it('filters MCP tool-call transcript entries against MCP_TRANSCRIPT_SERVER_ALLOWLIST', async () => {
+    const { MCP_TRANSCRIPT_SERVER_ALLOWLIST } = await import('../src/runners/runner-codex.js');
+    MCP_TRANSCRIPT_SERVER_ALLOWLIST.clear();
+    MCP_TRANSCRIPT_SERVER_ALLOWLIST.add('safe-github');
     scriptedEvents([
       {
         type: 'item.completed',
@@ -597,14 +595,6 @@ describe('timeout / cancellation', () => {
 
     expect(result.signal).toBe('cancelled');
     expect(result.ok).toBe(false);
-  });
-});
-
-describe('resolveCodexBin', () => {
-  it('returns the CODEX_BIN override verbatim and undefined otherwise (lockstep vendored binary)', () => {
-    expect(resolveCodexBin({ CODEX_BIN: '/opt/codex' })).toBe('/opt/codex');
-    expect(resolveCodexBin({ CODEX_BIN: '' })).toBeUndefined();
-    expect(resolveCodexBin({ PATH: '/usr/bin' })).toBeUndefined();
   });
 });
 

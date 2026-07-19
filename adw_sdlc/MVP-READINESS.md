@@ -131,9 +131,10 @@ _Post-MVP: not required for the (A) MVP. Listed for completeness._
   and `plan` results. It did not complete an edit: the plan file was never created (#74),
   draft PR #72 fixes the null-MCP-error crash exposed by the first implement nudge,
   and this host's `bwrap` cannot create the unprivileged user namespace required by
-  the workspace-write path. The paired child-env probe passed, but Codex still saw
-  residual MCP connector read authority through its home (#75). No issue-to-PR completion
-  or full-run cost/rate is claimed.
+  the workspace-write path. Historical probing saw residual connector authority through
+  the Codex home; #75 now keeps durable auth there while ignoring user config and disabling
+  apps/plugins, with a real two-process metadata regression. That boundary still needs a
+  compatible-host live rerun. No issue-to-PR completion or full-run cost/rate is claimed.
 - [x] ✅ **Pi real-issue validation observed with operator scope recovery (#32).**
   Run `babe0070` drove issue #70 to open PR #73 with Pi 0.80.6 on Node 24.18.0
   and local Qwen: 4 counted fenced attempts (2 clean, 2 nudged→ok, 0 hard-fails),

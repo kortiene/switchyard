@@ -12,8 +12,10 @@
  * unused: the SDK injects it into the child env as CODEX_API_KEY
  * (dist/index.js:244-245), routing a credential around the allowlist —
  * CODEX_API_KEY/OPENAI_API_KEY ride RUNNER_ENV_ALLOW instead, and
- * ChatGPT-login mode needs only HOME (~/.codex/auth.json; CODEX_HOME is
- * allowlisted so callers can point it at a scrubbed dir).
+ * ChatGPT-login mode keeps using HOME/CODEX_HOME for durable auth.  A small
+ * security launcher adds Codex CLI's supported `--ignore-user-config` and
+ * `--strict-config` flags, preserving auth while excluding config.toml-based
+ * MCP/plugin state and failing closed on config-version drift.
  *
  * Step-7 [VERIFY] resolutions:
  * - Tier model ids: gpt-5.4-mini / gpt-5.4 / gpt-5.5 confirmed current
@@ -23,27 +25,18 @@
  * - ChatGPT-login minimal env: HOME only (auth.json under ~/.codex);
  *   API-key mode: CODEX_API_KEY or OPENAI_API_KEY ("provide an API key
  *   through a supported auth env var", verified in the 0.139.0 binary).
- * - Native-binary preflight: the Codex constructor resolves the lockstep
- *   vendored binary and throws "Unable to locate Codex CLI binaries" when
- *   the platform package is absent; construction happens inside runPhase's
- *   try so that surfaces as a failed PhaseResult (crashed-CLI parity),
- *   never an exception out of the seam.
+ * - Native-binary preflight: the security launcher resolves the lockstep
+ *   vendored `@openai/codex` package when CODEX_BIN is absent.  Resolution or
+ *   spawn failures surface through the SDK as a failed PhaseResult
+ *   (crashed-CLI parity), never an exception out of the seam.
  * - outputSchema robustness: AgentMessageItem.text is documented as "JSON
  *   when structured output is requested" but JSON-only output is not
  *   contractual — parse defensively; the invoker's fenced-JSON fallback +
  *   single nudge own anything non-conforming.
  */
 
-import {
-  appendFileSync,
-  chmodSync,
-  copyFileSync,
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { appendFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import { Codex } from '@openai/codex-sdk';
 import type { ThreadItem, Usage } from '@openai/codex-sdk';
@@ -59,48 +52,47 @@ import { costUsd } from '../pricing.js';
 import { abortKind, TIMEOUT_RC } from './shared.js';
 
 /**
- * Allowed MCP connector identifiers for unattended Codex ADW phases.
- * Defaults to empty — all connectors, especially state-changing forge
- * connectors (GitHub, Jira, etc.), are denied until the operator opt-ins
- * explicitly by name.
+ * MCP server identifiers that may be shown in transcripts.  This controls
+ * disclosure only; adding a name never enables connector authority.  The
+ * default is empty so unexpected MCP events redact server IDs and errors.
  */
-export const MCP_CONNECTOR_ALLOWLIST = new Set<string>();
+export const MCP_TRANSCRIPT_SERVER_ALLOWLIST = new Set<string>();
 
 /**
- * Paths (under HOME/.codex) that are safe to copy into the scratch home so
- * that ChatGPT-login mode continues to authenticate.  Only auth.json is
- * copied — all other files stay behind so MCP / plugin configs stay scrubbed.
+ * Config overrides that close connector/plugin discovery independently of
+ * user config.  `--ignore-user-config` (inserted by the launcher below) keeps
+ * config.toml out of the run; these flags additionally disable hosted apps,
+ * installed/remote plugins, plugin hooks, and automatic MCP/tool discovery.
  */
-const AUTH_SUBPATHS = ['.codex/auth.json'] as const;
+export const CODEX_UNATTENDED_CONFIG = {
+  features: {
+    apps: false,
+    hooks: false,
+    plugins: false,
+    plugin_sharing: false,
+    remote_plugin: false,
+    skill_mcp_dependency_install: false,
+    tool_call_mcp_elicitation: false,
+    tool_suggest: false,
+  },
+  apps: {
+    _default: {
+      enabled: false,
+      destructive_enabled: false,
+      open_world_enabled: false,
+    },
+  },
+} as const;
 
 /**
- * Create a fresh, empty Codex home directory for the given run.
- *
- * The Codex SDK loads MCP server configurations and plugin state from the
- * Codex home directory (~/.codex or the directory pointed to by CODEX_HOME).
- * Leaving the operator's existing ~/.codex in place exposes connector tools
- * that bypass environment-variable scrubbing (observed in live validation:
- * GitHub MCP tool calls succeeded even though GH_TOKEN was not forwarded).
- *
- * This function creates a throwaway directory and copies only auth.json
- * from the user's real ~/.codex so ChatGPT-login mode can still authenticate.
- *
- * Returns the path to the scratch directory, to be cleaned up in a `finally`/`afterEach`.
+ * The SDK does not expose `codex exec --ignore-user-config --strict-config`,
+ * so every run is routed through a pinned local launcher that inserts them.
+ * The relative path is stable from both src/runners (tsx/tests) and
+ * dist/runners (built CLI).
  */
-export function createScratchedCodeXHome(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'adw-codex-home-'));
-  chmodSync(dir, 0o700); // ensure private — only the runner user can read
-  const home = process.env['HOME'] ?? '/root'; // fallback when HOME is absent
-  for (const sub of AUTH_SUBPATHS) {
-    const src = join(home, sub);
-    try {
-      copyFileSync(src, join(dir, 'auth.json'));
-    } catch {
-      // File missing / unreadable — the runner proceeds with a clean slate.
-    }
-  }
-  return dir;
-}
+export const CODEX_ADW_LAUNCHER = fileURLToPath(
+  new URL('../../bin/codex-adw-launcher.mjs', import.meta.url),
+);
 
 /**
  * PLAN.md Section 5, codex column. Tool/permission control is COARSE —
@@ -116,19 +108,6 @@ export const CODEX_CAPS: RunnerCaps = {
   nativeBudget: false,
   resume: true,
 };
-
-/**
- * Resolve the Codex CLI binary: the CODEX_BIN override (read from the
- * ALLOWLIST env, never process.env) or undefined, which lets the SDK use the
- * vendored `@openai/codex` binary it ships in lockstep. Unlike
- * resolveClaudeBin there is deliberately NO PATH/HOME search: a `codex` found
- * on PATH can be any version, and the SDK↔binary lockstep pin (PLAN.md D1)
- * is exactly what such a search would silently break.
- */
-export function resolveCodexBin(env: Record<string, string | undefined>): string | undefined {
-  const override = env['CODEX_BIN'];
-  return override !== undefined && override !== '' ? override : undefined;
-}
 
 /**
  * Codex token counts mirror the OpenAI API: input_tokens INCLUDES
@@ -199,7 +178,7 @@ function itemNote(item: ThreadItem): string {
         .join(', ')}\n`;
     case 'mcp_tool_call':
       const serverId = item.server;
-      const serverVisible = MCP_CONNECTOR_ALLOWLIST.has(serverId);
+      const serverVisible = MCP_TRANSCRIPT_SERVER_ALLOWLIST.has(serverId);
       return `[mcp ${serverVisible ? serverId : '<redacted>'}.${item.tool} ${item.status}]${
         serverVisible && item.error?.message !== undefined ? ` ${item.error.message}` : ''
       }\n`;
@@ -231,31 +210,21 @@ class CodexRunner implements AgentRunner {
     let usage: Usage | null = null;
     let threadId: string | undefined;
     let turnFailed: string | undefined;
-    let scratchedDir: string | null = null;
 
     try {
-      const codexBin = resolveCodexBin(req.env);
       // Verbatim allowlist, ALWAYS passed: with env set the SDK builds the
       // child env from it alone (replace semantics); omitted, it would copy
       // all of process.env (dist/index.js:234-239) — the fail-open this
       // adapter exists to prevent.
       //
-      // Scrubbed Codex home: create a fresh, empty Codex home directory for
-      // this run to prevent MCP server configs loaded from the operator's
-      // ~/.codex from bypassing environment-variable security (issue #75).
-      // Copy only auth.json (ChatGPT login credential) so login-mode runs
-      // can still authenticate after the scratch home is created.
-      let runEnv = req.env;
-      if (!('CODEX_HOME' in req.env)) {
-        const homeDir = createScratchedCodeXHome();
-        scratchedDir = homeDir;
-        // Build a per-call env copy so the shared req.env stays untouched
-        // across phases / nudge retries (the orchestrator reuses both).
-        runEnv = { ...req.env, CODEX_HOME: homeDir };
-      }
+      // Authentication remains in the caller-allowlisted HOME/CODEX_HOME so
+      // OAuth refreshes update the one durable credential store.  Connector
+      // authority does not: the launcher adds --ignore-user-config and the
+      // forced config disables apps/plugins even when CODEX_HOME is inherited.
       const codex = new Codex({
-        env: runEnv,
-        ...(codexBin !== undefined ? { codexPathOverride: codexBin } : {}),
+        env: req.env,
+        codexPathOverride: CODEX_ADW_LAUNCHER,
+        config: CODEX_UNATTENDED_CONFIG,
       });
       const thread = codex.startThread({
         model: req.model,
@@ -295,35 +264,13 @@ class CodexRunner implements AgentRunner {
       }
     } catch (err) {
       if (req.signal.aborted) {
-        if (scratchedDir !== null) {
-          try {
-            rmSync(scratchedDir, { recursive: true, force: true });
-          } catch {
-            // Non-fatal cleanup error.
-          }
-        }
         return this.failed(req, transcriptText, abortKind(req.signal), TIMEOUT_RC, finalResponse, usage, threadId);
       }
       // Mirror a crashed CLI run (adw/_phases.py:482-516): keep the captured
       // output, report a nonzero rc, and let the invoker parse/nudge/fail.
       // A missing native binary (constructor throw) lands here too.
       tee(`\n[codex runner error] ${String(err)}\n`);
-      if (scratchedDir !== null) {
-        try {
-          rmSync(scratchedDir, { recursive: true, force: true });
-        } catch {
-          // Non-fatal cleanup error.
-        }
-      }
       return this.failed(req, transcriptText, 'none', 1, finalResponse, usage, threadId);
-    }
-
-    if (scratchedDir !== null) {
-      try {
-        rmSync(scratchedDir, { recursive: true, force: true });
-      } catch {
-        // Non-fatal cleanup error; the OS will eventually garbage it up.
-      }
     }
 
     if (req.signal.aborted) {
@@ -338,22 +285,7 @@ class CodexRunner implements AgentRunner {
     }
     if (usage === null) {
       tee('\n[codex runner error] stream ended without turn.completed\n');
-      if (scratchedDir !== null) {
-        try {
-          rmSync(scratchedDir, { recursive: true, force: true });
-        } catch {
-          // Non-fatal cleanup error.
-        }
-      }
       return this.failed(req, transcriptText, 'none', 1, finalResponse, null, threadId);
-    }
-
-    if (scratchedDir !== null) {
-      try {
-        rmSync(scratchedDir, { recursive: true, force: true });
-      } catch {
-        // Non-fatal cleanup error.
-      }
     }
 
     return {
