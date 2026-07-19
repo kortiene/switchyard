@@ -123,9 +123,15 @@ describe('request shape', () => {
     const req = makeReq();
     await runner.runPhase(req);
 
-    // Identity, not just equality: the allowlist object itself must reach the
-    // SDK (replace semantics make it the entire child env).
-    expect(capturedCtorOptions().env).toBe(req.env);
+    // The env reaches the SDK unchanged (replace semantics make it the entire
+    // child env); a scratch home is created so CODEX_HOME was injected into a
+    // per-call copy, leaving req.env untouched for nudge retries.
+    const ctorEnv = capturedCtorOptions().env as Record<string, string>;
+    for (const [k, v] of Object.entries(req.env)) {
+      expect(ctorEnv[k]).toBe(v);
+    }
+    expect('GH_TOKEN' in ctorEnv).toBe(false);
+    expect(ctorEnv).not.toBe(req.env); // scratch home created a new copy
     const thread = capturedThreadOptions();
     expect(thread.model).toBe('gpt-5.5');
     expect(thread.sandboxMode).toBe('workspace-write');
@@ -197,8 +203,12 @@ describe('env isolation (PLAN.md Section 10)', () => {
     await runner.runPhase(makeReq({ env: allowlist }));
 
     const env = capturedCtorOptions().env as Record<string, string>;
-    expect(env).toBe(allowlist);
+    // When we create a scratch home the runner copies allowlist keys rather
+    // than mutating it — all allowlisted keys must still be present.
     expect(env['CODEX_API_KEY']).toBe('sk-codex');
+    expect(env['HOME']).toBe(allowlist['HOME']);
+    expect(env['PATH']).toBe(allowlist['PATH']);
+    expect(env['CODEX_HOME']).toBeDefined();
     expect(env['GH_TOKEN']).toBeUndefined();
     for (const key of Object.keys(env)) {
       expect(key.startsWith('MATRIX_'), key).toBe(false);
@@ -357,8 +367,9 @@ describe('result mapping', () => {
     expect(log).toContain('[command completed rc 0] pnpm test\nok\n');
     expect(log).toContain('[reasoning] thinking');
     expect(log).toContain('[file_change completed] update src/x.ts');
-    expect(log).toContain('[mcp fs.read failed] denied');
-    expect(log).toContain('[mcp fs.list failed]\n');
+    // Default allowlist (empty) → deny-all: connector names are redacted.
+    expect(log).toContain('[mcp <redacted>.read failed]');
+    expect(log).toContain('[mcp <redacted>.list failed]\n');
     expect(log).toContain('[web_search] codex docs');
     expect(log).toContain('[todo] [x] read file; [ ] write reply');
     expect(log).toContain('[codex error] tool exploded');
@@ -376,7 +387,8 @@ it('scratches a throwaway Codex home when CODEX_HOME is not provided (issue #75)
     // A scratch dir was injected into the env passed to the constructor
     const ctorOpts = capturedCtorOptions();
     const codexHome = ctorOpts.env!['CODEX_HOME'] as string;
-    expect(codexHome).toMatch(/adw-codex-home-[0-9]+-[a-z0-9]+$/);
+    // mkdtempSync produces a random suffix under tmpdir
+    expect(codexHome).toMatch(/tmp\/adw-codex-home-[\w]+$/);
     // The scratch dir is cleaned up after run (dir no longer exists)
     // We can't assert directly since the runner already deleted it,
     // but a successful run is good enough — failure would leave it.

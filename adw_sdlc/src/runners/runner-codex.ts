@@ -34,7 +34,14 @@
  *   single nudge own anything non-conforming.
  */
 
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  chmodSync,
+  copyFileSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -60,6 +67,13 @@ import { abortKind, TIMEOUT_RC } from './shared.js';
 export const MCP_CONNECTOR_ALLOWLIST = new Set<string>();
 
 /**
+ * Paths (under HOME/.codex) that are safe to copy into the scratch home so
+ * that ChatGPT-login mode continues to authenticate.  Only auth.json is
+ * copied — all other files stay behind so MCP / plugin configs stay scrubbed.
+ */
+const AUTH_SUBPATHS = ['.codex/auth.json'] as const;
+
+/**
  * Create a fresh, empty Codex home directory for the given run.
  *
  * The Codex SDK loads MCP server configurations and plugin state from the
@@ -68,14 +82,23 @@ export const MCP_CONNECTOR_ALLOWLIST = new Set<string>();
  * that bypass environment-variable scrubbing (observed in live validation:
  * GitHub MCP tool calls succeeded even though GH_TOKEN was not forwarded).
  *
- * This function creates a throwaway directory and ensures it contains **no**
- * MCP configuration files (no mcp.json, no plugins/, no remote_plugin_catalog,
- * etc.), only the absolute minimum structure the Codex CLI expects.
+ * This function creates a throwaway directory and copies only auth.json
+ * from the user's real ~/.codex so ChatGPT-login mode can still authenticate.
  *
  * Returns the path to the scratch directory, to be cleaned up in a `finally`/`afterEach`.
  */
 export function createScratchedCodeXHome(): string {
   const dir = mkdtempSync(join(tmpdir(), 'adw-codex-home-'));
+  chmodSync(dir, 0o700); // ensure private — only the runner user can read
+  const home = process.env['HOME'] ?? '/root'; // fallback when HOME is absent
+  for (const sub of AUTH_SUBPATHS) {
+    const src = join(home, sub);
+    try {
+      copyFileSync(src, join(dir, 'auth.json'));
+    } catch {
+      // File missing / unreadable — the runner proceeds with a clean slate.
+    }
+  }
   return dir;
 }
 
@@ -176,7 +199,7 @@ function itemNote(item: ThreadItem): string {
         .join(', ')}\n`;
     case 'mcp_tool_call':
       const serverId = item.server;
-      const serverVisible = MCP_CONNECTOR_ALLOWLIST.size === 0 || MCP_CONNECTOR_ALLOWLIST.has(serverId);
+      const serverVisible = MCP_CONNECTOR_ALLOWLIST.has(serverId);
       return `[mcp ${serverVisible ? serverId : '<redacted>'}.${item.tool} ${item.status}]${
         serverVisible && item.error?.message !== undefined ? ` ${item.error.message}` : ''
       }\n`;
@@ -220,16 +243,18 @@ class CodexRunner implements AgentRunner {
       // Scrubbed Codex home: create a fresh, empty Codex home directory for
       // this run to prevent MCP server configs loaded from the operator's
       // ~/.codex from bypassing environment-variable security (issue #75).
-      // The Codex CLI needs an existing directory; we use a throwaway dir
-      // that is deleted after the run.
+      // Copy only auth.json (ChatGPT login credential) so login-mode runs
+      // can still authenticate after the scratch home is created.
+      let runEnv = req.env;
       if (!('CODEX_HOME' in req.env)) {
-        const homeDir = join(tmpdir(), `adw-codex-home-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
-        mkdirSync(homeDir, { recursive: true });
+        const homeDir = createScratchedCodeXHome();
         scratchedDir = homeDir;
-        req.env['CODEX_HOME'] = homeDir;
+        // Build a per-call env copy so the shared req.env stays untouched
+        // across phases / nudge retries (the orchestrator reuses both).
+        runEnv = { ...req.env, CODEX_HOME: homeDir };
       }
       const codex = new Codex({
-        env: req.env,
+        env: runEnv,
         ...(codexBin !== undefined ? { codexPathOverride: codexBin } : {}),
       });
       const thread = codex.startThread({
