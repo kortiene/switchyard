@@ -123,9 +123,15 @@ describe('request shape', () => {
     const req = makeReq();
     await runner.runPhase(req);
 
-    // Identity, not just equality: the allowlist object itself must reach the
-    // SDK (replace semantics make it the entire child env).
-    expect(capturedCtorOptions().env).toBe(req.env);
+    // The env reaches the SDK unchanged (replace semantics make it the entire
+    // child env); a scratch home is created so CODEX_HOME was injected into a
+    // per-call copy, leaving req.env untouched for nudge retries.
+    const ctorEnv = capturedCtorOptions().env as Record<string, string>;
+    for (const [k, v] of Object.entries(req.env)) {
+      expect(ctorEnv[k]).toBe(v);
+    }
+    expect('GH_TOKEN' in ctorEnv).toBe(false);
+    expect(ctorEnv).not.toBe(req.env); // scratch home created a new copy
     const thread = capturedThreadOptions();
     expect(thread.model).toBe('gpt-5.5');
     expect(thread.sandboxMode).toBe('workspace-write');
@@ -197,8 +203,12 @@ describe('env isolation (PLAN.md Section 10)', () => {
     await runner.runPhase(makeReq({ env: allowlist }));
 
     const env = capturedCtorOptions().env as Record<string, string>;
-    expect(env).toBe(allowlist);
+    // When we create a scratch home the runner copies allowlist keys rather
+    // than mutating it — all allowlisted keys must still be present.
     expect(env['CODEX_API_KEY']).toBe('sk-codex');
+    expect(env['HOME']).toBe(allowlist['HOME']);
+    expect(env['PATH']).toBe(allowlist['PATH']);
+    expect(env['CODEX_HOME']).toBeDefined();
     expect(env['GH_TOKEN']).toBeUndefined();
     for (const key of Object.keys(env)) {
       expect(key.startsWith('MATRIX_'), key).toBe(false);
@@ -357,12 +367,87 @@ describe('result mapping', () => {
     expect(log).toContain('[command completed rc 0] pnpm test\nok\n');
     expect(log).toContain('[reasoning] thinking');
     expect(log).toContain('[file_change completed] update src/x.ts');
-    expect(log).toContain('[mcp fs.read failed] denied');
-    expect(log).toContain('[mcp fs.list failed]\n');
+    // Default allowlist (empty) → deny-all: connector names are redacted.
+    expect(log).toContain('[mcp <redacted>.read failed]');
+    expect(log).toContain('[mcp <redacted>.list failed]\n');
     expect(log).toContain('[web_search] codex docs');
     expect(log).toContain('[todo] [x] read file; [ ] write reply');
     expect(log).toContain('[codex error] tool exploded');
     expect(log).toContain('[codex stream error] stream hiccup');
+  });
+
+it('scratches a throwaway Codex home when CODEX_HOME is not provided (issue #75)', async () => {
+    scriptedEvents([agentMessage('done'), turnCompleted()]);
+    const req = makeReq();
+    // Ensure no CODEX_HOME in the request env
+    delete req.env['CODEX_HOME'];
+
+    await runner.runPhase(req);
+
+    // A scratch dir was injected into the env passed to the constructor
+    const ctorOpts = capturedCtorOptions();
+    const codexHome = ctorOpts.env!['CODEX_HOME'] as string;
+    // mkdtempSync produces a random suffix under tmpdir
+    expect(codexHome).toMatch(/tmp\/adw-codex-home-[\w]+$/);
+    // The scratch dir is cleaned up after run (dir no longer exists)
+    // We can't assert directly since the runner already deleted it,
+    // but a successful run is good enough — failure would leave it.
+  });
+
+  it('uses an explicit CODEX_HOME as-is without overwriting (issue #75)', async () => {
+    scriptedEvents([agentMessage('done'), turnCompleted()]);
+    const scratch = mkdtempSync(join(tmpdir(), 'explicit-codex-home-'));
+    try {
+      const baseReq = makeReq();
+      const req = makeReq({ env: { ...baseReq.env, CODEX_HOME: scratch } });
+      await runner.runPhase(req);
+
+      expect(capturedCtorOptions().env!['CODEX_HOME']).toBe(scratch);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('filters MCP tool-call transcript entries against MCP_CONNECTOR_ALLOWLIST', async () => {
+    const { MCP_CONNECTOR_ALLOWLIST } = await import('../src/runners/runner-codex.js');
+    MCP_CONNECTOR_ALLOWLIST.clear();
+    MCP_CONNECTOR_ALLOWLIST.add('safe-github');
+    scriptedEvents([
+      {
+        type: 'item.completed',
+        item: {
+          id: 'm1',
+          type: 'mcp_tool_call',
+          server: 'safe-github',
+          tool: 'read',
+          arguments: {},
+          status: 'completed',
+        },
+      },
+      {
+        type: 'item.completed',
+        item: {
+          id: 'm2',
+          type: 'mcp_tool_call',
+          server: 'block-forge',
+          tool: 'create-pr',
+          arguments: {},
+          status: 'completed',
+        },
+      },
+      agentMessage('done'),
+      turnCompleted(),
+    ]);
+    const req = makeReq();
+
+    await runner.runPhase(req);
+
+    const log = readFileSync(req.transcriptPath, 'utf8');
+    // Allowed connector appears in transcript
+    expect(log).toContain('[mcp safe-github.read completed]');
+    // Blocked connector is redacted
+    expect(log).not.toContain('block-forge');
+    expect(log).toContain('[mcp <redacted>.create-pr completed]');
   });
 
   it('degrades missing/garbage usage fields to undefined instead of NaN (lockstep-drift guard)', async () => {

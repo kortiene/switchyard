@@ -34,7 +34,16 @@
  *   single nudge own anything non-conforming.
  */
 
-import { appendFileSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  chmodSync,
+  copyFileSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { Codex } from '@openai/codex-sdk';
 import type { ThreadItem, Usage } from '@openai/codex-sdk';
@@ -48,6 +57,50 @@ import type {
 } from '../invoker.js';
 import { costUsd } from '../pricing.js';
 import { abortKind, TIMEOUT_RC } from './shared.js';
+
+/**
+ * Allowed MCP connector identifiers for unattended Codex ADW phases.
+ * Defaults to empty — all connectors, especially state-changing forge
+ * connectors (GitHub, Jira, etc.), are denied until the operator opt-ins
+ * explicitly by name.
+ */
+export const MCP_CONNECTOR_ALLOWLIST = new Set<string>();
+
+/**
+ * Paths (under HOME/.codex) that are safe to copy into the scratch home so
+ * that ChatGPT-login mode continues to authenticate.  Only auth.json is
+ * copied — all other files stay behind so MCP / plugin configs stay scrubbed.
+ */
+const AUTH_SUBPATHS = ['.codex/auth.json'] as const;
+
+/**
+ * Create a fresh, empty Codex home directory for the given run.
+ *
+ * The Codex SDK loads MCP server configurations and plugin state from the
+ * Codex home directory (~/.codex or the directory pointed to by CODEX_HOME).
+ * Leaving the operator's existing ~/.codex in place exposes connector tools
+ * that bypass environment-variable scrubbing (observed in live validation:
+ * GitHub MCP tool calls succeeded even though GH_TOKEN was not forwarded).
+ *
+ * This function creates a throwaway directory and copies only auth.json
+ * from the user's real ~/.codex so ChatGPT-login mode can still authenticate.
+ *
+ * Returns the path to the scratch directory, to be cleaned up in a `finally`/`afterEach`.
+ */
+export function createScratchedCodeXHome(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'adw-codex-home-'));
+  chmodSync(dir, 0o700); // ensure private — only the runner user can read
+  const home = process.env['HOME'] ?? '/root'; // fallback when HOME is absent
+  for (const sub of AUTH_SUBPATHS) {
+    const src = join(home, sub);
+    try {
+      copyFileSync(src, join(dir, 'auth.json'));
+    } catch {
+      // File missing / unreadable — the runner proceeds with a clean slate.
+    }
+  }
+  return dir;
+}
 
 /**
  * PLAN.md Section 5, codex column. Tool/permission control is COARSE —
@@ -145,8 +198,10 @@ function itemNote(item: ThreadItem): string {
         .map((change) => `${change.kind} ${change.path}`)
         .join(', ')}\n`;
     case 'mcp_tool_call':
-      return `[mcp ${item.server}.${item.tool} ${item.status}]${
-        item.error?.message !== undefined ? ` ${item.error.message}` : ''
+      const serverId = item.server;
+      const serverVisible = MCP_CONNECTOR_ALLOWLIST.has(serverId);
+      return `[mcp ${serverVisible ? serverId : '<redacted>'}.${item.tool} ${item.status}]${
+        serverVisible && item.error?.message !== undefined ? ` ${item.error.message}` : ''
       }\n`;
     case 'web_search':
       return `[web_search] ${item.query}\n`;
@@ -176,6 +231,7 @@ class CodexRunner implements AgentRunner {
     let usage: Usage | null = null;
     let threadId: string | undefined;
     let turnFailed: string | undefined;
+    let scratchedDir: string | null = null;
 
     try {
       const codexBin = resolveCodexBin(req.env);
@@ -183,8 +239,22 @@ class CodexRunner implements AgentRunner {
       // child env from it alone (replace semantics); omitted, it would copy
       // all of process.env (dist/index.js:234-239) — the fail-open this
       // adapter exists to prevent.
+      //
+      // Scrubbed Codex home: create a fresh, empty Codex home directory for
+      // this run to prevent MCP server configs loaded from the operator's
+      // ~/.codex from bypassing environment-variable security (issue #75).
+      // Copy only auth.json (ChatGPT login credential) so login-mode runs
+      // can still authenticate after the scratch home is created.
+      let runEnv = req.env;
+      if (!('CODEX_HOME' in req.env)) {
+        const homeDir = createScratchedCodeXHome();
+        scratchedDir = homeDir;
+        // Build a per-call env copy so the shared req.env stays untouched
+        // across phases / nudge retries (the orchestrator reuses both).
+        runEnv = { ...req.env, CODEX_HOME: homeDir };
+      }
       const codex = new Codex({
-        env: req.env,
+        env: runEnv,
         ...(codexBin !== undefined ? { codexPathOverride: codexBin } : {}),
       });
       const thread = codex.startThread({
@@ -225,13 +295,35 @@ class CodexRunner implements AgentRunner {
       }
     } catch (err) {
       if (req.signal.aborted) {
+        if (scratchedDir !== null) {
+          try {
+            rmSync(scratchedDir, { recursive: true, force: true });
+          } catch {
+            // Non-fatal cleanup error.
+          }
+        }
         return this.failed(req, transcriptText, abortKind(req.signal), TIMEOUT_RC, finalResponse, usage, threadId);
       }
       // Mirror a crashed CLI run (adw/_phases.py:482-516): keep the captured
       // output, report a nonzero rc, and let the invoker parse/nudge/fail.
       // A missing native binary (constructor throw) lands here too.
       tee(`\n[codex runner error] ${String(err)}\n`);
+      if (scratchedDir !== null) {
+        try {
+          rmSync(scratchedDir, { recursive: true, force: true });
+        } catch {
+          // Non-fatal cleanup error.
+        }
+      }
       return this.failed(req, transcriptText, 'none', 1, finalResponse, usage, threadId);
+    }
+
+    if (scratchedDir !== null) {
+      try {
+        rmSync(scratchedDir, { recursive: true, force: true });
+      } catch {
+        // Non-fatal cleanup error; the OS will eventually garbage it up.
+      }
     }
 
     if (req.signal.aborted) {
@@ -246,7 +338,22 @@ class CodexRunner implements AgentRunner {
     }
     if (usage === null) {
       tee('\n[codex runner error] stream ended without turn.completed\n');
+      if (scratchedDir !== null) {
+        try {
+          rmSync(scratchedDir, { recursive: true, force: true });
+        } catch {
+          // Non-fatal cleanup error.
+        }
+      }
       return this.failed(req, transcriptText, 'none', 1, finalResponse, null, threadId);
+    }
+
+    if (scratchedDir !== null) {
+      try {
+        rmSync(scratchedDir, { recursive: true, force: true });
+      } catch {
+        // Non-fatal cleanup error.
+      }
     }
 
     return {

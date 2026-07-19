@@ -143,9 +143,9 @@ describe('the SDK-built child env (the load-bearing boundary)', () => {
       expect(key.startsWith('MX_AGENT_'), key).toBe(false);
     }
     expect(env['CODEX_API_KEY']).toBe('sk-requested');
-    // Exactly the allowlist + the one benign marker the SDK adds for itself.
+    // Allowlist + the SDK originator marker + CODEX_HOME (scratched).
     const extras = Object.keys(env).filter((key) => !(key in allowlist));
-    expect(extras).toEqual(['CODEX_INTERNAL_ORIGINATOR_OVERRIDE']);
+    expect(extras).toEqual(['CODEX_HOME', 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE']);
 
     // The same run, end to end through the real SDK stream parser:
     expect(spawnMock.mock.calls[0]![0]).toBe('/fake/codex');
@@ -197,8 +197,9 @@ describe('the SDK-built child env (the load-bearing boundary)', () => {
       expect(env['GH_TOKEN']).toBeUndefined();
       expect(env['PATH']).toContain(join(tmp, 'bin'));
       expect(env['PATH']).not.toContain('/poisoned/parent/path');
+      // Allowlist + scratch CODEX_HOME + SDK originator marker.
       const extras = Object.keys(env).filter((key) => !(key in allowlist) && key !== 'PATH');
-      expect(extras).toEqual(['CODEX_INTERNAL_ORIGINATOR_OVERRIDE']);
+      expect(extras).toEqual(['CODEX_HOME', 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE']);
       expect(result.ok).toBe(true);
     }
   });
