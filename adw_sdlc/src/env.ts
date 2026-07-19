@@ -54,9 +54,9 @@ export const RUNNER_ENV_ALLOW: Record<RunnerId, readonly string[]> = {
     'CLAUDE_BIN',
     'CLAUDE_CODE_PATH',
   ],
-  // CODEX_BIN mirrors CLAUDE_BIN (binary override); CODEX_HOME lets callers
-  // point the CLI's config/auth dir (default ~/.codex) at a scrubbed
-  // throwaway dir — the residual-surface mitigation of PLAN.md Section 4.4.
+  // CODEX_BIN mirrors CLAUDE_BIN (binary override); HOME/CODEX_HOME retain
+  // durable CLI authentication. The Codex runner independently ignores user
+  // config and disables apps/plugins, so CODEX_HOME is not connector opt-in.
   codex: ['CODEX_API_KEY', 'OPENAI_API_KEY', 'CODEX_BIN', 'CODEX_HOME'],
   // OPENCODE_BIN mirrors CLAUDE_BIN/CODEX_BIN (binary override); XDG_DATA_HOME
   // lets callers point opencode's data/auth dir (default
