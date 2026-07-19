@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "observed_on": "2026-07-18",
+  "source_commit": "8962770be687be0ac818983ebc54e71df4a4d0ad",
+  "runner": "codex",
+  "validation_status": "authenticated_structured_phases_only_host_blocked",
+  "run_id": "c0de0069",
+  "issue_number": 69,
+  "runtime": {
+    "node_version": "24.18.0",
+    "sdk_package_version": "0.139.0",
+    "spawned_binary_version": "0.139.0",
+    "model": "gpt-5.4-mini",
+    "auth_mode": "ChatGPT login"
+  },
+  "timeout_resume": {
+    "phase": "classify",
+    "requested_timeout_seconds": 1,
+    "initial_cli_exit_code": 1,
+    "completed_phases_at_checkpoint": ["setup"],
+    "same_run_id_reused": true,
+    "completed_phase_skip_claimed": false,
+    "timeout_log_archived": false
+  },
+  "persisted_run": {
+    "state_bytes": 715,
+    "state_sha256": "9cca4352ce3ddb520f6cf77dc153479857296a6e5c6f25a02d6ea73cbc9af980",
+    "completed_phases": ["setup", "classify", "plan"],
+    "pr_number": null,
+    "pr_url": null,
+    "commit_created": false,
+    "target_diff_present": false,
+    "worktree_clean": true,
+    "persisted_total_cost_usd": 0.27709304999999995
+  },
+  "latest_metrics_snapshot": {
+    "scope": "later implement and tests retries only; not a full-run aggregate",
+    "metrics_bytes": 805,
+    "metrics_sha256": "79bf81cf55879cc2e13ae84ee404713dbbff24fd1825fbae394aef64ee5c04a0",
+    "phases": 2,
+    "attempts": 2,
+    "nudged_phases": 0,
+    "total_duration_ms": 449476,
+    "total_cost_usd": 0.21723194999999998,
+    "earlier_persisted_cost_usd": 0.0598611,
+    "failed_or_interrupted_attempt_cost_complete": false
+  },
+  "structured_output": {
+    "path": "native",
+    "counted_attempts": 2,
+    "clean": 1,
+    "nudged_to_success": 0,
+    "hard_failures": 1,
+    "hard_failure_rate": 0.5,
+    "classify_clean_excluded_from_bar": 1,
+    "uncounted": 2,
+    "verdict": "INSUFFICIENT DATA",
+    "chronology_caveat": "the older implement nudge artifact predates later overwritten implement artifacts, so this is not a vendored parity corpus"
+  },
+  "completed_plan_integrity": {
+    "tracking_issue": 74,
+    "recorded_plan_file": "specs/docs-replace-stale-healthtech-wording-in-package-readme.md",
+    "recorded_plan_file_present": false,
+    "structured_spec_created": false,
+    "plan_still_marked_completed": true,
+    "plan_transcript_bytes": 1444,
+    "plan_transcript_sha256": "d3e17ac5279744f97d33e2a7b9045df5666c10a1cbbb973eb66fb324b051b72b",
+    "completed_phase_skip_safety": "FAIL"
+  },
+  "adapter_failure": {
+    "phase": "implement",
+    "attempts": 2,
+    "error_excerpt": "TypeError: Cannot read properties of null (reading 'message')",
+    "root_cause": "completed mcp_tool_call item carried error:null",
+    "nudge_transcript_bytes": 164,
+    "nudge_transcript_sha256": "745c14b63b543729b2313cd6065b260bde0ac8e6515a48ede0271fab9e1675c9",
+    "fix_pull_request": 72,
+    "fix_pull_request_state": "OPEN_DRAFT"
+  },
+  "sandbox_blocker": {
+    "failed_file_change_events": 10,
+    "phase_error_excerpts": [
+      "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
+    ],
+    "raw_cli_control_error_excerpt": "bwrap: setting up uid map: Permission denied",
+    "unprivileged_user_namespace_probe": "blocked",
+    "docker_socket_probe": "permission denied",
+    "unsafe_danger_full_access_bypass_used": false,
+    "issue_to_pr_completed": false,
+    "phase_artifacts": [
+      {"role": "implement-later-retry", "bytes": 858, "sha256": "9824feaa2617718db6cc2c4d5884a9c3e6e3ca51b227a60646361e77996e61d4"},
+      {"role": "tests-later-retry", "bytes": 1158, "sha256": "203f181f67af04ed4bc850c6a4bc9278339e380f28f076dd09d4d10154b9e7e5"},
+      {"role": "review-write-probe", "bytes": 212, "sha256": "ac200cd6b582d02d71c957b2213d0fe23eb149fa4da76f3f9f4db4a45ef3ffdd"}
+    ],
+    "sdk_write_probe": {
+      "file_change_status": "failed",
+      "structured_claim": {"wrote": true},
+      "target_file_present": false,
+      "transcript_bytes": 105,
+      "transcript_sha256": "91c9cffba47be6427e9da43974f8f55e86667431733ad37e218873c3416972ed",
+      "private_session_bytes": 41653,
+      "private_session_sha256": "6b35e47c034a208eae0f7bfafe3611155b91f38cc2e82b116cd1524fb64b3be6",
+      "private_session_archived": false
+    },
+    "raw_cli_control_probe": {
+      "target_file_present": false,
+      "private_session_bytes": 43971,
+      "private_session_sha256": "1a60e76f26172939705ba72d7a9168b9438fd2aed4fb765c6473bfd550abcd42",
+      "private_session_archived": false
+    }
+  },
+  "secret_boundary": {
+    "audit_method": "names-only wrapper at the executable spawned by the production Codex SDK adapter",
+    "parent_required_key_names": [
+      "GH_TOKEN",
+      "ADW_LIVE_DENIED_SENTINEL",
+      "MATRIX_LIVE_DENIED_SENTINEL",
+      "MX_AGENT_LIVE_DENIED_SENTINEL"
+    ],
+    "parent_present_key_names": [
+      "GH_TOKEN",
+      "ADW_LIVE_DENIED_SENTINEL",
+      "MATRIX_LIVE_DENIED_SENTINEL",
+      "MX_AGENT_LIVE_DENIED_SENTINEL"
+    ],
+    "child_environment_key_names": [
+      "CODEX_BIN",
+      "CODEX_HOME",
+      "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+      "HOME",
+      "LANG",
+      "LC_ALL",
+      "PATH",
+      "PWD",
+      "SHELL",
+      "SHLVL",
+      "TERM",
+      "USER",
+      "_"
+    ],
+    "observed_denied_key_names": [],
+    "environment_values_archived": false,
+    "child_names_bytes": 106,
+    "child_names_sha256": "85086c74413b8ca8f1936ecd5c464acd4c6c4f80c65565af0173b228cb817290",
+    "successful_probe": {
+      "ok": true,
+      "rc": 0,
+      "signal": "none",
+      "structured": {"ok": true},
+      "session_id_present": true,
+      "cost_usd": 0.006798899999999999,
+      "transcript_bytes": 12,
+      "transcript_sha256": "e5f1eb4d806641698a35efe20e098efd20d7d57a9b90ee69079d5bb650920726"
+    },
+    "result": "PASS",
+    "scope": "spawned process environment only"
+  },
+  "residual_connector_authority": {
+    "tracking_issue": 75,
+    "observed": true,
+    "github_reads_completed": 3,
+    "github_update_attempts": 1,
+    "github_update_cancelled": true,
+    "external_write_completed": false,
+    "tool_inputs_archived": false,
+    "interpretation": "environment isolation did not remove MCP connector authority available through the Codex home"
+  },
+  "sanitization": {
+    "full_prompts_archived": false,
+    "full_transcripts_archived": false,
+    "tool_inputs_archived": false,
+    "environment_values_archived": false,
+    "auth_files_archived": false,
+    "session_content_archived": false,
+    "absolute_paths_archived": false
+  }
+}
