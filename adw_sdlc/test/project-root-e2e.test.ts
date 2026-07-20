@@ -88,6 +88,7 @@ function testDeps(overrides: DepsOverride = {}): OrchestratorDeps {
       throw new Error('runAgentPhase not stubbed for this test');
     }) as typeof runAgentPhase,
     classify: async () => ({ value: { issue_class: 'feat' as const, reason: 'r' }, usage: {} }),
+    fileExists: () => true,
   };
   return { ...base, ...overrides, git: { ...base.git, ...(overrides.git ?? {}) } };
 }

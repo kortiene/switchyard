@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { REPO_ROOT } from '../src/common.js';
 import { parseAdwConfig, setAdwConfigForTests } from '../src/config.js';
 import { AdwError, RunnerAuthError, RunnerTransientError } from '../src/errors.js';
 import type { AgentRunner } from '../src/invoker.js';
@@ -83,6 +84,7 @@ function testDeps(overrides: DepsOverride = {}): OrchestratorDeps {
       throw new Error('runAgentPhase not stubbed for this test');
     }) as typeof runAgentPhase,
     classify: async () => ({ value: { issue_class: 'feat', reason: 'r' }, usage: {} }),
+    fileExists: () => true,
   };
   return {
     ...base,
@@ -1752,5 +1754,76 @@ describe('run() integration', () => {
     );
     expect(log.mock.calls.flat().join('\n')).not.toContain('[dry-run]'); // preflight threw before printPlan
     expect(readdirSync(tmp)).toEqual([]); // nothing minted
+  });
+
+  it('rejects plan when spec_created is false and leaves the phase incomplete', async () => {
+    const deps = testDeps({
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValue('CLOSED'),
+      runAgentPhase: agentStub({
+        plan: { spec_created: false, plan_file: null, summary: 'could not plan' },
+        implement: { summary: 'did it', files_changed: ['src/x.ts'] },
+        tests: { tests_added: true, summary: '' },
+        review: { findings: [], wrote_commit_message: true, wrote_pr_body: true },
+      }),
+    });
+    await expect(run(5, createMockRunner(), { yes: true, noProgress: true }, deps)).rejects.toThrow(
+      /plan validation failed: spec_created is false/,
+    );
+    const state = AdwState.load(loadedId());
+    expect(state).not.toBeNull();
+    expect(state?.completedPhases).not.toContain('plan');
+  });
+
+  it('rejects spec_created true when no plan_file was recorded', async () => {
+    const fileExists = vi.fn(() => true);
+    const deps = testDeps({
+      fileExists,
+      runAgentPhase: agentStub({
+        ...PHASE_RESULTS,
+        plan: { spec_created: true, plan_file: null, summary: 'planned without a path' },
+      }),
+    });
+
+    await expect(run(5, createMockRunner(), { yes: true, noProgress: true }, deps)).rejects.toThrow(
+      /plan validation failed: spec_created is true but plan_file is empty/,
+    );
+    expect(AdwState.load(loadedId())?.completedPhases).not.toContain('plan');
+    expect(fileExists).not.toHaveBeenCalled();
+  });
+
+  it('rejects plan when spec_created is true but the artifact file is absent on disk', async () => {
+    const fileExists = vi.fn(() => false);
+    const deps = testDeps({
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValue('CLOSED'),
+      fileExists,
+      runAgentPhase: agentStub(PHASE_RESULTS),
+    });
+    await expect(run(5, createMockRunner(), { yes: true, noProgress: true }, deps)).rejects.toThrow(
+      /plan validation failed: plan_file is absent from the project: specs\/x\.md/,
+    );
+    const state = AdwState.load(loadedId());
+    expect(state).not.toBeNull();
+    expect(state?.completedPhases).not.toContain('plan');
+    expect(state?.planFile).toBeNull();
+    expect(fileExists).toHaveBeenCalledWith(join(REPO_ROOT, 'specs/x.md'));
+  });
+
+  it('reruns an incomplete plan on resume and completes it once the artifact exists', async () => {
+    let artifactExists = false;
+    const planCalls: string[] = [];
+    const deps = testDeps({
+      issueState: () => 'OPEN',
+      fileExists: () => artifactExists,
+      runAgentPhase: agentStub(PHASE_RESULTS, ({ phase }) => planCalls.push(phase)),
+    });
+    const options = { adwId: 'a1b2c3d4', phases: 'plan', noMerge: true, noProgress: true } as const;
+
+    await expect(run(5, createMockRunner(), options, deps)).rejects.toThrow(/plan validation failed/);
+    expect(AdwState.load('a1b2c3d4')?.completedPhases).not.toContain('plan');
+
+    artifactExists = true;
+    await expect(run(5, createMockRunner(), { ...options, resume: true }, deps)).resolves.toBe(0);
+    expect(AdwState.load('a1b2c3d4')?.completedPhases).toContain('plan');
+    expect(planCalls).toEqual(['plan', 'plan']);
   });
 });
