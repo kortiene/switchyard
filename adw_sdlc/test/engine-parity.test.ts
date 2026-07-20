@@ -167,6 +167,9 @@ function depsWithRealInvoker(): Partial<OrchestratorDeps> {
       squashMerge: () => ({ ok: true, error: null }),
     },
     classify: async () => ({ value: { issue_class: 'feat' as const, reason: 'r' }, usage: { costUsd: 0.01 } }),
+    // The scripted plan represents a successful write; keep this transport-
+    // parity suite filesystem-independent while still asserting the repo path.
+    fileExists: (path) => path === join(REPO_ROOT, 'specs/x.md'),
   };
 }
 

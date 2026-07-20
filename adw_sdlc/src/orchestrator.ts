@@ -19,8 +19,8 @@
  * tests patch — so the parity suite drives run() with no real agent/git/gh.
  */
 
-import { readFileSync, writeFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { projectRoot, setProjectRoot, shellSplit } from './common.js';
 import { DEFAULT_ADW_CONFIG, getAdwConfig, isClosedWorkItemState, type AdwConfig } from './config.js';
@@ -270,6 +270,8 @@ export interface OrchestratorDeps {
     prompt: string,
     options?: StructuredCallOptions,
   ) => Promise<StructuredCallResult<ClassifyResult>>;
+  /** Plan-artifact existence check; injectable so orchestration tests stay filesystem-independent. */
+  fileExists?: (path: string) => boolean;
   /**
    * Monotonic clock for per-phase duration metrics; injectable for tests.
    * Optional so existing OrchestratorDeps fixtures need no change; defaults to
@@ -295,6 +297,7 @@ export function defaultDeps(): OrchestratorDeps {
     ...providerDeps,
     runAgentPhase,
     classify: (prompt, options) => structuredCall(prompt, ClassifySchema, options),
+    fileExists: existsSync,
     now: defaultClock,
   };
 }
@@ -982,6 +985,32 @@ function applyResult(state: AdwState, phase: string, result: unknown): void {
       state.planFile = plan.plan_file;
     }
   }
+}
+
+/** Return an actionable error when a schema-valid plan lacks its required artifact. */
+function planValidationError(plan: PlanResult, fileExists: (path: string) => boolean): string | null {
+  if (!plan.spec_created) {
+    return 'spec_created is false; the model did not produce the plan artifact';
+  }
+
+  const planFile = plan.plan_file?.trim();
+  if (!planFile) {
+    return 'spec_created is true but plan_file is empty';
+  }
+  if (isAbsolute(planFile)) {
+    return `plan_file must be repository-relative: ${planFile}`;
+  }
+
+  const root = projectRoot();
+  const artifactPath = resolve(root, planFile);
+  const relativePath = relative(root, artifactPath);
+  if (relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+    return `plan_file escapes the project root: ${planFile}`;
+  }
+  if (!fileExists(artifactPath)) {
+    return `plan_file is absent from the project: ${planFile}`;
+  }
+  return null;
 }
 
 function workItemNumberMetadata(config: AdwConfig, issue: WorkItemId): number | null {
@@ -1811,6 +1840,18 @@ export async function run(
       });
       metrics.save();
       const result = outcome.data;
+      if (phase === 'plan') {
+        const validationError = planValidationError(result as PlanResult, deps.fileExists ?? existsSync);
+        if (validationError !== null) {
+          const message = `plan validation failed: ${validationError}`;
+          note(message);
+          progress(phase, message);
+          // Persist usage while leaving plan out of completed_phases. Throwing
+          // makes the failure visible; --resume will invoke the phase again.
+          state.save();
+          throw new AdwError(message);
+        }
+      }
       applyResult(state, phase, result);
       if (phase === 'review' || phase === 'document') {
         absorbAuthoredText(state);
