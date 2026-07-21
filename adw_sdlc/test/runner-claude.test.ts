@@ -165,6 +165,13 @@ describe('request shape', () => {
     expect(options.maxBudgetUsd).toBe(5);
   });
 
+  it('continues the requested session for an in-phase follow-up', async () => {
+    scriptedQuery([successResult({ session_id: 'sess-existing' })]);
+    await runner.runPhase(makeReq({ resumeSessionId: 'sess-existing' }));
+
+    expect(capturedOptions().resume).toBe('sess-existing');
+  });
+
   it('removes only the unsupported top-level schema dialect marker', () => {
     const nested = { $schema: 'keep-nested', type: 'string' };
     expect(

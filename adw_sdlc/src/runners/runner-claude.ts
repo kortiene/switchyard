@@ -317,6 +317,7 @@ class ClaudeRunner implements AgentRunner {
       ...(req.schema !== undefined
         ? { outputFormat: { type: 'json_schema' as const, schema: claudeOutputSchema(req.schema) } }
         : {}),
+      ...(req.resumeSessionId !== undefined ? { resume: req.resumeSessionId } : {}),
       ...(req.maxBudgetUsd !== undefined ? { maxBudgetUsd: req.maxBudgetUsd } : {}),
     };
 

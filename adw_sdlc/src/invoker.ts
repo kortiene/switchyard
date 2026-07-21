@@ -45,6 +45,8 @@ export interface PhaseRequest {
   env: Record<string, string>;
   /** Per-phase JSON Schema for structured output; absent ⇒ free-form. */
   schema?: JsonSchema;
+  /** Existing backend session/thread to continue for an in-phase follow-up. */
+  resumeSessionId?: string;
   /** Forwarded to backends with native budget gating (claude maxBudgetUsd). */
   maxBudgetUsd?: number;
   /** agents/{adw_id}/{phase}/transcript.log — adapters tee output here during the run. */

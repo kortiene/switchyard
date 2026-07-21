@@ -21,7 +21,7 @@ import { join } from 'node:path';
 import { parseJson, projectRoot } from './common.js';
 import { AdwError, RunnerAuthError, RunnerTransientError } from './errors.js';
 import { PHASE_TIMEOUT_ABORT_REASON } from './invoker.js';
-import type { AgentRunner, JsonSchema, PhaseResult, PhaseUsage } from './invoker.js';
+import type { AgentRunner, JsonSchema, PhaseRequest, PhaseResult, PhaseUsage } from './invoker.js';
 import { modelForPhase } from './models.js';
 import { composePhasePrompt, type AgentPhase } from './phases.js';
 import { resolvePhaseSchema } from './schema-registry.js';
@@ -32,6 +32,23 @@ import type { z } from 'zod';
 /** Verbatim from adw/_phases.py:472. */
 export const NUDGE =
   '\n\nRespond with ONLY the required JSON object in a ```json fenced block, nothing else.';
+
+/**
+ * Ask an already-informed session to serialize its completed work. This is
+ * deliberately not a phase prompt: replaying the task makes the agent repeat
+ * tools and edits instead of emitting the result it already knows (#90).
+ */
+function structuredOutputFollowup(phase: string, schema: JsonSchema): string {
+  return [
+    `You just completed the ${phase} phase in this session.`,
+    'Do not repeat the work and do not use tools.',
+    'Output ONLY the structured result JSON object matching the JSON Schema below.',
+    'Do not include Markdown fences, commentary, or explanation.',
+    '',
+    'Required JSON Schema:',
+    JSON.stringify(schema, null, 2),
+  ].join('\n');
+}
 
 const CLAUDE_PAYG_AUTH_ENV_KEYS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const;
 
@@ -101,12 +118,14 @@ export async function runAgentPhase<P extends SchemaPhase>(
   const phaseDir = state.phaseDir(phase);
   writeFileSync(join(phaseDir, 'prompt.txt'), prompt, 'utf8');
   const model = modelForPhase(phase, runner.id, { cliModel: options.cliModel ?? '' });
-  const schema = emitJsonContract ? undefined : phaseSchema.jsonSchema();
+  const outputSchema = phaseSchema.jsonSchema();
+  const schema = emitJsonContract ? undefined : outputSchema;
 
   const invoke = async (
     text: string,
     transcriptName: string,
     requestSchema: JsonSchema | undefined,
+    resumeSessionId?: string,
   ): Promise<PhaseResult> => {
     const controller = new AbortController();
     const timeoutMs = options.timeoutMs ?? 0;
@@ -118,7 +137,7 @@ export async function runAgentPhase<P extends SchemaPhase>(
     if (options.signal?.aborted) abortFromParent();
     else options.signal?.addEventListener('abort', abortFromParent, { once: true });
     try {
-      const request = {
+      const request: PhaseRequest = {
         phase,
         prompt: text,
         model,
@@ -127,6 +146,7 @@ export async function runAgentPhase<P extends SchemaPhase>(
         transcriptPath: join(phaseDir, transcriptName),
         signal: controller.signal,
         ...(requestSchema !== undefined ? { schema: requestSchema } : {}),
+        ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
         ...(options.maxBudgetUsd !== undefined ? { maxBudgetUsd: options.maxBudgetUsd } : {}),
       };
       return await runner.runPhase(request);
@@ -167,19 +187,19 @@ export async function runAgentPhase<P extends SchemaPhase>(
     if (first.signal === 'cancelled') {
       throw new AdwError(`${phase} phase was cancelled without parseable output`, { cause: err });
     }
-    // Native-schema backends get a true fenced-JSON fallback: the retry carries
-    // the contract the first prompt omitted AND withholds the native schema
-    // channel. This matters when a provider ignores or cannot execute a native
-    // json_schema/structured-output tool: retaining that channel can make the
-    // backend reject another otherwise usable prose/fenced response. The
-    // first prompt deliberately omits the contract (the schema rides the native
-    // channel), but the SDK can return success without a conforming payload
-    // (structured_output is optional on SDKResultSuccess) — and a bare NUDGE
-    // would demand "the required JSON object" the agent was never shown.
-    const retryPrompt = emitJsonContract
-      ? prompt
-      : composePhasePrompt(phase as AgentPhase, options.templateArgs, state, runner.id, true);
-    const second = await invoke(retryPrompt + NUDGE, 'transcript-2.log', undefined);
+    // Continue the informed backend session when it supplied a resume handle.
+    // The follow-up contains only the output schema: no task replay, tool work,
+    // or native structured-output channel. If a backend could not establish a
+    // resumable session, retain the historical fresh-call fallback so recovery
+    // does not become strictly weaker.
+    const resumeSessionId = runner.caps.resume ? first.sessionId : undefined;
+    const retryPrompt =
+      resumeSessionId !== undefined
+        ? structuredOutputFollowup(phase, outputSchema)
+        : (emitJsonContract
+            ? prompt
+            : composePhasePrompt(phase as AgentPhase, options.templateArgs, state, runner.id, true)) + NUDGE;
+    const second = await invoke(retryPrompt, 'transcript-2.log', undefined, resumeSessionId);
     let data: z.infer<(typeof PHASE_SCHEMAS)[P]>;
     try {
       data = extract(second);
@@ -208,7 +228,7 @@ export async function runAgentPhase<P extends SchemaPhase>(
       data,
       usage: mergeUsage(first.usage, second.usage),
       attempts: 2,
-      ...sessionOf(second),
+      ...sessionOf(second.sessionId !== undefined ? second : first),
     };
   }
 }
