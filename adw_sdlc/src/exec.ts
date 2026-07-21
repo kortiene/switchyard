@@ -16,6 +16,7 @@ import { createInterface } from 'node:readline';
 
 import { commandCwd } from './common.js';
 import { getAdwConfig } from './config.js';
+import { phaseLabel } from './progress.js';
 import { ENV_ALIASES, readEnvFlag } from './env-vars.js';
 
 /** Result shape mirroring Python's CompletedProcess slice we use. */
@@ -53,12 +54,14 @@ export function confirm(prompt: string): Promise<boolean> {
 // --- issue progress comments ---------------------------------------------------
 
 /**
- * Format a run-tagged progress line for a GitHub issue comment. Built only
- * from the run id, phase, and a caller-supplied fixed message — never runner
- * output, environment, or secrets (adw/_exec.py:61-68).
+ * Format a run-tagged Markdown progress update for a work-item comment. The
+ * stable first-line marker preserves traceability while the heading and body
+ * are readable in an issue timeline. Callers must supply fixed copy or the
+ * safe structural summaries from progress.ts — never free-form runner output,
+ * environment values, or secrets.
  */
 export function formatProgress(adwId: string, phase: string, message: string, tag: string = getAdwConfig().progress.tag): string {
-  return `${tag} ${adwId}_${phase}: ${message}`;
+  return `${tag} ${adwId}_${phase}:\n\n### ${phaseLabel(phase)}\n\n${message}`;
 }
 
 /** Best-effort `gh issue comment` with a run-tagged body; never throws. */

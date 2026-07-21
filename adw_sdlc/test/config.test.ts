@@ -338,7 +338,7 @@ describe('config-driven behavior', () => {
     expect(classifyModel(config)).toBe('project-classifier');
     expect(modelForPhase('implement', 'claude', { env: {}, config })).toBe('project-sonnet');
     expect(formatProgress('a1b2c3d4', 'plan', 'done', config.progress.tag)).toBe(
-      '[ACME-ADW] a1b2c3d4_plan: done',
+      '[ACME-ADW] a1b2c3d4_plan:\n\n### Planning\n\ndone',
     );
   });
 });
