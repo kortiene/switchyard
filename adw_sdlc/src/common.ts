@@ -146,28 +146,82 @@ export function renderPromptFile(path: string, args: readonly string[]): string 
 const JSON_FENCE_RE = /```json\s*\n([\s\S]*?)\n```/gi;
 const FENCE_RE = /```(?:[\w-]+)?\s*\n([\s\S]*?)\n```/g;
 
-/** Return the first balanced `{...}`/`[...]` span in `text`, else `text`. */
-function extractBraced(text: string): string {
-  const arrayStart = text.indexOf('[');
-  const arrayEnd = text.lastIndexOf(']');
-  const objStart = text.indexOf('{');
-  const objEnd = text.lastIndexOf('}');
-  if (objStart !== -1 && (arrayStart === -1 || objStart < arrayStart) && objEnd !== -1) {
-    return text.slice(objStart, objEnd + 1);
+/**
+ * Return balanced top-level `{...}`/`[...]` spans in source order.
+ *
+ * Agent prose can legitimately start with Markdown such as `[test]` before a
+ * later JSON object. A first-bracket/last-bracket slice mistakes that tag for a
+ * JSON array and discards the usable object. Track nesting and JSON strings so
+ * each candidate can instead be parsed independently.
+ */
+function bracedJsonCandidates(text: string): string[] {
+  const candidates: string[] = [];
+  const stack: string[] = [];
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i]!;
+    if (start === -1) {
+      if (char === '{' || char === '[') {
+        start = i;
+        stack.push(char === '{' ? '}' : ']');
+      }
+      continue;
+    }
+
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === '{' || char === '[') {
+      stack.push(char === '{' ? '}' : ']');
+      continue;
+    }
+    if (char !== '}' && char !== ']') {
+      continue;
+    }
+    if (stack.at(-1) !== char) {
+      // Malformed prose candidate. Reset and keep scanning for a later JSON
+      // value rather than letting one stray bracket consume the whole reply.
+      start = -1;
+      stack.length = 0;
+      inString = false;
+      escaped = false;
+      continue;
+    }
+    stack.pop();
+    if (stack.length === 0) {
+      candidates.push(text.slice(start, i + 1));
+      start = -1;
+    }
   }
-  if (arrayStart !== -1 && arrayEnd !== -1) {
-    return text.slice(arrayStart, arrayEnd + 1);
+  return candidates;
+}
+
+function topLevelTypeError(result: unknown, expect?: 'object' | 'array'): AdwError | null {
+  if (expect === 'object' && (typeof result !== 'object' || result === null || Array.isArray(result))) {
+    return new AdwError(`expected a JSON object, got ${Array.isArray(result) ? 'array' : typeof result}`);
   }
-  return text;
+  if (expect === 'array' && !Array.isArray(result)) {
+    return new AdwError(`expected a JSON array, got ${typeof result}`);
+  }
+  return null;
 }
 
 /**
  * Parse JSON that may be wrapped in a Markdown code fence or surrounding
  * prose (adw/common.py parse_json). Prefers the LAST explicit ```json fence
  * (agents emit the contract block last); then the last generic fenced block;
- * then the first balanced object/array span. Raises AdwError on failure;
- * `expect` constrains the
- * parsed top-level type.
+ * then the first parseable balanced object/array span. Raises AdwError on
+ * failure; `expect` constrains the parsed top-level type.
  */
 export function parseJson(text: string | null | undefined, expect?: 'object' | 'array'): unknown {
   if (text === null || text === undefined) {
@@ -178,30 +232,36 @@ export function parseJson(text: string | null | undefined, expect?: 'object' | '
   const genericMatches = jsonMatches.length > 0 ? [] : [...text.matchAll(FENCE_RE)];
   const matches = jsonMatches.length > 0 ? jsonMatches : genericMatches;
   const last = matches.length > 0 ? matches[matches.length - 1] : undefined;
-  let candidate = last?.[1] !== undefined ? last[1].trim() : text.trim();
+  const candidate = last?.[1] !== undefined ? last[1].trim() : text.trim();
+  const nested = bracedJsonCandidates(candidate);
+  const attempts = [candidate, ...nested.filter((value) => value !== candidate)];
+  let parseError: unknown;
+  let typeError: AdwError | null = null;
 
-  if (!candidate.startsWith('{') && !candidate.startsWith('[')) {
-    candidate = extractBraced(candidate);
+  for (const attempt of attempts) {
+    let result: unknown;
+    try {
+      result = JSON.parse(attempt);
+    } catch (err) {
+      parseError ??= err;
+      continue;
+    }
+    const mismatch = topLevelTypeError(result, expect);
+    if (mismatch !== null) {
+      typeError ??= mismatch;
+      continue;
+    }
+    return result;
   }
 
-  let result: unknown;
-  try {
-    result = JSON.parse(candidate);
-  } catch (err) {
-    const snippet = candidate.slice(0, 200);
-    throw new AdwError(
-      `could not parse JSON from agent output: ${err instanceof Error ? err.message : String(err)} (saw: ${JSON.stringify(snippet)})`,
-      { cause: err },
-    );
+  if (typeError !== null) {
+    throw typeError;
   }
-
-  if (expect === 'object' && (typeof result !== 'object' || result === null || Array.isArray(result))) {
-    throw new AdwError(`expected a JSON object, got ${Array.isArray(result) ? 'array' : typeof result}`);
-  }
-  if (expect === 'array' && !Array.isArray(result)) {
-    throw new AdwError(`expected a JSON array, got ${typeof result}`);
-  }
-  return result;
+  const snippet = candidate.slice(0, 200);
+  throw new AdwError(
+    `could not parse JSON from agent output: ${parseError instanceof Error ? parseError.message : String(parseError)} (saw: ${JSON.stringify(snippet)})`,
+    { cause: parseError },
+  );
 }
 
 /**

@@ -122,7 +122,7 @@ describe('runAgentPhase', () => {
     expect(outcome.usage).toMatchObject({ inputTokens: 21, outputTokens: 3 });
   });
 
-  it('retries a native-schema backend WITH the fenced-JSON contract it never saw', async () => {
+  it('retries a native-schema backend through the fenced-JSON fallback it never saw', async () => {
     // A native-schema success can come back without structured_output AND
     // without parseable text; the retry prompt must then carry the contract
     // footer the first prompt deliberately omitted, or the nudge demands a
@@ -142,10 +142,36 @@ describe('runAgentPhase', () => {
     });
     expect(outcome.data).toEqual({ tests_added: true, summary: 's' });
     expect(runner.requests).toHaveLength(2);
+    expect(runner.requests[0]!.schema).toBeDefined();
     expect(runner.requests[0]!.prompt).not.toContain('## Required output');
+    // The retry contract is authoritative: do not retain a native structured-
+    // output channel that the provider may ignore or fail to execute (#88).
+    expect(runner.requests[1]!.schema).toBeUndefined();
     expect(runner.requests[1]!.prompt).toContain('## Required output');
     expect(runner.requests[1]!.prompt).toContain('"tests_added"');
     expect(runner.requests[1]!.prompt.endsWith(NUDGE)).toBe(true);
+  });
+
+  it('extracts embedded JSON from a failed native-schema response before retrying (issue #88)', async () => {
+    const runner = createMockRunner({
+      script: () => ({
+        ok: false,
+        rc: 1,
+        transcriptText: '[test] finished the phase\n{"tests_added":true,"summary":"covered"}',
+      }),
+    });
+    const outcome = await runAgentPhase({
+      phase: 'tests',
+      templateArgs: ['x'],
+      state,
+      runner,
+      env: {},
+    });
+
+    expect(outcome.data).toEqual({ tests_added: true, summary: 'covered' });
+    expect(outcome.attempts).toBe(1);
+    expect(runner.requests).toHaveLength(1);
+    expect(runner.requests[0]!.schema).toBeDefined();
   });
 
   it('nudges once when a native-schema backend returns a non-conforming payload', async () => {

@@ -21,7 +21,7 @@ import { join } from 'node:path';
 import { parseJson, projectRoot } from './common.js';
 import { AdwError, RunnerAuthError, RunnerTransientError } from './errors.js';
 import { PHASE_TIMEOUT_ABORT_REASON } from './invoker.js';
-import type { AgentRunner, PhaseResult, PhaseUsage } from './invoker.js';
+import type { AgentRunner, JsonSchema, PhaseResult, PhaseUsage } from './invoker.js';
 import { modelForPhase } from './models.js';
 import { composePhasePrompt, type AgentPhase } from './phases.js';
 import { resolvePhaseSchema } from './schema-registry.js';
@@ -103,7 +103,11 @@ export async function runAgentPhase<P extends SchemaPhase>(
   const model = modelForPhase(phase, runner.id, { cliModel: options.cliModel ?? '' });
   const schema = emitJsonContract ? undefined : phaseSchema.jsonSchema();
 
-  const invoke = async (text: string, transcriptName: string): Promise<PhaseResult> => {
+  const invoke = async (
+    text: string,
+    transcriptName: string,
+    requestSchema: JsonSchema | undefined,
+  ): Promise<PhaseResult> => {
     const controller = new AbortController();
     const timeoutMs = options.timeoutMs ?? 0;
     const timer =
@@ -122,7 +126,7 @@ export async function runAgentPhase<P extends SchemaPhase>(
         env: options.env,
         transcriptPath: join(phaseDir, transcriptName),
         signal: controller.signal,
-        ...(schema !== undefined ? { schema } : {}),
+        ...(requestSchema !== undefined ? { schema: requestSchema } : {}),
         ...(options.maxBudgetUsd !== undefined ? { maxBudgetUsd: options.maxBudgetUsd } : {}),
       };
       return await runner.runPhase(request);
@@ -139,7 +143,7 @@ export async function runAgentPhase<P extends SchemaPhase>(
     return phaseSchema.validate(payload);
   };
 
-  const first = await invoke(prompt, 'transcript.log');
+  const first = await invoke(prompt, 'transcript.log', schema);
   try {
     return { data: extract(first), usage: first.usage, attempts: 1, ...sessionOf(first) };
   } catch (err) {
@@ -163,15 +167,19 @@ export async function runAgentPhase<P extends SchemaPhase>(
     if (first.signal === 'cancelled') {
       throw new AdwError(`${phase} phase was cancelled without parseable output`, { cause: err });
     }
-    // Native-schema backends get the retry WITH the fenced-JSON contract:
-    // their first prompt deliberately omits it (the schema rides the native
+    // Native-schema backends get a true fenced-JSON fallback: the retry carries
+    // the contract the first prompt omitted AND withholds the native schema
+    // channel. This matters when a provider ignores or cannot execute a native
+    // json_schema/structured-output tool: retaining that channel can make the
+    // backend reject another otherwise usable prose/fenced response. The
+    // first prompt deliberately omits the contract (the schema rides the native
     // channel), but the SDK can return success without a conforming payload
     // (structured_output is optional on SDKResultSuccess) — and a bare NUDGE
     // would demand "the required JSON object" the agent was never shown.
     const retryPrompt = emitJsonContract
       ? prompt
       : composePhasePrompt(phase as AgentPhase, options.templateArgs, state, runner.id, true);
-    const second = await invoke(retryPrompt + NUDGE, 'transcript-2.log');
+    const second = await invoke(retryPrompt + NUDGE, 'transcript-2.log', undefined);
     let data: z.infer<(typeof PHASE_SCHEMAS)[P]>;
     try {
       data = extract(second);
