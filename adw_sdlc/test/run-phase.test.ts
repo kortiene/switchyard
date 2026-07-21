@@ -279,11 +279,9 @@ describe('runAgentPhase', () => {
     expect(existsSync(join(tmp, 'a1b2c3d4', 'plan', 'transcript-2.log'))).toBe(false);
   });
 
-  it('classifies a persistent transient API 5xx as RunnerTransientError (after the nudge)', async () => {
-    // A momentary provider 500 is not a prompt problem — a nudge cannot fix it.
-    // When both the first attempt and the nudge hit it, escalate to a typed
-    // transient error the orchestrator retries with backoff, rather than killing
-    // the run as an unparseable reply.
+  it('classifies a transient API 5xx immediately with NO JSON nudge', async () => {
+    // A provider 500 is not malformed output — the orchestrator's bounded
+    // backoff is the recovery path, not another turn in the failed session.
     const runner = createMockRunner({
       id: 'claude',
       caps: { nativeSchema: false },
@@ -292,20 +290,32 @@ describe('runAgentPhase', () => {
     await expect(
       runAgentPhase({ phase: 'review', templateArgs: ['x'], state, runner, env: {} }),
     ).rejects.toThrow(RunnerTransientError);
-    expect(runner.requests).toHaveLength(2); // first attempt + one nudge, then escalate
+    expect(runner.requests).toHaveLength(1);
+    expect(existsSync(join(tmp, 'a1b2c3d4', 'review', 'transcript-2.log'))).toBe(false);
   });
 
-  it('recovers transparently when a transient blip clears on the nudge retry', async () => {
+  it('classifies an OpenCode loopback fetch timeout immediately and preserves its cause code', async () => {
     const runner = createMockRunner({
-      caps: { nativeSchema: false },
-      script: (_req, call) =>
-        call === 0
-          ? { transcriptText: 'API Error: 503 Service Unavailable' }
-          : { transcriptText: '```json\n{"resolved": 1, "remaining": 0}\n```' },
+      id: 'opencode',
+      script: () => ({
+        ok: false,
+        rc: 1,
+        transcriptText:
+          '[opencode runner error] Error: fetch failed (UND_ERR_HEADERS_TIMEOUT)',
+        sessionId: 'sess-stale',
+      }),
     });
-    const outcome = await runAgentPhase({ phase: 'resolve', templateArgs: ['x'], state, runner, env: {} });
-    expect(outcome.data.resolved).toBe(1);
-    expect(outcome.attempts).toBe(2); // the existing nudge doubled as the quick retry
+    const promise = runAgentPhase({
+      phase: 'resolve',
+      templateArgs: ['x'],
+      state,
+      runner,
+      env: {},
+    });
+    await expect(promise).rejects.toThrow(RunnerTransientError);
+    await expect(promise).rejects.toThrow(/UND_ERR_HEADERS_TIMEOUT/);
+    expect(runner.requests).toHaveLength(1);
+    expect(existsSync(join(tmp, 'a1b2c3d4', 'resolve', 'transcript-2.log'))).toBe(false);
   });
 
   it('fails after the second parse failure', async () => {

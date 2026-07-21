@@ -187,6 +187,14 @@ export async function runAgentPhase<P extends SchemaPhase>(
     if (first.signal === 'cancelled') {
       throw new AdwError(`${phase} phase was cancelled without parseable output`, { cause: err });
     }
+    // A transport/provider failure did not produce malformed phase output;
+    // there is nothing for a JSON nudge to repair. Classify the first attempt
+    // immediately so the orchestrator can apply its bounded backoff retry and
+    // does not spend another model turn in the same failed session.
+    const firstTransient = runnerTransientFailureReason(first);
+    if (firstTransient !== null) {
+      throw new RunnerTransientError(runner.id, phase, firstTransient, { cause: err });
+    }
     // Continue the informed backend session when it supplied a resume handle.
     // The follow-up contains only the output schema: no task replay, tool work,
     // or native structured-output channel. If a backend could not establish a
@@ -209,13 +217,11 @@ export async function runAgentPhase<P extends SchemaPhase>(
         if (secondAuthFailure !== null) {
           throw new RunnerAuthError(runner.id, phase, secondAuthFailure, { cause: secondErr });
         }
-        // A transient provider error (API 5xx / overload) is not a prompt
+        // A transient provider/transport error is not a prompt
         // problem — the nudge could not have fixed it. Classify it so the
         // orchestrator retries the phase with backoff instead of aborting the
-        // whole run on what looks like an unparseable reply. Check both attempts
-        // (the blip may have spanned the first and the nudge).
-        const transient =
-          runnerTransientFailureReason(second) ?? runnerTransientFailureReason(first);
+        // whole run on what looks like an unparseable reply.
+        const transient = runnerTransientFailureReason(second);
         if (transient !== null) {
           throw new RunnerTransientError(runner.id, phase, transient, { cause: secondErr });
         }
@@ -263,11 +269,11 @@ function runnerAuthFailureReason(
 }
 
 /**
- * Detect a transient provider failure in a runner transcript — an API 5xx,
- * "internal server error", overload/529, or a gateway error the SDK surfaced
- * instead of a reply. Returns the matched phrase (for the error message) or
- * null. Deliberately narrow: it must not match an agent merely *discussing* an
- * error, so each pattern is anchored on wording an infrastructure failure emits.
+ * Detect a transient provider or runner-transport failure in a transcript —
+ * an API 5xx, overload/529, gateway failure, or an OpenCode loopback fetch that
+ * died before a reply. Returns the matched phrase (for the error message) or
+ * null. Deliberately narrow: transport wording must occur on the adapter's own
+ * error line, so an agent merely discussing a socket error cannot match it.
  * Auth failures are classified separately and take precedence over this.
  */
 function runnerTransientFailureReason(result: PhaseResult): string | null {
@@ -280,6 +286,7 @@ function runnerTransientFailureReason(result: PhaseResult): string | null {
     /overloaded(?:_error)?/i,
     /\b(?:api error|http error|http|status(?:\s*code)?|error)[\s:#]+5(?:00|02|03|04|29)\b/i,
     /\b529\b[^\n]{0,40}?(?:overloaded|too many|rate)/i,
+    /\[opencode runner error\][^\n]*(?:fetch failed|socket hang up|ECONNRESET|ETIMEDOUT|EPIPE|UND_ERR_(?:HEADERS|BODY)_TIMEOUT)/i,
   ];
   for (const re of patterns) {
     const m = text.match(re);
