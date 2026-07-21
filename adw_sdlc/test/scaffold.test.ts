@@ -20,9 +20,15 @@ describe('scaffold', () => {
     // The four runner SDKs must stay optional so installing/selecting one
     // runner never requires the other three (PLAN.md D3). Unconditional runtime
     // deps: the classify SDK (@anthropic-ai/sdk), Zod (built-in phase schemas),
-    // and ajv (validates project-supplied per-phase schema overrides —
-    // docs/DESIGN-schema-overrides.md).
-    expect(Object.keys(pkg.dependencies).sort()).toEqual(['@anthropic-ai/sdk', 'ajv', 'zod']);
+    // ajv (validates project-supplied per-phase schema overrides —
+    // docs/DESIGN-schema-overrides.md), and Undici (the OpenCode loopback
+    // transport whose timeout must remain subordinate to the phase deadline).
+    expect(Object.keys(pkg.dependencies).sort()).toEqual([
+      '@anthropic-ai/sdk',
+      'ajv',
+      'undici',
+      'zod',
+    ]);
     expect(Object.keys(pkg.optionalDependencies).sort()).toEqual([
       '@anthropic-ai/claude-agent-sdk',
       '@earendil-works/pi-coding-agent',

@@ -462,12 +462,12 @@ function stripClaudePaygAuth(agent: AgentCtx): string[] {
 
 /**
  * Run an agent-phase invocation with bounded exponential backoff on a
- * {@link RunnerTransientError} (API 5xx / overload). A transient provider error
- * is not the agent's fault and no prompt change fixes it, so re-running the same
- * call after a short wait is the correct response — this stops a passing
- * implementation from being thrown away because the review (or any) phase
- * happened to hit a momentary API 500. Any other error (including a persistent
- * transient one after the budget is spent) propagates unchanged.
+ * {@link RunnerTransientError} (API 5xx / overload / transport failure). A
+ * transient runner error is not the agent's fault and no prompt change fixes
+ * it, so re-running the same call after a short wait is the correct response.
+ * This stops a passing implementation from being thrown away because the
+ * review (or any) phase happened to hit a momentary API 500. Any other error
+ * (including a persistent transient one after the budget is spent) propagates unchanged.
  */
 async function withTransientRetry<T>(
   invoke: () => Promise<T>,
@@ -491,7 +491,7 @@ async function withTransientRetry<T>(
       attempt += 1;
       const delayMs = config.baseDelayMs * 2 ** (attempt - 1);
       const message =
-        `${config.phase} phase hit a transient provider error (${err.reason}); ` +
+        `${config.phase} phase hit a transient provider/transport error (${err.reason}); ` +
         `retry ${attempt}/${config.retries} in ${Math.round(delayMs / 1000)}s`;
       config.note?.(message);
       config.progress?.(config.phase, message);

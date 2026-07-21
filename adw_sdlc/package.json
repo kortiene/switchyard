@@ -26,6 +26,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",
     "ajv": "^8.20.0",
+    "undici": "^7.28.0",
     "zod": "^4.4.3"
   },
   "optionalDependencies": {

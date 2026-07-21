@@ -20,6 +20,7 @@ const {
   spawnMock,
   createClientMock,
   sessionCreateMock,
+  sessionGetMock,
   sessionPromptMock,
   sessionAbortMock,
   eventSubscribeMock,
@@ -27,6 +28,7 @@ const {
   spawnMock: vi.fn(),
   createClientMock: vi.fn(),
   sessionCreateMock: vi.fn(),
+  sessionGetMock: vi.fn(),
   sessionPromptMock: vi.fn(),
   sessionAbortMock: vi.fn(),
   eventSubscribeMock: vi.fn(),
@@ -46,6 +48,7 @@ import {
   buildOpencodeServerConfig,
   createRunner,
   OPENCODE_CAPS,
+  OPENCODE_LOOPBACK_AGENT_OPTIONS,
   OPENCODE_PERMISSION,
   resolveOpencodeBin,
   splitModel,
@@ -87,6 +90,21 @@ function makeInfo(over: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
+function makeSession(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'sess-1',
+    slug: 'session',
+    projectID: 'project-1',
+    directory: join(tmp, 'worktree'),
+    title: 'adw plan',
+    version: '1',
+    time: { created: 1, updated: 2 },
+    cost: 0.0123,
+    tokens: { input: 100, output: 50, reasoning: 20, cache: { read: 10, write: 5 } },
+    ...over,
+  };
+}
+
 function promptResolves(info: Record<string, unknown>, parts: unknown[] = []): void {
   sessionPromptMock.mockResolvedValue({ data: { info, parts }, error: undefined });
 }
@@ -110,16 +128,29 @@ beforeEach(() => {
   spawnMock.mockReset();
   createClientMock.mockReset();
   sessionCreateMock.mockReset();
+  sessionGetMock.mockReset();
   sessionPromptMock.mockReset();
   sessionAbortMock.mockReset();
   eventSubscribeMock.mockReset();
 
   bannerOnSpawn();
   createClientMock.mockImplementation(() => ({
-    session: { create: sessionCreateMock, prompt: sessionPromptMock, abort: sessionAbortMock },
+    session: {
+      create: sessionCreateMock,
+      get: sessionGetMock,
+      prompt: sessionPromptMock,
+      abort: sessionAbortMock,
+    },
     event: { subscribe: eventSubscribeMock },
   }));
-  sessionCreateMock.mockResolvedValue({ data: { id: 'sess-1' }, error: undefined });
+  sessionCreateMock.mockResolvedValue({
+    data: makeSession({
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    }),
+    error: undefined,
+  });
+  sessionGetMock.mockResolvedValue({ data: makeSession(), error: undefined });
   sessionAbortMock.mockResolvedValue({ data: true, error: undefined });
   // Default: an SSE stream that never yields (the final-parts replay owns the
   // transcript); individual tests script richer streams.
@@ -134,6 +165,32 @@ afterEach(async () => {
 });
 
 describe('server spawn (the D5 boundary)', () => {
+  it('uses a dedicated no-timeout dispatcher for loopback SDK requests and destroys it on stop', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    try {
+      await runner.runPhase(makeReq());
+
+      const config = createClientMock.mock.calls[0]![0] as {
+        baseUrl: string;
+        fetch: typeof fetch;
+      };
+      expect(config.baseUrl).toBe(SERVER_URL);
+      expect(OPENCODE_LOOPBACK_AGENT_OPTIONS).toEqual({ headersTimeout: 0, bodyTimeout: 0 });
+      await config.fetch(`${SERVER_URL}/global/health`);
+      const init = fetchSpy.mock.calls[0]![1] as RequestInit & {
+        dispatcher: { destroyed: boolean };
+      };
+      expect(init.dispatcher.destroyed).toBe(false);
+
+      await runner.stop?.();
+      expect(init.dispatcher.destroyed).toBe(true);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('self-spawns opencode serve with the verbatim allowlist plus the authored config, never process.env', async () => {
     const poisoned = {
       GH_TOKEN: 'leak-gh',
@@ -249,7 +306,10 @@ describe('server spawn (the D5 boundary)', () => {
 
     expect(spawnMock).toHaveBeenCalledTimes(1);
     expect(createClientMock).toHaveBeenCalledTimes(1);
-    expect(createClientMock).toHaveBeenCalledWith({ baseUrl: SERVER_URL });
+    expect(createClientMock).toHaveBeenCalledWith({
+      baseUrl: SERVER_URL,
+      fetch: expect.any(Function),
+    });
     expect(sessionCreateMock).toHaveBeenCalledTimes(2);
   });
 
@@ -448,8 +508,65 @@ describe('result mapping', () => {
     });
   });
 
+  it('reports the cumulative session delta, including tool-loop turns before the final message', async () => {
+    promptResolves(makeInfo({
+      cost: 0.52793,
+      tokens: { input: 400, output: 80, reasoning: 30, cache: { read: 20, write: 0 } },
+    }));
+    sessionGetMock.mockResolvedValue({
+      data: makeSession({
+        cost: 2.075088,
+        tokens: { input: 1_900, output: 310, reasoning: 125, cache: { read: 700, write: 0 } },
+      }),
+      error: undefined,
+    });
+
+    const result = await runner.runPhase(makeReq());
+
+    expect(result.usage).toEqual({
+      inputTokens: 1_900,
+      outputTokens: 310,
+      cachedInputTokens: 700,
+      reasoningTokens: 125,
+      costUsd: 2.075088,
+    });
+  });
+
+  it('subtracts the baseline when measuring a resumed session', async () => {
+    const req = makeReq({ resumeSessionId: 'sess-existing' });
+    promptResolves(makeInfo({ sessionID: 'sess-existing', cost: 0.2 }));
+    sessionGetMock
+      .mockResolvedValueOnce({
+        data: makeSession({
+          id: 'sess-existing',
+          cost: 1.5,
+          tokens: { input: 1_000, output: 200, reasoning: 80, cache: { read: 400, write: 0 } },
+        }),
+        error: undefined,
+      })
+      .mockResolvedValueOnce({
+        data: makeSession({
+          id: 'sess-existing',
+          cost: 2.1,
+          tokens: { input: 1_450, output: 310, reasoning: 120, cache: { read: 550, write: 0 } },
+        }),
+        error: undefined,
+      });
+
+    const result = await runner.runPhase(req);
+
+    expect(result.usage).toMatchObject({
+      inputTokens: 450,
+      outputTokens: 110,
+      cachedInputTokens: 150,
+      reasoningTokens: 40,
+    });
+    expect(result.usage.costUsd).toBeCloseTo(0.6);
+  });
+
   it('degrades missing/garbage usage fields to undefined and cost to null (server-drift guard)', async () => {
     promptResolves(makeInfo({ cost: 'oops', tokens: { output: 50, cache: {} } }));
+    sessionGetMock.mockResolvedValue({ data: undefined, error: { message: 'unsupported' } });
     const result = await runner.runPhase(makeReq());
 
     expect(result.ok).toBe(true);
@@ -554,15 +671,27 @@ describe('result mapping', () => {
     expect(sessionPromptMock).not.toHaveBeenCalled();
   });
 
-  it('keeps captured output and reports rc 1 when the client throws (crashed-CLI parity)', async () => {
-    sessionPromptMock.mockRejectedValue(new Error('socket hang up'));
+  it('aborts and accounts for the session when the prompt transport throws', async () => {
+    sessionPromptMock.mockRejectedValue(
+      new Error('fetch failed', { cause: { code: 'UND_ERR_HEADERS_TIMEOUT' } }),
+    );
     const req = makeReq();
     const result = await runner.runPhase(req);
 
     expect(result.ok).toBe(false);
     expect(result.rc).toBe(1);
     expect(result.signal).toBe('none');
-    expect(readFileSync(req.transcriptPath, 'utf8')).toContain('[opencode runner error] Error: socket hang up');
+    expect(result.usage.costUsd).toBe(0.0123);
+    expect(sessionAbortMock).toHaveBeenCalledWith(
+      { sessionID: 'sess-1', directory: req.cwd },
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(readFileSync(req.transcriptPath, 'utf8')).toContain(
+      '[opencode runner error] Error: fetch failed (UND_ERR_HEADERS_TIMEOUT)',
+    );
+    expect(result.transcriptText).toContain(
+      '[opencode runner error] Error: fetch failed (UND_ERR_HEADERS_TIMEOUT)',
+    );
   });
 });
 

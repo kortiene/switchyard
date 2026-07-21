@@ -54,7 +54,9 @@ import type {
   AssistantMessage,
   OpencodeClient,
   Part,
+  Session,
 } from '@opencode-ai/sdk/v2/client';
+import { Agent } from 'undici';
 
 import { getAdwConfig, type AdwConfig } from '../config.js';
 import type {
@@ -129,6 +131,22 @@ export const SERVER_BIND_ATTEMPTS = 3;
  * are written to the phase transcript only on failure.
  */
 export const SERVER_DIAGNOSTIC_LIMIT_CHARS = 64 * 1024;
+
+/**
+ * The prompt request can legitimately remain silent while OpenCode is using
+ * tools or waiting on a hosted model. Node's global fetch otherwise inherits
+ * Undici's five-minute response-header timeout, which can fire long before the
+ * phase's configured deadline. Disable transport-level prompt/body deadlines
+ * for this loopback client; the PhaseRequest AbortSignal remains the single,
+ * explicit execution deadline.
+ */
+export const OPENCODE_LOOPBACK_AGENT_OPTIONS = {
+  headersTimeout: 0,
+  bodyTimeout: 0,
+} as const;
+
+/** Keep best-effort cleanup/accounting calls from delaying a failed phase. */
+export const OPENCODE_CLEANUP_TIMEOUT_MS = 5_000;
 
 /** IANA dynamic/private port range. */
 const PORT_RANGE_START = 49152;
@@ -213,6 +231,88 @@ function usageOf(info: AssistantMessage): PhaseUsage {
   return usage;
 }
 
+/** OpenCode's Session counters are cumulative across every assistant turn. */
+function usageOfSession(session: Session): PhaseUsage {
+  const count = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  const usage: PhaseUsage = {};
+  const input = count(session.tokens?.input);
+  const output = count(session.tokens?.output);
+  const reasoning = count(session.tokens?.reasoning);
+  const cached = count(session.tokens?.cache.read);
+  const cost = count(session.cost);
+  if (input !== undefined) usage.inputTokens = input;
+  if (output !== undefined) usage.outputTokens = output;
+  if (cached !== undefined) usage.cachedInputTokens = cached;
+  if (reasoning !== undefined) usage.reasoningTokens = reasoning;
+  if (cost !== undefined) usage.costUsd = cost;
+  return usage;
+}
+
+function usageDelta(after: PhaseUsage, before: PhaseUsage | null): PhaseUsage {
+  const delta: PhaseUsage = {};
+  const subtract = (a: number | undefined, b: number | undefined): number | undefined =>
+    a === undefined ? undefined : Math.max(0, a - (b ?? 0));
+  const input = subtract(after.inputTokens, before?.inputTokens);
+  const output = subtract(after.outputTokens, before?.outputTokens);
+  const cached = subtract(after.cachedInputTokens, before?.cachedInputTokens);
+  const reasoning = subtract(after.reasoningTokens, before?.reasoningTokens);
+  const cost = typeof after.costUsd === 'number'
+    ? Math.max(0, after.costUsd - (typeof before?.costUsd === 'number' ? before.costUsd : 0))
+    : undefined;
+  if (input !== undefined) delta.inputTokens = input;
+  if (output !== undefined) delta.outputTokens = output;
+  if (cached !== undefined) delta.cachedInputTokens = cached;
+  if (reasoning !== undefined) delta.reasoningTokens = reasoning;
+  if (cost !== undefined) delta.costUsd = cost;
+  return delta;
+}
+
+function hasUsageActivity(usage: PhaseUsage): boolean {
+  return [
+    usage.inputTokens,
+    usage.outputTokens,
+    usage.cachedInputTokens,
+    usage.reasoningTokens,
+    typeof usage.costUsd === 'number' ? usage.costUsd : undefined,
+  ].some((value) => value !== undefined && value > 0);
+}
+
+/**
+ * Prefer the session delta because a prompt can contain several assistant
+ * turns separated by tool calls. Fill only missing fields from the terminal
+ * assistant message, which is the best information older servers expose.
+ */
+function measuredUsage(
+  after: Session | null,
+  before: PhaseUsage | null,
+  info: AssistantMessage | null | undefined,
+): PhaseUsage {
+  const fallback = info != null ? usageOf(info) : {};
+  // A resumed session needs both sides of the measurement. If its baseline
+  // lookup failed, using the cumulative "after" value would charge the whole
+  // historical session to this phase.
+  if (after === null || before === null) {
+    return fallback;
+  }
+  const delta = usageDelta(usageOfSession(after), before);
+  if (!hasUsageActivity(delta) && hasUsageActivity(fallback)) {
+    return fallback;
+  }
+  const usage: PhaseUsage = {};
+  const input = delta.inputTokens ?? fallback.inputTokens;
+  const output = delta.outputTokens ?? fallback.outputTokens;
+  const cached = delta.cachedInputTokens ?? fallback.cachedInputTokens;
+  const reasoning = delta.reasoningTokens ?? fallback.reasoningTokens;
+  const cost = delta.costUsd ?? fallback.costUsd;
+  if (input !== undefined) usage.inputTokens = input;
+  if (output !== undefined) usage.outputTokens = output;
+  if (cached !== undefined) usage.cachedInputTokens = cached;
+  if (reasoning !== undefined) usage.reasoningTokens = reasoning;
+  if (cost !== undefined) usage.costUsd = cost;
+  return usage;
+}
+
 function asStructured(value: unknown): Record<string, unknown> | null {
   if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
     return value as Record<string, unknown>;
@@ -224,9 +324,10 @@ function asStructured(value: unknown): Record<string, unknown> | null {
  * Transcript accumulator: text parts stream into BOTH transcriptText and the
  * file (deduped by written length, so `message.part.delta`,
  * `message.part.updated`, and the final response parts can all replay the
- * same text without double-writing); tool/error notes go to the FILE only,
- * keeping transcriptText assistant-text-only so the invoker's
- * trailing-fenced-JSON fallback keeps parsing (codex/claude convention).
+ * same text without double-writing). Tool/server notes go to the FILE only.
+ * Terminal adapter/message errors also enter transcriptText so control-plane
+ * classifiers can distinguish infrastructure failures from malformed output;
+ * the JSON parser's balanced-object fallback preserves parse-first behavior.
  */
 class Transcript {
   text = '';
@@ -240,6 +341,13 @@ class Transcript {
   note(text: string): void {
     if (text !== '') {
       appendFileSync(this.path, text, 'utf8');
+    }
+  }
+
+  error(text: string): void {
+    if (text !== '') {
+      this.text += text;
+      this.note(text);
     }
   }
 
@@ -296,6 +404,7 @@ interface Server {
   client: OpencodeClient;
   url: string;
   diagnostics: ServerDiagnostics;
+  dispatcher: Agent;
 }
 
 /**
@@ -378,15 +487,15 @@ class OpencodeRunner implements AgentRunner {
     return Promise.resolve();
   }
 
-  /** Kill the self-spawned server; the orchestrator calls this in a finally. */
-  stop(): Promise<void> {
+  /** Kill the self-spawned server and destroy its loopback HTTP pool. */
+  async stop(): Promise<void> {
     this.starting = null;
     const server = this.server;
     this.server = null;
     if (server !== null && server.proc.exitCode === null && !server.proc.killed) {
       server.proc.kill('SIGTERM');
     }
-    return Promise.resolve();
+    await server?.dispatcher.destroy();
   }
 
   async runPhase(req: PhaseRequest): Promise<PhaseResult> {
@@ -402,7 +511,7 @@ class OpencodeRunner implements AgentRunner {
     } catch (err) {
       // A server that never came up mirrors a crashed CLI run: failed
       // result, output kept, never an exception out of the seam.
-      transcript.note(`[opencode runner error] ${String(err)}\n`);
+      transcript.error(`[opencode runner error] ${String(err)}\n`);
       return this.failed(transcript, req.signal.aborted ? abortKind(req.signal) : 'none',
         req.signal.aborted ? TIMEOUT_RC : 1, null);
     }
@@ -410,6 +519,8 @@ class OpencodeRunner implements AgentRunner {
     let sessionId = req.resumeSessionId;
     let info: AssistantMessage | undefined;
     let parts: Part[] = [];
+    let usageBefore: PhaseUsage | null = null;
+    let usageAfter: Session | null = null;
     const diagnosticsMark = server.diagnostics.mark();
     const model = splitModel(req.model);
     // The SSE tee is scoped to this phase; aborting it never cancels the
@@ -435,11 +546,15 @@ class OpencodeRunner implements AgentRunner {
           if (req.signal.aborted) {
             return this.failed(transcript, abortKind(req.signal), TIMEOUT_RC, null);
           }
-          transcript.note(`[opencode runner error] session.create failed: ${describe(created.error)}\n`);
+          transcript.error(`[opencode runner error] session.create failed: ${describe(created.error)}\n`);
           noteServerDiagnostics(server, diagnosticsMark, transcript);
           return this.failed(transcript, 'none', 1, null);
         }
         sessionId = created.data.id;
+        usageBefore = usageOfSession(created.data);
+      } else {
+        const before = await this.sessionSnapshot(server, sessionId, req.cwd);
+        usageBefore = before === null ? null : usageOfSession(before);
       }
 
       void this.teeEvents(server.client, sessionId, transcript, events.signal);
@@ -475,12 +590,26 @@ class OpencodeRunner implements AgentRunner {
           }
           return this.failed(transcript, abortKind(req.signal), TIMEOUT_RC, null, sessionId);
         }
-        transcript.note(`[opencode runner error] prompt failed: ${describe(res.error)}\n`);
+        transcript.error(`[opencode runner error] prompt failed: ${describe(res.error)}\n`);
+        if (sessionId !== undefined) {
+          await this.abortSession(server, sessionId, req.cwd);
+          usageAfter = await this.sessionSnapshot(server, sessionId, req.cwd);
+        }
         noteServerDiagnostics(server, diagnosticsMark, transcript);
-        return this.failed(transcript, 'none', 1, null, sessionId);
+        return this.failed(
+          transcript,
+          'none',
+          1,
+          null,
+          sessionId,
+          measuredUsage(usageAfter, usageBefore, null),
+        );
       }
       info = res.data.info;
       parts = res.data.parts;
+      if (!req.signal.aborted && sessionId !== undefined) {
+        usageAfter = await this.sessionSnapshot(server, sessionId, req.cwd);
+      }
     } catch (err) {
       if (req.signal.aborted) {
         // Best-effort server-side stop so an aborted phase stops burning
@@ -490,9 +619,20 @@ class OpencodeRunner implements AgentRunner {
         }
         return this.failed(transcript, abortKind(req.signal), TIMEOUT_RC, null, sessionId);
       }
-      transcript.note(`\n[opencode runner error] ${String(err)}\n`);
+      transcript.error(`\n[opencode runner error] ${describeThrown(err)}\n`);
+      if (sessionId !== undefined) {
+        await this.abortSession(server, sessionId, req.cwd);
+        usageAfter = await this.sessionSnapshot(server, sessionId, req.cwd);
+      }
       noteServerDiagnostics(server, diagnosticsMark, transcript);
-      return this.failed(transcript, 'none', 1, null, sessionId);
+      return this.failed(
+        transcript,
+        'none',
+        1,
+        null,
+        sessionId,
+        measuredUsage(usageAfter, usageBefore, null),
+      );
     } finally {
       events.abort();
     }
@@ -514,20 +654,27 @@ class OpencodeRunner implements AgentRunner {
     if (req.signal.aborted) {
       // Late abort after a completed prompt: parse-first parity — keep the
       // structured payload, still report the abort (the invoker owns policy).
-      return this.failed(transcript, abortKind(req.signal), TIMEOUT_RC, info, sessionId);
+      return this.failed(
+        transcript,
+        abortKind(req.signal),
+        TIMEOUT_RC,
+        info,
+        sessionId,
+        measuredUsage(usageAfter, usageBefore, info),
+      );
     }
     if (info.error !== undefined) {
       // StructuredOutputError, provider/auth errors, aborts observed
       // server-side: opencode has no native budget cap (caps.nativeBudget
       // false), so every message error stays signal 'none' and the invoker's
       // single nudge applies exactly as to a failed CLI run. File only.
-      transcript.note(`\n[opencode ${info.error.name}] ${describe(info.error.data)}\n`);
+      transcript.error(`\n[opencode ${info.error.name}] ${describe(info.error.data)}\n`);
       noteServerDiagnostics(server, diagnosticsMark, transcript);
       return {
         ok: false,
         structured: asStructured(info.structured),
         transcriptText: transcript.text,
-        usage: usageOf(info),
+        usage: measuredUsage(usageAfter, usageBefore, info),
         rc: 1,
         signal: 'none',
         ...(sessionId !== undefined ? { sessionId } : {}),
@@ -538,7 +685,7 @@ class OpencodeRunner implements AgentRunner {
       ok: true,
       structured: asStructured(info.structured),
       transcriptText: transcript.text,
-      usage: usageOf(info),
+      usage: measuredUsage(usageAfter, usageBefore, info),
       rc: 0,
       signal: 'none',
       ...(sessionId !== undefined ? { sessionId } : {}),
@@ -551,12 +698,13 @@ class OpencodeRunner implements AgentRunner {
       return Promise.resolve(this.server);
     }
     if (this.starting === null) {
-      const starting = this.spawnServer(req).then((server) => {
+      const starting = this.spawnServer(req).then(async (server) => {
         if (this.starting !== starting) {
           // stop() ran while the server was starting; don't resurrect it.
           if (server.proc.exitCode === null && !server.proc.killed) {
             server.proc.kill('SIGTERM');
           }
+          await server.dispatcher.destroy();
           throw new Error('opencode runner stopped during server start');
         }
         this.server = server;
@@ -651,7 +799,21 @@ class OpencodeRunner implements AgentRunner {
             settled = true;
             clearTimeout(timer);
             const url = match[1]!;
-            resolve({ proc, url, client: createOpencodeClient({ baseUrl: url }), diagnostics });
+            const dispatcher = new Agent(OPENCODE_LOOPBACK_AGENT_OPTIONS);
+            const fetchWithLoopbackDispatcher = ((
+              input: Parameters<typeof fetch>[0],
+              init?: Parameters<typeof fetch>[1],
+            ) => globalThis.fetch(
+              input,
+              { ...init, dispatcher } as unknown as RequestInit,
+            )) as typeof fetch;
+            resolve({
+              proc,
+              url,
+              client: createOpencodeClient({ baseUrl: url, fetch: fetchWithLoopbackDispatcher }),
+              diagnostics,
+              dispatcher,
+            });
             return;
           }
         }
@@ -730,12 +892,38 @@ class OpencodeRunner implements AgentRunner {
     }
   }
 
+  /** Best-effort cumulative accounting; terminal message usage is fallback. */
+  private async sessionSnapshot(server: Server, sessionId: string, cwd: string): Promise<Session | null> {
+    try {
+      const result = await server.client.session.get(
+        { sessionID: sessionId, directory: cwd },
+        { signal: AbortSignal.timeout(OPENCODE_CLEANUP_TIMEOUT_MS) },
+      );
+      return result.error === undefined && result.data !== undefined ? result.data : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Stop a request that may still be running after its client connection died. */
+  private async abortSession(server: Server, sessionId: string, cwd: string): Promise<void> {
+    try {
+      await server.client.session.abort(
+        { sessionID: sessionId, directory: cwd },
+        { signal: AbortSignal.timeout(OPENCODE_CLEANUP_TIMEOUT_MS) },
+      );
+    } catch {
+      // The process-level stop() is the hard cleanup boundary.
+    }
+  }
+
   private failed(
     transcript: Transcript,
     signal: PhaseResult['signal'],
     rc: number,
     info: AssistantMessage | null | undefined,
     sessionId?: string,
+    usageOverride?: PhaseUsage,
   ): PhaseResult {
     return {
       ok: false,
@@ -744,7 +932,7 @@ class OpencodeRunner implements AgentRunner {
       // claude/codex adapters; the invoker owns the policy).
       structured: info != null ? asStructured(info.structured) : null,
       transcriptText: transcript.text,
-      usage: info != null ? usageOf(info) : {},
+      usage: usageOverride ?? (info != null ? usageOf(info) : {}),
       rc,
       signal,
       ...(sessionId !== undefined ? { sessionId } : {}),
@@ -760,7 +948,7 @@ function describe(value: unknown): string {
   if (typeof value === 'object') {
     const message = (value as { message?: unknown }).message;
     if (typeof message === 'string') {
-      return message;
+      return appendErrorCode(message, errorCode(value));
     }
     try {
       return JSON.stringify(value);
@@ -769,6 +957,30 @@ function describe(value: unknown): string {
     }
   }
   return String(value);
+}
+
+function describeThrown(value: unknown): string {
+  return appendErrorCode(String(value), errorCode(value));
+}
+
+function appendErrorCode(message: string, code: string | null): string {
+  return code !== null && !message.includes(code) ? `${message} (${code})` : message;
+}
+
+/** Follow common Error/envelope cause shapes without assuming an SDK version. */
+function errorCode(value: unknown): string | null {
+  const seen = new Set<object>();
+  let current = value;
+  for (let depth = 0; depth < 5 && current !== null && typeof current === 'object'; depth += 1) {
+    if (seen.has(current)) return null;
+    seen.add(current);
+    const record = current as { code?: unknown; cause?: unknown; data?: unknown };
+    if (typeof record.code === 'string' && record.code !== '') {
+      return record.code;
+    }
+    current = record.cause ?? record.data;
+  }
+  return null;
 }
 
 export function createRunner(): AgentRunner {
