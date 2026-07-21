@@ -44,6 +44,20 @@ describe('parseJson', () => {
     expect(parseJson('the answer is {"a": 1} as shown')).toEqual({ a: 1 });
   });
 
+  it('skips a prose bracket tag before a later JSON object (issue #88)', () => {
+    expect(parseJson('[test] completed the work\n{"tests_added":true,"summary":"ok"}', 'object')).toEqual({
+      tests_added: true,
+      summary: 'ok',
+    });
+  });
+
+  it('balances nested values and braces inside JSON strings when extracting from prose', () => {
+    expect(parseJson('result: {"summary":"kept } literally","items":[{"ok":true}]} done', 'object')).toEqual({
+      summary: 'kept } literally',
+      items: [{ ok: true }],
+    });
+  });
+
   it('prefers an explicit json fence over later-looking generic markdown fences', () => {
     const text = [
       'report',
