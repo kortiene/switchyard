@@ -123,6 +123,13 @@ export const SERVER_START_TIMEOUT_MS = 30_000;
  */
 export const SERVER_BIND_ATTEMPTS = 3;
 
+/**
+ * Keep enough server output to diagnose a failed request without allowing a
+ * long-lived DEBUG server to grow the runner heap without bound. Diagnostics
+ * are written to the phase transcript only on failure.
+ */
+export const SERVER_DIAGNOSTIC_LIMIT_CHARS = 64 * 1024;
+
 /** IANA dynamic/private port range. */
 const PORT_RANGE_START = 49152;
 const PORT_RANGE_SIZE = 16384;
@@ -288,6 +295,71 @@ interface Server {
   proc: ChildProcess;
   client: OpencodeClient;
   url: string;
+  diagnostics: ServerDiagnostics;
+}
+
+/**
+ * Bounded, redacted capture of `opencode serve --print-logs` output. The
+ * monotonic offset lets each phase take a mark and include only logs emitted
+ * while that phase was active, even after older output has been trimmed.
+ */
+class ServerDiagnostics {
+  private text = '';
+  private offset = 0;
+
+  constructor(private readonly redactions: readonly string[]) {}
+
+  mark(): number {
+    return this.offset + this.text.length;
+  }
+
+  append(chunk: Buffer | string): string {
+    let safe = chunk.toString();
+    for (const secret of this.redactions) {
+      safe = safe.split(secret).join('[REDACTED]');
+    }
+
+    this.text += safe;
+    const overflow = this.text.length - SERVER_DIAGNOSTIC_LIMIT_CHARS;
+    if (overflow > 0) {
+      this.text = this.text.slice(overflow);
+      this.offset += overflow;
+    }
+    return safe;
+  }
+
+  since(mark: number): string {
+    const truncated = mark < this.offset;
+    const start = Math.max(mark, this.offset) - this.offset;
+    return `${truncated ? '[earlier opencode diagnostics truncated]\n' : ''}${this.text.slice(start)}`;
+  }
+}
+
+function diagnosticSecretValues(env: Record<string, string | undefined>, config: AdwConfig): string[] {
+  const configured = config.runners.opencode.authEnv;
+  const authNames = new Set(
+    configured === undefined ? [] : Array.isArray(configured) ? configured : [configured],
+  );
+  const values = new Set<string>();
+  for (const [key, value] of Object.entries(env)) {
+    if (
+      value !== undefined &&
+      value !== '' &&
+      (authNames.has(key) || /(?:API_KEY|AUTH_TOKEN|TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(key))
+    ) {
+      values.add(value);
+    }
+  }
+  // Redact longer values first so an accidentally overlapping short secret
+  // cannot leave a suffix of the longer credential behind.
+  return [...values].sort((a, b) => b.length - a.length);
+}
+
+function noteServerDiagnostics(server: Server, mark: number, transcript: Transcript): void {
+  const output = server.diagnostics.since(mark).trim();
+  if (output !== '') {
+    transcript.note(`[opencode server diagnostics]\n${output}\n`);
+  }
 }
 
 class OpencodeRunner implements AgentRunner {
@@ -338,12 +410,24 @@ class OpencodeRunner implements AgentRunner {
     let sessionId: string | undefined;
     let info: AssistantMessage | undefined;
     let parts: Part[] = [];
+    const diagnosticsMark = server.diagnostics.mark();
+    const model = splitModel(req.model);
     // The SSE tee is scoped to this phase; aborting it never cancels the
     // prompt itself.
     const events = new AbortController();
     try {
       const created = await server.client.session.create(
-        { directory: req.cwd, title: `adw ${req.phase}` },
+        {
+          directory: req.cwd,
+          title: `adw ${req.phase}`,
+          // The create route uses `id`, while the prompt route below uses
+          // `modelID`. Supplying both mirrors OpenCode's own CLI flow and
+          // prevents a newly-created hosted-provider session from beginning
+          // life with model=undefined.
+          ...(model.providerID !== ''
+            ? { model: { providerID: model.providerID, id: model.modelID } }
+            : {}),
+        },
         { signal: req.signal },
       );
       if (created.error !== undefined || created.data === undefined) {
@@ -351,6 +435,7 @@ class OpencodeRunner implements AgentRunner {
           return this.failed(transcript, abortKind(req.signal), TIMEOUT_RC, null);
         }
         transcript.note(`[opencode runner error] session.create failed: ${describe(created.error)}\n`);
+        noteServerDiagnostics(server, diagnosticsMark, transcript);
         return this.failed(transcript, 'none', 1, null);
       }
       sessionId = created.data.id;
@@ -361,8 +446,8 @@ class OpencodeRunner implements AgentRunner {
         {
           sessionID: sessionId,
           directory: req.cwd,
-          ...(splitModel(req.model).providerID !== ''
-            ? { model: splitModel(req.model) }
+          ...(model.providerID !== ''
+            ? { model }
             : {}),
           parts: [{ type: 'text', text: req.prompt }],
           ...(req.schema !== undefined
@@ -389,6 +474,7 @@ class OpencodeRunner implements AgentRunner {
           return this.failed(transcript, abortKind(req.signal), TIMEOUT_RC, null, sessionId);
         }
         transcript.note(`[opencode runner error] prompt failed: ${describe(res.error)}\n`);
+        noteServerDiagnostics(server, diagnosticsMark, transcript);
         return this.failed(transcript, 'none', 1, null, sessionId);
       }
       info = res.data.info;
@@ -403,6 +489,7 @@ class OpencodeRunner implements AgentRunner {
         return this.failed(transcript, abortKind(req.signal), TIMEOUT_RC, null, sessionId);
       }
       transcript.note(`\n[opencode runner error] ${String(err)}\n`);
+      noteServerDiagnostics(server, diagnosticsMark, transcript);
       return this.failed(transcript, 'none', 1, null, sessionId);
     } finally {
       events.abort();
@@ -433,6 +520,7 @@ class OpencodeRunner implements AgentRunner {
       // false), so every message error stays signal 'none' and the invoker's
       // single nudge applies exactly as to a failed CLI run. File only.
       transcript.note(`\n[opencode ${info.error.name}] ${describe(info.error.data)}\n`);
+      noteServerDiagnostics(server, diagnosticsMark, transcript);
       return {
         ok: false,
         structured: asStructured(info.structured),
@@ -506,12 +594,23 @@ class OpencodeRunner implements AgentRunner {
   }
 
   private spawnServerOnce(req: PhaseRequest, bin: string, port: number): Promise<Server> {
-    const proc = spawn(bin, ['serve', '--hostname', '127.0.0.1', '--port', String(port)], {
+    const config = getAdwConfig();
+    const diagnostics = new ServerDiagnostics(diagnosticSecretValues(req.env, config));
+    const proc = spawn(bin, [
+      'serve',
+      '--hostname',
+      '127.0.0.1',
+      '--port',
+      String(port),
+      '--print-logs',
+      '--log-level',
+      'DEBUG',
+    ], {
       cwd: req.cwd,
       // The allowlist verbatim, plus the config this adapter renders. The
       // operator may supply providers/models, while buildOpencodeServerConfig
       // keeps permission runner-owned; grandchildren inherit this clean env.
-      env: { ...req.env, OPENCODE_CONFIG_CONTENT: JSON.stringify(buildOpencodeServerConfig()) },
+      env: { ...req.env, OPENCODE_CONFIG_CONTENT: JSON.stringify(buildOpencodeServerConfig(config)) },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
@@ -535,10 +634,11 @@ class OpencodeRunner implements AgentRunner {
       }, SERVER_START_TIMEOUT_MS);
 
       const onData = (chunk: Buffer | string): void => {
+        const safe = diagnostics.append(chunk);
         if (settled) {
           return;
         }
-        output += chunk.toString();
+        output += safe;
         for (const line of output.split('\n')) {
           if (line.includes(READY_BANNER)) {
             const match = READY_URL.exec(line);
@@ -549,7 +649,7 @@ class OpencodeRunner implements AgentRunner {
             settled = true;
             clearTimeout(timer);
             const url = match[1]!;
-            resolve({ proc, url, client: createOpencodeClient({ baseUrl: url }) });
+            resolve({ proc, url, client: createOpencodeClient({ baseUrl: url }), diagnostics });
             return;
           }
         }

@@ -162,6 +162,7 @@ describe('server spawn (the D5 boundary)', () => {
     const port = Number(args[4]);
     expect(port).toBeGreaterThanOrEqual(49152);
     expect(port).toBeLessThan(65536);
+    expect(args.slice(5)).toEqual(['--print-logs', '--log-level', 'DEBUG']);
     expect(options.cwd).toBe(req.cwd);
     expect(options.env['ANTHROPIC_API_KEY']).toBe('sk-ant');
     expect(options.env['GH_TOKEN']).toBeUndefined();
@@ -379,7 +380,11 @@ describe('request shape', () => {
     await runner.runPhase(req);
 
     expect(sessionCreateMock).toHaveBeenCalledWith(
-      { directory: req.cwd, title: 'adw plan' },
+      {
+        directory: req.cwd,
+        title: 'adw plan',
+        model: { providerID: 'anthropic', id: 'claude-opus-4-8' },
+      },
       { signal: req.signal },
     );
     const [body, options] = sessionPromptMock.mock.calls[0]! as [Record<string, unknown>, { signal: AbortSignal }];
@@ -401,8 +406,10 @@ describe('request shape', () => {
 
   it('omits the model for an unprefixed override (server default provider resolution)', async () => {
     await runner.runPhase(makeReq({ model: 'claude-opus-4-8' }));
-    const body = sessionPromptMock.mock.calls[0]![0] as Record<string, unknown>;
-    expect('model' in body).toBe(false);
+    const create = sessionCreateMock.mock.calls[0]![0] as Record<string, unknown>;
+    const prompt = sessionPromptMock.mock.calls[0]![0] as Record<string, unknown>;
+    expect('model' in create).toBe(false);
+    expect('model' in prompt).toBe(false);
   });
 });
 
@@ -481,6 +488,47 @@ describe('result mapping', () => {
     expect(result.ok).toBe(false);
     expect(result.rc).toBe(1);
     expect(readFileSync(req.transcriptPath, 'utf8')).toContain('prompt failed');
+  });
+
+  it('adds bounded server DEBUG diagnostics to failures and redacts configured provider credentials', async () => {
+    const projectConfig = parseAdwConfig({
+      runners: { opencode: { authEnv: 'FORGE_AUTH', config: {} } },
+    });
+    setAdwConfigForTests(projectConfig);
+    sessionPromptMock.mockImplementation(() => {
+      proc.stderr.emit(
+        'data',
+        'level=WARN message="schema rejection" kind=Payload reason="Expected object, got undefined" auth=private-forge-token\n',
+      );
+      return Promise.resolve({
+        data: undefined,
+        error: { name: 'UnknownError', data: { message: 'Unexpected server error' } },
+      });
+    });
+    const req = makeReq({
+      env: { ...makeReq().env, FORGE_AUTH: 'private-forge-token' },
+    });
+    const result = await runner.runPhase(req);
+
+    expect(result.ok).toBe(false);
+    const log = readFileSync(req.transcriptPath, 'utf8');
+    expect(log).toContain('[opencode server diagnostics]');
+    expect(log).toContain('schema rejection');
+    expect(log).toContain('Expected object, got undefined');
+    expect(log).toContain('auth=[REDACTED]');
+    expect(log).not.toContain('private-forge-token');
+  });
+
+  it('does not add captured DEBUG output to a successful phase transcript', async () => {
+    sessionPromptMock.mockImplementation(() => {
+      proc.stderr.emit('data', 'level=DEBUG message="provider request completed"\n');
+      return Promise.resolve({ data: { info: makeInfo(), parts: [] }, error: undefined });
+    });
+    const req = makeReq();
+    const result = await runner.runPhase(req);
+
+    expect(result.ok).toBe(true);
+    expect(readFileSync(req.transcriptPath, 'utf8')).not.toContain('provider request completed');
   });
 
   it('maps a failed session.create to a failed result', async () => {
