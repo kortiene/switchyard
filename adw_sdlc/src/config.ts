@@ -39,11 +39,11 @@ const RunnerModelMapSchema = z
   .catchall(z.string().min(1));
 
 /**
- * One explicitly named credential may be forwarded to the OpenCode server for
- * use through OpenCode's `{env:NAME}` config substitution. Keep GitHub
- * authority and control-plane secrets outside that opt-in channel, and reject
- * OpenCode's own config selectors so an auth indirection cannot replace the
- * runner-authored permission policy through a second config source.
+ * One or more explicitly named credentials may be forwarded to the OpenCode
+ * server for use through OpenCode's `{env:NAME}` config substitution. Keep
+ * GitHub authority and control-plane secrets outside that opt-in channel, and
+ * reject OpenCode's own config selectors so an auth indirection cannot replace
+ * the runner-authored permission policy through a second config source.
  */
 const OPENCODE_FIXED_ENV = new Set<string>(RUNNER_ENV_ALLOW.opencode);
 const RESERVED_OPENCODE_AUTH_ENV = new Set<string>([
@@ -79,8 +79,8 @@ const OpencodeAuthEnvSchema = z
 const OpencodeRunnerConfigSchema = z.object({
   /** Operator-owned OpenCode server config; the adapter always replaces `permission`. */
   config: z.record(z.string(), z.unknown()).default({}),
-  /** Optional provider credential env name referenced as `{env:NAME}` in `config`. */
-  authEnv: OpencodeAuthEnvSchema.optional(),
+  /** Optional provider credential env name(s) referenced as `{env:NAME}` in `config`. */
+  authEnv: z.union([OpencodeAuthEnvSchema, z.array(OpencodeAuthEnvSchema).min(1)]).optional(),
 });
 
 /**

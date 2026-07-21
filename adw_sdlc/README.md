@@ -165,7 +165,7 @@ The validated surface (see `src/config.ts` for the authoritative Zod schema):
 | --- | --- |
 | `project` | id / display name |
 | `prompts` | template `defaultRoot` + per-runner roots. This repo points the HealthTech project pack at `../.adw/prompts`; `.pi/prompts` and `.claude/commands` are neutral fallback command templates. |
-| `runners` | runner-specific settings; `runners.opencode.config` supplies OpenCode server/provider config and optional `authEnv` names one provider credential |
+| `runners` | runner-specific settings; `runners.opencode.config` supplies OpenCode server/provider config and optional `authEnv` names one or more provider credentials |
 | `phases` | optional ordered agent-phase chain (reorder/drop known phases) |
 | `schemas` | optional per-phase JSON Schema overrides for `tests`/`e2e`/`document` (`root` dir + `overrides` map) |
 | `customPhases` | optional new phase names (each needs a `<name>.md` template + `.adw/schemas/<name>.json`); may opt into a `gates.custom` gate and/or a `loops` loop |
@@ -227,11 +227,25 @@ all OpenCode tiers to a local OpenAI-compatible Qwen server:
 
 Set `LOCAL_MODEL_API_KEY` in the parent environment before the run (a local
 server that does not authenticate can use a non-secret placeholder). `authEnv`
-is the only additional name admitted to the OpenCode child allowlist; it is not
-forwarded to other runners. GitHub authority, known credentials/config knobs
-belonging to other runners, `ADW_*` / `MX_AGENT_*` / `MATRIX_*`, and alternate
-OpenCode config-channel names are rejected. OpenCode performs the `{env:NAME}`
-substitution, keeping the value out of the project file.
+accepts the single string shown above or a non-empty array when the OpenCode
+config uses multiple hosted providers:
+
+```json
+{
+  "runners": {
+    "opencode": {
+      "authEnv": ["SAKANA_API_KEY", "ZAI_API_KEY"]
+    }
+  }
+}
+```
+
+Each additional listed name is admitted through the OpenCode-only allowlist
+extension; configuring `authEnv` never adds it to another runner's allowlist.
+GitHub authority, credentials/config knobs reserved to other runners,
+`ADW_*` / `MX_AGENT_*` / `MATRIX_*`, and alternate OpenCode config-channel
+names are rejected for every entry. OpenCode performs the `{env:NAME}`
+substitution, keeping credential values out of the project file.
 
 The adapter always replaces any operator-supplied `permission` field with its
 own headless policy, including the `bash` denials for `git` and `gh`. Provider,
@@ -333,10 +347,10 @@ run.
 opencode imports only via `@opencode-ai/sdk/v2/client`. The env allowlist in
 `src/env.ts` and this lint are hardcoded for security and cannot be broadly
 relaxed by a project pack. The sole narrow extension is the validated
-`runners.opencode.authEnv`: one exact provider-credential name, still filtered
-through `safeSubprocessEnv`; it cannot name GitHub authority, a denied prefix,
-another runner's known credential/config knob, or an alternate OpenCode config
-channel.
+`runners.opencode.authEnv`: one exact provider-credential name or a non-empty
+array of exact names, each still filtered through `safeSubprocessEnv`; no entry
+can name GitHub authority, a denied prefix, a credential/config knob reserved
+to another runner, or an alternate OpenCode config channel.
 
 ## Documentation map
 

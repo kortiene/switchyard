@@ -1602,17 +1602,20 @@ export async function run(
   }
 
   // OpenCode provider credentials stay out of .adw/config.json: the config may
-  // name one env var for `{env:NAME}` substitution, and only that name is
-  // added to the otherwise fixed runner allowlist. Config validation rejects
-  // GitHub authority, denied prefixes, and alternate OpenCode config channels.
+  // name one env var or a non-empty list for `{env:NAME}` substitution, and
+  // only those names are added to the otherwise fixed runner allowlist. Config
+  // validation rejects GitHub authority, denied prefixes, and alternate
+  // OpenCode config channels for every entry.
   const opencodeAuthEnv = runner.id === 'opencode' ? config.runners.opencode.authEnv : undefined;
+  const opencodeExtraAllow =
+    opencodeAuthEnv === undefined ? [] : typeof opencodeAuthEnv === 'string' ? [opencodeAuthEnv] : opencodeAuthEnv;
   const agentEnv = opts.inheritEnv
     ? definedEnv(deps.env)
     : safeSubprocessEnv({
         allowGhToken: false,
         runner: runner.id,
         source: deps.env,
-        extraAllow: opencodeAuthEnv === undefined ? [] : [opencodeAuthEnv],
+        extraAllow: opencodeExtraAllow,
       });
 
   const post = !opts.noProgress;
