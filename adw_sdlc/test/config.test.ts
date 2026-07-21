@@ -98,6 +98,13 @@ describe('ADW config', () => {
     });
   });
 
+  it('accepts a non-empty list of OpenCode provider credential names', () => {
+    const authEnv = ['SAKANA_API_KEY', 'ZAI_API_KEY'];
+    const config = parseAdwConfig({ runners: { opencode: { authEnv } } });
+
+    expect(config.runners.opencode.authEnv).toEqual(authEnv);
+  });
+
   it('rejects unsafe OpenCode auth indirection names and non-object server config', () => {
     for (const authEnv of [
       'GH_TOKEN',
@@ -117,7 +124,12 @@ describe('ADW config', () => {
       'NOT-A-NAME',
     ]) {
       expect(() => parseAdwConfig({ runners: { opencode: { authEnv } } }), authEnv).toThrow(/invalid/);
+      expect(
+        () => parseAdwConfig({ runners: { opencode: { authEnv: ['SAFE_PROVIDER_KEY', authEnv] } } }),
+        authEnv,
+      ).toThrow(/invalid/);
     }
+    expect(() => parseAdwConfig({ runners: { opencode: { authEnv: [] } } })).toThrow(/invalid/);
     expect(() => parseAdwConfig({ runners: { opencode: { config: [] } } })).toThrow(/invalid/);
     expect(() => parseAdwConfig({ runners: { opencode: { config: 'provider' } } })).toThrow(/invalid/);
   });

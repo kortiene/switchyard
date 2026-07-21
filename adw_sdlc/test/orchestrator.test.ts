@@ -554,6 +554,64 @@ describe('run() integration', () => {
     }
   });
 
+  it('forwards every configured OpenCode authEnv only to the OpenCode runner allowlist', async () => {
+    setAdwConfigForTests(
+      parseAdwConfig({
+        runners: {
+          opencode: {
+            authEnv: ['SAKANA_API_KEY', 'ZAI_API_KEY'],
+            config: {
+              provider: {
+                sakana: { options: { apiKey: '{env:SAKANA_API_KEY}' } },
+                zai: { options: { apiKey: '{env:ZAI_API_KEY}' } },
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    const runWith = async (runnerId: 'opencode' | 'claude', issue: number): Promise<Array<Record<string, string>>> => {
+      const seen: Array<Record<string, string>> = [];
+      const deps = testDeps({
+        env: {
+          PATH: '/bin',
+          ANTHROPIC_API_KEY: 'sk-ant-test',
+          SAKANA_API_KEY: 'sakana-secret',
+          ZAI_API_KEY: 'zai-secret',
+          GH_TOKEN: 'must-not-cross',
+        },
+        issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
+        runAgentPhase: agentStub(PHASE_RESULTS, (opts) => {
+          seen.push(opts.env);
+          if (opts.phase === 'review') {
+            mkdirSync(opts.state.workspace(), { recursive: true });
+            writeFileSync(commitMessagePath(opts.state), 'feat: multi-provider model routing', 'utf8');
+            writeFileSync(prBodyPath(opts.state), `Closes #${issue}`, 'utf8');
+          }
+        }),
+      });
+      expect(await run(issue, createMockRunner({ id: runnerId }), { yes: true, noProgress: true }, deps)).toBe(0);
+      return seen;
+    };
+
+    const opencodeEnvs = await runWith('opencode', 84);
+    expect(opencodeEnvs.length).toBeGreaterThan(0);
+    for (const env of opencodeEnvs) {
+      expect(env['SAKANA_API_KEY']).toBe('sakana-secret');
+      expect(env['ZAI_API_KEY']).toBe('zai-secret');
+      expect(env['GH_TOKEN']).toBeUndefined();
+    }
+
+    const claudeEnvs = await runWith('claude', 1084);
+    expect(claudeEnvs.length).toBeGreaterThan(0);
+    for (const env of claudeEnvs) {
+      expect(env['SAKANA_API_KEY']).toBeUndefined();
+      expect(env['ZAI_API_KEY']).toBeUndefined();
+      expect(env['GH_TOKEN']).toBeUndefined();
+    }
+  });
+
   it('reports a green PR-only run and lets an explicitly authorized resume merge it', async () => {
     const squashMerge = vi.fn(() => ({ ok: true, error: null }));
     const confirmPrompt = vi.fn(async () => false);
