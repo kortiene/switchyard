@@ -500,6 +500,49 @@ describe('run() integration', () => {
     expect(state?.totalCostUsd).toBeCloseTo(0.01);
   });
 
+  it('posts readable phase outcomes with the next step and no free-form runner text', async () => {
+    const postProgress = vi.fn();
+    const secretSummary = 'do-not-publish-runner-summary';
+    const results = {
+      ...PHASE_RESULTS,
+      implement: { summary: secretSummary, files_changed: ['src/lib.rs'] },
+    };
+    const deps = testDeps({
+      issueState: vi.fn().mockReturnValueOnce('OPEN').mockReturnValueOnce('CLOSED'),
+      postProgress,
+      classify: async () => ({ value: { issue_class: 'feat', reason: secretSummary }, usage: {} }),
+      runAgentPhase: agentStub(results, (opts) => {
+        if (opts.phase === 'review') {
+          mkdirSync(opts.state.workspace(), { recursive: true });
+          writeFileSync(commitMessagePath(opts.state), 'feat: readable progress', 'utf8');
+          writeFileSync(prBodyPath(opts.state), 'Closes #5', 'utf8');
+        }
+      }),
+    });
+
+    expect(await run(5, createMockRunner(), { yes: true }, deps)).toBe(0);
+
+    const messages = postProgress.mock.calls.map((call) => ({
+      phase: String(call[4]),
+      message: String(call[5]),
+    }));
+    const completed = (phase: string): string =>
+      messages.find((entry) => entry.phase === phase && entry.message.includes('**Next:**'))?.message ?? '';
+
+    expect(completed('classify')).toContain('Classified this work as a **feature**');
+    expect(completed('classify')).toContain('**Next:** Planning.');
+    expect(completed('implement')).toContain('1 changed file');
+    expect(completed('implement')).toContain('**Next:** Tests.');
+    expect(completed('resolve')).toContain('No test command was configured');
+    expect(completed('resolve')).toContain('**Next:** End-to-end tests.');
+    expect(completed('review')).toContain('Completed the review with no findings');
+    expect(completed('review')).toContain('**Next:** Review fixes.');
+    expect(completed('patch')).toContain('no blockers');
+    expect(completed('patch')).toContain('**Next:** Documentation.');
+    expect(completed('document')).toContain('**Next:** Final verification and merge preparation.');
+    expect(messages.map((entry) => entry.message).join('\n')).not.toContain(secretSummary);
+  });
+
   it('forwards configured OpenCode authEnv only to the OpenCode runner allowlist', async () => {
     setAdwConfigForTests(
       parseAdwConfig({

@@ -549,7 +549,7 @@ schema. `review` *looks* structured but reads the diff and writes workspace file
 | **patch_loop** | `patchLoop` | filter blocker findings, re-invoke `patch` ≤ max_attempts, stop on no progress |
 | **ci-fix** | `ciFixLoop` | poll `ciStatus`, re-invoke `resolve` on red, reset budget after commits, settle no-checks |
 | **finalize/merge** | `finalizeAndMerge` | finalize gates, commit/push/create-PR/watch-CI, `confirmMerge`, `squashMerge` |
-| **report** | `postProgress` | run-tagged gh comments, never secrets (`adw/_exec.py:71-88`) |
+| **report** | `postProgress` | run-tagged, human-readable Markdown updates with safe structural outcomes and next steps; never free-form runner text or secrets |
 
 Bounded loops stay as TS control-plane logic; a phase failure (`rc != 0`, native-schema-retry exhaustion,
 or a synthetic timeout/budget rc) feeds the existing loops exactly as a failed CLI run does today.

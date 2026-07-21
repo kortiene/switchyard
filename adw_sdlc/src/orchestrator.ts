@@ -45,6 +45,7 @@ import {
 import { createProvidersFromConfig, providerBackedDeps, type AdwProviders, type ProviderContext } from './providers.js';
 import { MetricsCollector, defaultClock, type Clock } from './metrics.js';
 import { modelForPhase } from './models.js';
+import { phaseCompletionProgress, phaseTransitionProgress } from './progress.js';
 import { runAgentPhase, type AgentPhaseOutcome } from './run-phase.js';
 import {
   ClassifySchema,
@@ -221,6 +222,18 @@ export interface RunCmdResult {
 }
 
 export type ProgressFn = (phase: string, message: string) => void;
+
+/** Next configured phase not already durable, or null when finalization follows. */
+function nextPendingPhase(phases: readonly string[], current: string, state: AdwState): string | null {
+  const currentIndex = phases.indexOf(current);
+  for (let index = currentIndex + 1; index < phases.length; index += 1) {
+    const candidate = phases[index]!;
+    if (!state.isDone(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
 
 export interface GitOps {
   createOrCheckoutBranch: typeof git.createOrCheckoutBranch;
@@ -598,14 +611,24 @@ function assertWithinBudget(state: AdwState, maxBudgetUsd: number | undefined): 
 export async function resolveLoop(
   state: AdwState,
   agent: AgentCtx,
-  config: { testCmd: string; maxAttempts: number; progress: ProgressFn; phase?: string; metrics?: MetricsCollector },
+  config: {
+    testCmd: string;
+    maxAttempts: number;
+    progress: ProgressFn;
+    phase?: string;
+    metrics?: MetricsCollector;
+    nextPhase?: string | null;
+  },
   deps: OrchestratorDeps,
 ): Promise<boolean> {
   // Built-in resolve passes no `phase`; a custom loop phase passes its own name
   // so the loop drives that phase's agent and tags progress under it.
   const phase = config.phase ?? 'resolve';
   if (config.testCmd.trim() === '') {
-    config.progress(phase, 'no test command configured; skipping test gate');
+    config.progress(
+      phase,
+      phaseTransitionProgress('skipped', 'No test command was configured, so the test gate was not run', config.nextPhase),
+    );
     return true;
   }
   const gate = shellSplit(config.testCmd);
@@ -613,11 +636,18 @@ export async function resolveLoop(
   for (;;) {
     const { rc, output } = deps.runCmd(gate);
     if (rc === 0) {
-      config.progress(phase, 'test gate is green');
+      config.progress(phase, phaseTransitionProgress('completed', 'The test gate is green', config.nextPhase));
       return true;
     }
     if (attempt >= config.maxAttempts) {
-      config.progress(phase, `test gate still failing after ${config.maxAttempts} attempt(s)`);
+      config.progress(
+        phase,
+        phaseTransitionProgress(
+          'blocked',
+          `The test gate is still failing after ${config.maxAttempts} repair attempt(s)`,
+          config.nextPhase,
+        ),
+      );
       return false;
     }
     attempt += 1;
@@ -634,7 +664,10 @@ export async function resolveLoop(
     });
     config.metrics?.save();
     if (outcome.data.resolved === 0) {
-      config.progress(phase, 'agent resolved nothing; stopping');
+      config.progress(
+        phase,
+        phaseTransitionProgress('blocked', 'The repair attempt did not resolve any test failures', config.nextPhase),
+      );
       return false;
     }
   }
@@ -645,7 +678,7 @@ export async function patchLoop(
   state: AdwState,
   findings: readonly ReviewFinding[],
   agent: AgentCtx,
-  config: { maxAttempts: number; progress: ProgressFn; metrics?: MetricsCollector },
+  config: { maxAttempts: number; progress: ProgressFn; metrics?: MetricsCollector; nextPhase?: string | null },
   deps: OrchestratorDeps,
 ): Promise<boolean> {
   const blockers = findings.filter((f) => f.severity === 'blocker');
@@ -654,7 +687,10 @@ export async function patchLoop(
     config.progress('patch', `${others} non-blocker finding(s) reported, not auto-fixed`);
   }
   if (blockers.length === 0) {
-    config.progress('patch', 'no blocker findings');
+    config.progress(
+      'patch',
+      phaseTransitionProgress('completed', 'The review found no blockers that require automatic fixes', config.nextPhase),
+    );
     return true;
   }
 
@@ -685,7 +721,18 @@ export async function patchLoop(
     }
     remaining = result.remaining;
   }
-  return remaining === 0;
+  const clear = remaining === 0;
+  config.progress(
+    'patch',
+    phaseTransitionProgress(
+      clear ? 'completed' : 'blocked',
+      clear
+        ? 'All review blockers were resolved'
+        : `${remaining} review blocker${remaining === 1 ? '' : 's'} remain after the bounded fix attempts`,
+      config.nextPhase,
+    ),
+  );
+  return clear;
 }
 
 /** Watch CI and ask the agent to fix red checks until green. Returns success. */
@@ -1698,9 +1745,12 @@ export async function run(
       if (isConditionalPhase(phase, config)) {
         const { runIt, reason } = gateConditional(phase, signal, files, config);
         if (!runIt) {
-          progress(phase, `skipped: ${reason}`);
           state.markDone(phase);
           state.save();
+          progress(
+            phase,
+            phaseTransitionProgress('skipped', reason, nextPendingPhase(phases, phase, state)),
+          );
           continue;
         }
       }
@@ -1714,8 +1764,21 @@ export async function run(
           state,
           agent,
           customLoop !== undefined
-            ? { testCmd: customLoop.command, maxAttempts: customLoop.maxAttempts, progress, phase, metrics }
-            : { testCmd: opts.testCmd, maxAttempts: opts.maxResolve, progress, metrics },
+            ? {
+                testCmd: customLoop.command,
+                maxAttempts: customLoop.maxAttempts,
+                progress,
+                phase,
+                metrics,
+                nextPhase: nextPendingPhase(phases, phase, state),
+              }
+            : {
+                testCmd: opts.testCmd,
+                maxAttempts: opts.maxResolve,
+                progress,
+                metrics,
+                nextPhase: nextPendingPhase(phases, phase, state),
+              },
           deps,
         );
         state.markDone(phase);
@@ -1728,7 +1791,18 @@ export async function run(
         // On a resume the review phase is skipped, so reconstruct its findings
         // from persisted state rather than silently patching nothing.
         const findings = reviewResult !== null ? reviewResult.findings : findingsFromState(state);
-        await patchLoop(state, findings, agent, { maxAttempts: opts.maxPatch, progress, metrics }, deps);
+        await patchLoop(
+          state,
+          findings,
+          agent,
+          {
+            maxAttempts: opts.maxPatch,
+            progress,
+            metrics,
+            nextPhase: nextPendingPhase(phases, phase, state),
+          },
+          deps,
+        );
         state.markDone(phase);
         state.save();
         assertWithinBudget(state, agent.maxBudgetUsd);
@@ -1766,7 +1840,7 @@ export async function run(
           state.markDone(phase);
           state.save();
           assertWithinBudget(state, agent.maxBudgetUsd);
-          progress(phase, 'done');
+          progress(phase, phaseCompletionProgress(phase, value, nextPendingPhase(phases, phase, state)));
           continue;
         } catch (err) {
           if (!(err instanceof StructuredCallApiError)) {
@@ -1877,7 +1951,7 @@ export async function run(
       state.markDone(phase);
       state.save();
       assertWithinBudget(state, agent.maxBudgetUsd);
-      progress(phase, 'done');
+      progress(phase, phaseCompletionProgress(phase, result, nextPendingPhase(phases, phase, state)));
     }
 
     return await finalizeAndMerge(state, opts, { providerCtx: pctx, issue, agent, progress, providers, config, metrics }, deps);
