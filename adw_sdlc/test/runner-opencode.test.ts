@@ -404,6 +404,20 @@ describe('request shape', () => {
     expect(body['format']).toEqual({ type: 'json_schema', schema, retryCount: 1 });
   });
 
+  it('prompts an existing session without creating a new one', async () => {
+    const req = makeReq({ resumeSessionId: 'sess-existing' });
+    promptResolves(makeInfo({ sessionID: 'sess-existing' }));
+    const result = await runner.runPhase(req);
+
+    expect(sessionCreateMock).not.toHaveBeenCalled();
+    expect(sessionPromptMock.mock.calls[0]![0]).toMatchObject({
+      sessionID: 'sess-existing',
+      directory: req.cwd,
+      parts: [{ type: 'text', text: req.prompt }],
+    });
+    expect(result.sessionId).toBe('sess-existing');
+  });
+
   it('omits the model for an unprefixed override (server default provider resolution)', async () => {
     await runner.runPhase(makeReq({ model: 'claude-opus-4-8' }));
     const create = sessionCreateMock.mock.calls[0]![0] as Record<string, unknown>;

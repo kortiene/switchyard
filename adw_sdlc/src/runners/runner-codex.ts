@@ -226,14 +226,19 @@ class CodexRunner implements AgentRunner {
         codexPathOverride: CODEX_ADW_LAUNCHER,
         config: CODEX_UNATTENDED_CONFIG,
       });
-      const thread = codex.startThread({
+      const threadOptions = {
         model: req.model,
         sandboxMode: 'workspace-write',
         workingDirectory: req.cwd,
         skipGitRepoCheck: true,
         approvalPolicy: 'never',
         ...(req.reasoning !== undefined ? { modelReasoningEffort: req.reasoning } : {}),
-      });
+      } as const;
+      const thread =
+        req.resumeSessionId !== undefined
+          ? codex.resumeThread(req.resumeSessionId, threadOptions)
+          : codex.startThread(threadOptions);
+      threadId = req.resumeSessionId;
       const { events } = await thread.runStreamed(req.prompt, {
         signal: req.signal,
         ...(req.schema !== undefined ? { outputSchema: req.schema } : {}),

@@ -130,6 +130,7 @@ export function buildPiArgs(req: PhaseRequest): string[] {
     '-p',
     '--mode',
     'json',
+    ...(req.resumeSessionId !== undefined ? ['--session', req.resumeSessionId] : []),
     '--model',
     req.model,
     ...(req.reasoning !== undefined ? ['--thinking', req.reasoning] : []),
@@ -284,7 +285,7 @@ class PiRunner implements AgentRunner {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    let sessionId: string | undefined;
+    let sessionId = req.resumeSessionId;
     // Streamed-delta length of the in-flight assistant message, so the
     // authoritative full text on its message_end can append only the unseen
     // tail (deltas and finals replay the same text, opencode convention).

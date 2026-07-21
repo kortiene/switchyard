@@ -290,6 +290,7 @@ export interface PhaseRequest<T = unknown> {
   cwd: string;                   // the worktree the agent edits
   env: Record<string, string>;   // EXPLICIT allowlist the orchestrator built; the ONLY env the backend may use
   schema?: JsonSchema;           // per-phase JSON Schema (from Zod); absent => free-form
+  resumeSessionId?: string;      // existing session/thread for an in-phase follow-up
   maxBudgetUsd?: number;         // forwarded to backends with native budget gating (claude)
   transcriptPath: string;        // agents/{adw_id}/{phase}/transcript.log
   signal: AbortSignal;           // orchestrator-owned timeout/cancel
@@ -327,7 +328,9 @@ Binding rules:
   `@anthropic-ai/sdk` (`messages.parse` + `zodOutputFormat`), default `claude-haiku-4-5`, regardless of
   selected runner (opt-out `MX_AGENT_CLASSIFY_ON_RUNNER=1`).
 - **Every other agentic phase** goes through the selected `runner.runPhase()`.
-- **Nudge-retry + no-retry-on-timeout live in the invoker, once** (Section 7): on `signal==='timeout'`
+- **Nudge-retry + no-retry-on-timeout live in the invoker, once** (Section 7): when a first call
+  supplies a resume handle, the invoker continues that informed session with a schema-only extraction
+  prompt instead of replaying the phase. On `signal==='timeout'`
   the invoker raises `AdwError` *without* a nudge (preserving `_TIMEOUT_EXIT_CODES` semantics); only a
   parse failure on a non-timed-out run triggers the single nudge-retry (`_NUDGE`). `signal==='budget'`
   (claude's native `error_max_budget_usd`) also fails fast with **no** nudge.
@@ -571,10 +574,10 @@ or a synthetic timeout/budget rc) feeds the existing loops exactly as a failed C
 | Backend | How structured output is requested → read | Fallback |
 |---|---|---|
 | `classify` (shared) | `messages.parse({ output_config:{ format: zodOutputFormat(ClassifySchema) }})` → `parsed_output` (null on refusal/truncation — **guard it**) | one nudge-retry (or bump `max_tokens`) then `AdwError` |
-| `claude` | `options.outputFormat:{type:'json_schema',schema}` → `result.structured_output` | invoker fenced-JSON + 1 nudge |
-| `codex` | `TurnOptions.outputSchema` → `JSON.parse(turn.finalResponse)` (string) | invoker fenced-JSON + 1 nudge |
-| `opencode` (**v2 client**) | `session.prompt({...,format:{type:'json_schema',schema,retryCount}})` → `result.structured` (`StructuredOutputError` on exhaustion) | invoker fenced-JSON + 1 nudge |
-| `pi` | **none** — accumulate assistant text from the `--mode json` line stream (the event bus on stdout), keep the trailing-fenced-JSON contract | invoker fenced-JSON + 1 nudge (this *is* pi's primary path) |
+| `claude` | `options.outputFormat:{type:'json_schema',schema}` → `result.structured_output` | same-session schema-only follow-up; fresh fenced fallback without a handle |
+| `codex` | `TurnOptions.outputSchema` → `JSON.parse(turn.finalResponse)` (string) | same-session schema-only follow-up; fresh fenced fallback without a handle |
+| `opencode` (**v2 client**) | `session.prompt({...,format:{type:'json_schema',schema,retryCount}})` → `result.structured` (`StructuredOutputError` on exhaustion) | same-session schema-only follow-up; fresh fenced fallback without a handle |
+| `pi` | **none** — accumulate assistant text from the `--mode json` line stream (the event bus on stdout), keep the trailing-fenced-JSON contract | same-session schema-only follow-up; fresh fenced fallback without a handle |
 
 `opencode` native schema is **only** available via `@opencode-ai/sdk/v2` (`OutputFormatJsonSchema`,
 `structured?`); the v1 default export has no `format`/`structured`. The adapter therefore imports the v2
@@ -582,11 +585,14 @@ client (Section 4.3-3); a **roadmap step-8 [VERIFY] gate** asserts the v2 prompt
 `.structured` against the pinned version before `caps.nativeSchema:true` is trusted (else opencode falls
 back to the same fenced-JSON+nudge path as pi).
 
-The fenced-JSON extraction + **one** nudge-retry (port `_NUDGE` and `parse_json` semantics from
-`adw/_phases.py:472`/`adw/common.py` verbatim) is implemented **once in the invoker layer** over
+The fenced-JSON extraction + **one** nudge-retry is implemented **once in the invoker layer** over
 `runPhase`, never duplicated per backend. Where `caps.nativeSchema` is true and the backend returns
-conforming output, the fallback never fires; a native-schema backend returning a non-conforming/`null`
-payload triggers the same single nudge.
+conforming output, the fallback never fires. A native-schema backend returning a non-conforming/`null`
+payload triggers a focused follow-up in the same session: `PhaseResult.sessionId` is passed back as
+`PhaseRequest.resumeSessionId`, the native schema channel is withheld, and the prompt contains only
+the required JSON Schema plus instructions not to repeat work or use tools. Each adapter maps that
+handle to its native mechanism (`resume`, `resumeThread`, existing OpenCode session id, or
+`--session`). If the first call produced no handle, the historical fresh-call fenced fallback remains.
 
 ### Output-contract footer: gated off for native-schema backends
 

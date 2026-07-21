@@ -16,9 +16,10 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { codexCtor, startThreadMock, runStreamedMock } = vi.hoisted(() => ({
+const { codexCtor, startThreadMock, resumeThreadMock, runStreamedMock } = vi.hoisted(() => ({
   codexCtor: vi.fn(),
   startThreadMock: vi.fn(),
+  resumeThreadMock: vi.fn(),
   runStreamedMock: vi.fn(),
 }));
 
@@ -29,6 +30,9 @@ vi.mock('@openai/codex-sdk', () => ({
     }
     startThread(options: unknown): unknown {
       return startThreadMock(options);
+    }
+    resumeThread(id: string, options: unknown): unknown {
+      return resumeThreadMock(id, options);
     }
   },
 }));
@@ -53,8 +57,10 @@ beforeEach(() => {
   runner = createRunner();
   codexCtor.mockReset();
   startThreadMock.mockReset();
+  resumeThreadMock.mockReset();
   runStreamedMock.mockReset();
   startThreadMock.mockImplementation(() => ({ runStreamed: runStreamedMock }));
+  resumeThreadMock.mockImplementation(() => ({ runStreamed: runStreamedMock }));
 });
 
 afterEach(() => {
@@ -177,6 +183,20 @@ describe('request shape', () => {
     scriptedEvents([turnCompleted()]);
     await runner.runPhase(makeReq({ reasoning: 'high' }));
     expect(capturedThreadOptions().modelReasoningEffort).toBe('high');
+  });
+
+  it('resumes the requested thread instead of starting a new one', async () => {
+    scriptedEvents([agentMessage('{"ok":true}'), turnCompleted()]);
+    const result = await runner.runPhase(makeReq({ resumeSessionId: 'thread-existing' }));
+
+    expect(startThreadMock).not.toHaveBeenCalled();
+    expect(resumeThreadMock).toHaveBeenCalledTimes(1);
+    expect(resumeThreadMock.mock.calls[0]![0]).toBe('thread-existing');
+    expect(resumeThreadMock.mock.calls[0]![1]).toMatchObject({
+      model: 'gpt-5.5',
+      workingDirectory: makeReq().cwd,
+    });
+    expect(result.sessionId).toBe('thread-existing');
   });
 
   it('always uses the security launcher and leaves CODEX_BIN inside the allowlisted env', async () => {

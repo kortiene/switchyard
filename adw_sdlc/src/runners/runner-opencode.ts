@@ -407,7 +407,7 @@ class OpencodeRunner implements AgentRunner {
         req.signal.aborted ? TIMEOUT_RC : 1, null);
     }
 
-    let sessionId: string | undefined;
+    let sessionId = req.resumeSessionId;
     let info: AssistantMessage | undefined;
     let parts: Part[] = [];
     const diagnosticsMark = server.diagnostics.mark();
@@ -416,29 +416,31 @@ class OpencodeRunner implements AgentRunner {
     // prompt itself.
     const events = new AbortController();
     try {
-      const created = await server.client.session.create(
-        {
-          directory: req.cwd,
-          title: `adw ${req.phase}`,
-          // The create route uses `id`, while the prompt route below uses
-          // `modelID`. Supplying both mirrors OpenCode's own CLI flow and
-          // prevents a newly-created hosted-provider session from beginning
-          // life with model=undefined.
-          ...(model.providerID !== ''
-            ? { model: { providerID: model.providerID, id: model.modelID } }
-            : {}),
-        },
-        { signal: req.signal },
-      );
-      if (created.error !== undefined || created.data === undefined) {
-        if (req.signal.aborted) {
-          return this.failed(transcript, abortKind(req.signal), TIMEOUT_RC, null);
+      if (sessionId === undefined) {
+        const created = await server.client.session.create(
+          {
+            directory: req.cwd,
+            title: `adw ${req.phase}`,
+            // The create route uses `id`, while the prompt route below uses
+            // `modelID`. Supplying both mirrors OpenCode's own CLI flow and
+            // prevents a newly-created hosted-provider session from beginning
+            // life with model=undefined.
+            ...(model.providerID !== ''
+              ? { model: { providerID: model.providerID, id: model.modelID } }
+              : {}),
+          },
+          { signal: req.signal },
+        );
+        if (created.error !== undefined || created.data === undefined) {
+          if (req.signal.aborted) {
+            return this.failed(transcript, abortKind(req.signal), TIMEOUT_RC, null);
+          }
+          transcript.note(`[opencode runner error] session.create failed: ${describe(created.error)}\n`);
+          noteServerDiagnostics(server, diagnosticsMark, transcript);
+          return this.failed(transcript, 'none', 1, null);
         }
-        transcript.note(`[opencode runner error] session.create failed: ${describe(created.error)}\n`);
-        noteServerDiagnostics(server, diagnosticsMark, transcript);
-        return this.failed(transcript, 'none', 1, null);
+        sessionId = created.data.id;
       }
-      sessionId = created.data.id;
 
       void this.teeEvents(server.client, sessionId, transcript, events.signal);
 

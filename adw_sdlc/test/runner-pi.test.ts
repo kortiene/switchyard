@@ -215,6 +215,19 @@ describe('the spawn (the load-bearing D5 boundary)', () => {
       'p',
     ]);
   });
+
+  it('continues the requested session with --session', () => {
+    expect(buildPiArgs(makeReq({ prompt: 'p', resumeSessionId: 'sess-existing' }))).toEqual([
+      '-p',
+      '--mode',
+      'json',
+      '--session',
+      'sess-existing',
+      '--model',
+      'sonnet',
+      'p',
+    ]);
+  });
 });
 
 describe('resolvePiBin', () => {

@@ -100,15 +100,20 @@ describe('runAgentPhase', () => {
       caps: { nativeSchema: false },
       script: (_req, call) =>
         call === 0
-          ? { transcriptText: 'no json here', usage: { inputTokens: 10, outputTokens: 1 } }
+          ? {
+              transcriptText: 'no json here',
+              usage: { inputTokens: 10, outputTokens: 1 },
+              sessionId: 'session-1',
+            }
           : {
               transcriptText: '```json\n{"resolved": 2, "remaining": 0}\n```',
               usage: { inputTokens: 11, outputTokens: 2 },
+              sessionId: 'session-1',
             },
     });
     const outcome = await runAgentPhase({
       phase: 'resolve',
-      templateArgs: ['x'],
+      templateArgs: ['ORIGINAL_TASK_SENTINEL'],
       state,
       runner,
       env: {},
@@ -116,22 +121,30 @@ describe('runAgentPhase', () => {
     expect(outcome.data.resolved).toBe(2);
     expect(outcome.attempts).toBe(2); // nudge-retry fired (double-charge signal)
     expect(runner.requests).toHaveLength(2);
-    expect(runner.requests[1]!.prompt.endsWith(NUDGE)).toBe(true);
+    expect(runner.requests[1]!.resumeSessionId).toBe('session-1');
+    expect(runner.requests[1]!.schema).toBeUndefined();
+    expect(runner.requests[1]!.prompt).toContain('You just completed the resolve phase in this session.');
+    expect(runner.requests[1]!.prompt).toContain('Required JSON Schema:');
+    expect(runner.requests[1]!.prompt).toContain('"resolved"');
+    expect(runner.requests[1]!.prompt).not.toContain('ORIGINAL_TASK_SENTINEL');
+    expect(runner.requests[1]!.prompt).not.toContain('## Required output');
     expect(runner.requests[1]!.transcriptPath.endsWith('transcript-2.log')).toBe(true);
     // Both attempts consumed tokens; usage is the pair's sum.
     expect(outcome.usage).toMatchObject({ inputTokens: 21, outputTokens: 3 });
   });
 
-  it('retries a native-schema backend through the fenced-JSON fallback it never saw', async () => {
+  it('continues a native-schema backend with a focused schema-only follow-up', async () => {
     // A native-schema success can come back without structured_output AND
-    // without parseable text; the retry prompt must then carry the contract
-    // footer the first prompt deliberately omitted, or the nudge demands a
-    // JSON shape the agent was never shown.
+    // without parseable text; continue the informed session with the schema,
+    // rather than replaying the task in a fresh session.
     const runner = createMockRunner({
       script: (_req, call) =>
         call === 0
-          ? { transcriptText: 'prose report, no JSON anywhere' }
-          : { transcriptText: '```json\n{"tests_added": true, "summary": "s"}\n```' },
+          ? { transcriptText: 'prose report, no JSON anywhere', sessionId: 'session-1' }
+          : {
+              transcriptText: '```json\n{"tests_added": true, "summary": "s"}\n```',
+              sessionId: 'session-1',
+            },
     });
     const outcome = await runAgentPhase({
       phase: 'tests',
@@ -144,12 +157,14 @@ describe('runAgentPhase', () => {
     expect(runner.requests).toHaveLength(2);
     expect(runner.requests[0]!.schema).toBeDefined();
     expect(runner.requests[0]!.prompt).not.toContain('## Required output');
-    // The retry contract is authoritative: do not retain a native structured-
-    // output channel that the provider may ignore or fail to execute (#88).
+    // The retry continues the informed session with only the schema: do not
+    // retain the native channel or replay the phase task (#88/#90).
     expect(runner.requests[1]!.schema).toBeUndefined();
-    expect(runner.requests[1]!.prompt).toContain('## Required output');
+    expect(runner.requests[1]!.resumeSessionId).toBe('session-1');
+    expect(runner.requests[1]!.prompt).not.toContain('## Required output');
     expect(runner.requests[1]!.prompt).toContain('"tests_added"');
-    expect(runner.requests[1]!.prompt.endsWith(NUDGE)).toBe(true);
+    expect(runner.requests[1]!.prompt).toContain('Do not repeat the work and do not use tools.');
+    expect(runner.requests[1]!.prompt).not.toContain('prose report');
   });
 
   it('extracts embedded JSON from a failed native-schema response before retrying (issue #88)', async () => {
@@ -178,8 +193,8 @@ describe('runAgentPhase', () => {
     const runner = createMockRunner({
       script: (_req, call) =>
         call === 0
-          ? { structured: { issue_class: 'bogus-class' } }
-          : { structured: { issue_class: 'feat', reason: 'r' } },
+          ? { structured: { issue_class: 'bogus-class' }, sessionId: 'session-1' }
+          : { structured: { issue_class: 'feat', reason: 'r' }, sessionId: 'session-1' },
     });
     const outcome = await runAgentPhase({
       phase: 'classify',
@@ -190,6 +205,22 @@ describe('runAgentPhase', () => {
     });
     expect(outcome.data).toEqual({ issue_class: 'feat', reason: 'r' });
     expect(runner.requests).toHaveLength(2);
+    expect(runner.requests[1]!.resumeSessionId).toBe('session-1');
+    expect(runner.requests[1]!.prompt).toContain('You just completed the classify phase');
+  });
+
+  it('retains the fresh-call fenced fallback when the first call has no resume handle', async () => {
+    const runner = createMockRunner({
+      script: (_req, call) =>
+        call === 0
+          ? { transcriptText: 'no json and no session' }
+          : { transcriptText: '```json\n{"resolved": 1, "remaining": 0}\n```' },
+    });
+    await runAgentPhase({ phase: 'resolve', templateArgs: ['x'], state, runner, env: {} });
+
+    expect(runner.requests[1]!.resumeSessionId).toBeUndefined();
+    expect(runner.requests[1]!.prompt).toContain('## Required output');
+    expect(runner.requests[1]!.prompt.endsWith(NUDGE)).toBe(true);
   });
 
   it('classifies Claude credit-balance output as auth failure with NO nudge retry', async () => {

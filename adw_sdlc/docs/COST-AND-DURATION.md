@@ -20,9 +20,12 @@ then finalize/ci-fix/merge. Each agent phase is one runner call through the
   `models.phaseTiers` in `.adw/config.json`). On claude the `capable` tier is
   `claude-opus-4-8` — by far the most expensive lever.
 - **The nudge-retry double-charge:** when a phase's first reply fails to
-  parse/validate, the invoker (`src/run-phase.ts`) retries once with the
-  fenced-JSON contract. **Both attempts are billed** and both add wall-clock
-  time. `AgentPhaseOutcome.attempts` (1 or 2) surfaces this per phase.
+  parse/validate, the invoker (`src/run-phase.ts`) retries once. When the
+  backend returned a session handle, this is a focused schema-only follow-up
+  in the same informed session; otherwise it falls back to a fresh call with
+  the fenced-JSON contract. **Both attempts are billed** and both add
+  wall-clock time. `AgentPhaseOutcome.attempts` (1 or 2) surfaces this per
+  phase.
 
 ## The metrics artifact: `agents/{adw_id}/metrics.json`
 
@@ -68,8 +71,10 @@ Each retry is a second billed call **and** added latency. Measure it with
 
 - A/B the native vs forced-fenced path (`ADW_PARITY_FORCE_FENCED_JSON=1`) and
   compare `total_cost_usd` / `total_duration_ms` / `nudge_rate`.
-- Keep the structural fix already in place: native-schema retries recompose the
-  prompt **with** the fenced contract footer the first prompt omitted.
+- Keep the structural fix already in place: native-schema retries continue the
+  informed session with only the required JSON Schema, withhold the native
+  output channel, and explicitly prohibit repeated work/tool use. A full
+  fenced-contract prompt is used only when no resume handle exists.
 
 ### 2. Down-tier non-edit-heavy phases
 
