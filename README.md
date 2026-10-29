@@ -11,6 +11,14 @@ GitHub, CI, and any optional merge.
 > with GitHub is the current MVP path. Adapters for Codex, OpenCode, and Pi are
 > included, but their live-run readiness differs.
 
+## Rust-first prototype planning
+
+The [Rust-first prototype plan](./docs/rust-first/README.md) describes the next
+experimental track: a Rust mission core with Pi Durable as its initial agent
+runtime. [Milestone tracker #94](https://github.com/kortiene/switchyard/issues/94)
+links the implementation sequence and acceptance criteria. This is planned work;
+the runnable developer preview documented below remains the TypeScript package.
+
 ## What Switchyard does
 
 Give Switchyard one work item and it will:

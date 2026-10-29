@@ -1,15 +1,16 @@
 ---
 type: Decision Register
 title: Control-plane invariants and decision status
-description: The implemented, in-development, and deferred choices that define Switchyard's safety and extensibility boundaries.
+description: The implemented, proposed, in-development, and deferred choices that define Switchyard's safety and extensibility boundaries.
 tags: [decisions, invariants, security, architecture]
-timestamp: "2026-07-18T13:26:10Z"
+timestamp: "2026-10-29T00:00:00-04:00"
 ---
 
 # Status vocabulary
 
 * **Implemented** means current source and tests enforce the choice.
 * **In development** means the current checkout implements it, but it may not yet be a committed or released contract.
+* **Proposed** means a documented design under review; it is not implemented behavior or a change to current defaults.
 * **Deferred** means design material exists but the behavior is intentionally absent.
 
 # Register
@@ -17,6 +18,7 @@ timestamp: "2026-07-18T13:26:10Z"
 | Decision | Status | Consequence |
 | --- | --- | --- |
 | Use a TypeScript/Node control plane with four runner adapters. | Implemented | Claude, Codex, OpenCode, and Pi share one kernel rather than four workflows. |
+| Build a Rust mission core with Pi Durable behind a confined, replaceable process adapter. | Proposed | Rust owns transitions, effects, verification and publication; Pi owns its session. [Rust-first M1](../../docs/rust-first/README.md) and [#94](https://github.com/kortiene/switchyard/issues/94) define the recovery/approval contracts. S2 requires an explicit GO before the downstream live path; current TypeScript behavior and state v1 remain unchanged. |
 | Keep one `AgentRunner.runPhase()` seam and branch on capabilities. | Implemented | Backend details stay in adapters; the orchestrator consumes normalized requests/results. |
 | Make phase flow deterministic and keep built-in control semantics in the kernel. | Implemented | Projects may configure known/custom phases, but cannot redefine load-bearing built-in meanings. |
 | Let the orchestrator own Git, forge, CI, and merge operations. | Implemented | Runner children edit files but do not receive forge authority in phased mode. |
@@ -53,3 +55,9 @@ Design documents explain rationale but may lag implementation. Determine present
 [3] [Managed-worktree design](https://github.com/kortiene/switchyard/blob/main/adw_sdlc/docs/DESIGN-managed-git-worktrees.md)
 
 [4] [Deferred memory decision](https://github.com/kortiene/switchyard/blob/main/adw_sdlc/MEMORY_STACK.md)
+
+[5] [Rust-first prototype and normative mission transitions](../../docs/rust-first/README.md)
+
+[6] [Runtime protocol and replay identity](../../docs/rust-first/runtime-protocol.md)
+
+[7] [Integration gate, fallback and planned CI](../../docs/rust-first/delivery-plan.md)
