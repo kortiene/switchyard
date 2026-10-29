@@ -92,6 +92,11 @@ impl Error {
             detail: detail.to_string(),
         }
     }
+
+    /// Storage and IO failures can be retried. Semantic rejections cannot.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Storage { .. } | Self::GitFailed { .. })
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

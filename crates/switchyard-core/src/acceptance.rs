@@ -93,6 +93,10 @@ fn create(host: &mut Host, repo: &Path, max_repairs: u32) -> crate::MissionSnaps
     .unwrap()
 }
 
+fn deliver(host: &mut Host, mission: &str) {
+    host.dispatch_pending(mission).unwrap();
+}
+
 fn admit(host: &mut Host, mission: &str, body: CommandBody) -> crate::AdmitResult {
     let snap = host.snapshot(mission).unwrap();
     host.admit(AdmitRequest {
@@ -579,6 +583,7 @@ fn pause_resume_and_pause_during_publishing() {
     let pausing = host.snapshot(&created.mission_id).unwrap();
     assert_eq!(pausing.phase, Phase::Pausing);
     assert_eq!(pausing.resume_target, Some(Phase::Draft));
+    deliver(&mut host, &created.mission_id);
     admit(&mut host, &created.mission_id, CommandBody::ConfirmStopped);
     assert_eq!(
         host.snapshot(&created.mission_id).unwrap().phase,
@@ -623,6 +628,7 @@ fn cancellation_during_publication_can_finish_or_discover_the_pr() {
         cancelling.delivery.as_ref().unwrap().publication_state,
         "intent_recorded"
     );
+    deliver(&mut host, &created.mission_id);
     admit(
         &mut host,
         &created.mission_id,
@@ -648,6 +654,7 @@ fn cancellation_during_publication_can_finish_or_discover_the_pr() {
         .unwrap()
         .id;
     let proof = proof_for(&digest, "101");
+    deliver(&mut host, &created.mission_id);
     host.record_operation(
         &created.mission_id,
         &publication_operation_id(&delivery_id).unwrap(),
@@ -1046,6 +1053,7 @@ fn pause_stop_and_cancel_must_settle_before_work_resumes() {
             effects: EffectProof::Reconciled,
         },
     );
+    deliver(&mut host, &created.mission_id);
     admit(
         &mut host,
         &created.mission_id,
@@ -1191,6 +1199,7 @@ fn terminal_missions_reject_content_writes() {
     let mut host = Host::open(&world.db).unwrap();
     let created = create(&mut host, &world.repo, 2);
     admit(&mut host, &created.mission_id, CommandBody::Cancel);
+    deliver(&mut host, &created.mission_id);
     admit(
         &mut host,
         &created.mission_id,
@@ -1247,6 +1256,7 @@ fn paused_review_drift_repairs_the_resume_target() {
     let mut host = Host::open(&world.db).unwrap();
     let approved = world_approved_for_drift(&mut host, &world);
     admit(&mut host, &approved.mission_id, CommandBody::Pause);
+    deliver(&mut host, &approved.mission_id);
     admit(&mut host, &approved.mission_id, CommandBody::ConfirmStopped);
     assert_eq!(
         host.snapshot(&approved.mission_id).unwrap().resume_target,
@@ -1395,6 +1405,7 @@ fn cancelled_mission_does_not_dispatch_pending_work_and_outbox_keeps_admission_o
     })
     .unwrap();
     admit(&mut host, &created.mission_id, CommandBody::Cancel);
+    deliver(&mut host, &created.mission_id);
     admit(
         &mut host,
         &created.mission_id,
@@ -1408,7 +1419,11 @@ fn cancelled_mission_does_not_dispatch_pending_work_and_outbox_keeps_admission_o
     assert_eq!(snap.attempt_id, created.attempt_id);
     assert_eq!(snap.commands[0].id, "z-start");
     assert_eq!(snap.commands[0].state, "superseded");
-    assert_eq!(host.runtime_mut().submission_count(), 0);
+    assert!(
+        host.runtime_mut()
+            .stored_receipt(&format!("{}:z-start", created.attempt_id))
+            .is_none()
+    );
 
     let world = open_world();
     let mut host = Host::open(&world.db).unwrap();
@@ -1512,9 +1527,14 @@ fn incomplete_notification_frames_do_not_advance_and_errors_keep_the_queue() {
     host.runtime_mut().push_notification(plan_note("later"));
     host.runtime_mut()
         .push_notification(RuntimeNotification::Idle);
-    let error = host.poll_runtime(&created.mission_id).unwrap_err();
-    assert_eq!(error.category(), "illegal_transition");
-    assert_eq!(host.runtime_mut().queued_notifications(), 2);
+    host.poll_runtime(&created.mission_id).unwrap();
+    let snap = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(snap.phase, Phase::AwaitingReview);
+    assert_eq!(host.runtime_mut().queued_notifications(), 0);
+    assert_eq!(snap.quarantined.len(), 1);
+    assert_eq!(snap.quarantined[0].1, "illegal_transition");
+    assert!(snap.quarantined[0].3.contains("plan_completed"));
+    host.poll_runtime(&created.mission_id).unwrap();
     assert_eq!(
         host.snapshot(&created.mission_id).unwrap().phase,
         Phase::AwaitingReview
@@ -1559,6 +1579,408 @@ fn operators_cannot_certify_observations_and_origin_urls_drop_userinfo() {
         host.snapshot(&created.mission_id).unwrap().phase,
         Phase::AwaitingPlanApproval
     );
+}
+
+#[test]
+fn paused_review_targets_without_pass_evidence_resume_into_verifying() {
+    for approve in [false, true] {
+        let world = open_world();
+        let mut host = Host::open(&world.db).unwrap();
+        let created = create(&mut host, &world.repo, 2);
+        admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+        deliver(&mut host, &created.mission_id);
+        notify(&mut host, &created.mission_id, plan_note("plan"));
+        admit(
+            &mut host,
+            &created.mission_id,
+            CommandBody::ApprovePlan {
+                plan_digest: plan_digest_for("plan").unwrap(),
+            },
+        );
+        notify(
+            &mut host,
+            &created.mission_id,
+            RuntimeNotification::ImplementationSettled { quiescent: true },
+        );
+        let digest = host.snapshot(&created.mission_id).unwrap().content_digest;
+        notify(&mut host, &created.mission_id, pass_note(&digest));
+        if approve {
+            admit(
+                &mut host,
+                &created.mission_id,
+                CommandBody::ApproveReview {
+                    digest: digest.clone(),
+                    rationale: "approve".into(),
+                },
+            );
+            assert_eq!(
+                host.snapshot(&created.mission_id).unwrap().phase,
+                Phase::Approved
+            );
+        } else {
+            assert_eq!(
+                host.snapshot(&created.mission_id).unwrap().phase,
+                Phase::AwaitingReview
+            );
+            assert!(
+                host.snapshot(&created.mission_id)
+                    .unwrap()
+                    .reviewed_digest
+                    .is_none()
+            );
+        }
+        admit(&mut host, &created.mission_id, CommandBody::Pause);
+        deliver(&mut host, &created.mission_id);
+        admit(&mut host, &created.mission_id, CommandBody::ConfirmStopped);
+        host.note_content_digest(
+            &created.mission_id,
+            host.snapshot(&created.mission_id).unwrap().revision,
+            "drifted-review-content",
+            "operator",
+        )
+        .unwrap();
+        admit(
+            &mut host,
+            &created.mission_id,
+            CommandBody::DetectUncertainty {
+                reason: AttentionReason::Uncertainty,
+                content_digest: None,
+            },
+        );
+        admit(
+            &mut host,
+            &created.mission_id,
+            CommandBody::ExplicitRecovery {
+                expected_target: Phase::Paused,
+                ownership_proven: true,
+                effects: EffectProof::Reconciled,
+            },
+        );
+        let paused = host.snapshot(&created.mission_id).unwrap();
+        assert_eq!(paused.phase, Phase::Paused);
+        assert_eq!(paused.resume_target, Some(Phase::Verifying));
+        admit(
+            &mut host,
+            &created.mission_id,
+            CommandBody::Resume { authorized: true },
+        );
+        assert_eq!(
+            host.snapshot(&created.mission_id).unwrap().phase,
+            Phase::Verifying
+        );
+    }
+}
+
+#[test]
+fn acknowledged_work_requires_a_delivered_abort_before_stop_or_cancel() {
+    for cancel in [false, true] {
+        let world = open_world();
+        let mut host = Host::open(&world.db).unwrap();
+        let created = create(&mut host, &world.repo, 2);
+        admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+        deliver(&mut host, &created.mission_id);
+        assert_eq!(host.runtime_mut().submission_count(), 1);
+        if cancel {
+            admit(&mut host, &created.mission_id, CommandBody::Cancel);
+            let error = admit_expect(
+                &mut host,
+                &created.mission_id,
+                CommandBody::ConfirmCancelled,
+            )
+            .unwrap_err();
+            assert_eq!(error.category(), "guard_failed");
+            assert_eq!(
+                host.snapshot(&created.mission_id).unwrap().phase,
+                Phase::Cancelling
+            );
+            deliver(&mut host, &created.mission_id);
+            admit(
+                &mut host,
+                &created.mission_id,
+                CommandBody::ConfirmCancelled,
+            );
+            assert_eq!(
+                host.snapshot(&created.mission_id).unwrap().phase,
+                Phase::Cancelled
+            );
+        } else {
+            admit(&mut host, &created.mission_id, CommandBody::Pause);
+            let error = admit_expect(&mut host, &created.mission_id, CommandBody::ConfirmStopped)
+                .unwrap_err();
+            assert_eq!(error.category(), "guard_failed");
+            assert_eq!(
+                host.snapshot(&created.mission_id).unwrap().phase,
+                Phase::Pausing
+            );
+            deliver(&mut host, &created.mission_id);
+            admit(&mut host, &created.mission_id, CommandBody::ConfirmStopped);
+            assert_eq!(
+                host.snapshot(&created.mission_id).unwrap().phase,
+                Phase::Paused
+            );
+        }
+        let snap = host.snapshot(&created.mission_id).unwrap();
+        let start = snap
+            .commands
+            .iter()
+            .find(|command| command.kind == "start_planning")
+            .expect("start planning");
+        let abort_kind = if cancel { "cancel" } else { "pause" };
+        let abort = snap
+            .commands
+            .iter()
+            .find(|command| command.kind == abort_kind)
+            .expect("abort");
+        assert_eq!(start.state, "acknowledged");
+        assert_eq!(abort.state, "acknowledged");
+        assert_eq!(
+            host.runtime_mut().admission_order(),
+            &[start.request_id.clone(), abort.request_id.clone()]
+        );
+        let journal: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(crate::journal_path(&world.db)).unwrap())
+                .unwrap();
+        assert_eq!(
+            journal["submissions"][&start.request_id]["method"],
+            "submit"
+        );
+        assert_eq!(journal["submissions"][&abort.request_id]["method"], "abort");
+    }
+}
+
+#[test]
+fn resume_enqueues_a_runtime_continuation_for_withheld_work() {
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    admit(&mut host, &created.mission_id, CommandBody::Pause);
+    deliver(&mut host, &created.mission_id);
+    let mid = host.snapshot(&created.mission_id).unwrap();
+    assert!(
+        mid.commands
+            .iter()
+            .any(|command| { command.kind == "start_planning" && command.state == "superseded" })
+    );
+    admit(&mut host, &created.mission_id, CommandBody::ConfirmStopped);
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::Resume { authorized: true },
+    );
+    let resumed = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(resumed.phase, Phase::Planning);
+    let continuation = resumed
+        .commands
+        .iter()
+        .find(|command| command.kind == "continue" && command.state == "pending")
+        .expect("resume enqueues a planning continuation");
+    deliver(&mut host, &created.mission_id);
+    assert!(
+        host.runtime_mut()
+            .stored_receipt(&continuation.request_id)
+            .is_some()
+    );
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().phase,
+        Phase::Planning
+    );
+
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    deliver(&mut host, &created.mission_id);
+    notify(&mut host, &created.mission_id, plan_note("plan"));
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::ApprovePlan {
+            plan_digest: plan_digest_for("plan").unwrap(),
+        },
+    );
+    admit(&mut host, &created.mission_id, CommandBody::Pause);
+    deliver(&mut host, &created.mission_id);
+    admit(&mut host, &created.mission_id, CommandBody::ConfirmStopped);
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::Resume { authorized: true },
+    );
+    let resumed = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(resumed.phase, Phase::Implementing);
+    assert!(
+        resumed
+            .commands
+            .iter()
+            .any(|command| command.kind == "continue" && command.state == "pending")
+    );
+    deliver(&mut host, &created.mission_id);
+    assert!(host.runtime_mut().submission_count() >= 2);
+
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    deliver(&mut host, &created.mission_id);
+    notify(&mut host, &created.mission_id, plan_note("plan"));
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::ApprovePlan {
+            plan_digest: plan_digest_for("plan").unwrap(),
+        },
+    );
+    notify(
+        &mut host,
+        &created.mission_id,
+        RuntimeNotification::ImplementationSettled { quiescent: true },
+    );
+    let digest = host.snapshot(&created.mission_id).unwrap().content_digest;
+    notify(&mut host, &created.mission_id, fail_note(&digest));
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::AuthorizeBoundedRepair {
+            rationale: "repair the check".into(),
+        },
+    );
+    admit(&mut host, &created.mission_id, CommandBody::Pause);
+    deliver(&mut host, &created.mission_id);
+    let paused_work = host.snapshot(&created.mission_id).unwrap();
+    assert!(paused_work.commands.iter().any(|command| {
+        command.kind == "authorize_bounded_repair" && command.state == "superseded"
+    }));
+    admit(&mut host, &created.mission_id, CommandBody::ConfirmStopped);
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::Resume { authorized: true },
+    );
+    let resumed = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(resumed.phase, Phase::Implementing);
+    assert_eq!(resumed.repair_count, 1);
+    let continuation = resumed
+        .commands
+        .iter()
+        .find(|command| command.kind == "continue" && command.state == "pending")
+        .expect("resume enqueues a repair continuation");
+    let payload = command_payload(&world.db, &continuation.request_id);
+    assert!(payload.contains("repair"), "{payload}");
+    deliver(&mut host, &created.mission_id);
+    assert!(
+        host.runtime_mut()
+            .stored_receipt(&continuation.request_id)
+            .is_some()
+    );
+}
+
+fn command_payload(db: &Path, request_id: &str) -> String {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.query_row(
+        "SELECT payload_canonical FROM commands WHERE request_id = ?1",
+        [request_id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn terminal_verification_notifications_do_not_write_evidence() {
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    let digest = drive_to_publishing(&mut host, &created.mission_id);
+    notify(
+        &mut host,
+        &created.mission_id,
+        RuntimeNotification::PublicationObserved {
+            content_digest: digest,
+            commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            tree_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            pr_id: "101".into(),
+        },
+    );
+    assert_terminal_notification_is_inert(
+        &world.db,
+        &mut host,
+        &created.mission_id,
+        Phase::Published,
+    );
+
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::Cancel);
+    deliver(&mut host, &created.mission_id);
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::ConfirmCancelled,
+    );
+    assert_terminal_notification_is_inert(
+        &world.db,
+        &mut host,
+        &created.mission_id,
+        Phase::Cancelled,
+    );
+
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    deliver(&mut host, &created.mission_id);
+    notify(&mut host, &created.mission_id, plan_note("plan"));
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::Reject {
+            rationale: "no".into(),
+        },
+    );
+    assert_terminal_notification_is_inert(
+        &world.db,
+        &mut host,
+        &created.mission_id,
+        Phase::Rejected,
+    );
+}
+
+fn assert_terminal_notification_is_inert(db: &Path, host: &mut Host, mission: &str, phase: Phase) {
+    let before_evidence = sql_count(db, "evidence");
+    let before_verifications = sql_count(db, "verifications");
+    let before_latest = latest_outcome(db, mission);
+    let before = host.snapshot(mission).unwrap();
+    for kind in ["verification_error", "verification_incomplete"] {
+        let error = host
+            .apply_notification_json(mission, &json!({"kind": kind, "detail": "late"}))
+            .unwrap_err();
+        assert_eq!(error.category(), "terminal_immutable");
+    }
+    let after = host.snapshot(mission).unwrap();
+    assert_eq!(after.phase, phase);
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(sql_count(db, "evidence"), before_evidence);
+    assert_eq!(sql_count(db, "verifications"), before_verifications);
+    assert_eq!(latest_outcome(db, mission), before_latest);
+}
+
+fn sql_count(db: &Path, table: &str) -> i64 {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+        row.get(0)
+    })
+    .unwrap()
+}
+
+fn latest_outcome(db: &Path, mission: &str) -> Option<String> {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.query_row(
+        "SELECT outcome FROM verifications WHERE mission_id = ?1 AND invalidated = 0 ORDER BY seq DESC LIMIT 1",
+        [mission],
+        |row| row.get(0),
+    )
+    .ok()
 }
 
 #[test]

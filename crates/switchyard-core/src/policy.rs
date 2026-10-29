@@ -14,6 +14,11 @@ pub struct Facts {
     pub verification: Option<VerificationFact>,
     pub delivery: Option<DeliveryRecord>,
     pub publication_receipt: Option<PublicationProof>,
+    pub pending_pause: bool,
+    pub pending_cancel: bool,
+    pub acknowledged_pause: bool,
+    pub acknowledged_cancel: bool,
+    pub admitted_runtime_work: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -179,6 +184,16 @@ pub fn authorize(mission: &MissionRecord, body: &CommandBody, facts: &Facts) -> 
             if facts.ops_blocked {
                 return Err(blocked());
             }
+            if facts.pending_pause {
+                return Err(Error::guard(
+                    "pause abort is still pending and has not been delivered",
+                ));
+            }
+            if facts.admitted_runtime_work && !facts.acknowledged_pause {
+                return Err(Error::guard(
+                    "runtime work is outstanding until the pause abort is delivered",
+                ));
+            }
             Ok(())
         }
         CommandBody::Resume { authorized } => {
@@ -199,6 +214,16 @@ pub fn authorize(mission: &MissionRecord, body: &CommandBody, facts: &Facts) -> 
         CommandBody::ConfirmCancelled => {
             if facts.ops_blocked {
                 return Err(blocked());
+            }
+            if facts.pending_cancel {
+                return Err(Error::guard(
+                    "cancel abort is still pending and has not been delivered",
+                ));
+            }
+            if facts.admitted_runtime_work && !facts.acknowledged_cancel {
+                return Err(Error::guard(
+                    "runtime work is outstanding until the cancel abort is delivered",
+                ));
             }
             if let Some(proof) = &facts.publication_receipt
                 && let Some(delivery) = &facts.delivery
@@ -230,6 +255,15 @@ pub fn authorize(mission: &MissionRecord, body: &CommandBody, facts: &Facts) -> 
             }
             if validated == Phase::Paused && facts.ops_blocked {
                 return Err(blocked());
+            }
+            Ok(())
+        }
+        CommandBody::Continue { activity } => {
+            require_nonempty(activity, "activity")?;
+            if !matches!(mission.phase, Phase::Planning | Phase::Implementing) {
+                return Err(Error::guard(
+                    "runtime continuation is only admitted in planning or implementing",
+                ));
             }
             Ok(())
         }
@@ -483,7 +517,12 @@ pub fn project(
                 plan.reconcile_only = true;
             }
             if next == Phase::Paused {
-                plan.resume_target = crate::domain::repaired_resume_target(mission);
+                let pass_for_current = crate::domain::has_complete_pass_for_digest(
+                    facts.verification.as_ref(),
+                    &mission.content_digest,
+                );
+                plan.resume_target =
+                    crate::domain::repaired_resume_target(mission, pass_for_current);
                 if plan.resume_target == Some(Phase::Verifying) {
                     plan.invalidate_evidence = true;
                     plan.invalidate_reviews = true;

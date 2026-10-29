@@ -418,8 +418,17 @@ impl Store {
         Ok(commands)
     }
 
-    pub fn apply_transition(&mut self, plan: &TransitionPlan, command: &NewCommand) -> Result<()> {
+    pub fn apply_transition(
+        &mut self,
+        plan: &TransitionPlan,
+        command: &NewCommand,
+        verification: Option<&NewVerification>,
+        continuation: Option<&NewCommand>,
+    ) -> Result<()> {
         let tx = self.immediate()?;
+        if let Some(verification) = verification {
+            insert_verification(&tx, &command.mission_id, &command.attempt_id, verification)?;
+        }
         let changed = tx
             .execute(
                 "UPDATE missions SET
@@ -553,6 +562,9 @@ impl Store {
             )?;
         }
         insert_command(&tx, command)?;
+        if let Some(continuation) = continuation {
+            insert_command(&tx, continuation)?;
+        }
         insert_decision(
             &tx,
             DecisionWrite {
@@ -714,56 +726,50 @@ impl Store {
         verification: &NewVerification,
     ) -> Result<String> {
         let tx = self.immediate()?;
-        let evidence_id = crate::domain::new_id("e");
-        let verification_id = crate::domain::new_id("v");
-        let now = now_ms();
-        let body = serde_json::to_string(&json!({
-            "body": verification.evidence_body,
-            "contentDigest": verification.content_digest,
-        }))
-        .map_err(Error::storage)?;
-        let provenance =
-            serde_json::to_string(&NewVerification::provenance()).map_err(Error::storage)?;
+        let id = insert_verification(&tx, mission_id, attempt_id, verification)?;
+        tx.commit().map_err(Error::storage)?;
+        Ok(id)
+    }
+
+    pub fn quarantine_notification(
+        &mut self,
+        mission_id: &str,
+        error_category: &str,
+        reason: &str,
+        frame_json: &str,
+    ) -> Result<()> {
+        let tx = self.immediate()?;
         tx.execute(
-            "INSERT INTO evidence(
-                id, mission_id, attempt_id, content_hash, completeness, provenance_json,
-                body_json, invalidated, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)",
-            params![
-                evidence_id,
-                mission_id,
-                attempt_id,
-                verification.content_digest,
-                verification.completeness.as_str(),
-                provenance,
-                body,
-                now
-            ],
-        )
-        .map_err(Error::storage)?;
-        tx.execute(
-            "INSERT INTO verifications(
-                id, mission_id, attempt_id, seq, evidence_id, outcome, requirements_json,
-                content_digest, invalidated, created_at
-            ) VALUES (
-                ?1, ?2, ?3,
-                (SELECT COALESCE(MAX(seq), 0) + 1 FROM verifications),
-                ?4, ?5, ?6, ?7, 0, ?8
-            )",
-            params![
-                verification_id,
-                mission_id,
-                attempt_id,
-                evidence_id,
-                verification.outcome.as_str(),
-                verification.requirements_json(),
-                verification.content_digest,
-                now
-            ],
+            "INSERT INTO notification_quarantine(
+                mission_id, error_category, reason, frame_json, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![mission_id, error_category, reason, frame_json, now_ms()],
         )
         .map_err(Error::storage)?;
         tx.commit().map_err(Error::storage)?;
-        Ok(verification_id)
+        Ok(())
+    }
+
+    pub fn list_quarantine(&self, mission_id: &str) -> Result<Vec<(i64, String, String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, error_category, reason, frame_json
+                 FROM notification_quarantine
+                 WHERE mission_id = ?1
+                 ORDER BY id",
+            )
+            .map_err(Error::storage)?;
+        let rows = stmt
+            .query_map(params![mission_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(Error::storage)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row.map_err(Error::storage)?);
+        }
+        Ok(records)
     }
 
     pub fn latest_verification(&self, mission_id: &str) -> Result<Option<VerificationFact>> {
@@ -1010,6 +1016,63 @@ fn upsert_publication_receipt(
     )
     .map_err(Error::storage)?;
     Ok(())
+}
+
+fn insert_verification(
+    tx: &Transaction<'_>,
+    mission_id: &str,
+    attempt_id: &str,
+    verification: &NewVerification,
+) -> Result<String> {
+    let evidence_id = crate::domain::new_id("e");
+    let verification_id = crate::domain::new_id("v");
+    let now = now_ms();
+    let body = serde_json::to_string(&json!({
+        "body": verification.evidence_body,
+        "contentDigest": verification.content_digest,
+    }))
+    .map_err(Error::storage)?;
+    let provenance =
+        serde_json::to_string(&NewVerification::provenance()).map_err(Error::storage)?;
+    tx.execute(
+        "INSERT INTO evidence(
+            id, mission_id, attempt_id, content_hash, completeness, provenance_json,
+            body_json, invalidated, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)",
+        params![
+            evidence_id,
+            mission_id,
+            attempt_id,
+            verification.content_digest,
+            verification.completeness.as_str(),
+            provenance,
+            body,
+            now
+        ],
+    )
+    .map_err(Error::storage)?;
+    tx.execute(
+        "INSERT INTO verifications(
+            id, mission_id, attempt_id, seq, evidence_id, outcome, requirements_json,
+            content_digest, invalidated, created_at
+        ) VALUES (
+            ?1, ?2, ?3,
+            (SELECT COALESCE(MAX(seq), 0) + 1 FROM verifications),
+            ?4, ?5, ?6, ?7, 0, ?8
+        )",
+        params![
+            verification_id,
+            mission_id,
+            attempt_id,
+            evidence_id,
+            verification.outcome.as_str(),
+            verification.requirements_json(),
+            verification.content_digest,
+            now
+        ],
+    )
+    .map_err(Error::storage)?;
+    Ok(verification_id)
 }
 
 fn insert_command(tx: &Transaction<'_>, command: &NewCommand) -> Result<()> {

@@ -174,6 +174,69 @@ pub fn parse_notification(value: &Value) -> Result<RuntimeNotification> {
     }
 }
 
+impl RuntimeNotification {
+    pub fn frame_json(&self) -> Value {
+        match self {
+            Self::PlanCompleted {
+                plan,
+                digest,
+                quiescent,
+            } => {
+                json!({"kind": "plan_completed", "plan": plan, "digest": digest, "quiescent": quiescent})
+            }
+            Self::ImplementationSettled { quiescent } => {
+                json!({"kind": "implementation_settled", "quiescent": quiescent})
+            }
+            Self::VerificationPass {
+                content_digest,
+                evidence,
+                requirements,
+                completeness,
+            } => json!({
+                "kind": "verification_pass",
+                "contentDigest": content_digest,
+                "evidence": evidence,
+                "requirements": requirements,
+                "completeness": completeness,
+            }),
+            Self::VerificationFail {
+                content_digest,
+                evidence,
+                requirements,
+                completeness,
+            } => json!({
+                "kind": "verification_fail",
+                "contentDigest": content_digest,
+                "evidence": evidence,
+                "requirements": requirements,
+                "completeness": completeness,
+            }),
+            Self::VerificationError { detail } => {
+                json!({"kind": "verification_error", "detail": detail})
+            }
+            Self::VerificationIncomplete { detail } => {
+                json!({"kind": "verification_incomplete", "detail": detail})
+            }
+            Self::Uncertainty { reason, detail } => {
+                json!({"kind": "uncertainty", "reason": reason.as_str(), "detail": detail})
+            }
+            Self::PublicationObserved {
+                content_digest,
+                commit_sha,
+                tree_sha,
+                pr_id,
+            } => json!({
+                "kind": "publication_observed",
+                "contentDigest": content_digest,
+                "commitSha": commit_sha,
+                "treeSha": tree_sha,
+                "prId": pr_id,
+            }),
+            Self::Idle => json!({"kind": "idle"}),
+        }
+    }
+}
+
 fn required_completeness(value: &Value, kind: &str) -> Result<String> {
     let raw = value
         .get("completeness")

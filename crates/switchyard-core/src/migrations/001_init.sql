@@ -160,3 +160,12 @@ CREATE TABLE deliveries (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE notification_quarantine (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mission_id TEXT NOT NULL REFERENCES missions(id),
+    error_category TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    frame_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);

@@ -150,10 +150,11 @@ pub enum CommandKind {
     DetectUncertainty,
     ExplicitRecovery,
     Steer,
+    Continue,
 }
 
 impl CommandKind {
-    pub const fn all() -> [CommandKind; 21] {
+    pub const fn all() -> [CommandKind; 22] {
         [
             Self::StartPlanning,
             Self::PlanCompleted,
@@ -176,6 +177,7 @@ impl CommandKind {
             Self::DetectUncertainty,
             Self::ExplicitRecovery,
             Self::Steer,
+            Self::Continue,
         ]
     }
 
@@ -227,6 +229,7 @@ impl CommandKind {
             Self::DetectUncertainty => "detect_uncertainty",
             Self::ExplicitRecovery => "explicit_recovery",
             Self::Steer => "steer",
+            Self::Continue => "continue",
         }
     }
 
@@ -243,6 +246,7 @@ impl CommandKind {
                 | Self::Pause
                 | Self::Cancel
                 | Self::Steer
+                | Self::Continue
         )
     }
 }
@@ -574,6 +578,9 @@ pub enum CommandBody {
     Steer {
         content: String,
     },
+    Continue {
+        activity: String,
+    },
 }
 
 impl CommandBody {
@@ -600,6 +607,7 @@ impl CommandBody {
             Self::DetectUncertainty { .. } => CommandKind::DetectUncertainty,
             Self::ExplicitRecovery { .. } => CommandKind::ExplicitRecovery,
             Self::Steer { .. } => CommandKind::Steer,
+            Self::Continue { .. } => CommandKind::Continue,
         }
     }
 
@@ -695,6 +703,7 @@ impl CommandBody {
                 "effects": effects.as_str(),
             }),
             Self::Steer { content } => serde_json::json!({"content": content}),
+            Self::Continue { activity } => serde_json::json!({"activity": activity}),
         }
     }
 }
@@ -867,14 +876,28 @@ pub fn validated_recovery_target(mission: &MissionRecord) -> Result<Phase> {
 
 /// Resume target to store when recovery returns to `paused`.
 ///
-/// A paused mission keeps its stopped phase. If the saved resume target was a
-/// review phase and the content has drifted, that target is repaired to
-/// `verifying` so the next resume does not depend on the stale approval.
-pub fn repaired_resume_target(mission: &MissionRecord) -> Option<Phase> {
+/// A saved `awaiting_review` or `approved` target is revalidated against current
+/// complete PASS evidence for the mission's current content digest. Invalidated
+/// or missing evidence routes that target to `verifying`. `reviewed_digest` is
+/// not used: it is still absent before approval.
+pub fn repaired_resume_target(
+    mission: &MissionRecord,
+    complete_pass_for_current_digest: bool,
+) -> Option<Phase> {
     let resume = mission.resume_target?;
-    if matches!(resume, Phase::Approved | Phase::AwaitingReview) && content_drift(mission) {
+    if matches!(resume, Phase::Approved | Phase::AwaitingReview)
+        && !complete_pass_for_current_digest
+    {
         Some(Phase::Verifying)
     } else {
         Some(resume)
     }
+}
+
+pub fn has_complete_pass_for_digest(verification: Option<&VerificationFact>, digest: &str) -> bool {
+    verification.is_some_and(|verification| {
+        verification.outcome == VerificationOutcome::Pass
+            && verification.complete
+            && verification.content_digest == digest
+    })
 }

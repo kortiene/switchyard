@@ -5,8 +5,9 @@ use serde_json::{Value, json};
 use crate::canonical::{canonicalize, payload_hash};
 use crate::delivery::{publication_operation_id, publication_payload_hash};
 use crate::domain::{
-    CommandBody, CommandKind, CommandOrigin, CommandState, Completeness, MissionRecord,
-    OperationState, Phase, PublicationProof, SourceIssue, VerificationOutcome, now_ms,
+    AttentionReason, CommandBody, CommandKind, CommandOrigin, CommandState, Completeness,
+    MissionRecord, OperationState, Phase, PublicationProof, SourceIssue, VerificationFact,
+    VerificationOutcome, now_ms,
 };
 use crate::error::{Error, Result};
 use crate::execution::{
@@ -122,6 +123,7 @@ pub struct MissionSnapshot {
     pub runtime_adapter: String,
     pub verifier_json: String,
     pub delivery: Option<DeliveryView>,
+    pub quarantined: Vec<(i64, String, String, String)>,
 }
 
 impl MissionSnapshot {
@@ -166,6 +168,12 @@ impl MissionSnapshot {
                 "prId": delivery.pr_identity,
                 "publicationState": delivery.publication_state,
             })),
+            "quarantine": self.quarantined.iter().map(|(id, category, reason, frame)| json!({
+                "id": id,
+                "category": category,
+                "reason": reason,
+                "frame": frame,
+            })).collect::<Vec<_>>(),
         })
     }
 }
@@ -336,6 +344,14 @@ impl Host {
     }
 
     pub fn admit(&mut self, request: AdmitRequest) -> Result<AdmitResult> {
+        self.admit_attached(request, None)
+    }
+
+    fn admit_attached(
+        &mut self,
+        request: AdmitRequest,
+        verification: Option<&NewVerification>,
+    ) -> Result<AdmitResult> {
         let mission = self.store.load_mission(&request.mission_id)?;
         let attempt_id = request
             .attempt_id
@@ -394,7 +410,10 @@ impl Host {
                 "plan, verification, and publication observations must come from the runtime",
             ));
         }
-        if request.body.kind() == CommandKind::Steer {
+        if matches!(
+            request.body.kind(),
+            CommandKind::Steer | CommandKind::Continue
+        ) {
             let facts = self.facts(&mission)?;
             policy::authorize(&mission, &request.body, &facts)?;
             let command = new_command(
@@ -413,7 +432,14 @@ impl Host {
             return Ok(result_of(&command, mission.phase, false));
         }
         let spec = target_spec(mission.phase, request.body.kind())?;
-        let facts = self.facts(&mission)?;
+        let mut facts = self.facts(&mission)?;
+        if let Some(verification) = verification {
+            facts.verification = Some(VerificationFact {
+                outcome: verification.outcome,
+                content_digest: verification.content_digest.clone(),
+                complete: verification.completeness == Completeness::Complete,
+            });
+        }
         policy::authorize(&mission, &request.body, &facts)?;
         let plan = policy::project(&mission, spec, &request.body, &facts)?;
         let mut command = new_command(
@@ -429,15 +455,19 @@ impl Host {
             },
         );
         command.decision_digest = plan.decision_digest.clone();
-        self.store.apply_transition(&plan, &command)?;
+        let continuation = self.continuation_command(&mission, &request, plan.next)?;
+        self.store
+            .apply_transition(&plan, &command, verification, continuation.as_ref())?;
         Ok(result_of(&command, plan.next, false))
     }
 
     pub fn dispatch_pending(&mut self, mission_id: &str) -> Result<usize> {
         let mission = self.store.load_mission(mission_id)?;
-        let pending: Vec<_> = self
-            .store
-            .list_commands(mission_id)?
+        let recorded = self.store.list_commands(mission_id)?;
+        let admitted_runtime_work = recorded.iter().any(|command| {
+            command.state == CommandState::Acknowledged && is_runtime_work(command.kind)
+        });
+        let pending: Vec<_> = recorded
             .into_iter()
             .filter(|command| command.state == CommandState::Pending)
             .collect();
@@ -456,7 +486,7 @@ impl Host {
                 dispatched += 1;
                 continue;
             }
-            if suppress_pending(mission.phase, command.kind) {
+            if suppress_pending(mission.phase, command.kind, admitted_runtime_work) {
                 self.store.supersede_pending(
                     &command.id,
                     "admission closed before the runtime accepted this command",
@@ -492,9 +522,21 @@ impl Host {
         while let Some(note) = self.runtime.pop_notification() {
             match self.apply_notification(mission_id, note.clone()) {
                 Ok(outcome) => outcomes.push(outcome),
-                Err(error) => {
+                Err(error) if error.is_transient() => {
                     self.runtime.requeue_front(note);
                     return Err(error);
+                }
+                Err(error) => {
+                    let frame = note.frame_json().to_string();
+                    if let Err(storage) = self.store.quarantine_notification(
+                        mission_id,
+                        error.category(),
+                        &error.to_string(),
+                        &frame,
+                    ) {
+                        self.runtime.requeue_front(note);
+                        return Err(storage);
+                    }
                 }
             }
         }
@@ -575,6 +617,11 @@ impl Host {
                 requirements,
                 completeness,
             } => {
+                if mission.phase.is_terminal() {
+                    return Err(Error::TerminalImmutable {
+                        phase: mission.phase.to_string(),
+                    });
+                }
                 if mission.phase != Phase::Verifying {
                     return Err(Error::IllegalTransition {
                         from: mission.phase.to_string(),
@@ -602,31 +649,18 @@ impl Host {
                     revision: current.revision,
                 })
             }
-            RuntimeNotification::VerificationError { detail } => {
-                self.record_verification_row(
-                    &mission,
-                    VerificationOutcome::Error,
-                    &mission.content_digest,
-                    &detail,
-                    &[],
-                    "incomplete",
-                )?;
-                self.uncertainty(&mission, crate::domain::AttentionReason::VerificationError)
-            }
-            RuntimeNotification::VerificationIncomplete { detail } => {
-                self.record_verification_row(
-                    &mission,
-                    VerificationOutcome::Incomplete,
-                    &mission.content_digest,
-                    &detail,
-                    &[],
-                    "incomplete",
-                )?;
-                self.uncertainty(
-                    &mission,
-                    crate::domain::AttentionReason::VerificationIncomplete,
-                )
-            }
+            RuntimeNotification::VerificationError { detail } => self.terminal_observation(
+                &mission,
+                VerificationOutcome::Error,
+                &detail,
+                AttentionReason::VerificationError,
+            ),
+            RuntimeNotification::VerificationIncomplete { detail } => self.terminal_observation(
+                &mission,
+                VerificationOutcome::Incomplete,
+                &detail,
+                AttentionReason::VerificationIncomplete,
+            ),
             RuntimeNotification::Uncertainty { reason, .. } => self.uncertainty(&mission, reason),
             RuntimeNotification::PublicationObserved {
                 content_digest,
@@ -784,6 +818,11 @@ impl Host {
         requirements: Vec<String>,
         completeness: String,
     ) -> Result<NotifyOutcome> {
+        if mission.phase.is_terminal() {
+            return Err(Error::TerminalImmutable {
+                phase: mission.phase.to_string(),
+            });
+        }
         if mission.phase == Phase::AwaitingReview && mission.content_digest == content_digest {
             return Ok(unchanged(mission));
         }
@@ -793,17 +832,116 @@ impl Host {
                 command: "verification_pass".into(),
             });
         }
-        self.record_verification_row(
-            mission,
+        let verification = verification_record(
             VerificationOutcome::Pass,
             &content_digest,
             &evidence,
             &requirements,
             &completeness,
-        )?;
-        let current = self.store.load_mission(&mission.id)?;
-        self.admit_observation(&current, CommandBody::CompletePass)
-            .map(NotifyOutcome::Transition)
+        );
+        self.admit_attached(
+            AdmitRequest {
+                command_id: None,
+                mission_id: mission.id.clone(),
+                attempt_id: Some(mission.attempt.id.clone()),
+                expected_revision: mission.revision,
+                actor: "runtime-observation".into(),
+                origin: CommandOrigin::RuntimeObservation,
+                body: CommandBody::CompletePass,
+            },
+            Some(&verification),
+        )
+        .map(NotifyOutcome::Transition)
+    }
+
+    fn terminal_observation(
+        &mut self,
+        mission: &MissionRecord,
+        outcome: VerificationOutcome,
+        detail: &str,
+        reason: AttentionReason,
+    ) -> Result<NotifyOutcome> {
+        if mission.phase.is_terminal() {
+            return Err(Error::TerminalImmutable {
+                phase: mission.phase.to_string(),
+            });
+        }
+        if mission.phase == Phase::NeedsAttention {
+            return Ok(unchanged(mission));
+        }
+        let verification = verification_record(
+            outcome,
+            &mission.content_digest,
+            detail,
+            &[],
+            Completeness::Incomplete.as_str(),
+        );
+        self.admit_attached(
+            AdmitRequest {
+                command_id: None,
+                mission_id: mission.id.clone(),
+                attempt_id: Some(mission.attempt.id.clone()),
+                expected_revision: mission.revision,
+                actor: "runtime-observation".into(),
+                origin: CommandOrigin::RuntimeObservation,
+                body: CommandBody::DetectUncertainty {
+                    reason,
+                    content_digest: None,
+                },
+            },
+            Some(&verification),
+        )
+        .map(NotifyOutcome::Transition)
+    }
+
+    fn continuation_command(
+        &self,
+        mission: &MissionRecord,
+        request: &AdmitRequest,
+        next: Phase,
+    ) -> Result<Option<NewCommand>> {
+        let resumes = matches!(
+            request.body,
+            CommandBody::Resume { .. } | CommandBody::ExplicitRecovery { .. }
+        );
+        if !resumes || !matches!(next, Phase::Planning | Phase::Implementing) {
+            return Ok(None);
+        }
+        let commands = self.store.list_commands(&mission.id)?;
+        if admitted_work_for(&commands, next, mission.attempt.repair_count) {
+            return Ok(None);
+        }
+        let activity = if next == Phase::Planning {
+            "planning"
+        } else if mission.attempt.repair_count > 0 {
+            "repair"
+        } else {
+            "implementing"
+        };
+        let body = CommandBody::Continue {
+            activity: activity.to_string(),
+        };
+        let attempt_id = mission.attempt.id.clone();
+        let command_id = crate::domain::new_id("c");
+        let payload = body.payload(&mission.id, &attempt_id);
+        let canonical = canonicalize(&payload)?;
+        let hash = payload_hash(&payload)?;
+        Ok(Some(NewCommand {
+            id: command_id.clone(),
+            mission_id: mission.id.clone(),
+            attempt_id: attempt_id.clone(),
+            kind: CommandKind::Continue,
+            payload_canonical: canonical,
+            payload_hash: hash,
+            expected_revision: request.expected_revision.saturating_add(1),
+            resulting_revision: request.expected_revision.saturating_add(1),
+            state: CommandState::Pending,
+            request_id: format!("{attempt_id}:{command_id}"),
+            origin: CommandOrigin::Operator,
+            actor: request.actor.clone(),
+            rationale: format!("continue {activity}"),
+            decision_digest: None,
+        }))
     }
 
     fn record_verification_row(
@@ -929,11 +1067,27 @@ impl Host {
         } else {
             None
         };
+        let commands = self.store.list_commands(&mission.id)?;
         Ok(Facts {
             ops_blocked: self.store.ops_blocked(&mission.id)?,
             verification: self.store.latest_verification(&mission.id)?,
             delivery,
             publication_receipt,
+            pending_pause: commands.iter().any(|command| {
+                command.state == CommandState::Pending && command.kind == CommandKind::Pause
+            }),
+            pending_cancel: commands.iter().any(|command| {
+                command.state == CommandState::Pending && command.kind == CommandKind::Cancel
+            }),
+            acknowledged_pause: commands.iter().any(|command| {
+                command.state == CommandState::Acknowledged && command.kind == CommandKind::Pause
+            }),
+            acknowledged_cancel: commands.iter().any(|command| {
+                command.state == CommandState::Acknowledged && command.kind == CommandKind::Cancel
+            }),
+            admitted_runtime_work: commands.iter().any(|command| {
+                command.state == CommandState::Acknowledged && is_runtime_work(command.kind)
+            }),
         })
     }
 
@@ -1002,6 +1156,7 @@ fn snapshot_from(store: &Store, mission_id: &str, generation: u64) -> Result<Mis
         runtime_adapter: mission.attempt.runtime_adapter,
         verifier_json: mission.attempt.verifier_json,
         delivery,
+        quarantined: store.list_quarantine(mission_id)?,
     })
 }
 
@@ -1111,7 +1266,10 @@ fn is_runtime_observation(kind: CommandKind) -> bool {
     )
 }
 
-fn suppress_pending(phase: Phase, kind: CommandKind) -> bool {
+fn suppress_pending(phase: Phase, kind: CommandKind, admitted_runtime_work: bool) -> bool {
+    if matches!(kind, CommandKind::Pause | CommandKind::Cancel) && admitted_runtime_work {
+        return false;
+    }
     let closed = phase.is_terminal()
         || matches!(
             phase,
@@ -1123,6 +1281,53 @@ fn suppress_pending(phase: Phase, kind: CommandKind) -> bool {
     let stop_still_required = (kind == CommandKind::Pause && phase == Phase::Pausing)
         || (kind == CommandKind::Cancel && phase == Phase::Cancelling);
     !stop_still_required
+}
+
+fn is_runtime_work(kind: CommandKind) -> bool {
+    kind.is_runtime_bound() && !matches!(kind, CommandKind::Pause | CommandKind::Cancel)
+}
+
+fn admitted_work_for(
+    commands: &[crate::domain::CommandRecord],
+    phase: Phase,
+    repair_count: u32,
+) -> bool {
+    commands.iter().any(|command| {
+        command.state == CommandState::Acknowledged
+            && match phase {
+                Phase::Planning => matches!(
+                    command.kind,
+                    CommandKind::StartPlanning | CommandKind::RequestRevisedPlan
+                ),
+                Phase::Implementing if repair_count > 0 => {
+                    command.kind == CommandKind::AuthorizeBoundedRepair
+                }
+                Phase::Implementing => matches!(
+                    command.kind,
+                    CommandKind::ApprovePlan | CommandKind::RequestChanges
+                ),
+                _ => false,
+            }
+    })
+}
+
+fn verification_record(
+    outcome: VerificationOutcome,
+    content_digest: &str,
+    evidence: &str,
+    requirements: &[String],
+    completeness: &str,
+) -> NewVerification {
+    let completeness = completeness
+        .parse::<Completeness>()
+        .unwrap_or(Completeness::Incomplete);
+    NewVerification {
+        outcome,
+        content_digest: content_digest.to_string(),
+        evidence_body: evidence.to_string(),
+        completeness,
+        requirements: requirements.to_vec(),
+    }
 }
 
 fn runtime_method(kind: CommandKind) -> &'static str {
@@ -1159,6 +1364,7 @@ fn rationale(body: &CommandBody) -> String {
         | CommandBody::Reject { rationale }
         | CommandBody::ApproveReview { rationale, .. } => rationale.clone(),
         CommandBody::Steer { content } => content.clone(),
+        CommandBody::Continue { activity } => format!("continue {activity}"),
         CommandBody::DetectUncertainty { reason, .. } => reason.as_str().to_string(),
         other => other.kind().as_str().to_string(),
     }

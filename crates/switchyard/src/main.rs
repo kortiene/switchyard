@@ -389,5 +389,8 @@ fn command_body(kind: &str, payload: &Value) -> switchyard_core::Result<CommandB
         CommandKind::Steer => CommandBody::Steer {
             content: text("content")?,
         },
+        CommandKind::Continue => CommandBody::Continue {
+            activity: text("activity")?,
+        },
     })
 }
