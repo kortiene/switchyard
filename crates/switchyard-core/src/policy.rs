@@ -334,9 +334,12 @@ fn require_publication_proof(facts: &Facts, proof: &PublicationProof) -> Result<
             "publication proof does not match the authorized delivery",
         ));
     }
-    if let Some(existing) = &facts.publication_receipt
-        && existing != proof
-    {
+    let Some(existing) = &facts.publication_receipt else {
+        return Err(Error::guard(
+            "publication proof has not been observed; an operator command cannot certify it",
+        ));
+    };
+    if existing != proof {
         return Err(Error::guard(
             "publication proof conflicts with the recorded receipt",
         ));
@@ -478,6 +481,14 @@ pub fn project(
             plan.permitted_recovery_target = None;
             if next == Phase::Publishing {
                 plan.reconcile_only = true;
+            }
+            if next == Phase::Paused {
+                plan.resume_target = crate::domain::repaired_resume_target(mission);
+                if plan.resume_target == Some(Phase::Verifying) {
+                    plan.invalidate_evidence = true;
+                    plan.invalidate_reviews = true;
+                    plan.reviewed_digest = None;
+                }
             }
             if next == Phase::Verifying {
                 plan.invalidate_evidence = true;

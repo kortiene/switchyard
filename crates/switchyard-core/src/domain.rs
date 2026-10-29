@@ -269,6 +269,7 @@ pub enum CommandState {
     Pending,
     Acknowledged,
     Reconciled,
+    Superseded,
 }
 
 impl CommandState {
@@ -277,6 +278,7 @@ impl CommandState {
             Self::Pending => "pending",
             Self::Acknowledged => "acknowledged",
             Self::Reconciled => "reconciled",
+            Self::Superseded => "superseded",
         }
     }
 }
@@ -289,6 +291,7 @@ impl FromStr for CommandState {
             "pending" => Ok(Self::Pending),
             "acknowledged" => Ok(Self::Acknowledged),
             "reconciled" => Ok(Self::Reconciled),
+            "superseded" => Ok(Self::Superseded),
             other => Err(Error::storage(format!("unknown command state {other}"))),
         }
     }
@@ -860,4 +863,18 @@ pub fn validated_recovery_target(mission: &MissionRecord) -> Result<Phase> {
         return Ok(Phase::Verifying);
     }
     Ok(permitted)
+}
+
+/// Resume target to store when recovery returns to `paused`.
+///
+/// A paused mission keeps its stopped phase. If the saved resume target was a
+/// review phase and the content has drifted, that target is repaired to
+/// `verifying` so the next resume does not depend on the stale approval.
+pub fn repaired_resume_target(mission: &MissionRecord) -> Option<Phase> {
+    let resume = mission.resume_target?;
+    if matches!(resume, Phase::Approved | Phase::AwaitingReview) && content_drift(mission) {
+        Some(Phase::Verifying)
+    } else {
+        Some(resume)
+    }
 }

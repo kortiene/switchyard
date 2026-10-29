@@ -139,13 +139,13 @@ pub fn parse_notification(value: &Value) -> Result<RuntimeNotification> {
             content_digest: text("contentDigest")?,
             evidence: text("evidence")?,
             requirements: requirements()?,
-            completeness: text("completeness").unwrap_or_else(|_| "complete".into()),
+            completeness: required_completeness(value, kind)?,
         }),
         "verification_fail" => Ok(RuntimeNotification::VerificationFail {
             content_digest: text("contentDigest")?,
             evidence: text("evidence")?,
             requirements: requirements()?,
-            completeness: text("completeness").unwrap_or_else(|_| "complete".into()),
+            completeness: required_completeness(value, kind)?,
         }),
         "verification_error" => Ok(RuntimeNotification::VerificationError {
             detail: text("detail")?,
@@ -174,6 +174,19 @@ pub fn parse_notification(value: &Value) -> Result<RuntimeNotification> {
     }
 }
 
+fn required_completeness(value: &Value, kind: &str) -> Result<String> {
+    let raw = value
+        .get("completeness")
+        .ok_or_else(|| Error::guard(format!("notification {kind} requires completeness")))?;
+    let text = raw.as_str().ok_or_else(|| {
+        Error::guard(format!("notification {kind} completeness must be a string"))
+    })?;
+    let parsed = text
+        .parse::<crate::domain::Completeness>()
+        .map_err(|_| Error::guard(format!("notification {kind} has invalid completeness")))?;
+    Ok(parsed.as_str().to_string())
+}
+
 #[derive(Clone, Debug)]
 struct JournalEntry {
     payload_hash: String,
@@ -193,7 +206,9 @@ struct JournalEntry {
 pub struct FakeRuntime {
     path: std::path::PathBuf,
     submissions: BTreeMap<String, JournalEntry>,
+    admission_order: Vec<String>,
     notifications: VecDeque<RuntimeNotification>,
+    fail_next_persist: bool,
 }
 
 impl FakeRuntime {
@@ -206,7 +221,9 @@ impl FakeRuntime {
         Ok(Self {
             path: path.to_path_buf(),
             submissions,
+            admission_order: Vec::new(),
             notifications: VecDeque::new(),
+            fail_next_persist: false,
         })
     }
 
@@ -214,8 +231,35 @@ impl FakeRuntime {
         self.notifications.push_back(notification);
     }
 
-    pub fn drain_notifications(&mut self) -> Vec<RuntimeNotification> {
-        self.notifications.drain(..).collect()
+    pub fn pop_notification(&mut self) -> Option<RuntimeNotification> {
+        self.notifications.pop_front()
+    }
+
+    pub fn requeue_front(&mut self, notification: RuntimeNotification) {
+        self.notifications.push_front(notification);
+    }
+
+    pub fn queued_notifications(&self) -> usize {
+        self.notifications.len()
+    }
+
+    /// Test seam: the next journal write fails and does not keep the admission.
+    pub fn fail_next_persist(&mut self) {
+        self.fail_next_persist = true;
+    }
+
+    pub fn stored_receipt(&self, request_id: &str) -> Option<RuntimeReceipt> {
+        self.submissions
+            .get(request_id)
+            .map(|entry| RuntimeReceipt {
+                receipt_id: entry.receipt_id.clone(),
+                request_id: request_id.to_string(),
+                payload_hash: entry.payload_hash.clone(),
+            })
+    }
+
+    pub fn admission_order(&self) -> &[String] {
+        &self.admission_order
     }
 
     pub fn submission_count(&self) -> usize {
@@ -277,7 +321,11 @@ impl FakeRuntime {
                 session_id: request.binding.session_id.clone(),
             },
         );
-        self.persist()?;
+        if let Err(error) = self.persist() {
+            self.submissions.remove(&request.request_id);
+            return Err(error);
+        }
+        self.admission_order.push(request.request_id.clone());
         Ok(RuntimeReceipt {
             receipt_id,
             request_id: request.request_id.clone(),
@@ -285,7 +333,11 @@ impl FakeRuntime {
         })
     }
 
-    fn persist(&self) -> Result<()> {
+    fn persist(&mut self) -> Result<()> {
+        if self.fail_next_persist {
+            self.fail_next_persist = false;
+            return Err(Error::storage("injected journal persistence failure"));
+        }
         let mut submissions = serde_json::Map::new();
         for (request_id, entry) in &self.submissions {
             submissions.insert(

@@ -196,6 +196,59 @@ fn second_owner_is_rejected_while_status_still_reads() {
     assert_eq!(created["mission"]["phase"], "draft");
 }
 
+#[test]
+fn git_dir_from_the_parent_does_not_replace_the_requested_repo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let other = tmp.path().join("other");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    init_repo(&other);
+    std::fs::write(other.join("other.txt"), "other\n").unwrap();
+    let git = |dir: &Path, args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    };
+    git(&other, &["add", "other.txt"]);
+    git(&other, &["commit", "-m", "other"]);
+    let wanted = head(&repo);
+    let decoy = head(&other);
+    assert_ne!(wanted, decoy);
+    let output = Command::new(bin())
+        .args([
+            "mission",
+            "create",
+            "--db",
+            db.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--issue",
+            "95",
+            "--objective",
+            "identity",
+            "--acceptance",
+            "the requested repo",
+        ])
+        .env("GIT_DIR", other.join(".git"))
+        .env("GIT_WORK_TREE", &other)
+        .env("GH_TOKEN", "SENTINEL_GH_TOKEN_SHOULD_NOT_PERSIST")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stdout["mission"]["baseSha"], wanted.as_str());
+    assert_ne!(stdout["mission"]["baseSha"], decoy.as_str());
+}
+
 fn ledger_text(db: &Path) -> String {
     let mut bytes = Vec::new();
     for suffix in ["", "-wal", "-shm"] {

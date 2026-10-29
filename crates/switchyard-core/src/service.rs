@@ -199,13 +199,35 @@ pub fn journal_path(db_path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Resolve the database file, including a symlink, before lock and journal paths.
+pub fn canonical_db_path(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        return std::fs::canonicalize(path).map_err(Error::storage);
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| Error::storage("database path has no file name"))?;
+    if !parent.exists() {
+        std::fs::create_dir_all(parent).map_err(Error::storage)?;
+    }
+    Ok(std::fs::canonicalize(parent)
+        .map_err(Error::storage)?
+        .join(name))
+}
+
 impl Host {
     pub fn open(db_path: &Path) -> Result<Self> {
-        let mut lock = try_acquire(db_path)?;
-        let mut store = Store::open_writer(db_path)?;
+        let db_path = canonical_db_path(db_path)?;
+        let mut lock = try_acquire(&db_path)?;
+        let mut store = Store::open_writer(&db_path)?;
         store.migrate()?;
         store.bump_generation(&mut lock)?;
-        let runtime = FakeRuntime::open(&journal_path(db_path))?;
+        store.bind_owner_generation(lock.generation);
+        let runtime = FakeRuntime::open(&journal_path(&db_path))?;
         Ok(Self {
             store,
             runtime,
@@ -227,7 +249,8 @@ impl Host {
 
     /// Read-only inspection. Does not take the owner lock, migrate, or dispatch.
     pub fn inspect(db_path: &Path, mission_id: Option<&str>) -> Result<Vec<MissionSnapshot>> {
-        let store = Store::open_reader(db_path)?;
+        let db_path = canonical_db_path(db_path)?;
+        let store = Store::open_reader(&db_path)?;
         let generation = store.generation()?;
         let ids = match mission_id {
             Some(id) => vec![id.to_string()],
@@ -364,6 +387,13 @@ impl Host {
                 actual: mission.revision,
             });
         }
+        if is_runtime_observation(request.body.kind())
+            && request.origin != CommandOrigin::RuntimeObservation
+        {
+            return Err(Error::guard(
+                "plan, verification, and publication observations must come from the runtime",
+            ));
+        }
         if request.body.kind() == CommandKind::Steer {
             let facts = self.facts(&mission)?;
             policy::authorize(&mission, &request.body, &facts)?;
@@ -413,8 +443,26 @@ impl Host {
             .collect();
         let binding = self.binding(&mission);
         self.accept_runtime_binding(&binding, mission_id)?;
-        let count = pending.len();
+        let mut dispatched = 0;
         for command in pending {
+            if let Some(receipt) = self.runtime.stored_receipt(&command.request_id) {
+                if receipt.payload_hash != command.payload_hash {
+                    return Err(Error::CommandConflict {
+                        command_id: command.id,
+                    });
+                }
+                self.store
+                    .acknowledge(&command.id, &receipt_json(&receipt))?;
+                dispatched += 1;
+                continue;
+            }
+            if suppress_pending(mission.phase, command.kind) {
+                self.store.supersede_pending(
+                    &command.id,
+                    "admission closed before the runtime accepted this command",
+                )?;
+                continue;
+            }
             let request = RuntimeRequest {
                 binding: binding.clone(),
                 request_id: command.request_id.clone(),
@@ -428,8 +476,9 @@ impl Host {
             };
             self.store
                 .acknowledge(&command.id, &receipt_json(&receipt))?;
+            dispatched += 1;
         }
-        Ok(count)
+        Ok(dispatched)
     }
 
     pub fn recover(&mut self, mission_id: &str) -> Result<MissionSnapshot> {
@@ -439,10 +488,15 @@ impl Host {
     }
 
     pub fn poll_runtime(&mut self, mission_id: &str) -> Result<Vec<NotifyOutcome>> {
-        let notes = self.runtime.drain_notifications();
-        let mut outcomes = Vec::with_capacity(notes.len());
-        for note in notes {
-            outcomes.push(self.apply_notification(mission_id, note)?);
+        let mut outcomes = Vec::new();
+        while let Some(note) = self.runtime.pop_notification() {
+            match self.apply_notification(mission_id, note.clone()) {
+                Ok(outcome) => outcomes.push(outcome),
+                Err(error) => {
+                    self.runtime.requeue_front(note);
+                    return Err(error);
+                }
+            }
         }
         Ok(outcomes)
     }
@@ -599,6 +653,11 @@ impl Host {
         actor: &str,
     ) -> Result<MissionSnapshot> {
         let mission = self.store.load_mission(mission_id)?;
+        if mission.phase.is_terminal() {
+            return Err(Error::TerminalImmutable {
+                phase: mission.phase.to_string(),
+            });
+        }
         if mission.content_digest == digest {
             return self.snapshot(mission_id);
         }
@@ -656,10 +715,16 @@ impl Host {
 
     pub fn accept_runtime_binding(&self, binding: &RuntimeBinding, mission_id: &str) -> Result<()> {
         let mission = self.store.load_mission(mission_id)?;
-        if binding.generation != self.lock.generation {
+        let stored = self.store.generation()?;
+        if binding.generation != stored || self.lock.generation != stored {
+            let actual = if binding.generation != stored {
+                binding.generation
+            } else {
+                self.lock.generation
+            };
             return Err(Error::StaleGeneration {
-                expected: self.lock.generation,
-                actual: binding.generation,
+                expected: stored,
+                actual,
             });
         }
         if binding.mission_id != mission.id
@@ -1034,6 +1099,30 @@ fn initial_state(request: &AdmitRequest) -> CommandState {
     } else {
         CommandState::Pending
     }
+}
+
+fn is_runtime_observation(kind: CommandKind) -> bool {
+    matches!(
+        kind,
+        CommandKind::PlanCompleted
+            | CommandKind::CompletePass
+            | CommandKind::ReconcileDeliveryComplete
+            | CommandKind::DiscoverPublicationCompleted
+    )
+}
+
+fn suppress_pending(phase: Phase, kind: CommandKind) -> bool {
+    let closed = phase.is_terminal()
+        || matches!(
+            phase,
+            Phase::Pausing | Phase::Paused | Phase::Cancelling | Phase::NeedsAttention
+        );
+    if !closed {
+        return false;
+    }
+    let stop_still_required = (kind == CommandKind::Pause && phase == Phase::Pausing)
+        || (kind == CommandKind::Cancel && phase == Phase::Cancelling);
+    !stop_still_required
 }
 
 fn runtime_method(kind: CommandKind) -> &'static str {

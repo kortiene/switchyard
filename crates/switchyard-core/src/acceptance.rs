@@ -846,18 +846,17 @@ fn content_drift_recovers_to_verifying_and_publication_stays_reconcile_only() {
     )
     .unwrap_err();
     assert_eq!(republish.category(), "illegal_transition");
-    admit(
-        &mut host,
-        &created.mission_id,
-        CommandBody::ReconcileDeliveryComplete {
-            content_digest: digest,
-            commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            tree_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
-            pr_id: "101".into(),
-        },
-    );
     assert_eq!(
-        host.snapshot(&created.mission_id).unwrap().phase,
+        notify(
+            &mut host,
+            &created.mission_id,
+            RuntimeNotification::PublicationObserved {
+                content_digest: digest,
+                commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                tree_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                pr_id: "101".into(),
+            }
+        ),
         Phase::Published
     );
     drop(host);
@@ -866,15 +865,18 @@ fn content_drift_recovers_to_verifying_and_publication_stays_reconcile_only() {
     let mut host = Host::open(&world.db).unwrap();
     let created = create(&mut host, &world.repo, 2);
     let digest = drive_to_publishing(&mut host, &created.mission_id);
-    admit(
-        &mut host,
-        &created.mission_id,
-        CommandBody::ReconcileDeliveryComplete {
-            content_digest: digest.clone(),
-            commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            tree_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
-            pr_id: "101".into(),
-        },
+    assert_eq!(
+        notify(
+            &mut host,
+            &created.mission_id,
+            RuntimeNotification::PublicationObserved {
+                content_digest: digest.clone(),
+                commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                tree_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                pr_id: "101".into(),
+            }
+        ),
+        Phase::Published
     );
     assert_eq!(
         host.snapshot(&created.mission_id).unwrap().phase,
@@ -1181,6 +1183,382 @@ fn steering_keeps_phase_and_a_second_mission_is_rejected() {
         })
         .unwrap_err();
     assert_eq!(error.category(), "active_mission_exists");
+}
+
+#[test]
+fn terminal_missions_reject_content_writes() {
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::Cancel);
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::ConfirmCancelled,
+    );
+    let before = host.snapshot(&created.mission_id).unwrap();
+    let error = host
+        .note_content_digest(
+            &created.mission_id,
+            before.revision,
+            "rewritten",
+            "operator",
+        )
+        .unwrap_err();
+    assert_eq!(error.category(), "terminal_immutable");
+    let after = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(after.phase, Phase::Cancelled);
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.content_digest, before.content_digest);
+
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    host.dispatch_pending(&created.mission_id).unwrap();
+    notify(&mut host, &created.mission_id, plan_note("plan"));
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::Reject {
+            rationale: "stop".into(),
+        },
+    );
+    let before = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(before.phase, Phase::Rejected);
+    let error = host
+        .note_content_digest(
+            &created.mission_id,
+            before.revision,
+            "rewritten",
+            "operator",
+        )
+        .unwrap_err();
+    assert_eq!(error.category(), "terminal_immutable");
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().revision,
+        before.revision
+    );
+}
+
+#[test]
+fn paused_review_drift_repairs_the_resume_target() {
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let approved = world_approved_for_drift(&mut host, &world);
+    admit(&mut host, &approved.mission_id, CommandBody::Pause);
+    admit(&mut host, &approved.mission_id, CommandBody::ConfirmStopped);
+    assert_eq!(
+        host.snapshot(&approved.mission_id).unwrap().resume_target,
+        Some(Phase::Approved)
+    );
+    host.note_content_digest(
+        &approved.mission_id,
+        host.snapshot(&approved.mission_id).unwrap().revision,
+        "drifted-while-paused",
+        "operator",
+    )
+    .unwrap();
+    admit(
+        &mut host,
+        &approved.mission_id,
+        CommandBody::DetectUncertainty {
+            reason: AttentionReason::Uncertainty,
+            content_digest: None,
+        },
+    );
+    assert_eq!(
+        host.snapshot(&approved.mission_id)
+            .unwrap()
+            .permitted_recovery_target,
+        Some(Phase::Paused)
+    );
+    admit(
+        &mut host,
+        &approved.mission_id,
+        CommandBody::ExplicitRecovery {
+            expected_target: Phase::Paused,
+            ownership_proven: true,
+            effects: EffectProof::Reconciled,
+        },
+    );
+    let recovered = host.snapshot(&approved.mission_id).unwrap();
+    assert_eq!(recovered.phase, Phase::Paused);
+    assert_eq!(recovered.resume_target, Some(Phase::Verifying));
+    admit(
+        &mut host,
+        &approved.mission_id,
+        CommandBody::Resume { authorized: true },
+    );
+    assert_eq!(
+        host.snapshot(&approved.mission_id).unwrap().phase,
+        Phase::Verifying
+    );
+}
+
+#[test]
+fn failed_journal_write_is_not_acknowledged_on_retry_or_restart() {
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    host.runtime_mut().fail_next_persist();
+    let error = host.dispatch_pending(&created.mission_id).unwrap_err();
+    assert_eq!(error.category(), "storage_failed");
+    assert_eq!(host.runtime_mut().submission_count(), 0);
+    let pending = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(pending.pending_commands.len(), 1);
+    assert_eq!(host.dispatch_pending(&created.mission_id).unwrap(), 1);
+    assert_eq!(host.runtime_mut().submission_count(), 1);
+    let request_id = host.snapshot(&created.mission_id).unwrap().commands[0]
+        .request_id
+        .clone();
+    drop(host);
+
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    host.runtime_mut().fail_next_persist();
+    assert!(host.dispatch_pending(&created.mission_id).is_err());
+    drop(host);
+    let journal = std::fs::read_to_string(crate::journal_path(&world.db)).unwrap_or_default();
+    assert!(!journal.contains("start_planning") && !journal.contains("payloadHash"));
+    let mut host = Host::open(&world.db).unwrap();
+    assert_eq!(host.runtime_mut().submission_count(), 0);
+    assert_eq!(
+        host.snapshot(&created.mission_id)
+            .unwrap()
+            .pending_commands
+            .len(),
+        1
+    );
+    assert_eq!(host.dispatch_pending(&created.mission_id).unwrap(), 1);
+    assert_eq!(host.runtime_mut().submission_count(), 1);
+    let _ = request_id;
+}
+
+#[test]
+fn aliased_database_paths_share_one_owner_and_generation_is_reread() {
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    let alias = world._tmp.path().join("alias.sqlite");
+    std::os::unix::fs::symlink(&world.db, &alias).unwrap();
+    match Host::open(&alias) {
+        Err(error) => assert_eq!(error.category(), "second_active_owner"),
+        Ok(_) => panic!("symlink opened a second owner"),
+    }
+    let alias_lock = crate::execution::lock_path(&alias);
+    assert!(
+        !alias_lock.exists(),
+        "alias must not grow its own owner lock"
+    );
+    let generation = host.generation();
+    let conn = rusqlite::Connection::open(&world.db).unwrap();
+    conn.execute("UPDATE host_owner SET generation = generation + 1", [])
+        .unwrap();
+    let error =
+        admit_expect(&mut host, &created.mission_id, CommandBody::StartPlanning).unwrap_err();
+    assert_eq!(error.category(), "stale_generation");
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().phase,
+        Phase::Draft
+    );
+    let binding = crate::RuntimeBinding {
+        mission_id: created.mission_id.clone(),
+        attempt_id: created.attempt_id.clone(),
+        session_id: created.session_id.clone(),
+        generation,
+    };
+    assert_eq!(
+        host.accept_runtime_binding(&binding, &created.mission_id)
+            .unwrap_err()
+            .category(),
+        "stale_generation"
+    );
+}
+
+#[test]
+fn cancelled_mission_does_not_dispatch_pending_work_and_outbox_keeps_admission_order() {
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    host.admit(AdmitRequest {
+        command_id: Some("z-start".into()),
+        mission_id: created.mission_id.clone(),
+        attempt_id: None,
+        expected_revision: created.revision,
+        actor: "operator".into(),
+        origin: CommandOrigin::Operator,
+        body: CommandBody::StartPlanning,
+    })
+    .unwrap();
+    admit(&mut host, &created.mission_id, CommandBody::Cancel);
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::ConfirmCancelled,
+    );
+    drop(host);
+    let mut host = Host::open(&world.db).unwrap();
+    host.recover(&created.mission_id).unwrap();
+    let snap = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(snap.phase, Phase::Cancelled);
+    assert_eq!(snap.attempt_id, created.attempt_id);
+    assert_eq!(snap.commands[0].id, "z-start");
+    assert_eq!(snap.commands[0].state, "superseded");
+    assert_eq!(host.runtime_mut().submission_count(), 0);
+
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    host.dispatch_pending(&created.mission_id).unwrap();
+    host.admit(AdmitRequest {
+        command_id: Some("z-steer".into()),
+        mission_id: created.mission_id.clone(),
+        attempt_id: None,
+        expected_revision: host.snapshot(&created.mission_id).unwrap().revision,
+        actor: "operator".into(),
+        origin: CommandOrigin::Operator,
+        body: CommandBody::Steer {
+            content: "first".into(),
+        },
+    })
+    .unwrap();
+    host.admit(AdmitRequest {
+        command_id: Some("a-steer".into()),
+        mission_id: created.mission_id.clone(),
+        attempt_id: None,
+        expected_revision: host.snapshot(&created.mission_id).unwrap().revision,
+        actor: "operator".into(),
+        origin: CommandOrigin::Operator,
+        body: CommandBody::Steer {
+            content: "second".into(),
+        },
+    })
+    .unwrap();
+    let conn = rusqlite::Connection::open(&world.db).unwrap();
+    conn.execute("UPDATE commands SET created_at = 1", [])
+        .unwrap();
+    let snap = host.snapshot(&created.mission_id).unwrap();
+    let ids: Vec<&str> = snap
+        .commands
+        .iter()
+        .map(|command| command.id.as_str())
+        .collect();
+    let first = ids.iter().position(|id| *id == "z-steer").unwrap();
+    let second = ids.iter().position(|id| *id == "a-steer").unwrap();
+    assert!(first < second, "admission order lost: {ids:?}");
+    host.dispatch_pending(&created.mission_id).unwrap();
+    let order = host.runtime_mut().admission_order().to_vec();
+    assert_eq!(
+        order.last().map(String::as_str),
+        Some(snap.commands[second].request_id.as_str())
+    );
+    assert!(order.iter().any(|id| id.ends_with(":z-steer")));
+    assert!(
+        order
+            .windows(2)
+            .any(|pair| pair[0].ends_with(":z-steer") && pair[1].ends_with(":a-steer"))
+    );
+}
+
+#[test]
+fn incomplete_notification_frames_do_not_advance_and_errors_keep_the_queue() {
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    host.dispatch_pending(&created.mission_id).unwrap();
+    notify(&mut host, &created.mission_id, plan_note("plan"));
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::ApprovePlan {
+            plan_digest: plan_digest_for("plan").unwrap(),
+        },
+    );
+    notify(
+        &mut host,
+        &created.mission_id,
+        RuntimeNotification::ImplementationSettled { quiescent: true },
+    );
+    let digest = host.snapshot(&created.mission_id).unwrap().content_digest;
+    for body in [
+        json!({"kind": "verification_pass", "contentDigest": digest, "evidence": "x", "requirements": ["a"]}),
+        json!({"kind": "verification_pass", "contentDigest": digest, "evidence": "x", "requirements": ["a"], "completeness": null}),
+        json!({"kind": "verification_fail", "contentDigest": digest, "evidence": "x", "requirements": ["a"], "completeness": 1}),
+    ] {
+        let error = host
+            .apply_notification_json(&created.mission_id, &body)
+            .unwrap_err();
+        assert_eq!(error.category(), "guard_failed", "{body}");
+        assert_eq!(
+            host.snapshot(&created.mission_id).unwrap().phase,
+            Phase::Verifying
+        );
+    }
+    let error =
+        admit_expect(&mut host, &created.mission_id, CommandBody::CompletePass).unwrap_err();
+    assert_eq!(error.category(), "guard_failed");
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().phase,
+        Phase::Verifying
+    );
+
+    host.runtime_mut().push_notification(pass_note(&digest));
+    host.runtime_mut().push_notification(plan_note("later"));
+    host.runtime_mut()
+        .push_notification(RuntimeNotification::Idle);
+    let error = host.poll_runtime(&created.mission_id).unwrap_err();
+    assert_eq!(error.category(), "illegal_transition");
+    assert_eq!(host.runtime_mut().queued_notifications(), 2);
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().phase,
+        Phase::AwaitingReview
+    );
+}
+
+#[test]
+fn operators_cannot_certify_observations_and_origin_urls_drop_userinfo() {
+    let world = open_world();
+    git(
+        &world.repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://user:supersecret@github.com/kortiene/switchyard.git",
+        ],
+    );
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    let stored = ledger_text(&world.db);
+    assert!(!stored.contains("supersecret"));
+    assert!(stored.contains("github.com/kortiene/switchyard.git"));
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    let error = admit_expect(
+        &mut host,
+        &created.mission_id,
+        CommandBody::PlanCompleted {
+            plan: "plan".into(),
+            digest: plan_digest_for("plan").unwrap(),
+            quiescent: true,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.category(), "guard_failed");
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().phase,
+        Phase::Planning
+    );
+    notify(&mut host, &created.mission_id, plan_note("plan"));
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().phase,
+        Phase::AwaitingPlanApproval
+    );
 }
 
 #[test]

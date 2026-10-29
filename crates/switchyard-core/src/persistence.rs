@@ -24,6 +24,7 @@ const ENVIRONMENT_JSON: &str = r#"{"confinement":"deferred_to_s3","host":"single
 
 pub struct Store {
     conn: Connection,
+    owner_generation: Option<u64>,
 }
 
 pub struct NewCommand {
@@ -68,7 +69,10 @@ impl Store {
             std::fs::create_dir_all(parent).map_err(Error::storage)?;
         }
         let conn = Connection::open(path).map_err(Error::storage)?;
-        let mut store = Self { conn };
+        let mut store = Self {
+            conn,
+            owner_generation: None,
+        };
         store.configure_writer()?;
         Ok(store)
     }
@@ -100,7 +104,10 @@ impl Store {
                 detail: "read-only inspection could not enable query_only".into(),
             });
         }
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            owner_generation: None,
+        })
     }
 
     pub fn configure_writer(&mut self) -> Result<()> {
@@ -129,6 +136,10 @@ impl Store {
             });
         }
         Ok(())
+    }
+
+    pub fn bind_owner_generation(&mut self, generation: u64) {
+        self.owner_generation = Some(generation);
     }
 
     pub fn durability(&self) -> Result<(String, i64)> {
@@ -344,11 +355,20 @@ impl Store {
                  WHERE m.id = ?1",
             )
             .map_err(Error::storage)?;
-        let mission = stmt
-            .query_row(params![mission_id], map_mission)
-            .optional()
+        let rows = stmt
+            .query_map(params![mission_id], map_mission)
             .map_err(Error::storage)?;
-        mission.ok_or(Error::NotFound)
+        let mut missions = Vec::new();
+        for row in rows {
+            missions.push(row.map_err(Error::storage)?);
+        }
+        match missions.len() {
+            0 => Err(Error::NotFound),
+            1 => Ok(missions.remove(0)),
+            _ => Err(Error::Storage {
+                detail: "mission has more than one active attempt or root task".into(),
+            }),
+        }
     }
 
     pub fn list_mission_ids(&self) -> Result<Vec<String>> {
@@ -385,7 +405,7 @@ impl Store {
             .prepare(
                 "SELECT id, mission_id, attempt_id, kind, payload_hash, expected_revision,
                         resulting_revision, state, request_id, origin, runtime_receipt_json
-                 FROM commands WHERE mission_id = ?1 ORDER BY created_at, id",
+                 FROM commands WHERE mission_id = ?1 ORDER BY seq, id",
             )
             .map_err(Error::storage)?;
         let rows = stmt
@@ -583,8 +603,8 @@ impl Store {
     }
 
     pub fn acknowledge(&mut self, command_id: &str, receipt_json: &str) -> Result<()> {
-        let changed = self
-            .conn
+        let tx = self.immediate()?;
+        let changed = tx
             .execute(
                 "UPDATE commands SET state = 'acknowledged', runtime_receipt_json = ?1, updated_at = ?2
                  WHERE id = ?3 AND state = 'pending'",
@@ -592,8 +612,7 @@ impl Store {
             )
             .map_err(Error::storage)?;
         if changed != 1 {
-            let state: Option<String> = self
-                .conn
+            let state: Option<String> = tx
                 .query_row(
                     "SELECT state FROM commands WHERE id = ?1",
                     params![command_id],
@@ -602,12 +621,37 @@ impl Store {
                 .optional()
                 .map_err(Error::storage)?;
             if state.as_deref() == Some("acknowledged") || state.as_deref() == Some("reconciled") {
+                tx.commit().map_err(Error::storage)?;
                 return Ok(());
             }
             return Err(Error::Storage {
                 detail: format!("command {command_id} could not be acknowledged"),
             });
         }
+        tx.commit().map_err(Error::storage)?;
+        Ok(())
+    }
+
+    pub fn supersede_pending(&mut self, command_id: &str, reason: &str) -> Result<()> {
+        let tx = self.immediate()?;
+        let receipt = serde_json::to_string(&json!({
+            "superseded": true,
+            "reason": reason,
+        }))
+        .map_err(Error::storage)?;
+        let changed = tx
+            .execute(
+                "UPDATE commands SET state = 'superseded', runtime_receipt_json = ?1, updated_at = ?2
+                 WHERE id = ?3 AND state = 'pending'",
+                params![receipt, now_ms(), command_id],
+            )
+            .map_err(Error::storage)?;
+        if changed != 1 {
+            return Err(Error::Storage {
+                detail: format!("command {command_id} could not be superseded"),
+            });
+        }
+        tx.commit().map_err(Error::storage)?;
         Ok(())
     }
 
@@ -699,9 +743,13 @@ impl Store {
         .map_err(Error::storage)?;
         tx.execute(
             "INSERT INTO verifications(
-                id, mission_id, attempt_id, evidence_id, outcome, requirements_json,
+                id, mission_id, attempt_id, seq, evidence_id, outcome, requirements_json,
                 content_digest, invalidated, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)",
+            ) VALUES (
+                ?1, ?2, ?3,
+                (SELECT COALESCE(MAX(seq), 0) + 1 FROM verifications),
+                ?4, ?5, ?6, ?7, 0, ?8
+            )",
             params![
                 verification_id,
                 mission_id,
@@ -725,7 +773,7 @@ impl Store {
                  FROM verifications v
                  JOIN evidence e ON e.id = v.evidence_id
                  WHERE v.mission_id = ?1 AND v.invalidated = 0
-                 ORDER BY v.created_at DESC, v.id DESC
+                 ORDER BY v.seq DESC
                  LIMIT 1",
                 params![mission_id],
                 |row| {
@@ -832,8 +880,8 @@ impl Store {
     }
 
     pub fn settle_operation(&mut self, operation_id: &str, payload_hash: &str) -> Result<()> {
-        let changed = self
-            .conn
+        let tx = self.immediate()?;
+        let changed = tx
             .execute(
                 "UPDATE operation_receipts SET state = 'completed'
                  WHERE operation_id = ?1 AND payload_hash = ?2",
@@ -841,10 +889,10 @@ impl Store {
             )
             .map_err(Error::storage)?;
         if changed == 1 {
+            tx.commit().map_err(Error::storage)?;
             return Ok(());
         }
-        let existing: Option<String> = self
-            .conn
+        let existing: Option<String> = tx
             .query_row(
                 "SELECT payload_hash FROM operation_receipts WHERE operation_id = ?1",
                 params![operation_id],
@@ -853,7 +901,10 @@ impl Store {
             .optional()
             .map_err(Error::storage)?;
         match existing {
-            Some(existing_hash) if existing_hash == payload_hash => Ok(()),
+            Some(existing_hash) if existing_hash == payload_hash => {
+                tx.commit().map_err(Error::storage)?;
+                Ok(())
+            }
             Some(_) => Err(Error::OperationConflict {
                 operation_id: operation_id.to_string(),
             }),
@@ -898,9 +949,26 @@ impl Store {
     }
 
     fn immediate(&mut self) -> Result<Transaction<'_>> {
-        self.conn
+        let expected = self.owner_generation;
+        let tx = self
+            .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(Error::storage)
+            .map_err(Error::storage)?;
+        if let Some(expected) = expected {
+            let actual: Option<i64> = tx
+                .query_row(
+                    "SELECT generation FROM host_owner WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(Error::storage)?;
+            let actual = u64::try_from(actual.unwrap_or(0)).unwrap_or(0);
+            if actual != expected {
+                return Err(Error::StaleGeneration { expected, actual });
+            }
+        }
+        Ok(tx)
     }
 }
 
@@ -948,9 +1016,13 @@ fn insert_command(tx: &Transaction<'_>, command: &NewCommand) -> Result<()> {
     let now = now_ms();
     tx.execute(
         "INSERT INTO commands(
-            id, mission_id, attempt_id, kind, payload_canonical, payload_hash, expected_revision,
+            id, mission_id, attempt_id, seq, kind, payload_canonical, payload_hash, expected_revision,
             resulting_revision, state, request_id, origin, runtime_receipt_json, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?12)",
+         ) VALUES (
+            ?1, ?2, ?3,
+            (SELECT COALESCE(MAX(seq), 0) + 1 FROM commands),
+            ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?12
+         )",
         params![
             command.id,
             command.mission_id,
@@ -1198,5 +1270,122 @@ mod tests {
                 || message.contains("query_only"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn same_millisecond_verifications_follow_insertion_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mission.sqlite");
+        let mut store = Store::open_writer(&db).unwrap();
+        store.migrate().unwrap();
+        store.create_mission(sample_mission()).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO evidence(
+                    id, mission_id, attempt_id, content_hash, completeness, provenance_json,
+                    body_json, invalidated, created_at
+                 ) VALUES ('e-z', 'm-1', 'a-1', 'digest', 'complete', '{}', '{}', 0, 100)",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO evidence(
+                    id, mission_id, attempt_id, content_hash, completeness, provenance_json,
+                    body_json, invalidated, created_at
+                 ) VALUES ('e-a', 'm-1', 'a-1', 'digest', 'complete', '{}', '{}', 0, 100)",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO verifications(
+                    id, mission_id, attempt_id, seq, evidence_id, outcome, requirements_json,
+                    content_digest, invalidated, created_at
+                 ) VALUES ('v-z', 'm-1', 'a-1', 1, 'e-z', 'fail', '[]', 'digest', 0, 100)",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO verifications(
+                    id, mission_id, attempt_id, seq, evidence_id, outcome, requirements_json,
+                    content_digest, invalidated, created_at
+                 ) VALUES ('v-a', 'm-1', 'a-1', 2, 'e-a', 'pass', '[]', 'digest', 0, 100)",
+                [],
+            )
+            .unwrap();
+        let latest = store.latest_verification("m-1").unwrap().unwrap();
+        assert_eq!(latest.outcome, crate::domain::VerificationOutcome::Pass);
+    }
+
+    #[test]
+    fn one_active_attempt_and_one_root_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mission.sqlite");
+        let mut store = Store::open_writer(&db).unwrap();
+        store.migrate().unwrap();
+        store.create_mission(sample_mission()).unwrap();
+        let attempt = store
+            .conn
+            .execute(
+                "INSERT INTO attempts(
+                    id, mission_id, task_id, base_sha, session_id, runtime_config_json, policy_json,
+                    policy_hash, verifier_json, environment_json, successor_of, active, repair_count,
+                    max_repairs, plan_revision_count, max_plan_revisions, created_at
+                 ) VALUES (
+                    'a-2', 'm-1', 't-1', 'abc', 's-2', '{}', '{}', 'h', '{}', '{}', NULL, 1, 0, 1, 0, 1, 1
+                 )",
+                [],
+            )
+            .unwrap_err();
+        assert!(
+            attempt.to_string().to_lowercase().contains("unique"),
+            "{attempt}"
+        );
+        let task = store
+            .conn
+            .execute(
+                "INSERT INTO tasks(id, mission_id, acceptance_criteria, root, frozen, created_at)
+                 VALUES ('t-2', 'm-1', 'again', 1, 1, 1)",
+                [],
+            )
+            .unwrap_err();
+        assert!(task.to_string().to_lowercase().contains("unique"), "{task}");
+        assert_eq!(store.load_mission("m-1").unwrap().attempt.id, "a-1");
+    }
+
+    fn sample_mission() -> CreatedMission {
+        CreatedMission {
+            id: "m-1".into(),
+            task_id: "t-1".into(),
+            attempt_id: "a-1".into(),
+            session_id: "s-1".into(),
+            objective: "objective".into(),
+            acceptance: "acceptance".into(),
+            content_digest: "digest".into(),
+            repo: RepoIdentity {
+                toplevel: "/repo".into(),
+                head_sha: "abc".into(),
+                branch: "main".into(),
+                porcelain_hash: "sha256:00".into(),
+                origin_url: None,
+            },
+            issue: crate::domain::SourceIssue {
+                provider: "github".into(),
+                number: 95,
+                title: "title".into(),
+                snapshot_at: 0,
+            },
+            actor: "operator".into(),
+            max_repairs: 2,
+            max_plan_revisions: 3,
+            successor_of_mission_id: None,
+            successor_of_attempt_id: None,
+        }
     }
 }

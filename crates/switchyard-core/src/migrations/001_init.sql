@@ -53,6 +53,8 @@ CREATE TABLE tasks (
     created_at INTEGER NOT NULL
 );
 
+CREATE UNIQUE INDEX tasks_one_root ON tasks(mission_id) WHERE root = 1;
+
 CREATE TABLE attempts (
     id TEXT PRIMARY KEY,
     mission_id TEXT NOT NULL REFERENCES missions(id),
@@ -73,16 +75,19 @@ CREATE TABLE attempts (
     created_at INTEGER NOT NULL
 );
 
+CREATE UNIQUE INDEX attempts_one_active ON attempts(mission_id) WHERE active = 1;
+
 CREATE TABLE commands (
     id TEXT PRIMARY KEY,
     mission_id TEXT NOT NULL REFERENCES missions(id),
     attempt_id TEXT NOT NULL REFERENCES attempts(id),
+    seq INTEGER NOT NULL UNIQUE,
     kind TEXT NOT NULL,
     payload_canonical TEXT NOT NULL,
     payload_hash TEXT NOT NULL,
     expected_revision INTEGER NOT NULL,
     resulting_revision INTEGER,
-    state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'reconciled')),
+    state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'reconciled', 'superseded')),
     request_id TEXT NOT NULL UNIQUE,
     origin TEXT NOT NULL,
     runtime_receipt_json TEXT,
@@ -90,7 +95,7 @@ CREATE TABLE commands (
     updated_at INTEGER NOT NULL
 );
 
-CREATE INDEX commands_mission_state ON commands(mission_id, state, created_at);
+CREATE INDEX commands_mission_state ON commands(mission_id, state, seq);
 
 CREATE TABLE operation_receipts (
     operation_id TEXT PRIMARY KEY,
@@ -119,6 +124,7 @@ CREATE TABLE verifications (
     id TEXT PRIMARY KEY,
     mission_id TEXT NOT NULL REFERENCES missions(id),
     attempt_id TEXT NOT NULL REFERENCES attempts(id),
+    seq INTEGER NOT NULL UNIQUE,
     evidence_id TEXT REFERENCES evidence(id),
     outcome TEXT NOT NULL CHECK (outcome IN ('pass', 'fail', 'error', 'incomplete')),
     requirements_json TEXT NOT NULL,

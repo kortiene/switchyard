@@ -7,10 +7,10 @@ use crate::error::{Error, Result};
 
 /// Read repository identity without writing the checkout.
 ///
-/// Hooks and fsmonitor are disabled. Credential-bearing environment variables
-/// are removed from the git process. S1 does not require a clean tree; the
-/// porcelain hash is recorded so later slices can see drift. A repository
-/// without a commit cannot supply a base SHA and is rejected.
+/// Hooks, fsmonitor, and optional locks are disabled. The git process receives
+/// an allowlisted environment. S1 does not require a clean tree; the porcelain
+/// hash is recorded so later slices can see drift. A repository without a
+/// commit cannot supply a base SHA and is rejected.
 pub fn inspect_repo(path: &Path) -> Result<RepoIdentity> {
     let inside = git(path, &["rev-parse", "--is-inside-work-tree"])?;
     if inside.trim() != "true" {
@@ -31,9 +31,24 @@ pub fn inspect_repo(path: &Path) -> Result<RepoIdentity> {
         branch: branch.trim().to_string(),
         porcelain_hash: format!("sha256:{}", sha256_hex(&porcelain)),
         origin_url: origin
-            .map(|value| value.trim().to_string())
+            .map(|value| strip_userinfo(value.trim()))
             .filter(|value| !value.is_empty()),
     })
+}
+
+/// Drop URL userinfo such as `user:token@` before the identity is stored.
+pub fn strip_userinfo(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let rest = &url[scheme_end + 3..];
+    let Some(at) = rest.find('@') else {
+        return url.to_string();
+    };
+    if rest[..at].contains('/') {
+        return url.to_string();
+    }
+    format!("{}://{}", &url[..scheme_end], &rest[at + 1..])
 }
 
 fn git(path: &Path, args: &[&str]) -> Result<String> {
@@ -45,6 +60,13 @@ fn git(path: &Path, args: &[&str]) -> Result<String> {
 
 fn git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let mut command = Command::new("git");
+    command.env_clear();
+    if let Some(path_var) = std::env::var_os("PATH") {
+        command.env("PATH", path_var);
+    }
+    command.env("GIT_OPTIONAL_LOCKS", "0");
+    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    command.env("GIT_TERMINAL_PROMPT", "0");
     command
         .arg("-c")
         .arg("core.fsmonitor=")
@@ -53,17 +75,6 @@ fn git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
         .arg("-C")
         .arg(path);
     command.args(args);
-    for name in [
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
-        "GH_ENTERPRISE_TOKEN",
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-    ] {
-        command.env_remove(name);
-    }
     let output = command.output().map_err(|error| Error::GitFailed {
         detail: format!("failed to run git: {error}"),
     })?;
@@ -74,4 +85,25 @@ fn git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
         });
     }
     Ok(output.stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_userinfo;
+
+    #[test]
+    fn origin_userinfo_is_removed() {
+        assert_eq!(
+            strip_userinfo("https://user:supersecret@github.com/kortiene/switchyard.git"),
+            "https://github.com/kortiene/switchyard.git"
+        );
+        assert_eq!(
+            strip_userinfo("ssh://git@github.com/kortiene/switchyard.git"),
+            "ssh://github.com/kortiene/switchyard.git"
+        );
+        assert_eq!(
+            strip_userinfo("https://github.com/kortiene/switchyard.git"),
+            "https://github.com/kortiene/switchyard.git"
+        );
+    }
 }
