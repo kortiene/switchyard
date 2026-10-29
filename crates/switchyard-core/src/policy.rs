@@ -180,29 +180,12 @@ pub fn authorize(mission: &MissionRecord, body: &CommandBody, facts: &Facts) -> 
             Ok(())
         }
         CommandBody::Pause | CommandBody::Cancel => Ok(()),
-        CommandBody::ConfirmStopped => {
-            if facts.ops_blocked {
-                return Err(blocked());
-            }
-            if facts.pending_pause {
-                return Err(Error::guard(
-                    "pause abort is still pending and has not been delivered",
-                ));
-            }
-            if facts.admitted_runtime_work && !facts.acknowledged_pause {
-                return Err(Error::guard(
-                    "runtime work is outstanding until the pause abort is delivered",
-                ));
-            }
-            Ok(())
-        }
+        CommandBody::ConfirmStopped => require_pause_settled(facts),
         CommandBody::Resume { authorized } => {
             if !authorized {
                 return Err(Error::guard("resume requires explicit authorization"));
             }
-            if facts.ops_blocked {
-                return Err(blocked());
-            }
+            require_pause_settled(facts)?;
             let target = mission
                 .resume_target
                 .ok_or_else(|| Error::guard("paused mission has no resume target"))?;
@@ -253,8 +236,8 @@ pub fn authorize(mission: &MissionRecord, body: &CommandBody, facts: &Facts) -> 
                     "recovery target {expected_target} does not match validated target {validated}"
                 )));
             }
-            if validated == Phase::Paused && facts.ops_blocked {
-                return Err(blocked());
+            if validated == Phase::Paused {
+                require_pause_settled(facts)?;
             }
             Ok(())
         }
@@ -278,6 +261,23 @@ pub fn authorize(mission: &MissionRecord, body: &CommandBody, facts: &Facts) -> 
             Ok(())
         }
     }
+}
+
+fn require_pause_settled(facts: &Facts) -> Result<()> {
+    if facts.ops_blocked {
+        return Err(Error::guard("runtime or writers are not quiescent"));
+    }
+    if facts.pending_pause {
+        return Err(Error::guard(
+            "pause abort is still pending and has not been delivered",
+        ));
+    }
+    if facts.admitted_runtime_work && !facts.acknowledged_pause {
+        return Err(Error::guard(
+            "runtime work is outstanding until the pause abort is delivered",
+        ));
+    }
+    Ok(())
 }
 
 fn revalidate_resume(mission: &MissionRecord, facts: &Facts, target: Phase) -> Result<()> {

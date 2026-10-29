@@ -464,7 +464,7 @@ impl Host {
     pub fn dispatch_pending(&mut self, mission_id: &str) -> Result<usize> {
         let mission = self.store.load_mission(mission_id)?;
         let recorded = self.store.list_commands(mission_id)?;
-        let admitted_runtime_work = recorded.iter().any(|command| {
+        let mut admitted_runtime_work = recorded.iter().any(|command| {
             command.state == CommandState::Acknowledged && is_runtime_work(command.kind)
         });
         let pending: Vec<_> = recorded
@@ -483,6 +483,7 @@ impl Host {
                 }
                 self.store
                     .acknowledge(&command.id, &receipt_json(&receipt))?;
+                admitted_runtime_work |= is_runtime_work(command.kind);
                 dispatched += 1;
                 continue;
             }
@@ -506,6 +507,7 @@ impl Host {
             };
             self.store
                 .acknowledge(&command.id, &receipt_json(&receipt))?;
+            admitted_runtime_work |= is_runtime_work(command.kind);
             dispatched += 1;
         }
         Ok(dispatched)
@@ -908,7 +910,7 @@ impl Host {
             return Ok(None);
         }
         let commands = self.store.list_commands(&mission.id)?;
-        if admitted_work_for(&commands, next, mission.attempt.repair_count) {
+        if resumable_work_for(&commands, next) {
             return Ok(None);
         }
         let activity = if next == Phase::Planning {
@@ -1287,28 +1289,48 @@ fn is_runtime_work(kind: CommandKind) -> bool {
     kind.is_runtime_bound() && !matches!(kind, CommandKind::Pause | CommandKind::Cancel)
 }
 
-fn admitted_work_for(
-    commands: &[crate::domain::CommandRecord],
-    phase: Phase,
-    repair_count: u32,
-) -> bool {
-    commands.iter().any(|command| {
-        command.state == CommandState::Acknowledged
-            && match phase {
-                Phase::Planning => matches!(
-                    command.kind,
-                    CommandKind::StartPlanning | CommandKind::RequestRevisedPlan
-                ),
-                Phase::Implementing if repair_count > 0 => {
-                    command.kind == CommandKind::AuthorizeBoundedRepair
-                }
-                Phase::Implementing => matches!(
-                    command.kind,
-                    CommandKind::ApprovePlan | CommandKind::RequestChanges
-                ),
-                _ => false,
-            }
-    })
+/// The latest phase-entry command identifies the current planning/repair
+/// activity. A delivered abort ends submissions before it; later pending
+/// commands keep their original identity, including an admission whose reply
+/// was lost. `list_commands` supplies durable insertion order.
+fn resumable_work_for(commands: &[crate::domain::CommandRecord], phase: Phase) -> bool {
+    let starts_activity = |kind| match phase {
+        Phase::Planning => {
+            matches!(
+                kind,
+                CommandKind::StartPlanning | CommandKind::RequestRevisedPlan
+            )
+        }
+        Phase::Implementing => matches!(
+            kind,
+            CommandKind::ApprovePlan
+                | CommandKind::RequestChanges
+                | CommandKind::AuthorizeBoundedRepair
+        ),
+        _ => false,
+    };
+    let Some(start) = commands
+        .iter()
+        .rposition(|command| starts_activity(command.kind))
+    else {
+        return false;
+    };
+    for command in commands[start..].iter().rev() {
+        if matches!(command.kind, CommandKind::Pause | CommandKind::Cancel)
+            && command.state == CommandState::Acknowledged
+        {
+            return false;
+        }
+        if (starts_activity(command.kind) || command.kind == CommandKind::Continue)
+            && matches!(
+                command.state,
+                CommandState::Pending | CommandState::Acknowledged
+            )
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn verification_record(

@@ -13,6 +13,8 @@ use crate::{
     OperationState, Phase, PublicationProof,
 };
 
+mod recovery_regressions;
+
 struct World {
     _tmp: TempDir,
     db: PathBuf,
@@ -1001,6 +1003,7 @@ fn pause_stop_and_cancel_must_settle_before_work_resumes() {
         &crate::payload_hash(&json!({"argv": ["sleep", "1"]})).unwrap(),
     )
     .unwrap();
+    deliver(&mut host, &created.mission_id);
     admit(
         &mut host,
         &created.mission_id,
