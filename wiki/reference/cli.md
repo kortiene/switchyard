@@ -4,7 +4,7 @@ title: Command-line interface
 description: The supported command families, common run flags, and safety-sensitive CLI behavior.
 resource: https://github.com/kortiene/switchyard/blob/main/adw_sdlc/src/cli.ts
 tags: [reference, cli, commands, flags]
-timestamp: "2026-10-29T01:08:00-04:00"
+timestamp: "2026-10-29T11:40:00Z"
 ---
 
 # Entry points
@@ -56,6 +56,10 @@ npm run issue -- worktree prune --dry-run
 
 See the [managed-worktree playbook](/operations/managed-worktrees.md) before removal.
 
+# Rust prototype CLI
+
+S1 adds a separate `switchyard` binary. It is not the TypeScript CLI above and it does not read ADW state. `switchyard mission status` is read-only. `switchyard mission create` records a local Git snapshot and does not call GitHub. The fake runtime is the only adapter. Command details live in the binary's `--help` output and in the [Rust-first S1 resolutions](../../docs/rust-first/README.md#s1-resolutions).
+
 # Precedence
 
 Explicit CLI values generally override canonical `ADW_*` environment variables, which override validated project-pack defaults. Deprecated `MX_AGENT_*` aliases remain compatibility inputs; conflicting canonical and legacy values fail loudly.
@@ -67,3 +71,5 @@ Explicit CLI values generally override canonical `ADW_*` environment variables, 
 [2] [CLI behavior tests](https://github.com/kortiene/switchyard/blob/main/adw_sdlc/test/cli.test.ts)
 
 [3] [Environment alias handling](https://github.com/kortiene/switchyard/blob/main/adw_sdlc/src/env-vars.ts)
+
+[4] [Rust host CLI](../../crates/switchyard/src/main.rs)

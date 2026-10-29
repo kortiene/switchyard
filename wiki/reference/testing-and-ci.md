@@ -3,7 +3,7 @@ type: Testing Reference
 title: Testing and CI
 description: The focused-test workflow, canonical verification chain, coverage policy, and CI execution matrix.
 tags: [reference, testing, coverage, ci, verification]
-timestamp: "2026-07-18T13:26:10Z"
+timestamp: "2026-10-29T05:30:00Z"
 ---
 
 # Canonical gate
@@ -45,7 +45,17 @@ Use `npm test` for a coverage-free full suite. Finish broad or risky changes wit
 
 Coverage measures all `src/**/*.ts` except the public barrel and declaration files. Current enforced floors are 85% statements, 73% branches, 82% functions, and 85% lines.
 
-GitHub Actions checks the same `npm run verify` command on Node `20.19.0` (the package engine floor) and the Node 22 line. CI does not duplicate the gate stages; the package script remains the single local/CI entry point.
+GitHub Actions checks the same `npm run verify` command on Node `20.19.0` (the package engine floor) and the Node 22 line. CI does not duplicate the gate stages; the package script remains the TypeScript entry point.
+
+# Rust core gate
+
+S1 adds a separate Rust gate. From the repository root:
+
+```bash
+./scripts/rust-verify.sh
+```
+
+The script checks formatting, clippy, and `cargo test` with the committed Rust 1.99.1 toolchain. CI runs it as the stable job name `rust-core` on `ubuntu-24.04`. It does not replace `npm run verify`. Adding the workflow job does not make `rust-core` a required status check; a maintainer has to add that exact name to branch protection or rulesets.
 
 # Wiki validation policy
 
@@ -58,5 +68,7 @@ OKF consumers must tolerate missing links. Switchyard's producer-side `wiki:chec
 [2] [Vitest and coverage configuration](https://github.com/kortiene/switchyard/blob/main/adw_sdlc/vitest.config.ts)
 
 [3] [GitHub Actions verification workflow](https://github.com/kortiene/switchyard/blob/main/.github/workflows/verify.yml)
+
+[4] [Rust core gate](../../scripts/rust-verify.sh)
 
 [4] [Verification script invariants](https://github.com/kortiene/switchyard/blob/main/adw_sdlc/test/scaffold.test.ts)

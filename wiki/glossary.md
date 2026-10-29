@@ -3,7 +3,7 @@ type: Glossary
 title: Switchyard glossary
 description: Canonical meanings for terms used across the Switchyard control plane and wiki.
 tags: [terminology, adw, reference]
-timestamp: "2026-10-29T01:08:00-04:00"
+timestamp: "2026-10-29T11:40:00Z"
 ---
 
 # Terms
@@ -24,6 +24,8 @@ timestamp: "2026-10-29T01:08:00-04:00"
 | Provider | An implementation of a control-plane role: CLI locator, work items, VCS, or change requests and CI. |
 | Runner | A coding-agent backend selected to perform agentic phases without owning Git or forge actions. |
 | Work item | Provider-neutral unit of requested work, such as a GitHub issue. |
+| Rust mission | S1 durable objective in the Rust SQLite ledger. It is not an ADW run and does not use state v1. |
+| Attempt | One Rust execution snapshot. A host restart keeps the same attempt; a successor is a new mission and attempt. |
 
 # Related concepts
 

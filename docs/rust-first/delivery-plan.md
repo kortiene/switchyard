@@ -86,13 +86,13 @@ Credential-free automation should include fake-provider/fake-forge protocol test
 
 ## Planned CI and required checks
 
-The current [verify workflow](../../.github/workflows/verify.yml) runs the TypeScript gate on Node 20.19.0 and 22 with check names verify (node 20.19.0) and verify (node 22). The floor leg skips the optional existing Pi SDK; both current suites use mocks. Neither proves the new Pi Durable bridge. This documentation PR does not change workflows or branch protection.
+The current [verify workflow](../../.github/workflows/verify.yml) runs the TypeScript gate on Node 20.19.0 and 22 with check names verify (node 20.19.0) and verify (node 22). The floor leg skips the optional existing Pi SDK; both current suites use mocks. Neither proves the new Pi Durable bridge. S1 adds the separate `rust-core` job and does not change those TypeScript checks or branch protection.
 
 Add these separate jobs as their implementation slices land:
 
 | Stable proposed check name | Runner / runtime | Required coverage | Owner |
 | --- | --- | --- | --- |
-| rust-core | ubuntu-24.04; exact toolchain/MSRV recorded by S1 | Formatting/lint, Rust unit/domain/persistence tests, fake runtime and real Git fixtures | S1 |
+| rust-core | ubuntu-24.04; Rust 1.99.1, which is also the S1 MSRV (`rust-toolchain.toml`) | Formatting/lint, Rust unit/domain/persistence tests, fake runtime and real Git fixtures. The job exists; it is not a required check until a maintainer adds that exact name to branch protection or rulesets. | S1 |
 | pi-bridge-contract | ubuntu-24.04; Rust toolchain plus an exact maintained Node 22 patch >=22.19.0, pinned and verified in S2 | Locked Pi install/typecheck and faux-provider protocol/replay/receipt tests; never inherit the Node 20 leg or skip Pi | S2 |
 | execution-confinement | ubuntu-24.04 Linux x86_64; same pinned Rust/Node; backend/image and capabilities recorded by S3 | Real bridge and agent confinement, process-tree stop, denied filesystem/egress/credential access, replayed effect identity | S3 |
 | prototype-acceptance | ubuntu-24.04; same pins and backend | Composed fake-provider/fake-forge crash drills and local UI/CLI integration; real Git/workspaces | S8, with S7 tests |
@@ -124,7 +124,7 @@ Reuse behavior and test cases from the existing implementation where relevant: s
 
 These are bounded engineering choices, not reasons to reopen the agreed architecture:
 
-- S1: Rust toolchain/MSRV, database transaction/sync policy, canonical hashing, CLI/API shape and owner-lock behavior.
+- S1, resolved in the mission-ledger implementation: Rust 1.99.1 is the committed toolchain and MSRV. The mission database uses WAL and `synchronous=FULL` for committed process-crash durability; power-loss recovery is not claimed. Payload hashes use the integer-only JCS subset documented in the [S1 resolutions](README.md#s1-resolutions). The CLI is `switchyard mission` with create, status, command, recover, notify, lock, successor, and content. The owner lock is an exclusive flock plus a monotonic generation row; status does not take it. Tests cover the generated transition matrix, restart, fake runtime, and real Git. Live provider and live GitHub acceptance are not claimed.
 - S2: exact installable Pi/Node versions, bridge mapping storage, public API compatibility and replay/resync details.
 - S3: one Linux confinement backend proven on ubuntu-24.04, bridge/agent mount layout, process-tree supervision and egress/resource policy.
 - S5: verifier-visible workspace manifest, snapshot/freeze mechanism, completeness limits and artifact retention.

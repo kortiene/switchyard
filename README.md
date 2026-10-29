@@ -26,6 +26,19 @@ The [Rust-first prototype plan](./docs/rust-first/README.md) and
 describe the M1 recovery and approval contracts. The runnable reference
 documented below is that TypeScript package, not a compatibility commitment.
 
+S1 of that plan is a separate Cargo workspace (`crates/switchyard-core` and
+`crates/switchyard`). It persists missions in an application-owned SQLite ledger
+and drives them with a fake runtime: no model credentials, no GitHub writes, and
+no resume of frozen state v1. The Rust gate is separate from `npm run verify`:
+
+```bash
+./scripts/rust-verify.sh
+```
+
+It expects the committed Rust 1.99.1 toolchain. CI reports it as the `rust-core`
+job on `ubuntu-24.04`. That job is not a required status check until a maintainer
+adds the name to branch protection or rulesets.
+
 ## What Switchyard does
 
 Give Switchyard one work item and it will:
@@ -244,6 +257,7 @@ There is no root `package.json`; the Node package and all npm scripts live in
 | Path | What you will find there |
 | --- | --- |
 | [`adw_sdlc/`](./adw_sdlc/) | The main package: CLI, orchestration kernel, runner adapters, tests, and detailed docs. |
+| [`crates/`](./crates/) | The Rust S1 mission ledger and `switchyard` binary. Separate from the TypeScript CLI. |
 | [`.adw/`](./.adw/) | Switchyard's project pack: configuration, generated runtime prompts, and schemas. |
 | [`wiki/`](./wiki/) | The OKF v0.1 knowledge bundle for architecture, workflows, operations, and decisions. |
 | `agents/` | Git-ignored run state, prompts, transcripts, and metrics; created by live runs. |
@@ -283,8 +297,9 @@ Slash commands include `/adw-menu`, `/adw-runs`, `/adw-config`, `/adw-mvp`, and
 
 ## Quality gate
 
-`npm run verify` (from `adw_sdlc/`) is the canonical local **and** CI quality
-gate. It runs every check in order and fails fast:
+`npm run verify` (from `adw_sdlc/`) is the TypeScript reference gate. It runs
+every check in order and fails fast. The Rust S1 gate is the separate
+`./scripts/rust-verify.sh` command:
 
 ```bash
 cd adw_sdlc
