@@ -16,6 +16,9 @@ not a formality. This ledger is the readiness dashboard referenced by
 it is scoped to the **`claude`** cutover gate (the (A) MVP). Codex / opencode / pi
 live status is tracked separately in
 [`PARITY.md` → real-issue runs](../PARITY.md#real-issue-runs-per-runner).
+Pi run `babe0070` (PR #73) is partial evidence only. Direction (2026-10-29):
+Python compatibility is dropped. Row 11 is a historical observation, not an
+ongoing compatibility requirement. State v1 is frozen.
 
 ## Status legend (observed-live vocabulary)
 

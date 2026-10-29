@@ -15,9 +15,15 @@
 > - Runtime control-plane env vars are now canonicalized under `ADW_*`; the
 >   historical `MX_AGENT_*` names below are deprecated compatibility aliases and
 >   remain denied from runner subprocesses.
+> - **Direction (2026-10-29):** Python compatibility, py↔ts coexistence, and
+>   "keep Python for ≥1 release" below are historical. They are not current
+>   requirements. State v1 is frozen (no further changes, no new consumers).
+>   `runner-pi` and the TypeScript execution path are frozen legacy. Rust is
+>   the sole long-term engine. See `docs/rust-first/README.md` and
+>   `wiki/decisions/invariants.md`.
 >
-> For the current architecture and status, read `HEALTHTECH_PORT.md`,
-> `docs/UNIVERSAL.md`, and `HANDOVER.md`.
+> For the current architecture and status, read `docs/rust-first/README.md`,
+> `wiki/decisions/invariants.md`, `docs/UNIVERSAL.md`, and `MVP-READINESS.md`.
 
 Re-architect the CLI-subprocess ADW pipeline (`adw/`, Python) into a new **TypeScript/Node** package
 (`adw_sdlc/`) that drives the agentic phases through **one common `AgentRunner` interface** backed by

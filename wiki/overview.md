@@ -4,12 +4,14 @@ title: Switchyard
 description: An agent-readable and human-readable map of the Switchyard ADW control plane.
 resource: https://github.com/kortiene/switchyard
 tags: [switchyard, adw, control-plane, overview]
-timestamp: "2026-07-18T13:26:10Z"
+timestamp: "2026-10-29T01:08:00-04:00"
 ---
 
 # Purpose
 
 Switchyard contains `adw_sdlc`, a TypeScript and Node control plane that moves one work item through a deterministic Agentic Developer Workflow (ADW). Each agentic phase is a separate invocation of a selected coding-agent runner. The control plane owns phase order, state, local gates, Git operations, change-request operations, CI handling, and optional merge.
+
+Accepted direction (2026-10-29): Switchyard is unreleased and has no users. Rust is the sole long-term engine, including a native Rust agent runtime. Pi Durable 1.4.0 behind the sandboxed TypeScript bridge is a proof-of-concept runtime, not the end state. This TypeScript control plane is a reference while useful, not a coexistence or user-compatibility commitment. See [decisions](/decisions/invariants.md).
 
 This wiki is a navigation and explanation layer for contributors, operators, and agents. It summarizes relationships and points back to canonical implementation sources; it does not replace the package README, source code, schemas, or tests.
 

@@ -3,12 +3,12 @@ type: Operational Playbook
 title: Managed worktrees
 description: Inspection, retention, resume, and conservative cleanup for opt-in Switchyard-owned linked worktrees.
 tags: [operations, worktree, concurrency, cleanup, recovery]
-timestamp: "2026-07-18T13:26:10Z"
+timestamp: "2026-10-29T01:08:00-04:00"
 ---
 
 # Status and scope
 
-The current checkout implements an initial opt-in managed-worktree subsystem. Because these files may be work in progress until committed and released, verify the current CLI help and tests rather than treating this page as a versioned release promise.
+TypeScript managed-worktree work is stopped (2026-10-29). This page is not an in-development checkout and not a release contract. S3 ([#97](https://github.com/kortiene/switchyard/issues/97)) owns worktree lifecycle natively in Rust as part of the sandbox. The commands below describe the TypeScript checkout as it exists. Verify `npm run issue -- --help` before use.
 
 Managed mode isolates a run from the primary checkout. Durable run/registry data lives below the repository's common Git directory, while agent-writable artifacts remain inside the linked worktree under `agents/<adw-id>/`.
 

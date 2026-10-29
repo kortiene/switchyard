@@ -4,7 +4,7 @@ title: Command-line interface
 description: The supported command families, common run flags, and safety-sensitive CLI behavior.
 resource: https://github.com/kortiene/switchyard/blob/main/adw_sdlc/src/cli.ts
 tags: [reference, cli, commands, flags]
-timestamp: "2026-07-18T13:26:10Z"
+timestamp: "2026-10-29T01:08:00-04:00"
 ---
 
 # Entry points
@@ -17,7 +17,7 @@ npm run issue -- <work-item-id> --runner claude
 npm run issue -- <work-item-id> --resume --adw-id a1b2c3d4
 ```
 
-`issue` is retained as a backward-compatible name even when the configured provider uses a different kind of work item. The TypeScript engine is the default and only bundled engine; selecting `py` fails closed because the Python sibling is not part of this distribution.
+`issue` is retained as a backward-compatible name even when the configured provider uses a different kind of work item. The TypeScript engine is the bundled reference, not a long-term coexistence or user-compatibility promise (accepted 2026-10-29). Selecting `py` fails closed because the Python sibling is not part of this distribution. Python compatibility is dropped. State v1 (`adw/state.schema.json`, `agents/<adw-id>/state.json`) is frozen: no further changes, no new consumers. `runner-pi` and the TypeScript execution path are frozen legacy (fixes only).
 
 # Common run flags
 
@@ -45,7 +45,7 @@ Use `npm run issue -- --help` for the complete current flag list.
 
 # Managed-worktree commands
 
-The current source also exposes conservative inspection and cleanup commands for opt-in managed runs:
+TypeScript managed-worktree work is stopped (2026-10-29). S3 ([#97](https://github.com/kortiene/switchyard/issues/97)) owns worktree lifecycle natively in Rust. The current source still exposes conservative inspection and cleanup commands for opt-in managed runs:
 
 ```bash
 npm run issue -- worktree list --json

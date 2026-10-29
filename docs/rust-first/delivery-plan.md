@@ -9,8 +9,8 @@ Use focused PRs in dependency order. First build the domain with a fake runtime,
 | Slice | Issue | Depends on | Reviewable outcome |
 | --- | --- | --- | --- |
 | S1 | [#95](https://github.com/kortiene/switchyard/issues/95) | Planning review | Create the smallest runnable Rust host that can create, inspect, and recover a mission using a fake runtime. |
-| S2 | [#96](https://github.com/kortiene/switchyard/issues/96) | #95 | Validate the highest integration risk before building a full agent workflow: a pinned Pi Durable session controlled and recovered by Rust. |
-| S3 | [#97](https://github.com/kortiene/switchyard/issues/97) | #95, #96 | Let Pi use coding tools while Rust owns the filesystem/process boundary and trusted credentials. |
+| S2 | [#96](https://github.com/kortiene/switchyard/issues/96) | #95 | Proof-of-concept gate: a pinned Pi Durable 1.4.0 session, behind the sandboxed TypeScript bridge, controlled and recovered by Rust. Not an end-state runtime decision. |
+| S3 | [#97](https://github.com/kortiene/switchyard/issues/97) | #95, #96 | Let the proof-of-concept runtime use coding tools while Rust owns the filesystem/process boundary, trusted credentials, and worktree lifecycle. TypeScript managed-worktree work is stopped. |
 | S4 | [#98](https://github.com/kortiene/switchyard/issues/98) | #95, #96, #97 | Run the mission lifecycle in Rust while Pi owns only its agent session and internal tasks. |
 | S5 | [#99](https://github.com/kortiene/switchyard/issues/99) | #97, #98 | Make verified and approved states depend on observed content and host-controlled checks rather than agent messages. |
 | S6 | [#100](https://github.com/kortiene/switchyard/issues/100) | #99 | Produce one explicitly authorized PR and recover safely when a GitHub response is lost. |
@@ -21,7 +21,16 @@ The issue checklist is the operational source for progress. This document explai
 
 ## S2 integration gate and fallback
 
-S2 records GO or NO-GO in its issue and evidence ledger with exact source/package/Node identities, commands, results and unresolved constraints. No current result is assumed. GO requires every row below; an unproven mandatory property is NO-GO, not a warning.
+S2 is the proof-of-concept gate for pinned Pi Durable 1.4.0 behind the sandboxed TypeScript bridge. Switchyard is unreleased and has no users. Rust is the sole long-term engine, including a native Rust agent runtime. GO means this proof of concept may be used for downstream M1 live work behind the replaceable adapter. GO does not make Pi Durable the end state, and it does not create a TypeScript coexistence or user-compatibility promise. `adw_sdlc/` stays only as a reference while useful. `runner-pi` and the TypeScript execution path stay frozen legacy (fixes only).
+
+| Term | Meaning for this gate |
+| --- | --- |
+| Pi Durable 1.4.0 behind the sandboxed TypeScript bridge | Proof-of-concept runtime. The GO/NO-GO rows below test this adapter only. |
+| Native Rust agent runtime | Long-term target behind the same replaceable adapter. A NO-GO does not demote this target and does not select the TypeScript engine instead. |
+| `adw_sdlc/` | Reference while useful. No long-term coexistence or user-compatibility promise. |
+| State v1 | Frozen (`adw/state.schema.json`, `agents/<adw-id>/state.json`): no further changes, no new consumers. Python compatibility is dropped. |
+
+S2 records GO or NO-GO in its issue and evidence ledger with exact source/package/Node identities, commands, results and unresolved constraints. No current result is assumed. GO requires every proof row below; an unproven mandatory property is NO-GO, not a warning.
 
 | Required proof | NO-GO condition |
 | --- | --- |
@@ -37,15 +46,15 @@ Package 1.4.0 is an inspected source baseline, not a waiver for a missing releas
 On NO-GO:
 
 1. Keep S1 and the fake runtime usable. Record the failing test/API/version and mark Pi-dependent live work in S3-S8 blocked by #96; do not mark #96 completed as a successful integration.
-2. S3-S8 may prepare runtime-independent fixtures, domain/verification tests, UI mocks, and delivery reconciliation against fake runtime/forge adapters. Those results do not satisfy real Pi, sandbox, or live acceptance criteria.
-3. The default usable product remains the existing TypeScript path. No automatic runtime substitution, source fork, new native Rust harness, or broad rewrite is authorized by this fallback.
-4. Propose the smallest remedy: compatible pinned upstream version/build or bounded adapter fix. If Pi cannot meet the boundary, record a separate runtime-selection decision and revised scope/dependencies for a minimal native Rust runtime or another adapter before enabling downstream live work.
-5. Resume S3-S8's real path only after the revised S2 gate is GO; S3 must then pass the OS confinement gate before live mission execution.
+2. S3-S8 may prepare runtime-independent fixtures, domain/verification tests, UI mocks, and delivery reconciliation against fake runtime/forge adapters. Those results do not satisfy the Pi Durable proof of concept, the sandbox, or live acceptance criteria.
+3. Do not fall back to `adw_sdlc/` as the product. It remains a reference only. No automatic substitution that promotes `runner-pi`, no Pi source fork, and no user-compatibility promise.
+4. The target runtime remains native Rust behind the replaceable adapter. A compatible pin or bounded adapter fix may still be proposed to unblock the proof of concept; that remedy does not change the target. This NO-GO note does not itself authorize a broad rewrite. Downstream live work waits on a revised Pi Durable GO or a reviewed native-Rust runtime gate, not on the TypeScript engine.
+5. Resume the real S3-S8 path only after that revised gate is GO. S3 must pass the OS confinement gate, including native worktree lifecycle, before live mission execution. TypeScript managed-worktree work stays stopped.
 
 ## Incremental demonstrations
 
 1. **Foundation:** create a mission through the Rust CLI, restart, inspect the same attempt and pending command. No model or forge access.
-2. **Runtime proof:** Rust starts pinned Pi Durable, submits through the bridge, loses an acknowledgment, recovers one submission, and steers at a documented boundary.
+2. **Runtime proof:** Rust starts the pinned Pi Durable proof of concept, submits through the bridge, loses an acknowledgment, recovers one submission, and steers at a documented boundary. This does not adopt Pi Durable as the end state.
 3. **Controlled implementation:** Pi edits only its owned, confined workspace through Rust; cancellation stops descendants; stale generations cannot publish results.
 4. **Verified review:** frozen checks fail, a bounded repair changes the content, new evidence passes, stale approval is refused, and the operator approves the current digest.
 5. **Delivery:** materialize that approved Git tree and publish one PR; recover a simulated lost response without duplication.
@@ -70,7 +79,7 @@ The final live run uses a deliberately selected fixture repository/issue and exp
 | Existing branch has another head | Conflict reported; no blind overwrite or silent rebase | S6 |
 | Runtime version changes | Compatible pinned reopen or explicit block | S2 |
 | Unsupported bridge or agent confinement | Live implementation/verifier fails closed; confinement CI fails rather than skips | S3, S5 |
-| Pi integration gate fails | NO-GO recorded; S3-S8 real path blocked, fake-only preparation explicitly identified | S2 |
+| Pi Durable proof-of-concept gate fails | NO-GO recorded; Pi-dependent live path blocked. The TypeScript engine is not the fallback product. Native Rust remains the target runtime. Fake-only preparation is explicitly identified | S2 |
 | Final operator demonstration | Reviewed digest, evidence and single PR linked in ledger | S8 |
 
 Credential-free automation should include fake-provider/fake-forge protocol tests and real Git/process/sandbox integration on the declared supported platform. A live provider run is a separate acceptance gate. Keep the existing `npm run verify` behavior unchanged; invoke it from `adw_sdlc/` when running the current package gate. Add and document the Rust/bridge checks in S1/S2. Do not claim unrun checks pass.
@@ -102,7 +111,7 @@ Eight issues were open at planning time, with no open PRs. The repository is not
 | --- | --- |
 | [#28](https://github.com/kortiene/switchyard/issues/28) — fenced-output sample | Existing TypeScript parity work; no M1 dependency |
 | [#30](https://github.com/kortiene/switchyard/issues/30) — nudge rate | Retain as prior cost/latency evidence; no M1 dependency |
-| [#34](https://github.com/kortiene/switchyard/issues/34) — Python/TS cutover | Historical integrated-repository track; not a Rust cutover task |
+| [#34](https://github.com/kortiene/switchyard/issues/34) — Python/TS cutover | Python compatibility dropped 2026-10-29. Not a Rust task. State v1 stays frozen: no further changes, no new consumers |
 | [#38](https://github.com/kortiene/switchyard/issues/38) — TS linter | Current package maintenance; bridge checks get their own explicit scope |
 | [#40](https://github.com/kortiene/switchyard/issues/40) — Pi TUI tests | Existing Cockpit work; new web surface is S7 |
 | [#42](https://github.com/kortiene/switchyard/issues/42) — provider code plugins | Remains demand-gated; distinct from a bundled trusted Pi adapter |

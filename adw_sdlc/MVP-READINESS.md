@@ -10,8 +10,9 @@ localhost round-trip). Contact with reality now spans **thirteen** live `claude`
 run ids — the original seed, an 8-issue self-hosting batch, three issue-#20
 failure-drill carriers, and the active-phase recovery run — plus targeted
 real-spawn boundary/routing/veto probes, two OpenCode real-issue runs recorded
-in issue #31, Pi run `babe0070` to open PR #73, and partial authenticated Codex
-run `c0de0069`. See
+in issue #31, partial Pi run `babe0070` (PR #73; one owner scope fix — partial
+evidence only, an unassisted Pi real-issue run is still owed), and partial
+authenticated Codex run `c0de0069`. See
 [`docs/LIVE-RUN-BATCH.md`](./docs/LIVE-RUN-BATCH.md) and the sanitized
 [`test/fixtures/live-evidence/`](./test/fixtures/live-evidence/) corpus. Measured
 over the Claude batch, native structured output has **0/36 hard-fails (0.0%)** but
@@ -41,6 +42,11 @@ The docs blur three very different bars. These were the three candidate bars;
 > **Decision (recorded):** ☑ **(A)** — MVP = "`claude` autonomously ships real
 > issues reliably." **(B)** four-runner and **(C)** cutover are **post-MVP**
 > (see §2 / §3). Decided 2026-06-25.
+>
+> **Later decision (2026-10-29):** Python compatibility is dropped as a
+> requirement. §3 remains the historical **(C)** record and is not remaining
+> work. State v1 (`adw/state.schema.json`, `agents/<adw-id>/state.json`) is
+> frozen as is: no further changes, no new consumers.
 
 The rest of this doc adopts **(A)** and marks what **(B)/(C)** add.
 
@@ -135,25 +141,33 @@ _Post-MVP: not required for the (A) MVP. Listed for completeness._
   the Codex home; #75 now keeps durable auth there while ignoring user config and disabling
   apps/plugins, with a real two-process metadata regression. That boundary still needs a
   compatible-host live rerun. No issue-to-PR completion or full-run cost/rate is claimed.
-- [x] ✅ **Pi real-issue validation observed with operator scope recovery (#32).**
+- [ ] 🟡 **Pi real-issue validation is partial; operator scope recovery only (#32).**
   Run `babe0070` drove issue #70 to open PR #73 with Pi 0.80.6 on Node 24.18.0
   and local Qwen: 4 counted fenced attempts (2 clean, 2 nudged→ok, 0 hard-fails),
   $0 provider cost, and a successful timeout-then-resume. The operator interrupted
   an out-of-scope document phase, removed three untracked files, corrected the target,
-  and resumed without document, so this is not an uninterrupted-autonomy claim. Both
-  PR checks passed; live Pi itself did not run on either CI Node version.
+  and resumed without document, so this is not an uninterrupted-autonomy claim.
+  **Decision (2026-10-29): that run is partial evidence only.** An unassisted Pi
+  real-issue run is still owed. Both PR checks passed; live Pi itself did not run
+  on either CI Node version.
 
 ## 3. Gates that (C) — cutover — adds (post-MVP)
 
-_Post-MVP: not required for the (A) MVP. Listed for completeness._
+_Post-MVP relative to the 2026-06-25 (A) choice. **Superseded 2026-10-29:**
+Python compatibility is dropped as a requirement. These ❌ gates are historical
+and are not remaining work. State v1 (`adw/state.schema.json`,
+`agents/<adw-id>/state.json`) is frozen as is: no further changes, no new
+consumers. Do not delete the schema or `adw_sdlc/` under this decision._
 
 - [ ] ❌ **`ADW_ENGINE` py↔ts coexistence tested in the *integrated* repo.**
   The Python sibling is not bundled here, so **(C) cannot be validated from this
   standalone port** — it needs the combined environment. In the standalone port
   the `py` path now **fails closed explicitly** (selecting it raises a "not
-  available in this standalone distribution" `AdwError`; issue #27); the
-  coexistence gate itself stays ❌/post-MVP.
+  available in this standalone distribution" `AdwError`; issue #27). That
+  fail-closed behavior stays. The coexistence gate itself is no longer a
+  requirement; it is not a post-MVP task to finish.
 - [ ] ❌ Rollback plan: keep py ≥ 1 release, with a documented revert path.
+  Dropped with Python compatibility. There is no rollback-to-Python promise.
 
 ## 4. Cross-cutting — the universalization surface (regardless of A/B/C)
 
@@ -197,8 +211,8 @@ GitLab). **Decide scope:**
   harness/runbook, observed-live ledger, cost/secret-boundary audit, and
   universalization scope-line are done.
 - **Not automatable in this environment:** the remaining Codex edit-to-PR run on a
-  `bwrap`/user-namespace-compatible host, a real GitLab provider credential, and the
-  maintainer's cutover sign-off.
+  `bwrap`/user-namespace-compatible host, an unassisted Pi real-issue run, and a
+  real GitLab provider credential. Python cutover sign-off is not owed.
 
 ## Recommended minimal path to a defensible (A)-MVP
 

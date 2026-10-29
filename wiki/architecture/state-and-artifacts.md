@@ -3,7 +3,7 @@ type: Architecture Reference
 title: State and artifacts
 description: The durable run contract and the generated files used for resume, evidence, and agent handoff.
 tags: [architecture, state, resume, artifacts, metrics]
-timestamp: "2026-07-18T13:26:10Z"
+timestamp: "2026-10-29T01:08:00-04:00"
 ---
 
 # Default workspace
@@ -21,7 +21,7 @@ An ordinary run writes under `agents/<adw-id>/`. The eight-character hexadecimal
 
 # State contract
 
-`adw/state.schema.json` defines the portable version-one shape. Historical GitHub-shaped fields remain canonical for compatibility, while TypeScript-specific and provider-neutral fields are additive. Readers tolerate unknown additive fields; resume must not depend on a new field without an explicit schema and compatibility change.
+`adw/state.schema.json` defines frozen state v1, including `agents/<adw-id>/state.json`. Python compatibility is dropped (2026-10-29). The schema is frozen as is: no further changes and no new consumers. Historical GitHub-shaped fields and the existing additive TypeScript fields stay where they are. Existing TypeScript resume may keep reading v1. Rust missions do not resume legacy ADW runs, and that freeze is not a new-engine compatibility promise.
 
 State is saved after meaningful phase transitions so resume can skip completed work. Default state persistence preserves the historical contract. Managed runs use a separate durable control root, stricter atomic persistence, and worktree-local agent artifacts.
 

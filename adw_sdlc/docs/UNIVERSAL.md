@@ -557,10 +557,11 @@ own knobs (`--test-cmd`/`maxResolve`, `gates.e2e`/`gates.documentation`).
 
 ## State
 
-Persistent run state at `agents/{adw_id}/state.json` is the cross-language
-contract with the Python `adw/` pipeline. It carries v1 GitHub-shaped fields
-(`issue_number`, `pr_number`, `pr_url`) for backward compatibility, plus
-TS-additive provider-neutral metadata:
+Persistent run state at `agents/{adw_id}/state.json` is frozen state v1
+(2026-10-29). Python compatibility is dropped: no further schema changes and
+no new consumers. The file still carries v1 GitHub-shaped fields
+(`issue_number`, `pr_number`, `pr_url`) plus the existing TS-additive
+provider-neutral metadata:
 
 ```json
 "work_item": {
@@ -579,8 +580,10 @@ TS-additive provider-neutral metadata:
 }
 ```
 
-Both halves are validated against `adw/state.schema.json`. The provider-neutral
-fields are non-load-bearing for resume; v1 fields stay canonical. A string id
+Both halves are validated against the frozen `adw/state.schema.json`. The
+provider-neutral fields are non-load-bearing for existing TypeScript resume;
+v1 fields stay as frozen. That is not a Python-interoperability promise and
+not a contract for new engines. A string id
 is written as `issue_number: "PROJ-123"` and as `work_item.id`, with
 `work_item.number: null`. Readers also accept legacy numeric `issue_number`
 values and canonicalize them to strings before enforcing the resume-id guard.

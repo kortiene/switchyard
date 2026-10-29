@@ -3,7 +3,7 @@ type: Architecture Component
 title: Runners and providers
 description: The interchangeable agent-runner and external-system provider seams used by the control plane.
 tags: [architecture, runners, providers, adapters]
-timestamp: "2026-07-18T13:26:10Z"
+timestamp: "2026-10-29T01:08:00-04:00"
 ---
 
 # Runner seam
@@ -18,6 +18,8 @@ timestamp: "2026-07-18T13:26:10Z"
 | Pi | Fenced JSON contract | Allowlisted subprocess environment and streamed JSON events. |
 
 The kernel branches on declared capabilities, not runner identity. Model names are resolved through project-configured tiers.
+
+`runner-pi` and the TypeScript execution path are frozen legacy as of 2026-10-29: fixes only, retired with the TypeScript engine. They are not the Pi Durable proof-of-concept bridge. Run `babe0070` (PR #73) is partial evidence for this legacy adapter only; an unassisted Pi real-issue run is still owed.
 
 # Provider seam
 

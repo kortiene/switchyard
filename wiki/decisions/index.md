@@ -1,3 +1,3 @@
 # Decision knowledge
 
-* [Control-plane invariants and decision status](invariants.md) - Implemented control-plane invariants, the proposed Rust-first/Pi Durable boundary, and deferred capabilities.
+* [Control-plane invariants and decision status](invariants.md) - Implemented control-plane invariants, the accepted Rust-first direction (2026-10-29), and deferred capabilities.

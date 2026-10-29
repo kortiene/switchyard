@@ -18,7 +18,10 @@ session can pick up where we stopped.
   in `adw/fixtures/cross_language/`. The Python sibling is not bundled in
   this standalone port, so selecting `--engine py` / `ADW_ENGINE=py` raises an
   explicit "not available in this standalone distribution" `AdwError` at
-  dispatch (no spawn, no `python3` dependency).
+  dispatch (no spawn, no `python3` dependency). **Direction (2026-10-29):**
+  Python compatibility is dropped. State v1 is frozen as is (no further
+  changes, no new consumers). Later sections that treat py↔ts coexistence as
+  remaining work are historical.
 - Architectural plan & parity criteria: `adw_sdlc/PLAN.md`,
   `adw_sdlc/PARITY.md`, `adw_sdlc/HEALTHTECH_PORT.md`.
 - MVP open-risk counterweight to PARITY.md (what real readiness still requires —
@@ -1443,7 +1446,10 @@ The fix separates the two concepts the old wording conflated:
   repo, keep-py-≥1-release rollback plan, maintainer sign-off) — **post-MVP**.
   `MVP-READINESS.md` §3 is the single source of truth; `cli.ts` now defers to it
   via a cross-reference (`see MVP-READINESS.md §3`) so the two docs cannot
-  silently diverge again.
+  silently diverge again. **Direction (2026-10-29):** Python compatibility is
+  dropped. §3 keeps the post-MVP heading so this cross-reference still
+  resolves; its body records that the gate is not remaining work. State v1 is
+  frozen. `cli.ts` was not edited with that later decision.
 
 - `adw_sdlc/src/cli.ts` — `DEFAULT_ENGINE` JSDoc first sentence softened:
   "the cutover … is done" → "the `ts` default is set (the `py → ts` default flip
