@@ -90,7 +90,38 @@ Sources: [README](https://github.com/earendil-works/pi/blob/e65b3b88c08412bb8ffb
 
 A runtime restart retains the business Attempt. A new scope, changed policy, or explicitly abandoned attempt creates a successor with new authority; old evidence/decisions remain auditable. A bounded repair within an attempt creates a new review revision and invalidates earlier verification/approval.
 
-Suggested lifecycle: draft -> planning -> awaiting_plan_approval -> implementing -> verifying -> awaiting_review -> approved -> publishing -> published. Explicit paused, cancelling/cancelled, rejected, and needs_attention paths preserve the previous phase and reason. Validate legal transitions in Rust; the runtime cannot set mission status.
+## Normative mission transitions
+
+This table is normative for the proposed M1 implementation. Rust rejects every unlisted state transition. Each accepted transition checks the expected mission revision and atomically records its command/decision, resulting revision, and any outbox entry. Runtime notifications are observations used by Rust to evaluate guards; they cannot set mission state. Steering and inspection may leave state unchanged and still receive durable command receipts.
+
+| From | Command or reconciled observation | Guard and required effect | To |
+| --- | --- | --- | --- |
+| draft | start planning | Freeze attempt inputs and policy; acquire exclusive ownership; planning tools are read-only | planning |
+| planning | plan completed | Persist the complete plan and its digest; planning work is quiescent | awaiting_plan_approval |
+| awaiting_plan_approval | request revised plan | Record feedback; invalidate the old plan decision; enforce usage limits | planning |
+| awaiting_plan_approval | approve plan | Authorized actor confirms current plan digest; implementation policy is unchanged | implementing |
+| implementing | request verification / implementation settles | Freeze new mutation admission; confirm runtime and all writers quiescent; retain any interrupted effects for reconciliation | verifying |
+| verifying | complete PASS | Every frozen requirement passes with complete evidence for the current stable content | awaiting_review |
+| verifying | authorize bounded repair | FAIL is attributable to repairable code; policy permits repair; writers quiescent; limits available; atomically increment persistent repair count and invalidate old review/approval | implementing |
+| awaiting_review | request changes | Authorized feedback stays within frozen scope; writers quiescent; limits available; increment persistent repair count and invalidate old evidence/approval for the new revision | implementing |
+| awaiting_review | approve review | Confirm current digest, complete PASS and unchanged content; record actor/rationale | approved |
+| approved | publish | Explicit publication authority for this digest and target; revalidate frozen content; record delivery intent before external effects | publishing |
+| publishing | reconcile delivery complete | Exact approved tree/commit and one matching PR are proven; record delivery receipt | published |
+| awaiting_plan_approval, awaiting_review, approved | reject | Record explicit rejection; no delivery is in flight; writers quiescent | rejected |
+| draft, planning, awaiting_plan_approval, implementing, verifying, awaiting_review, approved | pause | Record resume target; close new admission and request drain/stop | pausing |
+| pausing | confirm stopped | Runtime and every writer quiescent; interrupted effects reconciled | paused |
+| paused | resume | Explicit authorization; original resume target revalidated with the same guards, plan/content/policy checks and ownership; no silent approval reuse | saved resume target |
+| Any nonterminal state except cancelling | cancel | Close admission, persist cancellation intent, request stop; retain in-flight publication receipts | cancelling |
+| cancelling | confirm cancelled | All writers stopped, effects reconciled, and no matching published PR exists; retain any already-created branch/commit | cancelled |
+| cancelling | discover publication already completed | Exact authorized delivery/PR is proven; cancellation cannot undo publication | published |
+| Any nonterminal state except needs_attention | detect uncertainty, invalid approval, ERROR/INCOMPLETE, exhausted limits, or failed stop | Revoke mutation/publication admission; persist prior phase, reason and permitted recovery target; invalidate stale evidence/approval | needs_attention |
+| needs_attention | explicit recovery | Prove ownership and effect outcomes; restore only a recorded, revalidated normal phase or paused; require that phase's guards; content drift returns to verifying, never directly approved | validated recovery target |
+
+Normal phases are draft, planning, awaiting_plan_approval, implementing, verifying, awaiting_review, approved, and publishing. Recovery cannot jump past a failed gate: pending stop/cancel intents must settle before resuming, and uncertain publication must reconcile before another publish attempt. A pause during publishing is rejected; cancellation during publishing follows the delivery-reconciliation rows above.
+
+published, rejected, and cancelled are terminal for the attempt. A successor attempt requires an explicit new command and identity; terminal records are never reopened. Policy/scope/verifier changes also require a successor attempt and new plan approval. A restart is not a new business attempt.
+
+A verification FAIL does not authorize unlimited automatic repair. Its guarded repair edge must consume a persisted allowance; ERROR/INCOMPLETE and unresolved external effects go to needs_attention. Changes after approval first invalidate it and enter needs_attention; reinspection/reverification and a new review are required before delivery.
 
 Plan approval authorizes implementation under the frozen policy. Delivery approval authorizes an exact reviewed result and target. Steering can refine work within policy; it cannot expand capabilities, alter acceptance tests, or approve publication.
 
@@ -110,11 +141,32 @@ Each supervisor activation has a generation. Reject calls/results from stale gen
 
 ## Workspace and trust boundary
 
-The Rust host creates an owned worktree from an exact base commit and provides a confined ExecutionEnv to Pi through the protocol. Choose one supported platform/backend in S3 and record its actual filesystem, network, process, and resource guarantees.
+The Rust host creates an owned worktree from an exact base commit and provides a confined ExecutionEnv to Pi through the protocol. M1 targets Linux; S3 must prove one confinement backend on the planned ubuntu-24.04 CI runner and record its actual filesystem, network, process, and resource guarantees. Other host platforms remain unsupported for live execution until separately proven.
 
 Agent-run processes must not access the original checkout, control databases, Pi storage, host credentials, bridge code, or writable Git administrative state. Mediate any required read-only Git inspection. Worktree metadata that refers to the base repository needs explicit mount/access treatment; it is not automatically isolated.
 
 Model-provider credentials belong to the trusted runtime process, not agent shell commands. GitHub publication credentials belong only to the Rust delivery component. Build environments from explicit allowlists. Repository scripts and test code run in confinement too.
+
+### Bridge process confinement and in-process allowlist
+
+The Pi bridge is a separate confined trust domain from the agent execution environment. It holds model credentials and session storage, so forwarding coding operations to Rust is necessary but insufficient.
+
+M1 permits only the pinned Pi Durable/Pi AI runtime and provider/storage adapters, schema validation, deterministic prompt/formatting helpers, and bundled read/write/edit/bash tool adapters whose file/process effects exclusively use the Rust-backed ExecutionEnv. Select these by a host-owned allowlist; freeze their versions and configuration with the attempt. Hooks may validate, record observations, or forward approved operations; they cannot open host tools or broaden policy.
+
+Disable code mode/eval, model-supplied JavaScript, dynamic extension loading, project/user extension discovery, arbitrary MCP servers, direct NodeExecutionEnv, detached subagents, and tools/hooks that perform independent shell/filesystem/network effects. Bundled implementation code is the reviewed trusted computing base; model/repository content is data, never imported or evaluated as host code. Package presence is not permission to register a capability.
+
+| Bridge capability | M1 boundary |
+| --- | --- |
+| Read | Read-only pinned runtime/package files, immutable host-supplied configuration, and its own session directory |
+| Write | Only its private Pi/adapter journal directory and a private bounded temporary directory; neither is agent-accessible |
+| Workspace and host filesystem | No direct mount/access to the repository/worktree, Rust mission database, home directory, forge credentials, host sockets or Git metadata |
+| Network | OS-enforced default-deny egress except the host-configured model endpoint through a controlled route/proxy and required narrowly controlled resolution; no runtime registry downloads or arbitrary redirects/URLs |
+| Process control | No arbitrary child-process creation, ptrace or access to host process credentials; Rust executes commands in the separate agent sandbox |
+| IPC | Only inherited supervised channels; requests must pass Rust capability, attempt and generation checks |
+
+Endpoint selection and credentials come from the operator, not the repository/model. Provider endpoints may receive the model context by design; that scoped disclosure is not a general internet capability. The confinement policy must also exclude cloud metadata/local host services and unapproved destination changes. An environment allowlist or an HTTP wrapper alone is not an egress boundary.
+
+Rust supervises bridge resources and lifetime independently of Pi's cooperative cancellation. S3 must demonstrate denied reads/writes/network/child-process attempts from test extension code executing inside the bridge, plus a hung extension that Rust terminates while retaining recoverable storage. If the selected platform cannot enforce either the bridge policy or agent sandbox policy, live execution remains blocked. S2 can prove the protocol with fake providers and execution stubs without claiming these OS guarantees.
 
 Cancellation means stop admission, request runtime abort, stop/drain the entire process tree, and confirm quiescence. Killing a bridge process alone does not prove that descendants stopped.
 

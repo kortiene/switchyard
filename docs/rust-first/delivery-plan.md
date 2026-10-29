@@ -19,6 +19,29 @@ Use focused PRs in dependency order. First build the domain with a fake runtime,
 
 The issue checklist is the operational source for progress. This document explains sequencing and milestone acceptance; it must not be marked implemented merely because issues or tests exist.
 
+## S2 integration gate and fallback
+
+S2 records GO or NO-GO in its issue and evidence ledger with exact source/package/Node identities, commands, results and unresolved constraints. No current result is assumed. GO requires every row below; an unproven mandatory property is NO-GO, not a warning.
+
+| Required proof | NO-GO condition |
+| --- | --- |
+| Reproducible installation | No installable, integrity-locked package/source combination matching the reviewed baseline, or undocumented source/package divergence |
+| Public recovery APIs | Cannot reopen and inspect persisted submissions/live work or deduplicate admission without private table access; cursor replay is optional if snapshot resync is proven |
+| Stable tool-effect identity | Cannot recover the same durable Pi tool-task identity/effect-key mapping across replay and route it to Rust receipts |
+| Controlled registry/execution | Required coding tools bypass the Rust ExecutionEnv, or the bridge cannot disable arbitrary extension/code loading under the stated allowlist |
+| Observable shutdown | Cannot distinguish answered/idle/abort settlement, or cannot expose enough ownership/process state for host-supervised stop and recovery |
+| Protocol correctness | Lost acknowledgment, restart, identity conflict, stale-generation or bounded transport tests fail under the pinned runtime |
+
+Package 1.4.0 is an inspected source baseline, not a waiver for a missing release. A different published version or reproducible source build may be proposed with exact integrity/provenance and a compatibility delta; review and update the pinned baseline, then rerun the full S2 gate. Do not silently use latest, import private Pi internals, or weaken a required invariant to obtain GO. S2 validates the logical confinement seam; actual bridge/agent OS enforcement is a separate blocking S3 gate.
+
+On NO-GO:
+
+1. Keep S1 and the fake runtime usable. Record the failing test/API/version and mark Pi-dependent live work in S3-S8 blocked by #96; do not mark #96 completed as a successful integration.
+2. S3-S8 may prepare runtime-independent fixtures, domain/verification tests, UI mocks, and delivery reconciliation against fake runtime/forge adapters. Those results do not satisfy real Pi, sandbox, or live acceptance criteria.
+3. The default usable product remains the existing TypeScript path. No automatic runtime substitution, source fork, new native Rust harness, or broad rewrite is authorized by this fallback.
+4. Propose the smallest remedy: compatible pinned upstream version/build or bounded adapter fix. If Pi cannot meet the boundary, record a separate runtime-selection decision and revised scope/dependencies for a minimal native Rust runtime or another adapter before enabling downstream live work.
+5. Resume S3-S8's real path only after the revised S2 gate is GO; S3 must then pass the OS confinement gate before live mission execution.
+
 ## Incremental demonstrations
 
 1. **Foundation:** create a mission through the Rust CLI, restart, inspect the same attempt and pending command. No model or forge access.
@@ -36,7 +59,7 @@ The final live run uses a deliberately selected fixture repository/issue and exp
 | --- | --- | --- |
 | Browser closes | Host continues; reconnect reconstructs persisted state | S7 |
 | Restart before/after Pi admission | One command, one submission, same business attempt | S1, S2, S4 |
-| Crash during tool effect | Reconciled receipt or visible uncertainty; no blind unsafe replay | S3, S8 |
+| Crash during tool effect | Stable tool-task/effect key returns the original receipt after a new generation; ambiguous outcomes block | S2, S3, S8 |
 | Old worker/process remains alive | No replacement writer or review; stale results rejected | S3 |
 | Cancellation during shell execution | All supervised descendants stopped before terminal state | S3, S4 |
 | Agent changes tests or claims success | Host's frozen verification contract still decides | S5 |
@@ -46,10 +69,30 @@ The final live run uses a deliberately selected fixture repository/issue and exp
 | PR created, response lost | Reconcile original branch/PR, retain one delivery | S6 |
 | Existing branch has another head | Conflict reported; no blind overwrite or silent rebase | S6 |
 | Runtime version changes | Compatible pinned reopen or explicit block | S2 |
-| Unsupported confinement | Live implementation/verifier fails closed | S3, S5 |
+| Unsupported bridge or agent confinement | Live implementation/verifier fails closed; confinement CI fails rather than skips | S3, S5 |
+| Pi integration gate fails | NO-GO recorded; S3-S8 real path blocked, fake-only preparation explicitly identified | S2 |
 | Final operator demonstration | Reviewed digest, evidence and single PR linked in ledger | S8 |
 
 Credential-free automation should include fake-provider/fake-forge protocol tests and real Git/process/sandbox integration on the declared supported platform. A live provider run is a separate acceptance gate. Keep the existing `npm run verify` behavior unchanged; invoke it from `adw_sdlc/` when running the current package gate. Add and document the Rust/bridge checks in S1/S2. Do not claim unrun checks pass.
+
+## Planned CI and required checks
+
+The current [verify workflow](../../.github/workflows/verify.yml) runs the TypeScript gate on Node 20.19.0 and 22 with check names verify (node 20.19.0) and verify (node 22). The floor leg skips the optional existing Pi SDK; both current suites use mocks. Neither proves the new Pi Durable bridge. This documentation PR does not change workflows or branch protection.
+
+Add these separate jobs as their implementation slices land:
+
+| Stable proposed check name | Runner / runtime | Required coverage | Owner |
+| --- | --- | --- | --- |
+| rust-core | ubuntu-24.04; exact toolchain/MSRV recorded by S1 | Formatting/lint, Rust unit/domain/persistence tests, fake runtime and real Git fixtures | S1 |
+| pi-bridge-contract | ubuntu-24.04; Rust toolchain plus an exact maintained Node 22 patch >=22.19.0, pinned and verified in S2 | Locked Pi install/typecheck and faux-provider protocol/replay/receipt tests; never inherit the Node 20 leg or skip Pi | S2 |
+| execution-confinement | ubuntu-24.04 Linux x86_64; same pinned Rust/Node; backend/image and capabilities recorded by S3 | Real bridge and agent confinement, process-tree stop, denied filesystem/egress/credential access, replayed effect identity | S3 |
+| prototype-acceptance | ubuntu-24.04; same pins and backend | Composed fake-provider/fake-forge crash drills and local UI/CLI integration; real Git/workspaces | S8, with S7 tests |
+
+The Node patch and Rust toolchain must be committed with reproducible install instructions; Node >=22.19.0 is a compatibility floor, not an unbounded installation target. The bridge job must assert its resolved version and dependency presence. The confinement job must fail, not skip or fall back to unconfined execution, when the runner lacks a required kernel/container capability. If hosted ubuntu-24.04 cannot enforce the selected backend, S3 stays blocked until a reviewed runner/backend change supplies the same proof; do not award a synthetic green result.
+
+Retain the existing TS checks. After each new job exists and reports reliably, an administrator must add its exact reported check name to main's branch protection/ruleset, then verify the enforced set. Renaming a job/matrix requires a corresponding protection update. Adding workflow YAML alone does not make a job required, and this plan does not claim current settings were inspected or changed. Keep stable aggregate names if a matrix is later introduced.
+
+Live provider spend and real GitHub publication remain a separately authorized operator acceptance run, not required credential-bearing jobs on arbitrary PR code. A green prototype-acceptance job proves simulated provider/forge scenarios only.
 
 ## Existing backlog triage
 
@@ -74,7 +117,7 @@ These are bounded engineering choices, not reasons to reopen the agreed architec
 
 - S1: Rust toolchain/MSRV, database transaction/sync policy, canonical hashing, CLI/API shape and owner-lock behavior.
 - S2: exact installable Pi/Node versions, bridge mapping storage, public API compatibility and replay/resync details.
-- S3: one supported OS/confinement backend, mount layout, process-tree supervision and egress/resource policy.
+- S3: one Linux confinement backend proven on ubuntu-24.04, bridge/agent mount layout, process-tree supervision and egress/resource policy.
 - S5: verifier-visible workspace manifest, snapshot/freeze mechanism, completeness limits and artifact retention.
 - S6: commit materialization/exclusion semantics, branch identity, target/base drift handling and GitHub credential setup.
 - S7: minimal local web stack and local-session/origin protections.

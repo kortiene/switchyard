@@ -71,9 +71,31 @@ Pi's ExecutionEnv forwards only the operations needed by the selected coding too
 
 Every mutating operation carries an operation ID, immutable argument hash, attempt/session/generation, capability scope, and deadline. Rust validates permissions and records intent before execution. Completed receipts are returned on duplicate requests; uncertain effects are reconciled or blocked.
 
+### Stable execution identity under tool replay
+
+For M1, derive each mutating effect identity as:
+
+```text
+operationId = "op-v1:" + hex(SHA256(JCS([
+  "switchyard.exec.v1", attemptId, sessionId, piToolTaskId, effectKey
+])))
+```
+
+JCS is RFC 8785 canonical JSON encoded as UTF-8; all identity components here are strings. S2 must freeze shared Rust/TypeScript vectors, including Unicode and delimiter cases. The Pi tool's durable task identity (public Tool API taskId, subject to S2's reopen proof) is the owner; a provider's tool-call label, transient wire ID, process ID or in-memory counter is not sufficient.
+
+Each bundled adapter assigns stable semantic effect keys within that tool task, such as write-file:v1, edit-file:replace:v1, or exec:start:v1. A tool with several effects needs distinct keys: a deterministic slot list derived from immutable tool input, or a mapping durably committed through supported runtime state before any dispatch. Nested calls use their own durable child tool-task identity. A restart must recover the same key map. If an API cannot propagate this identity to ExecutionEnv, S2 is no-go; do not invent a fresh ID.
+
+The operation ID excludes supervisor generation, connection/wire ID, timestamps, retry ordinal and argument hash. Those can change at recovery; using them would bypass deduplication. Rust authenticates the current generation before inspecting/returning a receipt. Arguments, method, capability scope and effective deadline policy have a separate immutable canonical payload hash bound to the operation ID; a changed payload is operation_conflict and requires inspection, not a new operation ID. Reconnect does not silently extend the original operation's deadline.
+
+On Pi replay, the same tool task/effect key returns the completed Rust receipt or the existing running handle. A prepared/unknown receipt is reconciled or blocked; it never licenses blind re-execution. A legitimately new tool task has a new operation ID even for identical arguments; deduplication across different tasks is a separate domain rule.
+
+For an edit that rereads a changed file after a crash, the adapter must recover the already-recorded mutation payload/receipt or surface a conflict rather than recompute different bytes under a fresh ID. exec status/cancel refer to the original start handle; each mutating cancellation request also has a stable command identity.
+
+Mandatory conformance: interrupt after Rust completes an effect but before Pi stores its result, reopen under a new supervisor generation, and prove the same operation ID yields one effect and its original receipt. Also prove multiple effects in one tool do not collide, nested calls retain identity, altered arguments conflict, and uncertain receipts do not execute automatically.
+
 The runtime cannot select arbitrary host paths, another attempt's worktree, credentials, verifier policy, GitHub operations, or an unconstrained host execution backend. Paths are resolved inside the confined environment with protection against traversal and symlink escape. A path-prefix check is insufficient.
 
-A shell tool may execute within its authorized sandbox, but cannot bypass the host boundary by inheriting the host's filesystem, sockets, environment, or writable Git metadata. Direct argv execution is preferred for host-owned verifier operations. The trusted model runtime's network access is separate from the sandbox's egress policy.
+A shell tool may execute within its authorized sandbox, but cannot bypass the host boundary by inheriting the host's filesystem, sockets, environment, or writable Git metadata. Direct argv execution is preferred for host-owned verifier operations. The bridge itself must satisfy the separate in-process tool allowlist and OS-enforced filesystem/network/process policy in [Bridge process confinement](README.md#bridge-process-confinement-and-in-process-allowlist); tool forwarding alone does not establish that boundary.
 
 For long commands, return a durable operation handle and expose bounded stdout/stderr events plus a final receipt. A timeout/cancel does not report success. Process exit, truncation, runtime failure, and uncertain termination remain distinguishable.
 
@@ -110,7 +132,7 @@ Pause is an explicit command, not loss of connection. A disconnected browser onl
 
 ## Errors, compatibility, and tests
 
-Use stable categories including incompatible_protocol, unsupported_capability, binding_mismatch, stale_generation, command_conflict, busy, idle, storage_failed, interrupted, execution_uncertain, cancellation_timeout, and resync_required. Include bounded diagnostic data without secrets. Errors explicitly identify whether work was admitted, rejected, or uncertain; a transport error cannot authorize automatic repetition of arbitrary effects.
+Use stable categories including incompatible_protocol, unsupported_capability, binding_mismatch, stale_generation, command_conflict, operation_conflict, busy, idle, storage_failed, interrupted, execution_uncertain, cancellation_timeout, and resync_required. Include bounded diagnostic data without secrets. Errors explicitly identify whether work was admitted, rejected, or uncertain; a transport error cannot authorize automatic repetition of arbitrary effects.
 
 Freeze protocol version, schemas, tool/configuration fingerprints, package lock, and runtime identity per attempt. Changing them needs compatibility tests; unsupported state is retained for inspection. A future Rust runtime implements the public contract for new attempts, not Pi's internal schema.
 
