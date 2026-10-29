@@ -37,7 +37,7 @@ Proposed envelope:
 
 A response repeats wire ID and binding and contains either result or a typed error. The trusted runtime never supplies an authoritative mission status. Events carry session identity and a cursor plus notification kind; a cursor gap requires a snapshot/resubscription. Persisted snapshot/receipts, not event delivery, decide recovery.
 
-Command payload hashing uses a specified canonical serialization. Keep session identity opaque; mapping to the underlying Pi storage/conversation is adapter-owned and durable.
+Command payload hashing uses RFC 8785 canonical JSON (JCS), UTF-8, then SHA-256. S1 implements that canonical form for null, booleans, strings, arrays, objects, and integers, and rejects non-integer numbers instead of inventing ES6 number text. S2 still freezes shared Rust/TypeScript vectors, including non-integers, Unicode, and delimiter cases. Keep session identity opaque; mapping to the underlying Pi storage/conversation is adapter-owned and durable.
 
 ## Host-to-runtime methods
 

@@ -83,3 +83,21 @@ jobs:
       # typecheck -> lint:env -> pack:check -> mirror:check -> wiki:check -> coverage -> build -> rm -rf dist
       - name: Verify
         run: npm run verify
+
+  # Stable check name: rust-core. This job does not change the TypeScript
+  # verify checks above. Adding the job does not make it a required status
+  # check; a maintainer must add the exact name `rust-core` to branch
+  # protection or rulesets after it reports reliably.
+  rust-core:
+    name: rust-core
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+
+      - name: Rust core gate
+        run: ./scripts/rust-verify.sh

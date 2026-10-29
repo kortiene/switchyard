@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Rust build output
+/target/
+
 # Build output (dist/ is a build artifact; tsconfig.build.json emits it)
 dist/
 

@@ -3,7 +3,7 @@ type: Architecture Reference
 title: State and artifacts
 description: The durable run contract and the generated files used for resume, evidence, and agent handoff.
 tags: [architecture, state, resume, artifacts, metrics]
-timestamp: "2026-10-29T01:08:00-04:00"
+timestamp: "2026-10-29T11:40:00Z"
 ---
 
 # Default workspace
@@ -25,6 +25,10 @@ An ordinary run writes under `agents/<adw-id>/`. The eight-character hexadecimal
 
 State is saved after meaningful phase transitions so resume can skip completed work. Default state persistence preserves the historical contract. Managed runs use a separate durable control root, stricter atomic persistence, and worktree-local agent artifacts.
 
+# Rust mission ledger
+
+The Rust S1 host stores missions in an operator-chosen SQLite file. That database is not `agents/<adw-id>/state.json` and is not frozen state v1. Rust missions do not resume legacy runs. State v1 stays frozen: no further changes and no new consumers.
+
 # Source-controlled versus generated
 
 | Category | Examples | Policy |
@@ -42,3 +46,5 @@ State is saved after meaningful phase transitions so resume can skip completed w
 [3] [Metrics collector](https://github.com/kortiene/switchyard/blob/main/adw_sdlc/src/metrics.ts)
 
 [4] [Cross-language state tests](https://github.com/kortiene/switchyard/blob/main/adw_sdlc/test/cross-language-state.test.ts)
+
+[5] [Rust mission ledger](../../crates/switchyard-core/src/lib.rs)

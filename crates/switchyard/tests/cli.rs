@@ -1,0 +1,212 @@
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
+use std::process::{Command, Stdio};
+
+use serde_json::Value;
+
+fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_switchyard")
+}
+
+fn init_repo(repo: &Path) {
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    std::fs::create_dir_all(repo).unwrap();
+    git(&["init", "--initial-branch=main"]);
+    git(&["config", "user.email", "switchyard@example.com"]);
+    git(&["config", "user.name", "Switchyard"]);
+    std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+    git(&["add", "README.md"]);
+    git(&["commit", "-m", "init"]);
+}
+
+fn run(args: &[&str]) -> (i32, Value, Value) {
+    let output = Command::new(bin())
+        .args(args)
+        .env("GH_TOKEN", "SENTINEL_GH_TOKEN_SHOULD_NOT_PERSIST")
+        .env(
+            "ANTHROPIC_API_KEY",
+            "SENTINEL_ANTHROPIC_KEY_SHOULD_NOT_PERSIST",
+        )
+        .output()
+        .unwrap();
+    let stdout = serde_json::from_slice::<Value>(&output.stdout).unwrap_or(Value::Null);
+    let stderr = serde_json::from_slice::<Value>(&output.stderr).unwrap_or(Value::Null);
+    (output.status.code().unwrap_or(1), stdout, stderr)
+}
+
+fn head(repo: &Path) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn create_status_and_recover_keep_the_same_attempt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let before = head(&repo);
+    let (code, stdout, _) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "95",
+        "--objective",
+        "Establish the ledger",
+        "--acceptance",
+        "Restart restores the attempt",
+        "--admit",
+        "start_planning",
+        "--persist-only",
+    ]);
+    assert_eq!(code, 0, "{stdout}");
+    let mission = &stdout["mission"];
+    let mission_id = mission["missionId"].as_str().unwrap();
+    let attempt_id = mission["attemptId"].as_str().unwrap();
+    assert_eq!(mission["phase"], "planning");
+    assert_eq!(mission["pendingCommands"].as_array().unwrap().len(), 1);
+    assert_eq!(mission["baseSha"], before.as_str());
+    assert_eq!(head(&repo), before);
+
+    let (code, status, _) = run(&[
+        "mission",
+        "status",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission_id,
+    ]);
+    assert_eq!(code, 0, "{status}");
+    assert_eq!(status["readOnly"], true);
+    assert_eq!(status["missions"][0]["attemptId"], attempt_id);
+    assert_eq!(
+        status["missions"][0]["pendingCommands"][0]["id"],
+        mission["pendingCommands"][0]["id"]
+    );
+
+    let (code, recovered, _) = run(&[
+        "mission",
+        "recover",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission_id,
+    ]);
+    assert_eq!(code, 0, "{recovered}");
+    assert_eq!(recovered["mission"]["attemptId"], attempt_id);
+    assert_eq!(recovered["mission"]["missionId"], mission_id);
+    assert_eq!(recovered["mission"]["phase"], "planning");
+    assert_eq!(
+        recovered["mission"]["pendingCommands"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(recovered["mission"]["commands"][0]["state"], "acknowledged");
+    assert_eq!(head(&repo), before);
+
+    let stored = ledger_text(&db);
+    assert!(
+        stored.contains("\"credentials\":\"none\"") || stored.contains("\"credentials\": \"none\"")
+    );
+    assert!(!stored.contains("SENTINEL_GH_TOKEN_SHOULD_NOT_PERSIST"));
+    assert!(!stored.contains("SENTINEL_ANTHROPIC_KEY_SHOULD_NOT_PERSIST"));
+}
+
+#[test]
+fn second_owner_is_rejected_while_status_still_reads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("mission.sqlite");
+    let mut child = Command::new(bin())
+        .args(["mission", "lock", "--db", db.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let holding: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(holding["holding"], true);
+
+    let (code, status, _) = run(&["mission", "status", "--db", db.to_str().unwrap()]);
+    assert_eq!(code, 0, "{status}");
+    assert_eq!(status["missions"].as_array().unwrap().len(), 0);
+
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+    let (code, _, stderr) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "95",
+        "--objective",
+        "blocked",
+        "--acceptance",
+        "blocked",
+    ]);
+    assert_eq!(code, 2);
+    assert_eq!(stderr["error"]["category"], "second_active_owner");
+
+    child.stdin.take().unwrap().write_all(b"\n").unwrap();
+    assert!(child.wait().unwrap().success());
+
+    let (code, created, _) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "95",
+        "--objective",
+        "after release",
+        "--acceptance",
+        "one owner",
+    ]);
+    assert_eq!(code, 0, "{created}");
+    assert_eq!(created["mission"]["phase"], "draft");
+}
+
+fn ledger_text(db: &Path) -> String {
+    let mut bytes = Vec::new();
+    for suffix in ["", "-wal", "-shm"] {
+        let path = std::path::PathBuf::from(format!("{}{suffix}", db.display()));
+        if let Ok(chunk) = std::fs::read(path) {
+            bytes.extend(chunk);
+        }
+    }
+    let journal = std::path::PathBuf::from(format!("{}.fake-runtime.json", db.display()));
+    if let Ok(chunk) = std::fs::read(journal) {
+        bytes.extend(chunk);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
