@@ -1,12 +1,16 @@
 # Design proposal — managed Git worktrees
 
-**Status:** implemented for the initial opt-in managed-worktree release. The
-repository now includes immutable run contexts, a durable common-Git-dir
-registry, per-run/lifecycle/merge leases, real linked-worktree allocation and
-resume validation, separated durable state and worktree-local authored
-artifacts, structured outcomes, conservative cleanup, and `worktree
+**Status:** TypeScript managed-worktree work is stopped (2026-10-29). Do not
+treat this document as in development or as the current checkout's forward
+plan. S3 ([#97](https://github.com/kortiene/switchyard/issues/97)) owns
+worktree lifecycle natively in Rust as part of the sandbox. The checkout
+already includes immutable run contexts, a durable common-Git-dir registry,
+per-run/lifecycle/merge leases, real linked-worktree allocation and resume
+validation, separated durable state and worktree-local authored artifacts,
+structured outcomes, conservative cleanup, and `worktree
 list/status/remove/prune --dry-run` CLI controls. The bounded multi-run batch
-dispatcher and cockpit UI described as later phases remain follow-up work.
+dispatcher and cockpit UI described as later phases are not follow-up work on
+this TypeScript track.
 
 **Author context:** generalizes the field-proven external/operator workflow in
 [`PARALLEL-BATCH.md`](./PARALLEL-BATCH.md) and
@@ -917,6 +921,11 @@ consume an explicit `PhaseRequest.cwd`. Each worker still owns a distinct
 runner instance, so no adapter is shared across worktrees.
 
 ## 20. Phased rollout
+
+The phases below are the original TypeScript proposal. Further TypeScript
+managed-worktree work is stopped (2026-10-29). Do not start Phase 2–4 on this
+track. Native worktree lifecycle belongs to Rust S3
+([#97](https://github.com/kortiene/switchyard/issues/97)).
 
 ### Phase 0 — safety foundation
 

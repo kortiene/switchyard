@@ -11,13 +11,20 @@ GitHub, CI, and any optional merge.
 > with GitHub is the current MVP path. Adapters for Codex, OpenCode, and Pi are
 > included, but their live-run readiness differs.
 
-## Rust-first prototype planning
+## Direction
 
-The [Rust-first prototype plan](./docs/rust-first/README.md) describes the next
-experimental track: a Rust mission core with Pi Durable as its initial agent
-runtime. [Milestone tracker #94](https://github.com/kortiene/switchyard/issues/94)
-links the implementation sequence and acceptance criteria. This is planned work;
-the runnable developer preview documented below remains the TypeScript package.
+Switchyard is unreleased and has no users. The accepted long-term engine is
+Rust, including a native Rust agent runtime
+([decision, 2026-10-29](./wiki/decisions/invariants.md)). Pi Durable 1.4.0
+behind the sandboxed TypeScript bridge is a proof-of-concept runtime behind a
+replaceable adapter, not the end state. The TypeScript/Node control plane in
+`adw_sdlc/` is kept only as a reference while useful. There is no long-term
+coexistence or user-compatibility promise.
+
+The [Rust-first prototype plan](./docs/rust-first/README.md) and
+[milestone tracker #94](https://github.com/kortiene/switchyard/issues/94)
+describe the M1 recovery and approval contracts. The runnable reference
+documented below is that TypeScript package, not a compatibility commitment.
 
 ## What Switchyard does
 
@@ -131,11 +138,14 @@ configuration options, managed-worktree recovery, and runner-specific setup.
   `GH_TOKEN` in normal phased mode. The advanced `--inherit-env` escape hatch
   weakens this boundary and should be used only when you understand and accept
   the risk.
-- **Managed isolation is available.** Advanced users can add `--worktree` to
-  give a run its own linked Git checkout. A new linked worktree does not inherit
-  ignored dependencies such as `node_modules`, so its test and finalize gates
-  must be runnable in that fresh checkout. The exact runner sandbox strength
-  still depends on the selected backend.
+- **Managed isolation on the TypeScript path is stopped work.** `--worktree`
+  can still give a run its own linked Git checkout, but in-progress TypeScript
+  managed-worktree development has stopped (2026-10-29). S3
+  ([#97](https://github.com/kortiene/switchyard/issues/97)) owns worktree
+  lifecycle natively in Rust as part of the sandbox. A new linked worktree does
+  not inherit ignored dependencies such as `node_modules`, so its test and
+  finalize gates must be runnable in that fresh checkout. The exact runner
+  sandbox strength still depends on the selected backend.
 - **Checks are explicit.** Tests and finalize gates are ordinary deterministic
   commands chosen by the operator or project pack, not claims made by the
   model.
@@ -182,7 +192,12 @@ identical live reliability.
 | **Claude** | Default runner and adopted MVP path; real issue-to-PR evidence is recorded. |
 | **OpenCode** | Adapter with recorded real issue-to-PR runs; provider setup differs from Claude. |
 | **Codex** | Adapter implemented; the current live ledger records an authentication blocker. |
-| **Pi** | Adapter implemented; a complete real-issue run is still owed and Node `>=22.19` is required. |
+| **Pi** | Adapter implemented. Run `babe0070` (issue #70, PR #73) is **partial** evidence only: it needed one scope fix from the owner. An unassisted Pi real-issue run is still owed. Node `>=22.19` is required. |
+
+`runner-pi` (that TypeScript Pi adapter) and the TypeScript execution path are
+frozen legacy as of 2026-10-29: fixes only, to be retired with the TypeScript
+engine. They are not the Pi Durable proof of concept and not the native Rust
+runtime.
 
 Use [`adw_sdlc/PARITY.md`](./adw_sdlc/PARITY.md) for the evidence ledger and
 [`adw_sdlc/MVP-READINESS.md`](./adw_sdlc/MVP-READINESS.md) for the current
@@ -199,8 +214,10 @@ shipping criteria.
   API-key setup before retrying. Claude-specific billing and login behavior is
   documented in the [package troubleshooting guide](./adw_sdlc/README.md#troubleshooting-classify-and-anthropic-api-billing).
 - **The checkout is dirty:** use a clean dedicated clone, or commit or stash
-  intentional work. Managed `--worktree` mode is another option when the
+  intentional work. Existing `--worktree` mode is another option when the
   project's dependencies and gate commands work in a fresh linked checkout.
+  TypeScript managed-worktree development is stopped; new lifecycle work is
+  Rust S3.
 - **No deterministic tests run:** pass `--test-cmd` or set `ADW_TEST_CMD`; this
   repository intentionally has no default command configured.
 - **A run was interrupted:** repeat the original command with `--resume` and

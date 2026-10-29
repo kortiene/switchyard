@@ -2,6 +2,7 @@
 
 Status: planned prototype; not implemented by this documentation change.  
 Planning date: 2026-10-28 (America/New_York).  
+Direction update: 2026-10-29 (America/New_York). Accepted; not yet implemented.  
 Milestone tracker: [#94 — One Recoverable, Verified Change](https://github.com/kortiene/switchyard/issues/94).
 
 ## Outcome and user experience
@@ -16,7 +17,7 @@ Read the [runtime protocol](runtime-protocol.md) and [delivery plan](delivery-pl
 
 ## Repository baseline
 
-The inspected Switchyard main is [`4b07a8ed72be`](https://github.com/kortiene/switchyard/tree/4b07a8ed72be97b4eb7dd5a5a37ad89d4eae4c21). It is a TypeScript/Node control plane in `adw_sdlc/`, with phase orchestration, four runner adapters, explicit project checks, Git/forge authority, and persisted ADW state. Its existing Pi runner is not evidence of Pi Durable integration.
+The inspected Switchyard main is [`4b07a8ed72be`](https://github.com/kortiene/switchyard/tree/4b07a8ed72be97b4eb7dd5a5a37ad89d4eae4c21). It is a TypeScript/Node control plane in `adw_sdlc/`, with phase orchestration, four runner adapters, explicit project checks, Git/forge authority, and persisted ADW state. Its existing Pi runner is not evidence of Pi Durable integration. Run `babe0070` (PR #73) is partial evidence for that legacy runner only: it needed one scope fix from the owner, and an unassisted Pi real-issue run is still owed. `runner-pi` and the TypeScript execution path are frozen legacy (fixes only), to be retired with the TypeScript engine.
 
 Existing implementation and reference sources:
 
@@ -24,21 +25,21 @@ Existing implementation and reference sources:
 - [Control-plane invariants](../../wiki/decisions/invariants.md) and [worktree design](../../adw_sdlc/docs/DESIGN-managed-git-worktrees.md).
 - [Current package guide](../../adw_sdlc/README.md), [readiness](../../adw_sdlc/MVP-READINESS.md), and [contributor workflow](../../wiki/workflows/contributing.md).
 
-The new path is additive. Keep the current CLI, runtime defaults, generated prompt mirrors, project packs, and state v1 contract intact. Do not move or delete the TypeScript implementation as part of M1. Rust missions do not resume legacy ADW runs; any later migration needs an explicit contract.
+Switchyard is unreleased and has no users. Rust is the sole engine long term, including a native Rust agent runtime. Pi Durable 1.4.0 behind the sandboxed TypeScript bridge is the M1 proof-of-concept runtime behind a replaceable adapter, not the end state. Keep `adw_sdlc/`, its CLI, runtime defaults, and generated prompt mirrors in tree as a reference while useful. Do not move or delete that package as part of M1. There is no long-term coexistence or user-compatibility promise. State v1 (`adw/state.schema.json`, `agents/<adw-id>/state.json`) is frozen as is: no further changes and no new consumers. Rust missions do not resume legacy ADW runs.
 
 ## Architecture decision
 
-Rust owns the product's durable authority. Pi Durable is the initial replaceable agent runtime behind a bundled, trusted TypeScript adapter.
+Rust owns the product's durable authority. For M1, Pi Durable 1.4.0 is the proof-of-concept agent runtime behind a bundled, trusted, sandboxed TypeScript adapter. The native Rust agent runtime is the target that replaces that adapter.
 
 | Owner | Responsibilities |
 | --- | --- |
 | Rust core | Mission transitions, authorization, plan approval, limits, command outbox, recovery decisions |
 | Rust execution boundary | Worktree ownership, confined file/process operations, process-tree supervision, operation receipts |
 | Rust verification and delivery | Trusted evidence, content-bound review, approval validity, Git and GitHub mutations |
-| Pi Durable | Conversation, model requests, internal tasks, tool lifecycle, steering inbox, session persistence |
+| Pi Durable 1.4.0 (proof of concept) | Conversation, model requests, internal tasks, tool lifecycle, steering inbox, session persistence, behind the replaceable adapter |
 | Interface | Send commands with identity/revision checks; display committed state and explicit uncertainty |
 
-This is Rust-first, not a Node-free or single-executable implementation. A native Rust agent loop can be evaluated later against measured limitations. Runtime replacement applies to new attempts; live Pi session migration is not promised.
+This is Rust-first, not a claim that M1 is already a Node-free or single-executable implementation. The native Rust agent runtime is the long-term target, not an optional later evaluation. M1 still proves the mission core against the Pi Durable proof of concept. Runtime replacement applies to new attempts; live Pi session migration is not promised.
 
 ```mermaid
 flowchart TD
@@ -141,7 +142,7 @@ Each supervisor activation has a generation. Reject calls/results from stale gen
 
 ## Workspace and trust boundary
 
-The Rust host creates an owned worktree from an exact base commit and provides a confined ExecutionEnv to Pi through the protocol. M1 targets Linux; S3 must prove one confinement backend on the planned ubuntu-24.04 CI runner and record its actual filesystem, network, process, and resource guarantees. Other host platforms remain unsupported for live execution until separately proven.
+The Rust host creates an owned worktree from an exact base commit and provides a confined ExecutionEnv to the proof-of-concept runtime through the protocol. S3 ([#97](https://github.com/kortiene/switchyard/issues/97)) owns that worktree lifecycle natively in Rust as part of the sandbox. In-progress TypeScript managed-worktree work is stopped and is not this design. M1 targets Linux; S3 must prove one confinement backend on the planned ubuntu-24.04 CI runner and record its actual filesystem, network, process, and resource guarantees. Other host platforms remain unsupported for live execution until separately proven.
 
 Agent-run processes must not access the original checkout, control databases, Pi storage, host credentials, bridge code, or writable Git administrative state. Mediate any required read-only Git inspection. Worktree metadata that refers to the base repository needs explicit mount/access treatment; it is not automatically isolated.
 
@@ -184,9 +185,11 @@ Publishing requires an explicit authorized command. Persist stable delivery iden
 
 ## Scope and deferred work
 
-M1: one operator, one active mission, one repository per mission, one Pi runtime configuration, one supported confinement backend, CLI plus a local mission page, persistent steering, bounded repairs, independent verification, explicit PR publication.
+M1: one operator, one active mission, one repository per mission, one Pi Durable proof-of-concept configuration, one supported confinement backend, CLI plus a local mission page, persistent steering, bounded repairs, independent verification, explicit PR publication.
 
-Deferred: Absurd/PostgreSQL fleet orchestration; multi-host handoff; remote multi-user access; collaborative file editing; Rust-native agent loop; arbitrary project-supplied plugins; multiple forge providers; automatic merge/deploy; CI repair automation; institutional memory; legacy session migration.
+Deferred past M1: Absurd/PostgreSQL fleet orchestration; multi-host handoff; remote multi-user access; collaborative file editing; arbitrary project-supplied plugins; multiple forge providers; automatic merge/deploy; CI repair automation; institutional memory; legacy session migration.
+
+The native Rust agent runtime is the long-term target, not one of those deferred alternatives. M1 uses the Pi Durable proof of concept. Replacing that adapter is later work on the accepted path.
 
 The trusted bundled Pi adapter is not the arbitrary forge-provider plugin mechanism deferred in [#42](https://github.com/kortiene/switchyard/issues/42).
 

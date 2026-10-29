@@ -2,9 +2,11 @@
 
 Status: proposed v0 contract to prove in [S2 / #96](https://github.com/kortiene/switchyard/issues/96). No existing Rust SDK or upstream wire protocol is implied. Companion: [architecture](README.md).
 
+The TypeScript bridge in this contract is the M1 proof-of-concept adapter for Pi Durable 1.4.0. It is not the end state. The long-term agent runtime is native Rust and implements this public contract for new attempts. `runner-pi` is frozen legacy and is not this bridge.
+
 ## Ownership and transport
 
-Rust owns mission state and launches one trusted, pinned TypeScript bridge for the active attempt. The bridge owns that Pi storage for its lifetime. Rust holds the exclusive host/attempt lock; fail startup if ownership cannot be established. Both processes use the same recorded attempt/session identity.
+Rust owns mission state and launches one trusted, pinned TypeScript bridge for the active proof-of-concept attempt. The bridge owns that Pi storage for its lifetime. Rust holds the exclusive host/attempt lock; fail startup if ownership cannot be established. Both processes use the same recorded attempt/session identity. The bridge is replaceable; Pi session internals are not the mission contract.
 
 Use UTF-8 JSON Lines over stdio. Stdout carries protocol frames only; stderr is bounded diagnostic logging with secrets redacted. Frame size, outstanding-request limits, operation deadlines, protocol version, and supported capabilities are negotiated/validated in the handshake. Oversized frames or malformed JSON close the connection and trigger reconciliation, never an assumed retry of an external effect.
 
@@ -134,6 +136,6 @@ Pause is an explicit command, not loss of connection. A disconnected browser onl
 
 Use stable categories including incompatible_protocol, unsupported_capability, binding_mismatch, stale_generation, command_conflict, operation_conflict, busy, idle, storage_failed, interrupted, execution_uncertain, cancellation_timeout, and resync_required. Include bounded diagnostic data without secrets. Errors explicitly identify whether work was admitted, rejected, or uncertain; a transport error cannot authorize automatic repetition of arbitrary effects.
 
-Freeze protocol version, schemas, tool/configuration fingerprints, package lock, and runtime identity per attempt. Changing them needs compatibility tests; unsupported state is retained for inspection. A future Rust runtime implements the public contract for new attempts, not Pi's internal schema.
+Freeze protocol version, schemas, tool/configuration fingerprints, package lock, and runtime identity per attempt. Changing them needs compatibility tests; unsupported state is retained for inspection. The native Rust agent runtime is the long-term target and implements this public contract for new attempts. The Pi Durable bridge must not leak Pi's internal schema into that contract.
 
 S2 owns fake-runtime/faux-provider conformance: duplicate admission, restart, lost reply, incompatible versions, wrong binding/generation, corrupt/oversized frames, backpressure, event gaps, timeout and cancellation. S3 adds real process/filesystem confinement tests. S8 composes them into acceptance. Live-provider tests are recorded separately from credential-free CI.

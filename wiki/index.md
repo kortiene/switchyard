@@ -13,7 +13,7 @@ okf_version: "0.1"
 * [Reference](reference/) - CLI, configuration, project-pack, testing, and CI facts.
 * [Workflows](workflows/) - Work-item delivery and contributor paths.
 * [Operations](operations/) - Troubleshooting and managed-worktree playbooks.
-* [Decisions](decisions/) - Implemented invariants, proposals, and deferred choices.
+* [Decisions](decisions/) - Implemented invariants, the accepted Rust-first direction, and deferred choices.
 * [Wiki contributing](contributing/) - Maintenance policy and copyable concept templates.
 
 # Canonical documentation

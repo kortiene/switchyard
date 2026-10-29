@@ -3,7 +3,7 @@ type: Glossary
 title: Switchyard glossary
 description: Canonical meanings for terms used across the Switchyard control plane and wiki.
 tags: [terminology, adw, reference]
-timestamp: "2026-07-18T13:26:10Z"
+timestamp: "2026-10-29T01:08:00-04:00"
 ---
 
 # Terms
@@ -18,7 +18,7 @@ timestamp: "2026-07-18T13:26:10Z"
 | Concept | One OKF Markdown document representing one unit of knowledge. |
 | Control plane | Deterministic code that owns orchestration, state, gates, Git, forge operations, and runner capabilities. |
 | Gate | A deterministic condition or command that decides whether work proceeds or a repair phase runs. |
-| Managed run | An opt-in run allocated to a Switchyard-owned linked Git worktree with durable ownership metadata. |
+| Managed run | An opt-in run allocated to a Switchyard-owned linked Git worktree with durable ownership metadata. TypeScript managed-worktree work stopped on 2026-10-29; native lifecycle belongs to Rust S3. |
 | Phase result | Runner output normalized and validated against the phase's structured-output schema. |
 | Project pack | Repository policy under `.adw/`: configuration, generated runtime prompts, optional schemas, and generation profile. |
 | Provider | An implementation of a control-plane role: CLI locator, work items, VCS, or change requests and CI. |

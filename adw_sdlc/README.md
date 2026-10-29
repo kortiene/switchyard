@@ -103,6 +103,11 @@ non-existent or non-directory path fails closed with an actionable error.
 
 ### Managed Git worktrees
 
+TypeScript managed-worktree work is stopped (2026-10-29). The commands below
+describe the checkout as it exists; they are not an active development track.
+S3 ([#97](https://github.com/kortiene/switchyard/issues/97)) owns worktree
+lifecycle natively in Rust as part of the sandbox.
+
 Managed mode is opt-in and leaves the primary checkout's branch and working
 tree untouched:
 
@@ -368,7 +373,7 @@ to another runner, or an alternate OpenCode config channel.
 | [`docs/COST-AND-DURATION.md`](./docs/COST-AND-DURATION.md) | Cost/duration levers (tier routing, nudge-retry rate, budget/timeout caps) + the per-run `agents/{adw_id}/metrics.json` artifact and measurement plan |
 | [`docs/SECRET-BOUNDARY-AUDIT.md`](./docs/SECRET-BOUNDARY-AUDIT.md) | Generic spawn preflight and real Claude SDK boundary probe; denied-key names/booleans only, never values |
 | [`docs/PARALLEL-BATCH.md`](./docs/PARALLEL-BATCH.md) | Operator guide and observed evidence for externally managed worktree-per-run parallel batches |
-| [`docs/DESIGN-managed-git-worktrees.md`](./docs/DESIGN-managed-git-worktrees.md) | Proposed first-class managed Git worktrees: ownership, lifecycle, recovery, concurrency, compatibility, and rollout |
+| [`docs/DESIGN-managed-git-worktrees.md`](./docs/DESIGN-managed-git-worktrees.md) | TypeScript managed-worktree design. Initial checkout behavior exists; further TypeScript work is stopped. Native lifecycle is Rust S3 (#97) |
 | [`MEMORY_STACK.md`](./MEMORY_STACK.md) | Decision record for the deferred cross-run memory feature |
 | [`docs/DESIGN-schema-overrides.md`](./docs/DESIGN-schema-overrides.md) | Design + rollout for per-phase schema overrides / custom phases (implemented) |
 | [`docs/DESIGN-custom-phase-control-flow.md`](./docs/DESIGN-custom-phase-control-flow.md) | Design for loop/gated custom phases (custom gates + resolve-style loops; implemented) |

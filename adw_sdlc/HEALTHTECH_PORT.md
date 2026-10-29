@@ -34,10 +34,14 @@ The original was a pnpm-workspace member with a sibling Python `adw/` engine. Th
 | Provider seam | GitHub/git effects wired directly into orchestration deps | `src/providers.ts` defines provider interfaces for CLI resolution, work items, VCS, and change requests/CI, plus behavior-preserving Git/GitHub adapters; `run()` now uses providers directly, with legacy `OrchestratorDeps` seams kept only as an adapter for tests/incremental migration |
 | Provider selection | implicit GitHub/git defaults in code | `.adw/config.json` explicitly selects the built-in providers (`github` for CLI/work-items/change-requests, `git` for VCS); `createProvidersFromConfig()` is the future plugin switchpoint |
 
-The **cross-language state contract** is preserved at `../adw/state.schema.json` (+ fixtures under
-`../adw/fixtures/cross_language/`) — JSON-only, no Python code. Provider-neutral `work_item` and
-`change_request` metadata are TS-additive, non-load-bearing fields; the v1 compatibility fields
-`issue_number`, `pr_number`, and `pr_url` remain canonical for resume and Python interoperability.
+State v1 remains at `../adw/state.schema.json` (+ fixtures under
+`../adw/fixtures/cross_language/`) — JSON-only, no Python code. **Direction
+(2026-10-29):** Python compatibility is dropped. The schema and
+`agents/<adw-id>/state.json` are frozen as is: no further changes, no new
+consumers. Provider-neutral `work_item` and `change_request` metadata are
+existing TS-additive, non-load-bearing fields; the v1 fields `issue_number`,
+`pr_number`, and `pr_url` stay as frozen for existing TypeScript resume. They
+are not a Python-interoperability promise.
 
 ## Status
 
