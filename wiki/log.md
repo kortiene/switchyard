@@ -2,6 +2,7 @@
 
 ## 2026-10-29
 
+* **S2 package NO-GO**: Recorded the published Pi Durable 1.4.0/source mismatch and executable faux-provider/storage probes. The diagnostic `pi-package-audit` job is not the S2 integration gate; #96 and Pi-dependent live work remain blocked.
 * **Rust mission ledger**: Recorded the S1 transition kernel and application-owned SQLite ledger as implemented. Pi Durable remains the proof-of-concept adapter. The TypeScript `npm run verify` gate stays separate from the `rust-core` check.
 * **Accepted direction**: Recorded the owner's decisions. Rust is the sole long-term engine, including a native Rust agent runtime. Pi Durable 1.4.0 behind the sandboxed TypeScript bridge is a proof-of-concept adapter, not the end state. `adw_sdlc/` stays only as a reference; there is no coexistence or user-compatibility promise. Python compatibility is dropped and state v1 is frozen. `runner-pi` and the TypeScript execution path are frozen legacy. TypeScript managed-worktree work is stopped; S3 ([#97](https://github.com/kortiene/switchyard/issues/97)) owns native worktree lifecycle. Pi run `babe0070` (PR #73) is partial evidence only; an unassisted Pi real-issue run is still owed.
 * **Proposed architecture**: Added the Rust-first/Pi Durable direction to the decision register, linked its normative transitions, replay identity, confinement and integration gate, and updated decision navigation. Superseded later the same day by the accepted-direction entry. The TypeScript checkout remains the implemented reference, not the long-term engine.

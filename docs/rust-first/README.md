@@ -1,6 +1,6 @@
 # Rust-first Switchyard prototype
 
-Status: direction accepted 2026-10-29; S1 foundation implemented; S2–S8 are not.  
+Status: direction accepted 2026-10-29; S1 foundation implemented; S2 package audit NO-GO; S2–S8 integration unimplemented.
 Planning date: 2026-10-28 (America/New_York).  
 Direction update: 2026-10-29 (America/New_York). Rust is the sole long-term engine. Pi Durable is the M1 proof-of-concept adapter.  
 S1 decisions recorded 2026-10-29.
@@ -56,13 +56,19 @@ flowchart TD
     CORE --> FORGE["GitHub delivery"]
 ```
 
-Start with one Rust library crate and one executable, using modules before adding more crates. S1 adds `crates/switchyard-core/` and `crates/switchyard/`. `runtime/pi/`, `web/`, and `tests/acceptance/` remain planned paths, not packages or usable product commands.
+Start with one Rust library crate and one executable, using modules before adding more crates. S1 adds `crates/switchyard-core/` and `crates/switchyard/`. `runtime/pi/` contains the S2 package audit only; the process bridge is not implemented. `web/` and `tests/acceptance/` remain planned paths, not packages or usable product commands.
 
 ## Runtime baseline
 
 Pi was inspected at [`e65b3b88c084`](https://github.com/earendil-works/pi/tree/e65b3b88c08412bb8ffbd21fb5dc5756064a6e5a). Its [package manifest](https://github.com/earendil-works/pi/blob/e65b3b88c08412bb8ffbd21fb5dc5756064a6e5a/packages/durable/package.json) reports version 1.4.0 and Node >=22.19.0. The [README](https://github.com/earendil-works/pi/blob/e65b3b88c08412bb8ffbd21fb5dc5756064a6e5a/packages/durable/README.md) identifies the API as experimental.
 
 S2 must establish an exact installable version and lockfile, supported Node version, source/package compatibility, and public API contract tests. A source version string does not prove a registry release is available.
+
+The [S2 feasibility audit](s2-feasibility.md) found that npm 1.4.0 comes from a
+different source commit and lacks reviewed admission APIs. It records NO-GO,
+reproducible faux-provider probes, and a proposed pinned source-build remedy.
+The diagnostic `pi-package-audit` job does not satisfy `pi-bridge-contract` or
+authorize live execution.
 
 Relevant semantics:
 

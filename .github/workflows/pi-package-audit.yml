@@ -1,0 +1,50 @@
+name: Pi package audit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi-package-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Evidence only. A green audit confirms the recorded NO-GO; it is NOT the
+  # planned pi-bridge-contract check and cannot approve S2 or unblock live work.
+  pi-package-audit:
+    name: pi-package-audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: runtime/pi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: runtime/pi/.node-version
+          cache: npm
+          cache-dependency-path: runtime/pi/package-lock.json
+      - name: Install audited packages
+        run: npm ci
+      - name: Verify diagnostic probes (not S2 acceptance)
+        run: npm run verify
+      - name: Record the NO-GO evidence
+        run: |
+          npm run --silent audit:package > "$RUNNER_TEMP/pi-package-audit.json"
+          node --input-type=module - <<'JS'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const report = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/pi-package-audit.json`, 'utf8'));
+          if (report.decision !== 'NO-GO') throw new Error('This evidence job cannot approve S2');
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            '## S2: NO-GO\n\nThe audit reproduced package/API incompatibilities. This job is not pi-bridge-contract. Issue #96 and downstream live execution remain blocked.\n');
+          JS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-package-audit
+          path: ${{ runner.temp }}/pi-package-audit.json
+          if-no-files-found: error

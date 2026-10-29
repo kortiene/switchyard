@@ -1,10 +1,10 @@
 # Delivery plan: One Recoverable, Verified Change
 
-Status: planning. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md).
+Status: S1 implemented; S2 package audit NO-GO; S2-S8 integration open. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md).
 
 ## Implementation sequence
 
-Use focused PRs in dependency order. First build the domain with a fake runtime, then prove the Pi bridge, then enable confined real effects. The first implementation issue is [#95](https://github.com/kortiene/switchyard/issues/95); the first integration go/no-go is [#96](https://github.com/kortiene/switchyard/issues/96).
+Use focused PRs in dependency order. S1's domain with a fake runtime is complete in [#105](https://github.com/kortiene/switchyard/pull/105), closing [#95](https://github.com/kortiene/switchyard/issues/95). Next prove the Pi bridge in [#96](https://github.com/kortiene/switchyard/issues/96), then enable confined real effects.
 
 | Slice | Issue | Depends on | Reviewable outcome |
 | --- | --- | --- | --- |
@@ -30,7 +30,7 @@ S2 is the proof-of-concept gate for pinned Pi Durable 1.4.0 behind the sandboxed
 | `adw_sdlc/` | Reference while useful. No long-term coexistence or user-compatibility promise. |
 | State v1 | Frozen (`adw/state.schema.json`, `agents/<adw-id>/state.json`): no further changes, no new consumers. Python compatibility is dropped. |
 
-S2 records GO or NO-GO in its issue and evidence ledger with exact source/package/Node identities, commands, results and unresolved constraints. No current result is assumed. GO requires every proof row below; an unproven mandatory property is NO-GO, not a warning.
+S2 records GO or NO-GO in its issue and evidence ledger with exact source/package/Node identities, commands, results and unresolved constraints. The [2026-10-29 package audit](s2-feasibility.md) records NO-GO for published 1.4.0: its source/API does not match the inspected baseline. Its diagnostic `pi-package-audit` check is not the planned `pi-bridge-contract` check. GO still requires every proof row below; an unproven mandatory property is NO-GO, not a warning.
 
 | Required proof | NO-GO condition |
 | --- | --- |
