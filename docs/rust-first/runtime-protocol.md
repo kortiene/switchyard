@@ -1,0 +1,117 @@
+# Initial Rust / Pi runtime protocol
+
+Status: proposed v0 contract to prove in [S2 / #96](https://github.com/kortiene/switchyard/issues/96). No existing Rust SDK or upstream wire protocol is implied. Companion: [architecture](README.md).
+
+## Ownership and transport
+
+Rust owns mission state and launches one trusted, pinned TypeScript bridge for the active attempt. The bridge owns that Pi storage for its lifetime. Rust holds the exclusive host/attempt lock; fail startup if ownership cannot be established. Both processes use the same recorded attempt/session identity.
+
+Use UTF-8 JSON Lines over stdio. Stdout carries protocol frames only; stderr is bounded diagnostic logging with secrets redacted. Frame size, outstanding-request limits, operation deadlines, protocol version, and supported capabilities are negotiated/validated in the handshake. Oversized frames or malformed JSON close the connection and trigger reconciliation, never an assumed retry of an external effect.
+
+Requests are bidirectional: Rust invokes runtime methods; the bridge invokes Rust execution methods. IDs are unique per connection and origin. Distinguish a transient wire ID from a durable command/operation ID. Never synchronously wait for a tool response while preventing the reader from handling other frames. Streams require bounded buffering and explicit truncation/gap reporting.
+
+Proposed envelope:
+
+```json
+{
+  "protocol": 0,
+  "kind": "request",
+  "id": "host:17",
+  "method": "runtime.submit",
+  "binding": {
+    "missionId": "m-1",
+    "attemptId": "a-1",
+    "sessionId": "s-1",
+    "generation": 3
+  },
+  "commandId": "c-42",
+  "params": {
+    "requestId": "a-1:c-42",
+    "content": "Implement the approved plan",
+    "payloadHash": "sha256:..."
+  }
+}
+```
+
+A response repeats wire ID and binding and contains either result or a typed error. The trusted runtime never supplies an authoritative mission status. Events carry session identity and a cursor plus notification kind; a cursor gap requires a snapshot/resubscription. Persisted snapshot/receipts, not event delivery, decide recovery.
+
+Command payload hashing uses a specified canonical serialization. Keep session identity opaque; mapping to the underlying Pi storage/conversation is adapter-owned and durable.
+
+## Host-to-runtime methods
+
+| Method | Result/semantics |
+| --- | --- |
+| runtime.hello | Adapter/protocol versions, package/source identity, storage backend and capabilities; no work admitted |
+| runtime.open | Create or reopen the bound session; return conversation identity and current committed state |
+| runtime.submit | Admit input with stable requestId; return durable submission receipt, not completion |
+| runtime.steer | Admit input with explicit busy/idle behavior; return receipt and admission state |
+| runtime.inspect | Snapshot of submissions, run/failure, live owned work and recoverable receipts |
+| runtime.watch | Start observation from a supported cursor or request full resync; partial stream is never authoritative |
+| runtime.abort | Request abort for the bound work; distinguish accepted from settled |
+| runtime.close | Stop scheduling and close storage after owned work settles or report an explicit timeout |
+
+The bridge implements these methods through public Pi APIs. Where the upstream watch surface does not support exact replay, the adapter returns resync_required and serves a snapshot. Do not invent replay guarantees.
+
+Mutations pass through Rust authorization and revision checks before dispatch. UI/browser clients cannot talk to this bridge directly. The bridge validates binding/generation for every command and execution callback.
+
+## Receipts and duplicate handling
+
+- Rust transactionally records command ID, payload hash, expected mission revision, permitted effect, and pending outbox state.
+- A bridge admission uses a deterministic Pi requestId derived from attempt plus command ID.
+- Lost acknowledgment: inspect/resend with the same identity. Never create a new ID to bypass uncertainty.
+- Same ID + same payload returns the original receipt. Same ID + different payload is command_conflict.
+- Persist bridge mapping/receipt state through public runtime documents or a documented adapter-owned journal; do not write private Pi tables.
+- Read-only methods are repeatable. Administrative methods such as open/abort/close need explicit operation-specific replay behavior; do not assume Pi input deduplication covers every method.
+- Runtime storage failure ends the bridge session and surfaces an error. Rust reconciles on reopen rather than treating the last notification as final.
+- Sidecar reopening alone does not prove workspace effects are recoverable.
+
+## Execution methods
+
+Pi's ExecutionEnv forwards only the operations needed by the selected coding tools. Proposed surface: file read/range-read, directory list, write/edit, exec start/status/cancel. Source/package compatibility and the exact required signatures are S2/S3 deliverables.
+
+Every mutating operation carries an operation ID, immutable argument hash, attempt/session/generation, capability scope, and deadline. Rust validates permissions and records intent before execution. Completed receipts are returned on duplicate requests; uncertain effects are reconciled or blocked.
+
+The runtime cannot select arbitrary host paths, another attempt's worktree, credentials, verifier policy, GitHub operations, or an unconstrained host execution backend. Paths are resolved inside the confined environment with protection against traversal and symlink escape. A path-prefix check is insufficient.
+
+A shell tool may execute within its authorized sandbox, but cannot bypass the host boundary by inheriting the host's filesystem, sockets, environment, or writable Git metadata. Direct argv execution is preferred for host-owned verifier operations. The trusted model runtime's network access is separate from the sandbox's egress policy.
+
+For long commands, return a durable operation handle and expose bounded stdout/stderr events plus a final receipt. A timeout/cancel does not report success. Process exit, truncation, runtime failure, and uncertain termination remain distinguishable.
+
+## Completion and cancellation
+
+| Fact | What it proves |
+| --- | --- |
+| Command admitted | Input is persisted and identified |
+| Submission answered | Model produced an answer for the submission |
+| Runtime idle | No relevant owned agent/task work remains under the documented scope |
+| Execution quiescent | Rust confirms the supervised writer/process environment is stopped/drained |
+| Verified | Rust has complete passing evidence for the inspected content |
+| Approved | An authorized actor accepted the exact current review digest |
+| Published | Delivery receipt reconciles to the approved Git output and PR |
+
+Neither answered nor idle alone proves verified. Before collecting evidence, Rust stops new input/tool admission for that revision, drains agent/background work, and establishes execution quiescence. M1 does not enable detached background agents.
+
+Pi's abort is cooperative. If it times out, Rust escalates through its supervisor and confinement backend, then confirms descendants are gone. If confirmation is unavailable, mark needs_attention and quarantine the workspace. A generation fence rejects stale messages but does not stop filesystem writes by itself.
+
+Pause is an explicit command, not loss of connection. A disconnected browser only disconnects observation. Host shutdown/crash closes or breaks the execution channel; ongoing sandbox jobs must be stopped or quarantined according to the recorded policy.
+
+## Recovery scenarios
+
+| Boundary | Required action |
+| --- | --- |
+| Rust commits outbox before dispatch | Deliver pending command with original identity |
+| Pi accepts before Rust records reply | Reconcile existing submission; do not submit twice |
+| Tool effect occurs before receipt | Recover handle/outcome or stop as uncertain |
+| Bridge dies while child command runs | Revoke generation, stop/drain environment, inspect workspace |
+| Watch misses events | Snapshot and resubscribe; do not infer completion from silence |
+| Cancel acknowledged before child exit | Continue waiting/escalating; do not declare quiescence |
+| Verification finishes before Rust restarts | Read persisted evidence and revalidate content before approval |
+| Runtime/package changes mid-attempt | Reject incompatible reopen; retain pinned version or explicit migration path |
+
+## Errors, compatibility, and tests
+
+Use stable categories including incompatible_protocol, unsupported_capability, binding_mismatch, stale_generation, command_conflict, busy, idle, storage_failed, interrupted, execution_uncertain, cancellation_timeout, and resync_required. Include bounded diagnostic data without secrets. Errors explicitly identify whether work was admitted, rejected, or uncertain; a transport error cannot authorize automatic repetition of arbitrary effects.
+
+Freeze protocol version, schemas, tool/configuration fingerprints, package lock, and runtime identity per attempt. Changing them needs compatibility tests; unsupported state is retained for inspection. A future Rust runtime implements the public contract for new attempts, not Pi's internal schema.
+
+S2 owns fake-runtime/faux-provider conformance: duplicate admission, restart, lost reply, incompatible versions, wrong binding/generation, corrupt/oversized frames, backpressure, event gaps, timeout and cancellation. S3 adds real process/filesystem confinement tests. S8 composes them into acceptance. Live-provider tests are recorded separately from credential-free CI.
