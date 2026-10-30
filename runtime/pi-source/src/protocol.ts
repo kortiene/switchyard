@@ -2,10 +2,13 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
-export const MAX_FRAME = 65_536;
-export const MAX_PENDING = 16;
-export const DEADLINE_MS = 5_000;
-export const SOURCE = 'e65b3b88c08412bb8ffbd21fb5dc5756064a6e5a';
+const pins = JSON.parse(readFileSync(new URL('../pins.json', import.meta.url), 'utf8'));
+export const PROTOCOL: number = pins.bridge.protocol;
+export const MAX_FRAME: number = pins.bridge.maxFrame;
+export const MAX_PENDING: number = pins.bridge.maxPending;
+export const DEADLINE_MS: number = pins.bridge.deadlineMs;
+export const CAPABILITIES: string[] = pins.bridge.capabilities;
+export const SOURCE: string = pins.commit;
 export const ADAPTER = hash(['protocol.ts', 'transport.ts', 'runtime.ts', 'forwarders.ts',
   '../test/bridge-child.ts', '../pins.json', '../package-lock.json']
   .map(path => readFileSync(new URL(path, import.meta.url), 'utf8')));

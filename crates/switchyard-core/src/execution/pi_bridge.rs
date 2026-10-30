@@ -1,9 +1,11 @@
 //! Credential-free S2 process transport. No product CLI or execution backend enables it.
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -12,9 +14,50 @@ use super::{OwnerLock, RuntimeBinding, operation_id, try_acquire};
 use crate::canonical::{canonicalize, payload_hash};
 use crate::error::{Error, Result};
 
-const MAX_FRAME: usize = 65_536;
-const MAX_PENDING: usize = 16;
-const SOURCE: &str = "e65b3b88c08412bb8ffbd21fb5dc5756064a6e5a";
+const STDERR_LIMIT: usize = 4096;
+
+struct Pins {
+    commit: String,
+    node: String,
+    bridge: ProtocolPins,
+}
+
+struct ProtocolPins {
+    protocol: u64,
+    max_frame: usize,
+    max_pending: usize,
+    deadline_ms: u64,
+    response_timeout_ms: u64,
+    max_effects_per_call: usize,
+    capabilities: Vec<String>,
+}
+
+fn pins() -> &'static Pins {
+    static PINS: OnceLock<Pins> = OnceLock::new();
+    PINS.get_or_init(|| {
+        let value: Value =
+            serde_json::from_str(include_str!("../../../../runtime/pi-source/pins.json"))
+                .expect("valid committed bridge pins");
+        let bridge = &value["bridge"];
+        let number = |key: &str| bridge[key].as_u64().expect("integer bridge pin");
+        Pins {
+            commit: value["commit"].as_str().expect("source pin").into(),
+            node: value["node"].as_str().expect("Node pin").into(),
+            bridge: ProtocolPins {
+                protocol: number("protocol"),
+                max_frame: number("maxFrame").try_into().expect("frame limit"),
+                max_pending: number("maxPending").try_into().expect("pending limit"),
+                deadline_ms: number("deadlineMs"),
+                response_timeout_ms: number("responseTimeoutMs"),
+                max_effects_per_call: number("maxEffectsPerCall")
+                    .try_into()
+                    .expect("effect limit"),
+                capabilities: serde_json::from_value(bridge["capabilities"].clone())
+                    .expect("capabilities"),
+            },
+        }
+    })
+}
 
 pub fn adapter_fingerprint() -> String {
     payload_hash(&json!([
@@ -37,6 +80,8 @@ pub struct PiBridge {
     next_id: u64,
     last_effect_id: u64,
     deadline: Duration,
+    stderr: Arc<Mutex<VecDeque<u8>>>,
+    stderr_done: Receiver<()>,
     _owner: OwnerLock,
 }
 
@@ -92,7 +137,8 @@ impl PiBridge {
         let mut input = child.stdin.take().expect("piped stdin");
         let output = child.stdout.take().expect("piped stdout");
         let mut diagnostics = child.stderr.take().expect("piped stderr");
-        let (writer, writes) = sync_channel::<Vec<u8>>(MAX_PENDING);
+        let max_frame = pins().bridge.max_frame;
+        let (writer, writes) = sync_channel::<Vec<u8>>(pins().bridge.max_pending);
         std::thread::spawn(move || {
             while let Ok(bytes) = writes.recv() {
                 if input
@@ -104,16 +150,16 @@ impl PiBridge {
                 }
             }
         });
-        let (frames, reader) = sync_channel(MAX_PENDING);
+        let (frames, reader) = sync_channel(pins().bridge.max_pending);
         std::thread::spawn(move || {
             let mut output = BufReader::new(output);
             loop {
                 let mut bytes = Vec::new();
                 let result = (&mut output)
-                    .take((MAX_FRAME + 1) as u64)
+                    .take((max_frame + 1) as u64)
                     .read_until(b'\n', &mut bytes);
                 let frame = match result {
-                    Ok(n) if n > 0 && n <= MAX_FRAME && bytes.last() == Some(&b'\n') => {
+                    Ok(n) if n > 0 && n <= max_frame && bytes.last() == Some(&b'\n') => {
                         serde_json::from_slice::<Value>(&bytes)
                             .map_err(|_| "malformed bridge frame".to_string())
                     }
@@ -125,9 +171,21 @@ impl PiBridge {
                 }
             }
         });
+        let stderr = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_LIMIT)));
+        let tail = Arc::clone(&stderr);
+        let (finished, stderr_done) = sync_channel(1);
         std::thread::spawn(move || {
-            let mut bytes = [0_u8; 4096];
-            while matches!(diagnostics.read(&mut bytes), Ok(n) if n > 0) {}
+            let mut bytes = [0_u8; STDERR_LIMIT];
+            while let Ok(n) = diagnostics.read(&mut bytes) {
+                if n == 0 {
+                    break;
+                }
+                let mut tail = tail.lock().expect("stderr mutex");
+                let overflow = (tail.len() + n).saturating_sub(STDERR_LIMIT);
+                tail.drain(..overflow);
+                tail.extend(&bytes[..n]);
+            }
+            let _ = finished.send(());
         });
         Ok(Self {
             child,
@@ -136,7 +194,9 @@ impl PiBridge {
             binding,
             next_id: 0,
             last_effect_id: 0,
-            deadline: Duration::from_secs(8),
+            deadline: Duration::from_millis(pins().bridge.response_timeout_ms),
+            stderr,
+            stderr_done,
             _owner: owner,
         })
     }
@@ -153,36 +213,29 @@ impl PiBridge {
         let result = self.call(
             "runtime.hello",
             None,
-            json!({"source": SOURCE, "adapter": adapter_fingerprint(), "maxFrame": MAX_FRAME,
-            "maxPending": MAX_PENDING, "capabilities": ["durable-admission", "payload-conflicts",
-            "snapshot-resync", "cooperative-abort", "forwarded-effects"]}),
+            json!({"source": pins().commit, "adapter": adapter_fingerprint(), "maxFrame": pins().bridge.max_frame,
+            "maxPending": pins().bridge.max_pending, "capabilities": pins().bridge.capabilities}),
             &mut |_| Err(Error::guard("unexpected effect")),
         )?;
-        if result["source"] != SOURCE
+        if result["source"] != pins().commit
             || result["adapter"] != adapter_fingerprint()
-            || result["node"] != "22.23.4"
-            || result["protocol"] != 0
-            || result["maxFrame"] != MAX_FRAME
-            || result["maxPending"] != MAX_PENDING
+            || result["node"] != pins().node
+            || result["protocol"] != pins().bridge.protocol
+            || result["maxFrame"] != pins().bridge.max_frame
+            || result["maxPending"] != pins().bridge.max_pending
             || result["storage"] != "sqlite-full"
-            || result["deadlineMs"] != 5000
-            || result["capabilities"]
-                != json!([
-                    "durable-admission",
-                    "payload-conflicts",
-                    "snapshot-resync",
-                    "cooperative-abort",
-                    "forwarded-effects"
-                ])
+            || result["deadlineMs"] != pins().bridge.deadline_ms
+            || result["capabilities"] != json!(pins().bridge.capabilities)
         {
-            self.terminate();
-            return Err(Error::guard("incompatible bridge handshake"));
+            return Err(self.failure(Error::guard("incompatible bridge handshake")));
         }
         Ok(result)
     }
 
     /// Calls never replay after a transport failure. The owner reconciles the
     /// original durable command/operation identity before deciding what to send.
+    /// The response timeout restarts after each effect receipt; trusted callback
+    /// execution time is excluded. The peer retains its separate effect timeout.
     pub fn call(
         &mut self,
         method: &str,
@@ -190,12 +243,8 @@ impl PiBridge {
         params: Value,
         effect: &mut dyn FnMut(&Value) -> Result<Value>,
     ) -> Result<Value> {
-        let outcome = self.call_inner(method, command_id, params, effect);
-        if outcome.is_err() {
-            // A peer error is conservatively fenced too. Retain its storage for inspection.
-            self.terminate();
-        }
-        outcome
+        self.call_inner(method, command_id, params, effect)
+            .map_err(|error| self.failure(error))
     }
 
     fn call_inner(
@@ -208,13 +257,14 @@ impl PiBridge {
         safe_json(&params)?;
         self.next_id += 1;
         let id = format!("host:{}", self.next_id);
-        let mut frame = json!({"protocol": 0, "kind": "request", "id": id, "method": method,
+        let mut frame = json!({"protocol": pins().bridge.protocol, "kind": "request", "id": id, "method": method,
             "binding": binding_json(&self.binding), "params": params});
         if let Some(command_id) = command_id {
             frame["commandId"] = json!(command_id);
         }
         self.send(&frame)?;
-        let limit = std::time::Instant::now() + self.deadline;
+        let mut limit = std::time::Instant::now() + self.deadline;
+        let mut effects = 0;
         loop {
             let remaining = limit.saturating_duration_since(std::time::Instant::now());
             let frame = self
@@ -222,10 +272,16 @@ impl PiBridge {
                 .recv_timeout(remaining)
                 .map_err(|_| Error::guard("bridge interrupted or deadline exceeded"))?
                 .map_err(Error::guard)?;
-            if frame["protocol"] != 0 || frame["binding"] != binding_json(&self.binding) {
+            if frame["protocol"] != pins().bridge.protocol
+                || frame["binding"] != binding_json(&self.binding)
+            {
                 return Err(Error::guard("invalid bridge protocol or binding"));
             }
             if frame["kind"] == "request" {
+                effects += 1;
+                if effects > pins().bridge.max_effects_per_call {
+                    return Err(Error::guard("bridge effect limit exceeded"));
+                }
                 let wire_id = text(&frame, "id")?;
                 let sequence = wire_id
                     .strip_prefix("bridge:")
@@ -253,16 +309,23 @@ impl PiBridge {
                 let reply = match effect(params) {
                     Ok(result) => json!({"result": result}),
                     Err(_) => {
+                        // TODO(#96, s2-bridge-probe.md "Remaining S2 acceptance"):
+                        // replace this generic callback result with typed definite
+                        // rejection/conflict vs uncertain execution receipts. An S1
+                        // Error alone does not prove whether an effect was admitted.
                         json!({"error": {"category": "execution_uncertain", "admission": "uncertain"}})
                     }
                 };
-                let mut response = json!({"protocol": 0, "kind": "response", "id": wire_id,
+                let mut response = json!({"protocol": pins().bridge.protocol, "kind": "response", "id": wire_id,
                     "binding": binding_json(&self.binding)});
                 response
                     .as_object_mut()
                     .expect("object")
                     .extend(reply.as_object().expect("object").clone());
                 self.send(&response)?;
+                // A committed effect receipt must not consume the runtime's next
+                // reply window. This does not extend the effect's own deadline.
+                limit = std::time::Instant::now() + self.deadline;
                 continue;
             }
             if frame["kind"] != "response"
@@ -288,7 +351,7 @@ impl PiBridge {
     fn send(&self, frame: &Value) -> Result<()> {
         let mut bytes = serde_json::to_vec(frame).map_err(Error::storage)?;
         bytes.push(b'\n');
-        if bytes.len() > MAX_FRAME {
+        if bytes.len() > pins().bridge.max_frame {
             return Err(Error::guard("oversized host frame"));
         }
         self.writer
@@ -299,6 +362,52 @@ impl PiBridge {
     pub fn terminate(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+
+    /// Untrusted fixture diagnostics, capped at 4 KiB with terminal controls escaped.
+    pub fn stderr_tail(&self) -> String {
+        let bytes: Vec<u8> = self
+            .stderr
+            .lock()
+            .expect("stderr mutex")
+            .iter()
+            .copied()
+            .collect();
+        let rendered: String = String::from_utf8_lossy(&bytes)
+            .chars()
+            .map(|c| {
+                if c.is_control() && c != '\n' && c != '\t' {
+                    c.escape_default().to_string()
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect();
+        let mut start = rendered.len().saturating_sub(STDERR_LIMIT);
+        while !rendered.is_char_boundary(start) {
+            start += 1;
+        }
+        rendered[start..].to_string()
+    }
+
+    fn failure(&mut self, mut error: Error) -> Error {
+        // Retain storage and fence the peer. Descendants holding stderr cannot
+        // make diagnostic collection wait indefinitely; S3 owns process trees.
+        self.terminate();
+        let _ = self.stderr_done.recv_timeout(Duration::from_millis(100));
+        let tail = self.stderr_tail();
+        if !tail.is_empty() {
+            match &mut error {
+                Error::GuardFailed { detail }
+                | Error::Storage { detail }
+                | Error::Canonical { detail } => {
+                    detail.push_str("\nbridge stderr (last 4 KiB, untrusted):\n");
+                    detail.push_str(&tail);
+                }
+                _ => {}
+            }
+        }
+        error
     }
 }
 
@@ -360,6 +469,13 @@ fn reject_authority(value: &Value) -> Result<()> {
             if fields.contains_key(key) {
                 return Err(Error::guard("runtime cannot supply mission authority"));
             }
+        }
+        for nested in fields.values() {
+            reject_authority(nested)?;
+        }
+    } else if let Some(items) = value.as_array() {
+        for nested in items {
+            reject_authority(nested)?;
         }
     }
     Ok(())

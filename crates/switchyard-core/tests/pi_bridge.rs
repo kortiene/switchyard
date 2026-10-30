@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
-use switchyard_core::{PiBridge, RuntimeBinding};
+use switchyard_core::{PiBridge, RuntimeBinding, operation_id, payload_hash};
 
 fn binding(generation: u64) -> RuntimeBinding {
     RuntimeBinding {
@@ -48,6 +48,141 @@ fn call(
     bridge.call(method, command, params, &mut |_| {
         panic!("no tool effects expected")
     })
+}
+
+fn synthetic_peer(directory: &Path, script: &str) -> PiBridge {
+    let launcher = directory.join("synthetic.mjs");
+    std::fs::write(&launcher, script).unwrap();
+    let (node, _) = paths();
+    PiBridge::spawn(
+        &node,
+        &launcher,
+        &directory.join("synthetic.sqlite"),
+        binding(1),
+        "answer",
+    )
+    .unwrap()
+}
+
+fn effect_peer(directory: &Path, count: usize) -> PiBridge {
+    let owner = binding(1);
+    let payload = json!({"method":"simulated-receipt"});
+    let effects: Vec<Value> = (1..=count).map(|n| {
+        let key = format!("slot-{n}");
+        json!({"protocol":0,"kind":"request","id":format!("bridge:{n}"),"method":"execution.request",
+            "binding":{"missionId":owner.mission_id,"attemptId":owner.attempt_id,"sessionId":owner.session_id,"generation":1},
+            "params":{"taskId":"task","effectKey":key,"payload":payload,"payloadHash":payload_hash(&payload).unwrap(),
+                "operationId":operation_id(&owner.attempt_id,&owner.session_id,"task",&key).unwrap()}})
+    }).collect();
+    synthetic_peer(
+        directory,
+        &format!(
+            r#"
+        import {{createInterface}} from 'node:readline';
+        const effects={effects}; let host; let next=0; const receipts=[];
+        const send=frame=>process.stdout.write(JSON.stringify(frame)+'\n');
+        createInterface({{input:process.stdin}}).on('line',line=>{{
+            const frame=JSON.parse(line);
+            if(frame.kind==='request') host=frame;
+            else receipts.push(frame.result);
+            if(next<effects.length) send(effects[next++]);
+            else setTimeout(()=>send({{protocol:0,kind:'response',id:host.id,binding:host.binding,result:{{receipts}}}}),125);
+        }});
+    "#,
+            effects = serde_json::to_string(&effects).unwrap()
+        ),
+    )
+}
+
+#[test]
+fn successful_effects_get_a_fresh_runtime_response_window() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut peer = effect_peer(directory.path(), 2);
+    let mut calls = 0;
+    let result = peer
+        .call("runtime.inspect", None, json!({}), &mut |_| {
+            // Each receipt takes less than Pi's 5 s effect deadline, but their
+            // combined duration exceeds the Rust response window of 8 s.
+            std::thread::sleep(Duration::from_millis(4100));
+            calls += 1;
+            Ok(json!({"receipt":calls}))
+        })
+        .unwrap();
+    assert_eq!(calls, 2);
+    assert_eq!(result["receipts"], json!([{"receipt":1},{"receipt":2}]));
+}
+
+#[test]
+fn effect_flood_cannot_extend_a_call_indefinitely() {
+    let pins: Value =
+        serde_json::from_str(include_str!("../../../runtime/pi-source/pins.json")).unwrap();
+    let limit = pins["bridge"]["maxEffectsPerCall"].as_u64().unwrap() as usize;
+    let directory = tempfile::tempdir().unwrap();
+    let mut peer = effect_peer(directory.path(), limit + 1);
+    let mut calls = 0;
+    let error = peer
+        .call("runtime.inspect", None, json!({}), &mut |_| {
+            calls += 1;
+            Ok(json!({"receipt":calls}))
+        })
+        .unwrap_err();
+    assert_eq!(calls, limit);
+    assert!(error.to_string().contains("effect limit exceeded"));
+}
+
+#[test]
+fn failed_peer_keeps_a_bounded_diagnostic_tail_without_terminal_controls() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut peer = synthetic_peer(
+        directory.path(),
+        r#"
+        import {writeSync} from 'node:fs';
+        process.stdin.once('data',()=>{
+            writeSync(2,'discarded-prefix'+'x'.repeat(12000)+'\x1b[31mstorage-open-failed\n');
+            process.exit(1);
+        });
+    "#,
+    );
+    let error = call(&mut peer, "runtime.open", None, json!({})).unwrap_err();
+    let tail = peer.stderr_tail();
+    assert!(tail.len() <= 4096);
+    assert!(!tail.contains("discarded-prefix"));
+    assert!(!tail.contains('\x1b'));
+    assert!(error.to_string().contains("storage-open-failed"));
+}
+
+#[test]
+fn handshake_rejects_pin_drift_and_retains_diagnostics() {
+    for mutation in [
+        "result.node='wrong'",
+        "result.source='wrong'",
+        "result.deadlineMs=1",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let pins = include_str!("../../../runtime/pi-source/pins.json");
+        let mut peer = synthetic_peer(
+            directory.path(),
+            &format!(
+                r#"
+            import {{createInterface}} from 'node:readline'; import {{writeSync}} from 'node:fs';
+            const pins={pins};
+            createInterface({{input:process.stdin}}).on('line',line=>{{
+                const request=JSON.parse(line);
+                const result={{...request.params,protocol:pins.bridge.protocol,node:pins.node,
+                    storage:'sqlite-full',deadlineMs:pins.bridge.deadlineMs}};
+                {mutation}; writeSync(2,'handshake-diagnostic\n');
+                process.stdout.write(JSON.stringify({{protocol:0,kind:'response',id:request.id,binding:request.binding,result}})+'\n');
+            }});
+        "#
+            ),
+        );
+        let message = peer.hello().unwrap_err().to_string();
+        assert!(
+            message.contains("incompatible bridge handshake"),
+            "{mutation}: {message}"
+        );
+        assert!(message.contains("handshake-diagnostic"));
+    }
 }
 
 #[test]
@@ -174,6 +309,9 @@ fn malformed_peer_output_and_forged_authority_are_rejected_by_rust() {
         "frame.result = {verified:true}",
         "frame.result = {published:true}",
         "frame.result = {quiescent:true}",
+        "frame.result = {snapshot:{verified:true}}",
+        "frame.result = {snapshots:[{state:{approved:true}}]}",
+        "frame.result = [{published:true}]",
         "frame.result = {number:0.5}",
         "frame.result = {huge:'x'.repeat(65536)}",
     ];

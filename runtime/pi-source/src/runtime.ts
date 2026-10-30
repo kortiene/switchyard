@@ -5,7 +5,7 @@ import { ConversationBusy, ConversationIdle, createRegistry, defineDoc, defineDo
   Harness, type Conversation, type SubmissionDraft, type ToolRegistration } from '@earendil-works/pi-durable';
 import { SqliteStorage } from '@earendil-works/pi-durable/storage/sqlite';
 import { openNodeSqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite/node';
-import { ADAPTER, canonical, DEADLINE_MS, hash, MAX_FRAME, MAX_PENDING, ProtocolError, SOURCE,
+import { ADAPTER, canonical, CAPABILITIES, DEADLINE_MS, hash, MAX_FRAME, MAX_PENDING, PROTOCOL, ProtocolError, SOURCE,
   type Binding, type Frame, type Json } from './protocol.ts';
 
 const Session = defineDoc({ kind: 'switchyard.bridge.session', scope: 'session', version: 1,
@@ -40,7 +40,7 @@ export class Runtime {
         throw new ProtocolError('unsupported_capability');
       }
       this.negotiated = true;
-      return { protocol: 0, source: SOURCE, adapter: ADAPTER, node: process.versions.node, maxFrame: MAX_FRAME,
+      return { protocol: PROTOCOL, source: SOURCE, adapter: ADAPTER, node: process.versions.node, maxFrame: MAX_FRAME,
         maxPending: MAX_PENDING, deadlineMs: DEADLINE_MS, capabilities: CAPABILITIES, storage: 'sqlite-full' };
     }
     if (!this.negotiated) throw new ProtocolError('handshake_required');
@@ -178,5 +178,3 @@ export class Runtime {
       unsettledSubmissionCount: inspection.submissions.length };
   }
 }
-
-export const CAPABILITIES = ['durable-admission', 'payload-conflicts', 'snapshot-resync', 'cooperative-abort', 'forwarded-effects'];

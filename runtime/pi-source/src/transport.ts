@@ -1,6 +1,6 @@
 // Bounded bidirectional JSON Lines. The reader continues while a runtime call awaits a tool receipt.
 import { TextDecoder } from 'node:util';
-import { checkBinding, DEADLINE_MS, MAX_FRAME, MAX_PENDING, ProtocolError,
+import { checkBinding, DEADLINE_MS, MAX_FRAME, MAX_PENDING, PROTOCOL, ProtocolError,
   type Binding, type Frame, type Json } from './protocol.ts';
 
 export class Transport {
@@ -41,7 +41,7 @@ export class Transport {
     if (this.dead || !frame || typeof frame !== 'object') throw new Error('invalid envelope');
     if (frame.kind === 'response') {
       checkBinding(frame.binding, this.binding);
-      if (frame.protocol !== 0) throw new Error('invalid protocol');
+      if (frame.protocol !== PROTOCOL) throw new Error('invalid protocol');
       const waiting = this.pending.get(frame.id);
       if (!waiting || (frame.result === undefined) === (frame.error === undefined)) throw new Error('unknown response');
       this.pending.delete(frame.id);
@@ -61,13 +61,13 @@ export class Transport {
     this.active++;
     const timer = setTimeout(() => this.fail(), DEADLINE_MS * 2);
     void Promise.resolve().then(async () => {
-      if (frame.protocol !== 0) throw new ProtocolError('incompatible_protocol');
+      if (frame.protocol !== PROTOCOL) throw new ProtocolError('incompatible_protocol');
       checkBinding(frame.binding, this.binding);
       return dispatch(frame);
-    }).then(result => this.send({ protocol: 0, kind: 'response', id: frame.id, binding: this.binding, result }),
+    }).then(result => this.send({ protocol: PROTOCOL, kind: 'response', id: frame.id, binding: this.binding, result }),
       error => {
         if (!(error instanceof ProtocolError)) { this.fail(); return; }
-        this.send({ protocol: 0, kind: 'response', id: frame.id, binding: this.binding,
+        this.send({ protocol: PROTOCOL, kind: 'response', id: frame.id, binding: this.binding,
           error: { category: error.category, admission: error.admission } });
       }).finally(() => { clearTimeout(timer); this.active--; });
   }
@@ -78,7 +78,7 @@ export class Transport {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.fail(); }, DEADLINE_MS);
       this.pending.set(id, { resolve, reject, timer });
-      this.send({ protocol: 0, kind: 'request', id, binding: this.binding, method, params });
+      this.send({ protocol: PROTOCOL, kind: 'request', id, binding: this.binding, method, params });
     });
   }
 
