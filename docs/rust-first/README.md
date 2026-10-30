@@ -1,6 +1,6 @@
 # Rust-first Switchyard prototype
 
-Status: direction accepted 2026-10-29; S1 foundation implemented; S2 package audit NO-GO; S2–S8 integration unimplemented.
+Status: direction accepted 2026-10-29; S1 foundation implemented; published S2 package NO-GO; source candidate and partial bridge probes available, full S2–S8 integration incomplete.
 Planning date: 2026-10-28 (America/New_York).  
 Direction update: 2026-10-29 (America/New_York). Rust is the sole long-term engine. Pi Durable is the M1 proof-of-concept adapter.  
 S1 decisions recorded 2026-10-29.
@@ -56,7 +56,7 @@ flowchart TD
     CORE --> FORGE["GitHub delivery"]
 ```
 
-Start with one Rust library crate and one executable, using modules before adding more crates. S1 adds `crates/switchyard-core/` and `crates/switchyard/`. `runtime/pi/` contains the S2 package audit only; the process bridge is not implemented. `web/` and `tests/acceptance/` remain planned paths, not packages or usable product commands.
+Start with one Rust library crate and one executable, using modules before adding more crates. S1 adds `crates/switchyard-core/` and `crates/switchyard/`. `runtime/pi/` contains the published-package audit. `runtime/pi-source/` contains the reproducible source candidate and [partial bridge probe](s2-bridge-probe.md), which is enabled only by the Rust `pi-contract` feature and does not replace the CLI's fake runtime. `web/` and `tests/acceptance/` remain planned paths, not packages or usable product commands.
 
 ## Runtime baseline
 

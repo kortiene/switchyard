@@ -58,3 +58,7 @@ These remove the demonstrated package/API mismatch. They do not prove the
 Rust process bridge, durable payload conflicts, tool replay, cancellation,
 transport limits, operating-system confinement, or real issue-to-PR acceptance.
 S2 stays open, and Pi-dependent live work stays blocked until the full gate.
+
+The dependent [process-bridge probe](../../docs/rust-first/s2-bridge-probe.md)
+adds a feature-gated Rust supervisor and credential-free wire/replay tests.
+Its extra tests are partial S2 evidence; the regular mission CLI is unchanged.

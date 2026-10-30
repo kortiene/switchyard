@@ -66,6 +66,13 @@ Its five probes and typecheck can pass while the integration remains NO-GO.
 `pi-bridge-contract` check and grants no downstream live-execution readiness.
 The [audit package](../../runtime/pi/README.md) documents commands and limits.
 
+The separate [source candidate](../../runtime/pi-source/README.md) rebuilds the
+reviewed Pi workspace closure and checks artifact hashes in `pi-source-candidate`.
+The dependent `pi-bridge-probe` job runs the feature-gated Rust transport and
+credential-free recovery probes. Both remain partial evidence; see the
+[remaining S2 acceptance](../../docs/rust-first/s2-bridge-probe.md). Neither job
+replaces `pi-bridge-contract` or enables live execution.
+
 # Wiki validation policy
 
 OKF consumers must tolerate missing links. Switchyard's producer-side `wiki:check` deliberately uses a stricter policy and rejects broken local concept and repository-source links before changes enter the repository. External URLs and heading anchors are not fetched or validated.
