@@ -2,6 +2,10 @@ name: Pi package audit
 
 on:
   pull_request:
+    paths:
+      - 'runtime/pi/**'
+      - '.github/workflows/pi-package-audit.yml'
+      - 'docs/rust-first/s2-feasibility.md'
   push:
     branches: [main]
 
@@ -39,7 +43,9 @@ jobs:
           node --input-type=module - <<'JS'
           import { readFileSync, appendFileSync } from 'node:fs';
           const report = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/pi-package-audit.json`, 'utf8'));
-          if (report.decision !== 'NO-GO') throw new Error('This evidence job cannot approve S2');
+          if (report.decision !== 'NO-GO' || !Array.isArray(report.blockers) || report.blockers.length === 0) {
+            throw new Error('Expected observed incompatibilities; reassess the package audit without granting S2 GO');
+          }
           appendFileSync(process.env.GITHUB_STEP_SUMMARY,
             '## S2: NO-GO\n\nThe audit reproduced package/API incompatibilities. This job is not pi-bridge-contract. Issue #96 and downstream live execution remain blocked.\n');
           JS

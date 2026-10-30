@@ -53,7 +53,7 @@ whole-build reproducibility or supply-chain attestation validity.
 | --- | --- | --- |
 | Idle input with `whenBusy: "steer", whenIdle: "reject"` | Accepted; one faux-model call; submission `done` | Published runtime ignores the newer idle guard. It can start new work where a caller expects steering-only behavior. |
 | Same request ID, different content | Original submission returned; one model call and one user entry | Pi deduplication is useful but does not enforce Switchyard's payload-conflict rule. A bridge-owned durable hash binding is still required. |
-| SIGKILL after a passive entry is durably admitted, before any host receipt | Reopened public API finds the same submission; replay produces one entry | Limited positive evidence for Pi persistence/deduplication. It does not prove the Rust outbox, model/tool recovery or exactly-once effects. |
+| SIGKILL after Pi admission, before an external host receives the receipt | Reopened public API finds the same submission; replay produces one entry | Limited positive evidence for Pi persistence/deduplication. It does not prove a crash during admission, the Rust outbox, model/tool recovery or exactly-once effects. |
 | Source/declaration audit | Published source matches the release commit, not the reviewed source | The mandatory source/package compatibility criterion fails. |
 | Adoption gate | Exit `1`, JSON decision `NO-GO` | Audit success cannot be mistaken for S2 approval. |
 
@@ -79,9 +79,18 @@ npm run --silent audit:package
 npm run --silent gate
 ```
 
-`verify` runs typechecking and five executable probes. The successful tests
+`verify` runs typechecking and six tests (five executable probes and a decision
+regression). The successful tests
 confirm the recorded incompatibilities. `audit:package` prints evidence;
 `gate` must exit `1`. A nonzero result is not to be masked or treated as GO.
+
+The report derives `NO-GO` from non-empty observed `blockers`. With no package
+blockers it reports `NEEDS-FULL-S2`, never `GO`, and the adoption gate still exits
+`1`. CI also requires non-empty blockers. The inverted package tests deliberately
+fail when a candidate becomes compatible: preserve this published-1.4.0 evidence,
+introduce separate candidate compatibility tests, and review any change to these
+expectations together with the pin. Do not weaken tests to keep an audit green
+or interpret compatible package APIs as a passed bridge contract.
 
 CI's `pi-package-audit` runs those diagnostic tests and uploads the JSON report.
 It is deliberately **not** `pi-bridge-contract`, and does not meet that required

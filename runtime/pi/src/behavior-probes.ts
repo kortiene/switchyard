@@ -29,6 +29,8 @@ export async function probeIdleSteering() {
     } catch (error) {
       // Only the specific public idle refusal proves the behavior. Storage, timeout,
       // provider and unrelated exceptions must fail the probe, never manufacture GO.
+      // TODO(source-build): use instanceof on the public ConversationIdle export when
+      // the selected pin provides it. Version 1.4.0 does not export that class.
       if (error instanceof Error && error.constructor.name === 'ConversationIdle') {
         return { rejected: true, status: 'idle_rejected', modelCalls: faux.state.callCount };
       }

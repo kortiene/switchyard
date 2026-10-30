@@ -8,6 +8,12 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 import { auditPackage } from '../src/package-audit.ts';
 import { probeChangedPayload, probeIdleSteering } from '../src/behavior-probes.ts';
+import { adoptionDecision } from '../src/feasibility.ts';
+
+test('removing package blockers still requires the full S2 gate', () => {
+  assert.equal(adoptionDecision(['incompatible API']), 'NO-GO');
+  assert.equal(adoptionDecision([]), 'NEEDS-FULL-S2');
+});
 
 test('installed source matches the published tag, but not the accepted source baseline', async () => {
   const audit = await auditPackage();
@@ -29,7 +35,7 @@ test('Pi request deduplication alone does not detect changed payloads', { timeou
   assert.deepEqual(await probeChangedPayload(), { sameSubmission: true, modelCalls: 1, userEntries: 1 });
 });
 
-test('a Pi-only passive submission survives SIGKILL before receipt and reopens once', { timeout: 15_000 }, async () => {
+test('a Pi-only passive submission survives SIGKILL after admission and reopens once', { timeout: 15_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'switchyard-pi-audit-'));
   const childPath = fileURLToPath(new URL('./recovery-child.ts', import.meta.url));
   const database = join(directory, 'pi.sqlite');
@@ -80,6 +86,8 @@ test('the adoption gate remains nonzero; a successful audit is not S2 GO', { tim
   } catch (error) {
     const failure = error as { code?: number; stdout?: string };
     assert.equal(failure.code, 1);
-    assert.equal(JSON.parse(failure.stdout!).decision, 'NO-GO');
+    const report = JSON.parse(failure.stdout!);
+    assert.equal(report.decision, 'NO-GO');
+    assert(report.blockers.length > 0, 'NO-GO must be backed by observed incompatibilities');
   }
 });

@@ -14,7 +14,8 @@ const root = await harness.root(context);
 const draft = { type: 'write' as const, requestId: 'lost-ack', entry: { kind: 'switchyard.audit', data: { marker: 'one' } } };
 if (mode === 'admit') {
   await root.submit(draft, context);
-  // Test-observer marker after admission, before any receipt is returned to a host.
+  // Pi admission has completed; an external host has not received its receipt.
+  // This observer marker does not model a crash partway through admission.
   process.stdout.write('admitted\n');
   setInterval(() => {}, 1_000);
 } else {
