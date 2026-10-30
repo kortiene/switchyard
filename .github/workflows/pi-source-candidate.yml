@@ -1,0 +1,43 @@
+name: Pi source candidate
+
+on:
+  pull_request:
+    paths:
+      - 'runtime/pi-source/**'
+      - '.github/workflows/pi-source-candidate.yml'
+      - 'docs/rust-first/**'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi-source-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pi-source-candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: runtime/pi-source
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: runtime/pi-source/.node-version
+      - name: Select pinned build tooling
+        run: npm install --global npm@11.9.0 --ignore-scripts --no-audit --no-fund
+      - name: Rebuild and verify all source artifact hashes
+        run: node build.mjs
+      - name: Install candidate without lifecycle scripts
+        run: npm ci
+      - name: Verify public admission APIs (not S2 GO)
+        run: npm run verify
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-source-provenance
+          path: runtime/pi-source/.artifacts/provenance.json
+          if-no-files-found: error
