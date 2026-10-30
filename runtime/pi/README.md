@@ -2,11 +2,9 @@
 
 This directory is a **feasibility probe, not the runtime bridge**. The decision
 for npm `@earendil-works/pi-durable@1.4.0` against the reviewed source baseline is
-**NO-GO** (2026-10-29, merged in #106). See the [evidence and remedy](../../docs/rust-first/s2-feasibility.md).
-The pinned source candidate merged in #107 lives in `../pi-source/` and is
-`NEEDS-FULL-S2`, not an approval of this package. Draft #108 is not this
-directory and is not on main. [#96](https://github.com/kortiene/switchyard/issues/96)
-remains NO-GO until its complete gate passes. The mission CLI still uses S1's
+**NO-GO** (2026-10-29). See the [evidence and current status](../../docs/rust-first/s2-feasibility.md).
+S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and that
+audit. The mission CLI still uses S1's
 fake runtime. There is no model-provider spend, workspace execution, GitHub
 publication, or claim of confinement here.
 

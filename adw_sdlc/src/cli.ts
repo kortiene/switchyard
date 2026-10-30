@@ -9,7 +9,7 @@
  * - `py` — not available. Selecting it raises an explicit `AdwError` at
  *   dispatch — no subprocess, no `python3` dependency. Python compatibility
  *   was dropped on 2026-10-29; there is no upstream engine to switch to.
- * - `ts` — parse the phased flags (mirroring adw/issue.py build_parser),
+ * - `ts` — parse the phased flags (historically mirrored adw/issue.py),
  *   resolve `--runner`/`ADW_RUNNER` over the four-runner registry, and
  *   bind the loaded adapter into `orchestrator.run()`.
  *

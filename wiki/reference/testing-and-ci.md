@@ -68,9 +68,7 @@ The [audit package](../../runtime/pi/README.md) documents commands and limits.
 
 # Pinned source candidate
 
-[#107](https://github.com/kortiene/switchyard/pull/107) added `pi-source-candidate`. It rebuilds `runtime/pi-source/` when that path, its workflow, or `docs/rust-first/` changes. The candidate verdict is `NEEDS-FULL-S2`. The job is not `pi-bridge-contract` and does not change the [#96](https://github.com/kortiene/switchyard/issues/96) NO-GO.
-
-[#108](https://github.com/kortiene/switchyard/pull/108) is an open draft, not this checkout. It describes a separate `pi-bridge-probe` job. Main does not run that job. A green audit or source rebuild is not live execution and is not S2 acceptance.
+[#107](https://github.com/kortiene/switchyard/pull/107) added `pi-source-candidate`. It rebuilds `runtime/pi-source/` when that path, its workflow, or `docs/rust-first/` changes. The job is not `pi-bridge-contract`. S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and the [S2 feasibility audit](../../docs/rust-first/s2-feasibility.md). A green audit or source rebuild is not live execution and is not S2 acceptance.
 
 # Wiki validation policy
 

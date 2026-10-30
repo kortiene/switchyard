@@ -9,12 +9,13 @@ parent [#94](https://github.com/kortiene/switchyard/issues/94).
 [#106](https://github.com/kortiene/switchyard/pull/106) merged this published-package
 NO-GO. [#107](https://github.com/kortiene/switchyard/pull/107) merged the pinned
 source candidate in `runtime/pi-source/`; its verdict is `NEEDS-FULL-S2`.
-[#108](https://github.com/kortiene/switchyard/pull/108) is an open draft at
-`dc604a01ca2c39ed13678e4b2088d832e18303aa` with partial process-bridge probes only.
-It is not merged. [#96](https://github.com/kortiene/switchyard/issues/96) remains
-**NO-GO** until the complete gate in that issue passes. This note does not execute
-that gate and does not claim GO or live execution. The 2026-10-29 evidence below
-stays as recorded.
+[#108](https://github.com/kortiene/switchyard/pull/108) is an open draft with
+partial bridge probes. It is not merged, and it is not S2 acceptance or live
+execution. [#96](https://github.com/kortiene/switchyard/issues/96) remains
+**NO-GO** until the complete gate in that issue passes. This section is the
+status to update when that draft moves. This note does not execute the gate and
+does not claim GO or live execution. The 2026-10-29 evidence below stays as
+recorded.
 
 S1 is complete in [#105](https://github.com/kortiene/switchyard/pull/105).
 S2 is not complete. Rust remains the sole long-term engine, including the native
@@ -117,9 +118,8 @@ snapshot recovery, stable multi-effect and nested-tool replay through Rust
 receipts, registry restrictions, and observable abort settlement. Exported
 `taskId` and nested-call types alone do not prove replay behavior.
 
-This audit did not add a process bridge, and main still does not contain one.
-Draft #108 probes a bridge off this checkout; those probes are not merged and do
-not satisfy the acceptance list above. In particular, the S1 fake runtime's
+This audit did not add a process bridge. Later bridge work is tracked in
+Current status above. In particular, the S1 fake runtime's
 verification/publication notifications are not exposed to Pi. Future external
 frames must not authorize verification PASS, approval, publication, or writer
 quiescence; those remain Rust-owned facts. S3 confinement and S8 live acceptance
@@ -141,9 +141,8 @@ catalog. Two local builds matched every committed artifact hash, and four
 public-API compatibility tests pass. Its verdict remains `NEEDS-FULL-S2`. It does
 not alter the published-package NO-GO above.
 
-[#108](https://github.com/kortiene/switchyard/pull/108) is an open draft that
-starts a bridge against those public APIs. It is partial evidence only. Rerun the
-**whole** S2 gate before any GO. A newer compatible published package with
+S2 is NO-GO until the whole gate passes; see Current status and
+[#96](https://github.com/kortiene/switchyard/issues/96). A newer compatible published package with
 reviewed provenance is another bounded remedy when available. If neither the
 source candidate nor a published pin can pass that gate, review a native-Rust
 implementation gate and downstream scope. Retain S1/fake operation; do not

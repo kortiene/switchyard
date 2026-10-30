@@ -1,10 +1,10 @@
 # Delivery plan: One Recoverable, Verified Change
 
-Status: S1 implemented (#105). S2 remains NO-GO (#96): #106 and #107 are merged; #108 is an open draft with partial bridge probes only. S3–S8 are planned. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md). Status reconciled 2026-10-30 against main `b03313109fe16bd3031efdbc75d753ece28e5137`.
+Status: S1 implemented (#105). S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and [s2-feasibility.md](s2-feasibility.md). S3–S8 are planned. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md). Disposition recorded 2026-10-30; see [#109](https://github.com/kortiene/switchyard/issues/109) for current disposition.
 
 ## Implementation sequence
 
-Use focused PRs in dependency order. S1's domain with a fake runtime is complete in [#105](https://github.com/kortiene/switchyard/pull/105), closing [#95](https://github.com/kortiene/switchyard/issues/95). Next prove the Pi bridge in [#96](https://github.com/kortiene/switchyard/issues/96), then enable confined real effects. [#108](https://github.com/kortiene/switchyard/pull/108) is an open draft with partial probes only. It does not satisfy #96.
+Use focused PRs in dependency order. S1's domain with a fake runtime is complete in [#105](https://github.com/kortiene/switchyard/pull/105), closing [#95](https://github.com/kortiene/switchyard/issues/95). Next prove the Pi bridge in [#96](https://github.com/kortiene/switchyard/issues/96), then enable confined real effects. S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and [s2-feasibility.md](s2-feasibility.md).
 
 | Slice | Issue | Depends on | Reviewable outcome |
 | --- | --- | --- | --- |
@@ -30,7 +30,7 @@ S2 is the proof-of-concept gate for pinned Pi Durable 1.4.0 behind the sandboxed
 | `adw_sdlc/` | Reference while useful. No long-term coexistence or user-compatibility promise. |
 | State v1 | Frozen (`adw/state.schema.json`, `agents/<adw-id>/state.json`): no further changes, no new consumers. Python compatibility is dropped. |
 
-S2 records GO or NO-GO in its issue and evidence ledger with exact source/package/Node identities, commands, results and unresolved constraints. The [2026-10-29 package audit](s2-feasibility.md) records NO-GO for published 1.4.0: its source/API does not match the inspected baseline. [#106](https://github.com/kortiene/switchyard/pull/106) merged that audit. [#107](https://github.com/kortiene/switchyard/pull/107) merged the pinned source candidate; its verdict is `NEEDS-FULL-S2`, not GO. [#108](https://github.com/kortiene/switchyard/pull/108) remains an open draft (`dc604a01ca2c39ed13678e4b2088d832e18303aa`) with partial bridge probes only. The diagnostic `pi-package-audit` check and the `pi-source-candidate` rebuild are not the planned `pi-bridge-contract` check. #96 stays NO-GO until every proof row below passes. An unproven mandatory property is NO-GO, not a warning. This cleanup does not execute that gate.
+S2 records GO or NO-GO in its issue and evidence ledger with exact source/package/Node identities, commands, results and unresolved constraints. The [2026-10-29 package audit](s2-feasibility.md) records NO-GO for published 1.4.0: its source/API does not match the inspected baseline. S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and that audit. The diagnostic `pi-package-audit` check and the `pi-source-candidate` rebuild are not the planned `pi-bridge-contract` check. #96 stays NO-GO until every proof row below passes. An unproven mandatory property is NO-GO, not a warning. This cleanup does not execute that gate.
 
 | Required proof | NO-GO condition |
 | --- | --- |
@@ -88,7 +88,7 @@ Credential-free automation should include fake-provider/fake-forge protocol test
 
 The current [verify workflow](../../.github/workflows/verify.yml) runs the TypeScript gate on Node 20.19.0 and 22 with check names verify (node 20.19.0) and verify (node 22). The floor leg skips the optional existing Pi SDK; both current suites use mocks. Neither proves the new Pi Durable bridge. S1 adds the separate `rust-core` job and does not change those TypeScript checks or branch protection.
 
-As of 2026-10-30, `pi-package-audit` and `pi-source-candidate` also exist. They record the published-package NO-GO and the pinned source rebuild. They are not `pi-bridge-contract`. Draft #108 describes a `pi-bridge-probe` job; that job is not on main. A green audit or source rebuild does not change the #96 NO-GO and is not live execution.
+As of 2026-10-30, `pi-package-audit` and `pi-source-candidate` also exist. They record the published-package NO-GO and the pinned source rebuild. They are not `pi-bridge-contract`. S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and [s2-feasibility.md](s2-feasibility.md). A green audit or source rebuild is not live execution.
 
 Add these separate jobs as their implementation slices land:
 

@@ -3,7 +3,7 @@
 ## 2026-10-30
 
 * **Active path**: The root README now leads with the Rust S1 host, `./scripts/rust-verify.sh`, and a repository role map. The TypeScript walkthrough, Cockpit, and quality-gate detail are one legacy reference with links to the package README and [Testing and CI](reference/testing-and-ci.md).
-* **S2 status**: The decision register, rust-first status pages, and testing reference now agree that #106 and #107 are merged, #108 is an open draft with partial bridge probes, and #96 remains NO-GO until its complete gate passes. The 2026-10-29 package-audit evidence stays dated. This log does not claim S2 GO or live execution.
+* **S2 status**: Live S2 status stays in the [feasibility audit](../docs/rust-first/s2-feasibility.md). Other pages say S2 is NO-GO and point there and at #96. The 2026-10-29 package-audit evidence stays dated. This log does not claim S2 GO or live execution.
 * **Backlog**: The delivery-plan triage matches [#109](https://github.com/kortiene/switchyard/issues/109). #34 is closed as not planned, not completed. That close does not authorize deleting `adw/` or `adw_sdlc/`.
 
 ## 2026-10-29

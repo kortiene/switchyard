@@ -21,18 +21,9 @@ proof-of-concept adapter only, not that runtime. The planned M1 shape is Pi
 Durable 1.4.0 behind a sandboxed TypeScript bridge. That bridge is not an
 accepted integration.
 
-[S2 (#96)](https://github.com/kortiene/switchyard/issues/96) remains **NO-GO**
-until its complete gate passes:
-
-- [#106](https://github.com/kortiene/switchyard/pull/106) merged the package
-  audit. It records **NO-GO** for published Pi Durable 1.4.0 (2026-10-29).
-  `runtime/pi/` holds that evidence. `pi-package-audit` is not
-  `pi-bridge-contract`.
-- [#107](https://github.com/kortiene/switchyard/pull/107) merged a pinned
-  source candidate in `runtime/pi-source/`. Its verdict is `NEEDS-FULL-S2`.
-- [#108](https://github.com/kortiene/switchyard/pull/108) is an open draft at
-  `dc604a01ca2c39ed13678e4b2088d832e18303aa`. It supplies partial bridge probes
-  only. It is not merged, and it is not S2 acceptance or live execution.
+S2 is **NO-GO**. See
+[#96](https://github.com/kortiene/switchyard/issues/96) and the
+[S2 feasibility audit](./docs/rust-first/s2-feasibility.md).
 
 The TypeScript path and `runner-pi` are frozen (2026-10-29) and will be
 retired with the TypeScript engine. Python compatibility is dropped. State v1
@@ -87,7 +78,7 @@ in the [package development guide](./adw_sdlc/README.md#development).
 | Work | Status |
 | --- | --- |
 | **S1** [#95](https://github.com/kortiene/switchyard/issues/95) | Implemented. Mission ledger, command outbox, fake runtime. |
-| **S2** [#96](https://github.com/kortiene/switchyard/issues/96) | **NO-GO** until the complete gate passes. #106 and #107 are merged. #108 is a draft with partial probes only. |
+| **S2** [#96](https://github.com/kortiene/switchyard/issues/96) | **NO-GO**. See [#96](https://github.com/kortiene/switchyard/issues/96) and the [S2 feasibility audit](./docs/rust-first/s2-feasibility.md). |
 | **S3–S8** [#97](https://github.com/kortiene/switchyard/issues/97)–[#102](https://github.com/kortiene/switchyard/issues/102) | Planned. S3 owns native worktree lifecycle. Pi-dependent live work stays blocked while S2 is NO-GO. |
 | **Native Rust agent runtime** | Accepted long-term target (2026-10-29). Not implemented. Replacing the proof-of-concept adapter needs its own reviewed gate. |
 
@@ -166,9 +157,11 @@ only confirms that the local package and project pack load.
 > Only target repositories you trust. Pass `--test-cmd` or `ADW_TEST_CMD`;
 > this repository's default test command is empty.
 
-Live-run flags, runner setup, managed-worktree commands, and troubleshooting
-are in the [package README](./adw_sdlc/README.md#quick-start). Historical
-evidence is in [`adw_sdlc/PARITY.md`](./adw_sdlc/PARITY.md) and
+Live-run prerequisites (`gh auth status`, a clean dedicated checkout, approval
+to spend credits, and a `--no-merge` budget example) are in the
+[package quick start](./adw_sdlc/README.md#quick-start), with the flag list and
+managed-worktree commands. Historical evidence is in
+[`adw_sdlc/PARITY.md`](./adw_sdlc/PARITY.md) and
 [`adw_sdlc/MVP-READINESS.md`](./adw_sdlc/MVP-READINESS.md).
 
 | Runner | Recorded role on this frozen path |
