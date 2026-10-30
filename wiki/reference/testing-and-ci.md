@@ -3,7 +3,7 @@ type: Testing Reference
 title: Testing and CI
 description: The focused-test workflow, canonical verification chain, coverage policy, and CI execution matrix.
 tags: [reference, testing, coverage, ci, verification]
-timestamp: "2026-10-29T05:30:00Z"
+timestamp: "2026-10-29T19:30:00Z"
 ---
 
 # Canonical gate
@@ -56,6 +56,15 @@ S1 adds a separate Rust gate. From the repository root:
 ```
 
 The script checks formatting, clippy, and `cargo test` with the committed Rust 1.99.1 toolchain. CI runs it as the stable job name `rust-core` on `ubuntu-24.04`. It does not replace `npm run verify`. Adding the workflow job does not make `rust-core` a required status check; a maintainer has to add that exact name to branch protection or rulesets.
+
+# Pi package audit (S2 NO-GO)
+
+The separate `pi-package-audit` job uses pinned Node 22.23.4 on Ubuntu 24.04 to
+reproduce the [S2 package/API incompatibilities](../../docs/rust-first/s2-feasibility.md).
+Its five probes and typecheck can pass while the integration remains NO-GO.
+`npm run gate` in `runtime/pi/` exits 1. The diagnostic job is not the planned
+`pi-bridge-contract` check and grants no downstream live-execution readiness.
+The [audit package](../../runtime/pi/README.md) documents commands and limits.
 
 # Wiki validation policy
 

@@ -26,6 +26,12 @@ The [Rust-first prototype plan](./docs/rust-first/README.md) and
 describe the M1 recovery and approval contracts. The runnable reference
 documented below is that TypeScript package, not a compatibility commitment.
 
+S2's [package audit](./docs/rust-first/s2-feasibility.md) records **NO-GO** for
+published Pi Durable 1.4.0 against the reviewed source baseline. The package
+lacks reviewed admission APIs; `runtime/pi/` contains reproducible probes,
+not a runtime bridge. Pi-dependent live work remains blocked pending a reviewed
+compatible package/source build and the full S2 gate.
+
 S1 of that plan is a separate Cargo workspace (`crates/switchyard-core` and
 `crates/switchyard`). It persists missions in an application-owned SQLite ledger
 and drives them with a fake runtime: no model credentials, no GitHub writes, and
