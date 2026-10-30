@@ -1,0 +1,54 @@
+name: Pi source candidate
+
+on:
+  pull_request:
+    paths:
+      - 'runtime/pi-source/**'
+      - '.github/workflows/pi-source-candidate.yml'
+      - 'docs/rust-first/**'
+  push:
+    branches: [main]
+    paths:
+      - 'runtime/pi-source/**'
+      - '.github/workflows/pi-source-candidate.yml'
+      - 'docs/rust-first/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi-source-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pi-source-candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: runtime/pi-source
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: runtime/pi-source/.node-version
+      - name: Select pinned build tooling
+        run: npm install --global npm@11.9.0 --ignore-scripts --no-audit --no-fund
+      - name: Read pinned catalog revision
+        id: catalog
+        run: node -e 'console.log("revision=" + require("./pins.json").catalogRevision)' >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: runtime/pi-source/.catalog-cache
+          key: pi-model-catalog-${{ steps.catalog.outputs.revision }}
+      - name: Rebuild and verify all source artifact hashes
+        run: node build.mjs
+      - name: Install candidate without lifecycle scripts
+        run: npm ci
+      - name: Verify public admission APIs (not S2 GO)
+        run: npm run verify
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pi-source-provenance
+          path: runtime/pi-source/.artifacts/provenance.json
+          if-no-files-found: error

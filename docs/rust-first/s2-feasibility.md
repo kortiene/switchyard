@@ -113,6 +113,13 @@ are separate gates even after S2 succeeds.
 
 ## Recommended bounded remedy
 
+The reproducible candidate now lives in [runtime/pi-source](../../runtime/pi-source/README.md).
+Its complete five-package workspace closure is built from the reviewed source
+with the upstream pinned catalog. Two local builds matched every committed
+artifact hash, and four public-API compatibility tests pass. Its verdict remains
+`NEEDS-FULL-S2`; this does not alter the published-package NO-GO below or approve
+the still-unproven process bridge.
+
 Prepare a separately reviewable, reproducible source-build candidate for the
 already-reviewed commit `e65b3b88c08412bb8ffbd21fb5dc5756064a6e5a`. Pin the entire
 required workspace dependency closure, Node/build tools, upstream lockfile and

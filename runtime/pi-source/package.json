@@ -1,0 +1,28 @@
+{
+  "name": "@switchyard/pi-source-candidate",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "22.23.4", "npm": "11.9.0" },
+  "scripts": {
+    "build:source": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "verify": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "file:.artifacts/earendil-works-chord-1.4.0.tgz",
+    "@earendil-works/pi-ai": "file:.artifacts/earendil-works-pi-ai-1.4.0.tgz",
+    "@earendil-works/pi-codemode": "file:.artifacts/earendil-works-pi-codemode-1.4.0.tgz",
+    "@earendil-works/pi-durable": "file:.artifacts/earendil-works-pi-durable-1.4.0.tgz",
+    "@earendil-works/pi-telemetry": "file:.artifacts/earendil-works-pi-telemetry-1.4.0.tgz"
+  },
+  "overrides": {
+    "@earendil-works/chord": "$@earendil-works/chord",
+    "@earendil-works/pi-ai": "$@earendil-works/pi-ai",
+    "@earendil-works/pi-codemode": "$@earendil-works/pi-codemode",
+    "@earendil-works/pi-durable": "$@earendil-works/pi-durable",
+    "@earendil-works/pi-telemetry": "$@earendil-works/pi-telemetry"
+  },
+  "devDependencies": { "@types/node": "22.19.19", "typescript": "7.0.2" }
+}
