@@ -1,7 +1,7 @@
 # S2 process bridge: partial conformance
 
 Status: **NEEDS-FULL-S2**. This work depends on the source candidate in
-[PR #107](https://github.com/kortiene/switchyard/pull/107), which remains open.
+[PR #107](https://github.com/kortiene/switchyard/pull/107), now merged.
 It is a reviewable bridge implementation and credential-free probe, not S2 GO.
 The product CLI and `Host` continue to use the S1 fake runtime.
 

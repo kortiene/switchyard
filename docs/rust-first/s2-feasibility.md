@@ -126,7 +126,7 @@ required workspace dependency closure, Node/build tools, upstream lockfile and
 source provenance; verify that emitted artifacts expose the reviewed APIs.
 Do not mix this source with similarly numbered published workspace packages
 without a documented compatibility check. The candidate has been built and
-tested in PR #107; its pin review and the full S2 bridge gate remain open. The
+tested and merged in PR #107; the full S2 bridge gate remains open. The
 separate [bridge probe](s2-bridge-probe.md) records partial conformance evidence
 without changing this package verdict.
 

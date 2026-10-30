@@ -4,6 +4,10 @@ This is the bounded source-build remedy for [S2 / #96](https://github.com/kortie
 The published-1.4.0 NO-GO evidence stays in `../pi/`. This candidate is
 **NEEDS-FULL-S2**, not an integration approval or a usable coding runtime.
 
+This directory is disposable S2 proof-of-concept evidence, with no long-term
+maintenance or TypeScript runtime compatibility promise. Rust remains the target
+agent runtime; the legacy TypeScript engine stays frozen.
+
 ## Reproduce
 
 Use Node **22.23.4** and npm **11.9.0**, then from this directory:
@@ -15,11 +19,11 @@ npm run verify
 ```
 
 The build needs Git, curl, npm registry access, the pinned upstream commit and
-the immutable pi.dev catalog URL. It fails on missing inputs, version mismatch,
+the immutable pi.dev catalog URL on a catalog-cache miss. It fails on missing inputs, version mismatch,
 changed source/lock/catalog, or artifact drift. It never falls back to `latest`,
 the published Pi packages, a live catalog, or regenerated expected hashes.
 
-`pins.json` fixes source commit `e65b3b88`, the upstream lockfile SHA-256,
+`pins.json` fixes source commit `e65b3b88`, workspace version 1.4.0, the upstream lockfile SHA-256,
 TypeScript 7.0.2, and all five output tarball hashes. The production workspace
 dependency closure is telemetry, Chord, code mode, AI and Durable, all compiled
 from that same unmodified commit. Building the code-mode dependency does not
@@ -28,7 +32,11 @@ enable its tools or execution capabilities in a future bridge.
 Upstream's ignored model data is hydrated with its own offline hydrator from
 the content-addressed catalog in `nix/model-catalog.json`. The bytes are checked
 before hydration. No provider discovery or paid model request is made. This is
-the upstream Nix build's data path, used without requiring Nix.
+the upstream Nix build's data path, used without requiring Nix. Verified catalog
+bytes are stored in `.catalog-cache/<catalogRevision>.json`; CI restores that
+directory using the exact revision as its cache key. A warm cache avoids pi.dev
+access. Cached bytes are hash-checked on every build, and corrupt entries fail
+closed. A cold cache still requires pi.dev availability.
 
 Build dependencies are installed with the unchanged upstream lock and lifecycle
 scripts disabled. Runtime dependencies have a separate committed lockfile;
@@ -36,6 +44,10 @@ direct file dependencies and overrides prevent an internal Pi package from
 silently resolving to a same-version registry binary. Build artifacts and
 temporary checkouts are ignored. The script promotes artifacts only when every
 hash matches, and emits `.artifacts/provenance.json`.
+The source-cleanliness check rejects tracked changes and unexpected untracked
+files; upstream-ignored build outputs remain allowed. This CI workflow pins all
+Actions to full commit SHAs and applies the same path filters to PRs and main
+pushes.
 
 ## Evidence and limits
 

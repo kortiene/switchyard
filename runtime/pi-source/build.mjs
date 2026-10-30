@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,6 +21,18 @@ const run = (command, args, cwd = source) => execFileSync(command, args, {
 });
 const git = (...args) => execFileSync('git', args, { cwd: source, encoding: 'utf8' }).trim();
 try {
+  const cache = join(root, '.catalog-cache');
+  const catalog = join(cache, `${pins.catalogRevision}.json`);
+  if (!existsSync(catalog)) {
+    const downloaded = join(work, 'models.all.json');
+    run('curl', ['--fail', '--silent', '--show-error', '--location', '--max-time', '90',
+      `https://pi.dev/api/models/revisions/${pins.catalogRevision}?types=chat,image,classifier`, '-o', downloaded]);
+    assert.equal(`sha256-${sha256(readFileSync(downloaded))}`, pins.catalogRevision, 'Catalog integrity mismatch');
+    mkdirSync(cache, { recursive: true });
+    renameSync(downloaded, catalog);
+  }
+  // Cache entries remain untrusted inputs; validate restored bytes on every build.
+  assert.equal(`sha256-${sha256(readFileSync(catalog))}`, pins.catalogRevision, 'Catalog integrity mismatch');
   run('git', ['init', '--quiet']);
   run('git', ['fetch', '--depth=1', pins.repository, pins.commit]);
   run('git', ['checkout', '--quiet', '--detach', 'FETCH_HEAD']);
@@ -36,15 +48,11 @@ try {
   for (const pkg of pins.packages) {
     const metadata = JSON.parse(readFileSync(join(source, 'packages', pkg.directory, 'package.json'), 'utf8'));
     assert.equal(metadata.name, pkg.name);
-    assert.equal(metadata.version, '1.4.0');
+    assert.equal(metadata.version, pins.version);
     for (const name of Object.keys(metadata.dependencies ?? {})) {
       if (name.startsWith('@earendil-works/')) assert(closure.has(name), `Missing source dependency: ${name}`);
     }
   }
-  const catalog = join(work, 'models.all.json');
-  run('curl', ['--fail', '--silent', '--show-error', '--location', '--max-time', '90',
-    `https://pi.dev/api/models/revisions/${pins.catalogRevision}?types=chat,image,classifier`, '-o', catalog]);
-  assert.equal(`sha256-${sha256(readFileSync(catalog))}`, pins.catalogRevision, 'Catalog integrity mismatch');
   run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund']);
   run(process.execPath, ['packages/ai/scripts/hydrate-model-catalog.ts', catalog]);
   for (const pkg of pins.packages) {
@@ -52,7 +60,8 @@ try {
     run('npm', ['pack', '--ignore-scripts', '--silent', `--workspace=${pkg.name}`, `--pack-destination=${packed}`]);
     assert.equal(sha256(readFileSync(join(packed, pkg.artifact))), pkg.sha256, `Artifact drift: ${pkg.name}`);
   }
-  assert.equal(git('diff', '--exit-code'), '', 'Build changed tracked source');
+  assert.equal(git('status', '--porcelain', '--untracked-files=all'), '',
+    'Build changed tracked source or created unexpected untracked files');
   assert.equal(sha256(readFileSync(join(source, 'package-lock.json'))), pins.lockSha256);
   const artifacts = join(root, '.artifacts');
   mkdirSync(artifacts, { recursive: true });
