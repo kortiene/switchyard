@@ -3,7 +3,7 @@ type: Testing Reference
 title: Testing and CI
 description: The focused-test workflow, canonical verification chain, coverage policy, and CI execution matrix.
 tags: [reference, testing, coverage, ci, verification]
-timestamp: "2026-10-29T19:30:00Z"
+timestamp: "2026-10-30T22:00:00Z"
 ---
 
 # Canonical gate
@@ -66,6 +66,12 @@ Its five probes and typecheck can pass while the integration remains NO-GO.
 `pi-bridge-contract` check and grants no downstream live-execution readiness.
 The [audit package](../../runtime/pi/README.md) documents commands and limits.
 
+# Pinned source candidate
+
+[#107](https://github.com/kortiene/switchyard/pull/107) added `pi-source-candidate`. It rebuilds `runtime/pi-source/` when that path, its workflow, or `docs/rust-first/` changes. The candidate verdict is `NEEDS-FULL-S2`. The job is not `pi-bridge-contract` and does not change the [#96](https://github.com/kortiene/switchyard/issues/96) NO-GO.
+
+[#108](https://github.com/kortiene/switchyard/pull/108) is an open draft, not this checkout. It describes a separate `pi-bridge-probe` job. Main does not run that job. A green audit or source rebuild is not live execution and is not S2 acceptance.
+
 # Wiki validation policy
 
 OKF consumers must tolerate missing links. Switchyard's producer-side `wiki:check` deliberately uses a stricter policy and rejects broken local concept and repository-source links before changes enter the repository. External URLs and heading anchors are not fetched or validated.
@@ -80,4 +86,4 @@ OKF consumers must tolerate missing links. Switchyard's producer-side `wiki:chec
 
 [4] [Rust core gate](../../scripts/rust-verify.sh)
 
-[4] [Verification script invariants](https://github.com/kortiene/switchyard/blob/main/adw_sdlc/test/scaffold.test.ts)
+[5] [Verification script invariants](https://github.com/kortiene/switchyard/blob/main/adw_sdlc/test/scaffold.test.ts)

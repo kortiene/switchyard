@@ -1,10 +1,10 @@
 # Delivery plan: One Recoverable, Verified Change
 
-Status: S1 implemented; S2 package audit NO-GO; S2-S8 integration open. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md).
+Status: S1 implemented (#105). S2 remains NO-GO (#96): #106 and #107 are merged; #108 is an open draft with partial bridge probes only. S3–S8 are planned. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md). Status reconciled 2026-10-30 against main `b03313109fe16bd3031efdbc75d753ece28e5137`.
 
 ## Implementation sequence
 
-Use focused PRs in dependency order. S1's domain with a fake runtime is complete in [#105](https://github.com/kortiene/switchyard/pull/105), closing [#95](https://github.com/kortiene/switchyard/issues/95). Next prove the Pi bridge in [#96](https://github.com/kortiene/switchyard/issues/96), then enable confined real effects.
+Use focused PRs in dependency order. S1's domain with a fake runtime is complete in [#105](https://github.com/kortiene/switchyard/pull/105), closing [#95](https://github.com/kortiene/switchyard/issues/95). Next prove the Pi bridge in [#96](https://github.com/kortiene/switchyard/issues/96), then enable confined real effects. [#108](https://github.com/kortiene/switchyard/pull/108) is an open draft with partial probes only. It does not satisfy #96.
 
 | Slice | Issue | Depends on | Reviewable outcome |
 | --- | --- | --- | --- |
@@ -30,7 +30,7 @@ S2 is the proof-of-concept gate for pinned Pi Durable 1.4.0 behind the sandboxed
 | `adw_sdlc/` | Reference while useful. No long-term coexistence or user-compatibility promise. |
 | State v1 | Frozen (`adw/state.schema.json`, `agents/<adw-id>/state.json`): no further changes, no new consumers. Python compatibility is dropped. |
 
-S2 records GO or NO-GO in its issue and evidence ledger with exact source/package/Node identities, commands, results and unresolved constraints. The [2026-10-29 package audit](s2-feasibility.md) records NO-GO for published 1.4.0: its source/API does not match the inspected baseline. Its diagnostic `pi-package-audit` check is not the planned `pi-bridge-contract` check. GO still requires every proof row below; an unproven mandatory property is NO-GO, not a warning.
+S2 records GO or NO-GO in its issue and evidence ledger with exact source/package/Node identities, commands, results and unresolved constraints. The [2026-10-29 package audit](s2-feasibility.md) records NO-GO for published 1.4.0: its source/API does not match the inspected baseline. [#106](https://github.com/kortiene/switchyard/pull/106) merged that audit. [#107](https://github.com/kortiene/switchyard/pull/107) merged the pinned source candidate; its verdict is `NEEDS-FULL-S2`, not GO. [#108](https://github.com/kortiene/switchyard/pull/108) remains an open draft (`dc604a01ca2c39ed13678e4b2088d832e18303aa`) with partial bridge probes only. The diagnostic `pi-package-audit` check and the `pi-source-candidate` rebuild are not the planned `pi-bridge-contract` check. #96 stays NO-GO until every proof row below passes. An unproven mandatory property is NO-GO, not a warning. This cleanup does not execute that gate.
 
 | Required proof | NO-GO condition |
 | --- | --- |
@@ -88,6 +88,8 @@ Credential-free automation should include fake-provider/fake-forge protocol test
 
 The current [verify workflow](../../.github/workflows/verify.yml) runs the TypeScript gate on Node 20.19.0 and 22 with check names verify (node 20.19.0) and verify (node 22). The floor leg skips the optional existing Pi SDK; both current suites use mocks. Neither proves the new Pi Durable bridge. S1 adds the separate `rust-core` job and does not change those TypeScript checks or branch protection.
 
+As of 2026-10-30, `pi-package-audit` and `pi-source-candidate` also exist. They record the published-package NO-GO and the pinned source rebuild. They are not `pi-bridge-contract`. Draft #108 describes a `pi-bridge-probe` job; that job is not on main. A green audit or source rebuild does not change the #96 NO-GO and is not live execution.
+
 Add these separate jobs as their implementation slices land:
 
 | Stable proposed check name | Runner / runtime | Required coverage | Owner |
@@ -105,18 +107,20 @@ Live provider spend and real GitHub publication remain a separately authorized o
 
 ## Existing backlog triage
 
-Eight issues were open at planning time, with no open PRs. The repository is not GitHub-archived. Preserve these issue histories and states; this planning track neither closes nor silently reassigns them.
+Planning snapshot (2026-10-28): eight of these issues were open, and the repository had no open pull requests. The repository is not GitHub-archived. Current disposition is [consolidation tracker #109](https://github.com/kortiene/switchyard/issues/109). This section records that disposition. It does not copy #109's delivery sequence, and it does not open, close, or reassign the issues.
 
-| Existing issue | Disposition for Rust M1 |
+| Existing issue | Disposition aligned with #109 |
 | --- | --- |
-| [#28](https://github.com/kortiene/switchyard/issues/28) — fenced-output sample | Existing TypeScript parity work; no M1 dependency |
-| [#30](https://github.com/kortiene/switchyard/issues/30) — nudge rate | Retain as prior cost/latency evidence; no M1 dependency |
-| [#34](https://github.com/kortiene/switchyard/issues/34) — Python/TS cutover | Python compatibility dropped 2026-10-29. Not a Rust task. State v1 stays frozen: no further changes, no new consumers |
-| [#38](https://github.com/kortiene/switchyard/issues/38) — TS linter | Current package maintenance; bridge checks get their own explicit scope |
-| [#40](https://github.com/kortiene/switchyard/issues/40) — Pi TUI tests | Existing Cockpit work; new web surface is S7 |
-| [#42](https://github.com/kortiene/switchyard/issues/42) — provider code plugins | Remains demand-gated; distinct from a bundled trusted Pi adapter |
-| [#43](https://github.com/kortiene/switchyard/issues/43) — provider extension tail | Deferred; M1 has one GitHub delivery path |
-| [#44](https://github.com/kortiene/switchyard/issues/44) — institutional memory | Deferred beyond M1 |
+| [#28](https://github.com/kortiene/switchyard/issues/28) — fenced-output sample | Legacy/deferred. Retained open, with no M1 dependency and no new TypeScript feature investment. |
+| [#30](https://github.com/kortiene/switchyard/issues/30) — nudge rate | Legacy/deferred. Retained open as prior cost/latency evidence, with no M1 dependency and no new TypeScript feature investment. |
+| [#34](https://github.com/kortiene/switchyard/issues/34) — Python/TS cutover | Closed 2026-10-30 as not planned. The 2026-10-29 Rust direction supersedes the old cutover. Not marked completed. Closing it does not authorize deleting `adw/` or `adw_sdlc/`. State v1 stays frozen: no further changes, no new consumers. |
+| [#38](https://github.com/kortiene/switchyard/issues/38) — TS linter | Legacy/deferred. Retained open, with no M1 dependency and no new TypeScript feature investment. Bridge checks keep their own explicit scope. |
+| [#40](https://github.com/kortiene/switchyard/issues/40) — Pi TUI tests | Legacy/deferred. Retained open. Existing Cockpit work is not S7, and this track does not add TypeScript feature investment. |
+| [#42](https://github.com/kortiene/switchyard/issues/42) — provider code plugins | Deferred and demand-gated. No implementation in the consolidation track. Distinct from a bundled trusted Pi adapter. |
+| [#43](https://github.com/kortiene/switchyard/issues/43) — provider extension tail | Deferred and demand-gated. No implementation in the consolidation track. M1 has one GitHub delivery path. |
+| [#44](https://github.com/kortiene/switchyard/issues/44) — institutional memory | Deferred and demand-gated. No implementation in the consolidation track. Beyond M1. |
+
+Preserve historical issue bodies. If this table and #109 diverge, update #109 rather than growing a second queue here.
 
 Reuse behavior and test cases from the existing implementation where relevant: secret allowlists, Git ownership, worktree reconciliation, dry-run expectations, bounded repair and structured errors. Do not port the entire phase engine, generalized provider framework, or all runner backends before demonstrating one mission.
 

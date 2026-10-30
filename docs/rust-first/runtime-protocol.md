@@ -1,6 +1,6 @@
 # Initial Rust / Pi runtime protocol
 
-Status: proposed v0 contract to prove in [S2 / #96](https://github.com/kortiene/switchyard/issues/96). No existing Rust SDK or upstream wire protocol is implied. Companion: [architecture](README.md).
+Status: proposed v0 contract to prove in [S2 / #96](https://github.com/kortiene/switchyard/issues/96). #96 remains NO-GO (2026-10-30). #106 and #107 are merged; #108 is an open draft with partial probes and is not acceptance of this contract. No existing Rust SDK or upstream wire protocol is implied. Companion: [architecture](README.md).
 
 The TypeScript bridge in this contract is the M1 proof-of-concept adapter for Pi Durable 1.4.0. It is not the end state. The long-term agent runtime is native Rust and implements this public contract for new attempts. `runner-pi` is frozen legacy and is not this bridge.
 

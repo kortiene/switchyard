@@ -4,7 +4,7 @@ title: Command-line interface
 description: The supported command families, common run flags, and safety-sensitive CLI behavior.
 resource: https://github.com/kortiene/switchyard/blob/main/adw_sdlc/src/cli.ts
 tags: [reference, cli, commands, flags]
-timestamp: "2026-10-29T11:40:00Z"
+timestamp: "2026-10-30T22:00:00Z"
 ---
 
 # Entry points
@@ -58,7 +58,7 @@ See the [managed-worktree playbook](/operations/managed-worktrees.md) before rem
 
 # Rust prototype CLI
 
-S1 adds a separate `switchyard` binary. It is not the TypeScript CLI above and it does not read ADW state. `switchyard mission status` is read-only. `switchyard mission create` records a local Git snapshot and does not call GitHub. The fake runtime is the only adapter. Command details live in the binary's `--help` output and in the [Rust-first S1 resolutions](../../docs/rust-first/README.md#s1-resolutions).
+S1 adds a separate `switchyard` binary. It is the active host in this checkout. It is not the TypeScript CLI above and it does not read ADW state. `switchyard mission status` is read-only. `switchyard mission create` records a local Git snapshot and does not call GitHub. The fake runtime is the only adapter on main. The S2 process bridge is not wired into this binary. Draft [#108](https://github.com/kortiene/switchyard/pull/108) does not change that. [#96](https://github.com/kortiene/switchyard/issues/96) remains NO-GO. Command details live in the binary's `--help` output and in the [Rust-first S1 resolutions](../../docs/rust-first/README.md#s1-resolutions). The local Rust check is `./scripts/rust-verify.sh` from the repository root.
 
 # Precedence
 

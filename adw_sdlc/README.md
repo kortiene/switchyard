@@ -1,5 +1,11 @@
 # adw_sdlc
 
+> Status: frozen reference (2026-10-29). Fixes only. This package and
+> `runner-pi` will be retired with the TypeScript engine. It is not the active
+> Rust host and not the Pi Durable proof-of-concept adapter. Python
+> compatibility is dropped. State v1 is frozen as-is. The default engine in
+> this package remains `ts`. See the [repository README](../README.md).
+
 A TypeScript/Node control plane for the **phased ADW (Agentic Developer
 Workflow) SDLC pipeline**. It drives one work item (e.g. a GitHub issue)
 through a deterministic chain of single-purpose agent phases, where each phase

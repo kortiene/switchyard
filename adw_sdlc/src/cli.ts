@@ -3,14 +3,12 @@
  * The /issue entry point that wires ADW_ENGINE + ADW_RUNNER
  * selection (PLAN.md roadmap step 10, D4).
  *
- * `ADW_ENGINE={py|ts}` (default `ts` in this standalone port, flag
- * `--engine`) picks which language drives the run, orthogonal to the runner
- * choice:
+ * `ADW_ENGINE={py|ts}` (default `ts`, flag `--engine`) picks which language
+ * drives this reference package, orthogonal to the runner choice:
  *
- * - `py` — NOT available in this standalone port. It would require the Python
- *   sibling (`adw/issue.py`), which is not bundled here, so selecting it raises
- *   an explicit `AdwError` at dispatch — no subprocess, no `python3` dependency.
- *   (To drive a run with the py engine, use the integrated upstream repository.)
+ * - `py` — not available. Selecting it raises an explicit `AdwError` at
+ *   dispatch — no subprocess, no `python3` dependency. Python compatibility
+ *   was dropped on 2026-10-29; there is no upstream engine to switch to.
  * - `ts` — parse the phased flags (mirroring adw/issue.py build_parser),
  *   resolve `--runner`/`ADW_RUNNER` over the four-runner registry, and
  *   bind the loaded adapter into `orchestrator.run()`.
@@ -42,13 +40,14 @@ export const ENGINE_IDS = ['py', 'ts'] as const;
 export type EngineId = (typeof ENGINE_IDS)[number];
 
 /**
- * Standalone HealthTech port: the `ts` default is set (the `py → ts` default
- * flip is local to this port); the cutover *milestone* (PLAN.md roadmap step 12)
- * is **post-MVP** — see `MVP-READINESS.md` §3, which tracks `(C)` cutover as a
- * post-MVP gate. `py` stays a recognized engine id, but it is NOT available in
- * this standalone port: selecting it via `--engine py` / `ADW_ENGINE=py` raises
- * a deterministic `AdwError` at dispatch (no spawn, no `python3` dependency),
- * because the Python `adw/issue.py` sibling is not bundled here.
+ * Default engine for this reference package: `ts`.
+ *
+ * The historical `py → ts` cutover milestone (PLAN.md roadmap step 12) is
+ * **post-MVP** and, since 2026-10-29, is not remaining work: Python
+ * compatibility is dropped. See `MVP-READINESS.md` §3, which keeps `(C)`
+ * cutover as that post-MVP record. `py` stays a recognized engine id so
+ * `--engine py` / `ADW_ENGINE=py` fails closed with `AdwError` (no spawn,
+ * no `python3`). This constant is not the long-term Rust engine.
  */
 export const DEFAULT_ENGINE: EngineId = 'ts';
 

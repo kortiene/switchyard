@@ -3,7 +3,7 @@ type: Contributor Workflow
 title: Contributor workflow
 description: A source-of-truth-first workflow for changing Switchyard code, prompts, configuration, tests, and documentation.
 tags: [workflow, contributing, testing, prompts, documentation]
-timestamp: "2026-07-18T13:26:10Z"
+timestamp: "2026-10-30T22:00:00Z"
 ---
 
 # Before editing
@@ -27,7 +27,15 @@ timestamp: "2026-07-18T13:26:10Z"
 
 # Test and verify
 
-From `adw_sdlc/`:
+Active Rust work, from the repository root:
+
+```bash
+./scripts/rust-verify.sh
+```
+
+That script is the Rust gate (fmt, Clippy, and `cargo test` on the committed 1.99.1 toolchain). CI reports it as `rust-core`. It does not call a model or GitHub, and a green run is not an S2 GO.
+
+Frozen TypeScript reference, from `adw_sdlc/`:
 
 ```bash
 npx vitest run test/<affected>.test.ts
@@ -35,7 +43,7 @@ npm run wiki:check
 npm run verify
 ```
 
-The final command is the canonical local and CI gate. Real paid runner calls, live forge mutations, and live evidence drills are not part of ordinary automated tests.
+`npm run verify` remains the TypeScript reference gate and the existing required CI check. It is not the active product gate. Real paid runner calls, live forge mutations, and live evidence drills are not part of ordinary automated tests. Wiki edits run `npm run wiki:check` before the broader gate.
 
 # Documentation ownership
 
