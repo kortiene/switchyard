@@ -1,4 +1,5 @@
 // Bounded bidirectional JSON Lines. The reader continues while a runtime call awaits a tool receipt.
+import { writeSync } from 'node:fs';
 import { TextDecoder } from 'node:util';
 import { checkBinding, DEADLINE_MS, MAX_FRAME, MAX_PENDING, PROTOCOL, ProtocolError,
   type Binding, type Frame, type Json } from './protocol.ts';
@@ -66,7 +67,7 @@ export class Transport {
       return dispatch(frame);
     }).then(result => this.send({ protocol: PROTOCOL, kind: 'response', id: frame.id, binding: this.binding, result }),
       error => {
-        if (!(error instanceof ProtocolError)) { this.fail(); return; }
+        if (!(error instanceof ProtocolError)) { this.diagnostic(error); this.fail(); return; }
         this.send({ protocol: PROTOCOL, kind: 'response', id: frame.id, binding: this.binding,
           error: { category: error.category, admission: error.admission } });
       }).finally(() => { clearTimeout(timer); this.active--; });
@@ -89,6 +90,16 @@ export class Transport {
       this.fail(); return;
     }
     process.stdout.write(data);
+  }
+
+  // One line, flushed before exit. Name and message only: no stack, cause, or payload.
+  private diagnostic(error: unknown) {
+    try {
+      const name = (error instanceof Error && error.name ? error.name : 'Error').slice(0, 40);
+      const message = (error instanceof Error ? error.message : '').slice(0, 160);
+      const line = `${name}: ${message}`.replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').replace(/ {2,}/g, ' ').trim();
+      writeSync(process.stderr.fd, `pi-bridge: ${line}\n`);
+    } catch { /* best-effort; the peer still exits */ }
   }
 
   private fail() {

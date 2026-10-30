@@ -293,7 +293,27 @@ fn corrupt_storage_is_retained_and_never_opened_as_a_fresh_session() {
     let (node, launcher) = paths();
     let mut bridge = PiBridge::spawn(&node, &launcher, &db, binding(1), "answer").unwrap();
     bridge.hello().unwrap();
-    assert!(call(&mut bridge, "runtime.open", None, json!({})).is_err());
+    let error = call(&mut bridge, "runtime.open", None, json!({})).unwrap_err();
+    let message = error.to_string();
+    let tail = bridge.stderr_tail();
+    assert!(
+        !tail.trim().is_empty(),
+        "corrupt open exited with empty stderr: {message}"
+    );
+    assert!(
+        tail.lines()
+            .any(|line| line.contains("pi-bridge:") && line.contains("file is not a database")),
+        "stderr missing bounded storage diagnostic: {tail}"
+    );
+    assert!(
+        message.contains("file is not a database"),
+        "bridge failure did not retain stderr diagnostic: {message}"
+    );
+    let status = bridge.exit_status().expect("peer status");
+    assert!(
+        status.is_some_and(|status| !status.success()),
+        "corrupt open should exit non-zero, got {status:?}"
+    );
     assert_eq!(std::fs::read(&db).unwrap(), corrupt);
 }
 

@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -362,6 +362,11 @@ impl PiBridge {
     pub fn terminate(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+
+    /// Exit status once the peer has been reaped. `Ok(None)` while it is still running.
+    pub fn exit_status(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        self.child.try_wait()
     }
 
     /// Untrusted fixture diagnostics, capped at 4 KiB with terminal controls escaped.
