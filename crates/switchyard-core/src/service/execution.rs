@@ -148,9 +148,9 @@ impl Host {
             Err(error @ Error::StaleGeneration { .. }) => {
                 error.with_context(format!("original execution failure: {original}"))
             }
-            Err(error) => original.with_context(format!(
-                "could not record execution uncertainty: {error}"
-            )),
+            Err(error) => {
+                original.with_context(format!("could not record execution uncertainty: {error}"))
+            }
         }
     }
 }
