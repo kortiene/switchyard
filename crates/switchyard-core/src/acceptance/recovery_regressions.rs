@@ -64,6 +64,7 @@ fn failed_pause_recovery_waits_for_abort_across_restart() {
     deliver(&mut host, mission);
     assert!(
         host.runtime_mut()
+            .unwrap()
             .stored_receipt(&pause.request_id)
             .is_some()
     );
@@ -72,15 +73,15 @@ fn failed_pause_recovery_waits_for_abort_across_restart() {
     let continued = continuation(&host, mission);
     deliver(&mut host, mission);
     assert_eq!(
-        host.runtime_mut().admission_order(),
+        host.runtime_mut().unwrap().admission_order(),
         &[pause.request_id, continued.request_id.clone()]
     );
-    assert_eq!(host.runtime_mut().submission_count(), 3);
+    assert_eq!(host.runtime_mut().unwrap().submission_count(), 3);
     drop(host);
 
     let mut host = Host::open(&world.db).unwrap();
     host.recover(mission).unwrap();
-    assert_eq!(host.runtime_mut().submission_count(), 3);
+    assert_eq!(host.runtime_mut().unwrap().submission_count(), 3);
     assert!(host.snapshot(mission).unwrap().pending_commands.is_empty());
 }
 
@@ -117,15 +118,17 @@ fn revised_plan_resume_ignores_prior_planning_acknowledgment() {
     deliver(&mut host, mission);
     assert!(
         host.runtime_mut()
+            .unwrap()
             .stored_receipt(&revised.request_id)
             .is_none()
     );
     assert!(
         host.runtime_mut()
+            .unwrap()
             .stored_receipt(&continued.request_id)
             .is_some()
     );
-    assert_eq!(host.runtime_mut().submission_count(), 3);
+    assert_eq!(host.runtime_mut().unwrap().submission_count(), 3);
 }
 
 #[test]
@@ -173,10 +176,11 @@ fn second_repair_resume_ignores_prior_repair_acknowledgment() {
     deliver(&mut host, mission);
     assert!(
         host.runtime_mut()
+            .unwrap()
             .stored_receipt(&continued.request_id)
             .is_some()
     );
-    assert_eq!(host.runtime_mut().submission_count(), 5);
+    assert_eq!(host.runtime_mut().unwrap().submission_count(), 5);
 }
 
 #[test]
@@ -223,7 +227,7 @@ fn explicit_recovery_reuses_pending_request_with_or_without_lost_ack() {
             );
         }
         deliver(&mut host, mission);
-        assert_eq!(host.runtime_mut().submission_count(), 1);
+        assert_eq!(host.runtime_mut().unwrap().submission_count(), 1);
         if let Some(receipt) = receipt {
             assert_eq!(
                 host.snapshot(mission).unwrap().commands[0]
@@ -235,7 +239,7 @@ fn explicit_recovery_reuses_pending_request_with_or_without_lost_ack() {
         drop(host);
         let mut host = Host::open(&world.db).unwrap();
         host.recover(mission).unwrap();
-        assert_eq!(host.runtime_mut().submission_count(), 1);
+        assert_eq!(host.runtime_mut().unwrap().submission_count(), 1);
     }
 }
 
@@ -261,7 +265,7 @@ fn recovery_reuses_pending_and_acknowledged_continuation() {
     uncertain(&mut host, mission, AttentionReason::ExecutionUncertain);
     recover_to(&mut host, mission, Phase::Planning).unwrap();
     assert!(host.snapshot(mission).unwrap().pending_commands.is_empty());
-    assert_eq!(host.runtime_mut().submission_count(), 2);
+    assert_eq!(host.runtime_mut().unwrap().submission_count(), 2);
 }
 
 #[test]
@@ -294,6 +298,7 @@ fn reconciling_lost_start_ack_keeps_its_pending_abort() {
     deliver(&mut host, mission);
     assert!(
         host.runtime_mut()
+            .unwrap()
             .stored_receipt(&pause.request_id)
             .is_some()
     );

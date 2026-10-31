@@ -132,20 +132,22 @@ export class Runtime {
       draft = { type: 'input', content: params.content, requestId, whenBusy: method === 'runtime.steer' ? 'steer' : 'reject',
         ...(method === 'runtime.steer' ? { whenIdle: 'reject' as const } : {}) };
     }
-    const receipt = await harness.commit(async tx => {
+    const admitted = await harness.commit(async tx => {
       if (this.closing) throw new ProtocolError('session_unavailable');
       const state = await tx.doc(Session);
       const command = await tx.doc(Command, commandId, null);
       if (command.hash && (command.hash !== payloadHash || command.method !== method)) throw new ProtocolError('command_conflict');
       if (state.stopCommand) throw new ProtocolError('stopping');
-      if (command.receipt) return command.receipt;
+      if (command.receipt) return { receipt: command.receipt, fresh: false };
       const id = await root.submit(tx, draft);
       command.hash = payloadHash; command.method = method; command.receipt = String(id); command.settled = true;
-      return command.receipt;
+      return { receipt: command.receipt, fresh: true };
     }, BACKGROUND_CONTEXT);
-    this.afterAdmission?.(); // conformance crash barrier: committed, no response/scheduling yet
+    // Only a new admission is a crash point. Replaying an existing receipt must
+    // stay alive so recovery can resume that submission with the fixture armed.
+    if (admitted.fresh) this.afterAdmission?.();
     harness.resume();
-    return { receiptId: receipt, commandId, requestId, payloadHash, admitted: true };
+    return { receiptId: admitted.receipt, commandId, requestId, payloadHash, admitted: true };
   }
 
   private async abort(commandId: string, payloadHash: string): Promise<Json> {

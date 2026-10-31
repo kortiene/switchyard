@@ -263,12 +263,10 @@ impl Host {
         self.lock.generation
     }
 
-    /// Fake-runtime simulation seam, available only on hosts opened with `open`.
-    /// Panics for an explicitly selected Pi probe; it cannot inject Pi authority.
-    pub fn runtime_mut(&mut self) -> &mut FakeRuntime {
-        self.runtime
-            .fake_mut()
-            .expect("runtime_mut is a FakeRuntime-only simulation seam")
+    /// Fake-runtime simulation seam for hosts opened with [`Host::open`].
+    /// A Pi probe host returns `None` and cannot accept fake observations.
+    pub fn runtime_mut(&mut self) -> Option<&mut FakeRuntime> {
+        self.runtime.fake_mut()
     }
 
     pub fn durability(&self) -> Result<(String, i64)> {
@@ -514,27 +512,28 @@ impl Host {
             if !initialized {
                 self.store.mark_runtime_initialized(&mission.attempt.id)?;
             }
-            if runtime.needs_resume {
+            if runtime.needs_resume(&binding) {
                 // Validate previous ACKs before admitting any new work. A valid
                 // session with a missing command is not an empty session to refill.
+                // One inspect covers the set; each row is still checked on its own.
+                let mut acknowledged = Vec::new();
                 for command in recorded
                     .iter()
                     .filter(|c| c.state == CommandState::Acknowledged && c.kind.is_runtime_bound())
                 {
-                    let request = RuntimeRequest {
-                        binding: binding.clone(),
-                        request_id: command.request_id.clone(),
-                        payload_hash: command.payload_hash.clone(),
-                        method: runtime_method(command.kind),
-                    };
-                    let payload: Value =
-                        serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
-                    runtime.require_acknowledged(
-                        &request,
-                        &payload,
-                        command.runtime_receipt_json.as_deref(),
-                    )?;
+                    acknowledged.push(crate::execution::AcknowledgedCheck {
+                        request: RuntimeRequest {
+                            binding: binding.clone(),
+                            request_id: command.request_id.clone(),
+                            payload_hash: command.payload_hash.clone(),
+                            method: runtime_method(command.kind),
+                        },
+                        payload: serde_json::from_str(&command.payload_canonical)
+                            .map_err(Error::storage)?,
+                        recorded: command.runtime_receipt_json.clone(),
+                    });
                 }
+                runtime.require_acknowledged_batch(&acknowledged)?;
             }
         }
         let mut dispatched = 0;
@@ -597,7 +596,7 @@ impl Host {
         let RuntimeAdapter::Pi(runtime) = &mut self.runtime else {
             return Ok(());
         };
-        if !runtime.needs_resume {
+        if !runtime.needs_resume(&binding) {
             return Ok(());
         }
         if self.store.ops_blocked(&mission.id)? {
@@ -656,7 +655,10 @@ impl Host {
             match self.apply_notification(mission_id, note.clone()) {
                 Ok(outcome) => outcomes.push(outcome),
                 Err(error) if error.is_transient() => {
-                    self.runtime_mut().requeue_front(note);
+                    self.runtime
+                        .fake_mut()
+                        .expect("notification was popped from FakeRuntime")
+                        .requeue_front(note);
                     return Err(error);
                 }
                 Err(error) => {
@@ -667,7 +669,10 @@ impl Host {
                         &error.to_string(),
                         &frame,
                     ) {
-                        self.runtime_mut().requeue_front(note);
+                        self.runtime
+                            .fake_mut()
+                            .expect("notification was popped from FakeRuntime")
+                            .requeue_front(note);
                         return Err(storage);
                     }
                 }

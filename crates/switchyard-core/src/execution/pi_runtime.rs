@@ -1,5 +1,6 @@
 //! Feature-gated S1 outbox adapter for the credential-free Pi probe.
 //! Inspect first; never resume a recovered submission merely to learn its receipt.
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -9,11 +10,28 @@ use super::{PiBridge, RuntimeBinding, RuntimeReceipt, RuntimeRequest};
 use crate::canonical::{canonicalize, payload_hash, sha256_hex};
 use crate::error::{Error, Result};
 
+/// `runtime.inspect` rejects more than this many ids. Kept in step with
+/// `runtime/pi-source/src/runtime.ts`; a larger restart set is chunked.
+const INSPECT_BATCH_LIMIT: usize = 32;
+
+struct BoundSession {
+    bridge: PiBridge,
+    needs_resume: bool,
+}
+
+/// One previously acknowledged command to check against a shared Pi snapshot.
+pub(crate) struct AcknowledgedCheck {
+    pub(crate) request: RuntimeRequest,
+    pub(crate) payload: Value,
+    pub(crate) recorded: Option<String>,
+}
+
 pub(crate) struct PiRuntime {
     node: PathBuf,
     directory: PathBuf,
-    bridge: Option<PiBridge>,
-    pub(crate) needs_resume: bool,
+    /// Keyed by session id: that id also names the sqlite file, so each mission
+    /// or attempt gets its own child. The child stores the full binding.
+    sessions: BTreeMap<String, BoundSession>,
     pub(crate) fixture: &'static str,
 }
 
@@ -25,8 +43,7 @@ impl PiRuntime {
         Ok(Self {
             node,
             directory: directory.into(),
-            bridge: None,
-            needs_resume: false,
+            sessions: BTreeMap::new(),
             fixture: "answer",
         })
     }
@@ -46,11 +63,15 @@ impl PiRuntime {
         ))
     }
 
+    /// Open one child for this session binding. The same binding reuses that
+    /// child and keeps the resume flag from the first open. A different
+    /// mission, attempt, or generation for an already-open session fails
+    /// closed instead of replacing the child or its storage file.
     pub(crate) fn open(&mut self, binding: &RuntimeBinding, require_existing: bool) -> Result<()> {
-        if let Some(bridge) = &self.bridge {
-            if bridge.binding() != binding {
+        if let Some(session) = self.sessions.get(&binding.session_id) {
+            if session.bridge.binding() != binding {
                 return Err(Error::guard(
-                    "Pi probe already bound to another session/generation",
+                    "Pi session is already open with a different mission, attempt, or generation",
                 ));
             }
             return Ok(());
@@ -80,9 +101,20 @@ impl PiRuntime {
         if opened["opened"] != true || opened["scheduling"] != "paused" {
             return Err(Error::guard("Pi open did not return an inert session"));
         }
-        self.bridge = Some(bridge);
-        self.needs_resume = require_existing;
+        self.sessions.insert(
+            binding.session_id.clone(),
+            BoundSession {
+                bridge,
+                needs_resume: require_existing,
+            },
+        );
         Ok(())
+    }
+
+    pub(crate) fn needs_resume(&self, binding: &RuntimeBinding) -> bool {
+        self.sessions
+            .get(&binding.session_id)
+            .is_some_and(|session| session.bridge.binding() == binding && session.needs_resume)
     }
 
     #[cfg(test)]
@@ -130,6 +162,17 @@ impl PiRuntime {
         Ok(())
     }
 
+    fn session_mut(&mut self, binding: &RuntimeBinding) -> Result<&mut BoundSession> {
+        let session = self
+            .sessions
+            .get_mut(&binding.session_id)
+            .ok_or_else(|| Error::guard("Pi session is not open"))?;
+        if session.bridge.binding() != binding {
+            return Err(Error::guard("Pi request has stale/mismatched binding"));
+        }
+        Ok(session)
+    }
+
     fn call(
         &mut self,
         request: &RuntimeRequest,
@@ -137,14 +180,9 @@ impl PiRuntime {
         command: Option<&str>,
         params: Value,
     ) -> Result<Value> {
-        let bridge = self
+        self.session_mut(&request.binding)?
             .bridge
-            .as_mut()
-            .ok_or_else(|| Error::guard("Pi session is not open"))?;
-        if bridge.binding() != &request.binding {
-            return Err(Error::guard("Pi request has stale/mismatched binding"));
-        }
-        bridge.call(method, command, params, &mut no_effects)
+            .call(method, command, params, &mut no_effects)
     }
 
     pub(crate) fn reconcile(
@@ -154,46 +192,70 @@ impl PiRuntime {
     ) -> Result<Option<RuntimeReceipt>> {
         Self::validate_command(request, payload)?;
         let (method, params) = mapped(request, payload)?;
-        let snapshot = self.call(
-            request,
-            "runtime.inspect",
-            None,
-            json!({"commandIds":[request.request_id]}),
-        )?;
-        let rows = snapshot["commands"]
-            .as_array()
-            .ok_or_else(|| Error::guard("missing Pi command snapshot"))?;
-        if rows.len() != 1 || rows[0]["commandId"] != request.request_id {
+        let snapshot = self.inspect_ids(request, &[request.request_id.as_str()])?;
+        let rows = command_rows(&snapshot)?;
+        if rows.len() != 1 {
             return Err(Error::guard("Pi inspection returned a different command"));
         }
-        let record = &rows[0]["receipt"];
-        if record.is_null() {
-            return Ok(None);
+        receipt_from_row(request, method, &params, &rows[0])
+    }
+
+    /// One inspect for the whole acknowledged set, then the same per-row checks
+    /// as [`Self::require_acknowledged`]. Sets larger than the bridge cap are
+    /// split into consecutive batches; each row is still checked on its own.
+    pub(crate) fn require_acknowledged_batch(
+        &mut self,
+        checks: &[AcknowledgedCheck],
+    ) -> Result<()> {
+        if checks.is_empty() {
+            return Ok(());
         }
-        if record["hash"] != payload_hash(&json!({"method":method,"params":params}))?
-            || record["method"] != method
-        {
-            return Err(Error::CommandConflict {
-                command_id: request.request_id.clone(),
-            });
-        }
-        // An incomplete abort must be explicitly replayed to settle, never ACKed.
-        if record["settled"] == false && method == "runtime.abort" {
-            return Ok(None);
-        }
-        if record["settled"] != true {
-            return Err(Error::guard("uncertain Pi command record"));
-        }
-        let receipt = record["receipt"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| Error::guard("Pi record has no receipt"))?;
-        if method != "runtime.abort" && !rows[0]["status"].is_string() {
+        let binding = &checks[0].request.binding;
+        if checks.iter().any(|check| &check.request.binding != binding) {
             return Err(Error::guard(
-                "Pi receipt has no corresponding durable submission",
+                "Pi acknowledgement batch mixes session bindings",
             ));
         }
-        Ok(Some(receipt_for(request, receipt)))
+        let mut seen = Vec::<&str>::new();
+        for check in checks {
+            if seen.contains(&check.request.request_id.as_str()) {
+                return Err(Error::guard("Pi acknowledgement batch repeats a command"));
+            }
+            seen.push(check.request.request_id.as_str());
+            Self::validate_command(&check.request, &check.payload)?;
+        }
+        let mut rows = BTreeMap::<String, Value>::new();
+        for chunk in checks.chunks(INSPECT_BATCH_LIMIT) {
+            let ids: Vec<&str> = chunk
+                .iter()
+                .map(|check| check.request.request_id.as_str())
+                .collect();
+            let snapshot = self.inspect_ids(&chunk[0].request, &ids)?;
+            let returned = command_rows(&snapshot)?;
+            if returned.len() != chunk.len() {
+                return Err(Error::guard("Pi inspection returned a different command"));
+            }
+            for row in returned {
+                let id = row["commandId"]
+                    .as_str()
+                    .ok_or_else(|| Error::guard("Pi inspection returned a different command"))?;
+                if !ids.contains(&id) || rows.insert(id.to_string(), row.clone()).is_some() {
+                    return Err(Error::guard("Pi inspection returned a different command"));
+                }
+            }
+        }
+        for check in checks {
+            let (method, params) = mapped(&check.request, &check.payload)?;
+            let row = rows
+                .get(&check.request.request_id)
+                .ok_or_else(|| Error::guard("Pi inspection returned a different command"))?;
+            let original =
+                receipt_from_row(&check.request, method, &params, row)?.ok_or_else(|| {
+                    Error::guard("acknowledged Pi submission is missing; recovery blocked")
+                })?;
+            confirm_recorded(&original, check.recorded.as_deref())?;
+        }
+        Ok(())
     }
 
     pub(crate) fn require_acknowledged(
@@ -205,20 +267,12 @@ impl PiRuntime {
         let original = self.reconcile(request, payload)?.ok_or_else(|| {
             Error::guard("acknowledged Pi submission is missing; recovery blocked")
         })?;
-        let recorded: Value = serde_json::from_str(
-            recorded.ok_or_else(|| Error::guard("acknowledged command has no Rust receipt"))?,
-        )
-        .map_err(Error::storage)?;
-        if recorded["receiptId"] != original.receipt_id
-            || recorded["requestId"] != original.request_id
-            || recorded["payloadHash"] != original.payload_hash
-            || recorded["adapter"] != "pi-probe-v1"
-        {
-            return Err(Error::guard(
-                "Rust/Pi receipt disagreement; recovery blocked",
-            ));
-        }
+        confirm_recorded(&original, recorded)?;
         Ok(original)
+    }
+
+    fn inspect_ids(&mut self, request: &RuntimeRequest, ids: &[&str]) -> Result<Value> {
+        self.call(request, "runtime.inspect", None, json!({"commandIds": ids}))
     }
 
     pub(crate) fn dispatch(
@@ -251,9 +305,71 @@ impl PiRuntime {
             .as_str()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| Error::guard("Pi admission has no receipt"))?;
-        self.needs_resume = false;
+        self.session_mut(&request.binding)?.needs_resume = false;
         Ok(receipt_for(request, receipt))
     }
+}
+
+fn command_rows(snapshot: &Value) -> Result<&Vec<Value>> {
+    snapshot["commands"]
+        .as_array()
+        .ok_or_else(|| Error::guard("missing Pi command snapshot"))
+}
+
+fn receipt_from_row(
+    request: &RuntimeRequest,
+    method: &str,
+    params: &Value,
+    row: &Value,
+) -> Result<Option<RuntimeReceipt>> {
+    if row["commandId"] != request.request_id {
+        return Err(Error::guard("Pi inspection returned a different command"));
+    }
+    let record = &row["receipt"];
+    if record.is_null() {
+        return Ok(None);
+    }
+    if record["hash"] != payload_hash(&json!({"method": method, "params": params}))?
+        || record["method"] != method
+    {
+        return Err(Error::CommandConflict {
+            command_id: request.request_id.clone(),
+        });
+    }
+    // An incomplete abort must be explicitly replayed to settle, never ACKed.
+    if record["settled"] == false && method == "runtime.abort" {
+        return Ok(None);
+    }
+    if record["settled"] != true {
+        return Err(Error::guard("uncertain Pi command record"));
+    }
+    let receipt = record["receipt"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::guard("Pi record has no receipt"))?;
+    if method != "runtime.abort" && !row["status"].is_string() {
+        return Err(Error::guard(
+            "Pi receipt has no corresponding durable submission",
+        ));
+    }
+    Ok(Some(receipt_for(request, receipt)))
+}
+
+fn confirm_recorded(original: &RuntimeReceipt, recorded: Option<&str>) -> Result<()> {
+    let recorded: Value = serde_json::from_str(
+        recorded.ok_or_else(|| Error::guard("acknowledged command has no Rust receipt"))?,
+    )
+    .map_err(Error::storage)?;
+    if recorded["receiptId"] != original.receipt_id
+        || recorded["requestId"] != original.request_id
+        || recorded["payloadHash"] != original.payload_hash
+        || recorded["adapter"] != "pi-probe-v1"
+    {
+        return Err(Error::guard(
+            "Rust/Pi receipt disagreement; recovery blocked",
+        ));
+    }
+    Ok(())
 }
 
 fn receipt_for(request: &RuntimeRequest, receipt: &str) -> RuntimeReceipt {

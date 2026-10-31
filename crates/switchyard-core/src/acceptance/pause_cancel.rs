@@ -171,7 +171,7 @@ fn acknowledged_work_requires_a_delivered_abort_before_stop_or_cancel() {
         let created = create(&mut host, &world.repo, 2);
         admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
         deliver(&mut host, &created.mission_id);
-        assert_eq!(host.runtime_mut().submission_count(), 1);
+        assert_eq!(host.runtime_mut().unwrap().submission_count(), 1);
         if cancel {
             admit(&mut host, &created.mission_id, CommandBody::Cancel);
             let error = admit_expect(
@@ -226,7 +226,7 @@ fn acknowledged_work_requires_a_delivered_abort_before_stop_or_cancel() {
         assert_eq!(start.state, "acknowledged");
         assert_eq!(abort.state, "acknowledged");
         assert_eq!(
-            host.runtime_mut().admission_order(),
+            host.runtime_mut().unwrap().admission_order(),
             &[start.request_id.clone(), abort.request_id.clone()]
         );
         let journal: serde_json::Value =

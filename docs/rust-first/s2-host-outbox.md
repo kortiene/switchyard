@@ -58,6 +58,15 @@ Pi storage is deterministically derived beside the canonical ledger under
 `<ledger>.pi-sessions/<sha256(sessionId)>.sqlite`. Path ownership is a local host
 contract, not filesystem confinement.
 
+A Pi Host keeps one child per session binding (mission, attempt, session, and
+this process's generation). The ledger still allows only one active mission.
+A later mission or attempt on that same Host gets its own child and sqlite
+file, instead of failing as a rebind of the first session. Reopening the same
+binding reuses that child. A different mission, attempt, or generation for a
+session that is already open in this process fails closed; it does not replace
+the child or the storage file. Restarting the Host starts a new generation and
+new children. `Host::open` and the product CLI stay on FakeRuntime.
+
 1. Open Pi inertly and validate its pinned handshake and persisted session binding.
 2. Commit `sessionInitialized: true` in the attempt's existing runtime config.
 3. Only then inspect or dispatch outbox commands.
@@ -97,16 +106,22 @@ remain conservatively uncertain and no ExecutionEnv operations are enabled.
 ## Failure injection and verification
 
 The bundled conformance launcher has two explicit crash fixtures: before
-`runtime.submit` admission, and immediately after Pi's admission/document
+`runtime.submit` admission, and immediately after a fresh Pi admission/document
 transaction commits but before scheduler resume or the response. The latter
-SIGKILL leaves the real S1 row pending. Tests restart the Host and use public Pi
+SIGKILL leaves the real S1 row pending. Replaying a command that already has a
+receipt does not trip that barrier, so recovery can keep the fixture armed and
+still resume the original submission. Tests restart the Host and use public Pi
 inspection to compare the original receipt, then prove it finishes without a new
 mission, attempt, or command. The product constructor selects neither crash mode.
 
-Twelve Host tests cover:
+Sixteen Host tests cover:
 
 - crash before admission, crash after admission before Rust acknowledgement,
-  repeated restarts, and resumption of the original submission;
+  repeated restarts, resumption of the original submission, and a recovery
+  replay that leaves the crash-after-admission fixture armed;
+- a successor attempt dispatched by the same Pi host after the first mission
+  is terminal, and a conflicting binding rejected for a session that is
+  already open;
 - pause/cancel after lost work acknowledgement, with an unsent continuation;
 - changed canonical content with a valid but conflicting hash;
 - missing, empty, corrupt and incompatible storage/configuration;

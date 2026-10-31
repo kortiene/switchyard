@@ -158,9 +158,7 @@ impl Store {
                 object.remove("sessionInitialized");
             }
             if &config != expected {
-                return Err(Error::guard(
-                    "ledger runtime configuration mismatch; no adapter replacement",
-                ));
+                return Err(Error::guard(runtime_config_mismatch(&config, expected)));
             }
         }
         Ok(())
@@ -1375,6 +1373,43 @@ fn json_str(value: &Value, key: &str) -> Result<String> {
         })
 }
 
+/// Fail closed, and name every key whose stored value differs from the host.
+/// `sessionInitialized` is removed by the caller before this runs.
+fn runtime_config_mismatch(found: &Value, expected: &Value) -> String {
+    let (Some(found_map), Some(expected_map)) = (found.as_object(), expected.as_object()) else {
+        return format!(
+            "ledger runtime configuration mismatch; no adapter replacement (config: expected {expected}, found {found})"
+        );
+    };
+    let mut keys: Vec<&String> = found_map.keys().chain(expected_map.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    let parts: Vec<String> = keys
+        .into_iter()
+        .filter(|key| found_map.get(*key) != expected_map.get(*key))
+        .map(|key| {
+            format!(
+                "{key}: expected {}, found {}",
+                render_config_value(expected_map.get(key)),
+                render_config_value(found_map.get(key))
+            )
+        })
+        .collect();
+    let detail = if parts.is_empty() {
+        "configuration differs".to_string()
+    } else {
+        parts.join("; ")
+    };
+    format!("ledger runtime configuration mismatch; no adapter replacement ({detail})")
+}
+
+fn render_config_value(value: Option<&Value>) -> String {
+    match value {
+        None => "absent".to_string(),
+        Some(value) => value.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1485,6 +1520,70 @@ mod tests {
             .unwrap_err();
         assert!(task.to_string().to_lowercase().contains("unique"), "{task}");
         assert_eq!(store.load_mission("m-1").unwrap().attempt.id, "a-1");
+    }
+
+    #[test]
+    fn runtime_config_mismatch_names_each_differing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mission.sqlite");
+        let mut store = Store::open_writer(&db).unwrap();
+        store.migrate().unwrap();
+        let mut mission = sample_mission();
+        mission.runtime_config = r#"{"adapter":"pi-probe-v1","credentials":"none","fingerprint":"sha256:old","node":"22.23.4","source":"abc"}"#.into();
+        store.create_mission(mission).unwrap();
+        let expected = json!({
+            "adapter": "pi-probe-v1",
+            "credentials": "none",
+            "fingerprint": "sha256:new",
+            "node": "22.23.5",
+            "source": "def",
+            "extra": true
+        });
+        let message = store
+            .require_runtime_config(&expected)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("fingerprint: expected \"sha256:new\", found \"sha256:old\""),
+            "{message}"
+        );
+        assert!(
+            message.contains("node: expected \"22.23.5\", found \"22.23.4\""),
+            "{message}"
+        );
+        assert!(
+            message.contains("source: expected \"def\", found \"abc\""),
+            "{message}"
+        );
+        assert!(
+            message.contains("extra: expected true, found absent"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("adapter:") && !message.contains("credentials:"),
+            "{message}"
+        );
+        assert!(message.contains("no adapter replacement"), "{message}");
+        store
+            .conn
+            .execute(
+                "UPDATE attempts SET runtime_config_json=json_set(runtime_config_json,'$.sessionInitialized',json('true'))",
+                [],
+            )
+            .unwrap();
+        let matching = json!({
+            "adapter": "pi-probe-v1",
+            "credentials": "none",
+            "fingerprint": "sha256:old",
+            "node": "22.23.4",
+            "source": "abc"
+        });
+        store.require_runtime_config(&matching).unwrap();
+        let drifted = store
+            .require_runtime_config(&expected)
+            .unwrap_err()
+            .to_string();
+        assert!(!drifted.contains("sessionInitialized"), "{drifted}");
     }
 
     fn sample_mission() -> CreatedMission {

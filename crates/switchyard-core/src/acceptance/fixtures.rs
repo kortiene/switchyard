@@ -118,7 +118,7 @@ pub(super) fn admit_expect(host: &mut Host, mission: &str, body: CommandBody) ->
 }
 
 pub(super) fn notify(host: &mut Host, mission: &str, notification: RuntimeNotification) -> Phase {
-    host.runtime_mut().push_notification(notification);
+    host.runtime_mut().unwrap().push_notification(notification);
     let outcome = host.poll_runtime(mission).unwrap().pop().unwrap();
     outcome.phase()
 }

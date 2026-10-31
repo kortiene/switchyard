@@ -10,10 +10,12 @@ import { ADAPTER, canonical, MAX_FRAME, SOURCE, type Binding, type Frame, type J
 const binding: Binding = { missionId: 'm', attemptId: 'a', sessionId: 's', generation: 1 };
 const hello = { source: SOURCE, adapter: ADAPTER, maxFrame: MAX_FRAME, maxPending: 16, capabilities: ['durable-admission'] };
 
-async function peer(mode = 'answer') {
-  const directory = await mkdtemp(join(tmpdir(), 'switchyard-wire-'));
+async function peer(mode = 'answer', options: { directory?: string; generation?: number; cleanup?: boolean } = {}) {
+  const directory = options.directory ?? await mkdtemp(join(tmpdir(), 'switchyard-wire-'));
+  const cleanup = options.cleanup ?? options.directory === undefined;
+  const session: Binding = { ...binding, generation: options.generation ?? binding.generation };
   const child: ChildProcessWithoutNullStreams = spawn(process.execPath, ['--experimental-strip-types',
-    fileURLToPath(new URL('./bridge-child.ts', import.meta.url)), join(directory, 'pi.sqlite'), JSON.stringify(binding), mode],
+    fileURLToPath(new URL('./bridge-child.ts', import.meta.url)), join(directory, 'pi.sqlite'), JSON.stringify(session), mode],
     { env: {}, stdio: ['pipe', 'pipe', 'pipe'] });
   child.stderr.resume();
   let buffer = '';
@@ -42,10 +44,12 @@ async function peer(mode = 'answer') {
     const wireId = `host:${++id}`;
     return new Promise<Frame>((resolve, reject) => {
       pending.set(wireId, { resolve, reject });
-      child.stdin.write(`${JSON.stringify({ protocol: 0, kind: 'request', id: wireId, method, binding, params, ...extra })}\n`);
+      child.stdin.write(`${JSON.stringify({ protocol: 0, kind: 'request', id: wireId, method, binding: session, params, ...extra })}\n`);
     });
   };
-  return { child, exited, request, effects, async close() { child.kill('SIGKILL'); await exited; await rm(directory, { recursive: true, force: true }); } };
+  return { child, exited, request, effects, directory, async close() {
+    child.kill('SIGKILL'); await exited; if (cleanup) await rm(directory, { recursive: true, force: true });
+  } };
 }
 
 test('shared JSON subset rejects floats, unsafe integers and lone surrogates', () => {
@@ -93,6 +97,56 @@ test('protocol, capabilities, binding and generation are checked before opening 
     assert.equal((await p.request('verification_pass', {})).error?.category, 'unsupported_method');
     assert.equal((await p.request('runtime.submit', { type: 'input', content: 'x', approved: true }, { commandId: 'x' })).error?.category, 'invalid_params');
   } finally { await p.close(); }
+});
+
+test('crash-after-admission kills a fresh submit and leaves an idempotent replay alive', { timeout: 15_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'switchyard-crash-'));
+  const first = await peer('crash-after-admission', { directory, generation: 1, cleanup: false });
+  try {
+    assert.equal((await first.request('runtime.hello', hello)).error, undefined);
+    assert.equal((await first.request('runtime.open', {})).error, undefined);
+    let frame: Frame | undefined;
+    const submitted = first.request('runtime.submit', { type: 'input', content: 'plan' }, { commandId: 'c1' })
+      .then(value => { frame = value; }, () => undefined);
+    const code = await first.exited;
+    await submitted;
+    assert.equal(frame, undefined);
+    assert.equal(code, null);
+  } finally { await first.close(); }
+
+  const replay = await peer('crash-after-admission', { directory, generation: 2, cleanup: false });
+  try {
+    assert.equal((await replay.request('runtime.hello', hello)).error, undefined);
+    assert.equal((await replay.request('runtime.open', { requireExisting: true })).error, undefined);
+    const once = await replay.request('runtime.submit', { type: 'input', content: 'plan' }, { commandId: 'c1' });
+    const twice = await replay.request('runtime.submit', { type: 'input', content: 'plan' }, { commandId: 'c1' });
+    assert.equal(once.error, undefined);
+    assert.equal(twice.error, undefined);
+    const receipt = (once.result as { receiptId?: string }).receiptId;
+    assert.equal(typeof receipt, 'string');
+    assert.equal((twice.result as { receiptId?: string }).receiptId, receipt);
+    assert.equal(replay.child.exitCode, null);
+    const limit = Date.now() + 3_000;
+    let status: Json | null = null;
+    while (Date.now() < limit) {
+      const inspect = await replay.request('runtime.inspect', { commandIds: ['c1'] });
+      const commands = (inspect.result as { commands?: { status?: Json }[] }).commands ?? [];
+      status = commands[0]?.status ?? null;
+      if (status === 'done') break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(status, 'done');
+    let fresh: Frame | undefined;
+    const killed = replay.request('runtime.submit', { type: 'input', content: 'next' }, { commandId: 'c2' })
+      .then(value => { fresh = value; }, () => undefined);
+    const exitCode = await replay.exited;
+    await killed;
+    assert.equal(fresh, undefined);
+    assert.equal(exitCode, null);
+  } finally {
+    await replay.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 for (const [name, input] of [

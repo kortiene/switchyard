@@ -298,10 +298,21 @@ fn incompatible_configuration_and_default_fake_reopen_are_rejected() {
     let mut h = host(&w, "answer");
     create(&mut h, &w);
     drop(h);
-    assert!(Host::open(&w.db).is_err());
+    let fake = Host::open(&w.db)
+        .err()
+        .expect("fake reopen of a Pi ledger")
+        .to_string();
+    assert!(fake.contains("adapter:"), "{fake}");
+    assert!(fake.contains("pi-probe-v1"), "{fake}");
     Connection::open(&w.db).unwrap().execute("UPDATE attempts SET runtime_config_json=json_set(runtime_config_json,'$.fingerprint','wrong')",[]).unwrap();
     let node = std::env::var_os("SWITCHYARD_PI_NODE").unwrap();
-    assert!(Host::open_pi_probe(&w.db, Path::new(&node)).is_err());
+    let drifted = Host::open_pi_probe(&w.db, Path::new(&node))
+        .err()
+        .expect("drifted fingerprint")
+        .to_string();
+    assert!(drifted.contains("fingerprint:"), "{drifted}");
+    assert!(drifted.contains("found \"wrong\""), "{drifted}");
+    assert!(drifted.contains("no adapter replacement"), "{drifted}");
 }
 
 #[test]
@@ -472,5 +483,118 @@ fn runtime_open_before_initialization_marker_is_recovered_without_replacing_sess
     assert_eq!(after.session_id, m.session_id);
     assert_eq!(after.commands[0].request_id, c.request_id);
     assert!(h.store.runtime_initialized(&m.attempt_id).unwrap());
+    assert_eq!(counts(&w), (1, 1, 1));
+}
+
+#[test]
+fn one_host_dispatches_a_successor_attempt_on_its_own_bridge() {
+    let w = world();
+    let mut h = host(&w, "answer");
+    let first = create(&mut h, &w);
+    let start_a = admit(&mut h, &first.mission_id, CommandBody::StartPlanning).unwrap();
+    assert_eq!(h.dispatch_pending(&first.mission_id).unwrap(), 1);
+    // The ledger still allows only one active mission. A later attempt on this
+    // same Host is a new session binding and must not be rejected as a rebind.
+    Connection::open(&w.db)
+        .unwrap()
+        .execute(
+            "UPDATE missions SET phase='cancelled' WHERE id=?1",
+            [&first.mission_id],
+        )
+        .unwrap();
+    let second = h.create_successor(&first.mission_id, "operator").unwrap();
+    let start_b = admit(&mut h, &second.mission_id, CommandBody::StartPlanning).unwrap();
+    assert_eq!(h.dispatch_pending(&second.mission_id).unwrap(), 1);
+    assert_eq!(h.dispatch_pending(&first.mission_id).unwrap(), 0);
+    let snap_a = h.snapshot(&first.mission_id).unwrap();
+    let snap_b = h.snapshot(&second.mission_id).unwrap();
+    assert_ne!(snap_a.session_id, snap_b.session_id);
+    assert_ne!(snap_a.attempt_id, snap_b.attempt_id);
+    assert!(snap_b.pending_commands.is_empty());
+    assert_eq!(snap_a.commands[0].request_id, start_a.request_id);
+    assert_eq!(snap_b.commands[0].request_id, start_b.request_id);
+    assert_ne!(snap_a.commands[0].request_id, snap_b.commands[0].request_id);
+    // Pi receipt ids are per session, so the same text can appear in both files.
+    assert!(snap_a.commands[0].receipt_id.is_some());
+    assert!(snap_b.commands[0].receipt_id.is_some());
+    let binding_a = h.binding(&h.store.load_mission(&first.mission_id).unwrap());
+    let binding_b = h.binding(&h.store.load_mission(&second.mission_id).unwrap());
+    let req = request(&h, &first.mission_id, &start_a, "submit");
+    assert!(first_receipt(&mut h, &req)["receipt"]["receipt"].is_string());
+    let db_a = pi(&mut h).database(&binding_a);
+    let db_b = pi(&mut h).database(&binding_b);
+    assert!(db_a.is_file());
+    assert!(db_b.is_file());
+    assert_ne!(db_a, db_b);
+    assert_eq!(counts(&w), (2, 2, 2));
+}
+
+#[test]
+fn open_session_rejects_a_conflicting_binding_without_replacing_the_child() {
+    let w = world();
+    let mut h = host(&w, "answer");
+    let mission = create(&mut h, &w);
+    let command = admit(&mut h, &mission.mission_id, CommandBody::StartPlanning).unwrap();
+    let req = request(&h, &mission.mission_id, &command, "submit");
+    pi(&mut h).open(&req.binding, false).unwrap();
+    let mut conflicting = req.binding.clone();
+    conflicting.mission_id = "other-mission".into();
+    let error = pi(&mut h).open(&conflicting, false).unwrap_err();
+    assert_eq!(error.category(), "guard_failed");
+    assert!(
+        error
+            .to_string()
+            .contains("already open with a different mission, attempt, or generation"),
+        "{error}"
+    );
+    assert_eq!(h.dispatch_pending(&mission.mission_id).unwrap(), 1);
+    assert!(
+        h.snapshot(&mission.mission_id)
+            .unwrap()
+            .pending_commands
+            .is_empty()
+    );
+}
+
+#[test]
+fn pi_probe_runtime_mut_is_absent() {
+    let w = world();
+    let mut h = host(&w, "answer");
+    assert!(h.runtime_mut().is_none());
+}
+
+#[test]
+fn crash_after_admission_replay_keeps_the_fixture_and_does_not_sigkill() {
+    let w = world();
+    let mut h = host(&w, "crash-after-admission");
+    let mission = create(&mut h, &w);
+    let command = admit(&mut h, &mission.mission_id, CommandBody::StartPlanning).unwrap();
+    assert!(h.dispatch_pending(&mission.mission_id).is_err());
+    assert_eq!(
+        h.snapshot(&mission.mission_id)
+            .unwrap()
+            .pending_commands
+            .len(),
+        1
+    );
+    drop(h);
+    let mut h = host(&w, "crash-after-admission");
+    let after = h.recover(&mission.mission_id).unwrap();
+    assert!(after.pending_commands.is_empty());
+    assert_eq!(after.commands[0].request_id, command.request_id);
+    assert!(after.commands[0].receipt_id.is_some());
+    let req = request(&h, &mission.mission_id, &command, "submit");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let state = first_receipt(&mut h, &req);
+        if state["status"] == "done" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "replay with the crash fixture still armed never resumed: {state}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert_eq!(counts(&w), (1, 1, 1));
 }
