@@ -261,11 +261,17 @@ fn mission_command_reconciles_a_prepared_workspace() {
         "start_planning",
         "--expected-revision",
         &revision.to_string(),
-        "--persist-only",
     ]);
     assert_eq!(code, 0, "{error}");
-    assert_eq!(commanded["commandState"], "pending");
     assert_eq!(commanded["mission"]["phase"], "planning");
+    assert_eq!(commanded["mission"]["commands"][0]["state"], "acknowledged");
+    assert_eq!(
+        commanded["mission"]["pendingCommands"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
     assert_eq!(commanded["mission"]["workspace"]["state"], "ready");
     assert_eq!(
         commanded["mission"]["workspace"]["id"],
@@ -274,6 +280,106 @@ fn mission_command_reconciles_a_prepared_workspace() {
     assert_ne!(
         commanded["mission"]["workspace"]["verifiedGeneration"],
         prepared["workspace"]["verifiedGeneration"]
+    );
+}
+
+#[test]
+fn uncertain_workspace_admits_pause_and_cancel_without_dispatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    let root = tmp.path().join("workspaces");
+    std::fs::create_dir(&root).unwrap();
+    init_repo(&repo);
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "118",
+        "--objective",
+        "stop despite uncertainty",
+        "--acceptance",
+        "pause and cancel are recorded",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let attempt = created["mission"]["attemptId"].as_str().unwrap();
+    let revision = created["mission"]["revision"].as_u64().unwrap();
+    let (code, _, error) = run(&[
+        "mission",
+        "workspace",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--attempt",
+        attempt,
+        "--root",
+        root.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{error}");
+    std::fs::remove_file(root.join(attempt).join("owner.json")).unwrap();
+
+    let (code, paused, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--kind",
+        "pause",
+        "--expected-revision",
+        &revision.to_string(),
+        "--persist-only",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(paused["commandState"], "pending");
+    assert_eq!(paused["mission"]["phase"], "pausing");
+    assert_eq!(paused["mission"]["workspace"]["state"], "ready");
+    let paused_revision = paused["mission"]["revision"].as_u64().unwrap();
+
+    let (code, _, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--kind",
+        "cancel",
+        "--expected-revision",
+        &paused_revision.to_string(),
+    ]);
+    assert_ne!(code, 0);
+    assert_eq!(error["error"]["category"], "workspace_uncertain");
+
+    let (code, status, error) = run(&[
+        "mission",
+        "status",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission_status = &status["missions"][0];
+    assert_eq!(mission_status["phase"], "cancelling");
+    assert_eq!(mission_status["workspace"]["state"], "uncertain");
+    let commands = mission_status["commands"].as_array().unwrap();
+    assert!(
+        commands
+            .iter()
+            .any(|command| command["kind"] == "pause" && command["state"] == "pending")
+    );
+    assert!(
+        commands
+            .iter()
+            .any(|command| command["kind"] == "cancel" && command["state"] == "pending")
     );
 }
 

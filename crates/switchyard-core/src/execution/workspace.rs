@@ -5,7 +5,9 @@ use std::process::Stdio;
 
 use serde_json::Value;
 
+pub(crate) use super::git::FilterCacheScope;
 use super::git::{command, git, git_bytes};
+
 use crate::domain::MissionRecord;
 use crate::error::{Error, Result};
 use crate::workspace::{WorkspaceRecord, WorkspaceView};
@@ -223,6 +225,25 @@ fn create_slot(w: &WorkspaceRecord) -> Result<(WorkspaceLease, String, String)> 
         builder.mode(0o700);
     }
     builder.create(w.slot()).map_err(Error::storage)?;
+    // This call created the directory. A later error must not leave a slot
+    // without owner.json, or the retry would treat it as foreign and become
+    // permanently uncertain.
+    match finish_created_slot(w) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            remove_created_slot(&w.slot())?;
+            Err(error)
+        }
+    }
+}
+
+fn finish_created_slot(w: &WorkspaceRecord) -> Result<(WorkspaceLease, String, String)> {
+    #[cfg(test)]
+    if std::env::var_os("SW_WORKSPACE_FAIL_AFTER_MKDIR").is_some() {
+        return Err(Error::storage(
+            "injected failure after creating the workspace slot",
+        ));
+    }
     let lease_path = w.slot().join("owner.lock");
     let lease = create_lock(&lease_path)?;
     write_marker(w)?;
@@ -233,6 +254,14 @@ fn create_slot(w: &WorkspaceRecord) -> Result<(WorkspaceLease, String, String)> 
         identity(&w.slot())?,
         identity(&lease_path)?,
     ))
+}
+
+fn remove_created_slot(slot: &Path) -> Result<()> {
+    match fs::remove_dir_all(slot) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::storage(error)),
+    }
 }
 
 /// A crash after the slot and `owner.json` are durable, but before `creating`
@@ -503,19 +532,53 @@ fn verify_binding(w: &WorkspaceRecord) -> Result<(String, PathBuf)> {
             "workspace binding, lock reason or frozen HEAD mismatch",
         ));
     }
-    require_head(w, &admin, &tree)?;
     let relative_common = regular_text(&admin.join("commondir"))?;
-    if fs::canonicalize(admin.join(relative_common.trim_end_matches('\n')))
-        .map_err(Error::storage)?
-        != Path::new(&w.common_dir)
-        || common_dir(&tree)? != Path::new(&w.common_dir)
-        || git(&tree, &["rev-parse", "--show-toplevel"])?.trim_end_matches('\n') != w.view.path
-        || git(&tree, &["rev-parse", "--absolute-git-dir"])?.trim_end_matches('\n')
-            != path_text(&admin)?
+    let linked_common = fs::canonicalize(admin.join(relative_common.trim_end_matches('\n')))
+        .map_err(evidence_io)?;
+    let tree_common = evidence_path(common_dir(&tree))?;
+    let toplevel = evidence_git(&tree, &["rev-parse", "--show-toplevel"])?;
+    let git_dir = evidence_git(&tree, &["rev-parse", "--absolute-git-dir"])?;
+    if linked_common != Path::new(&w.common_dir)
+        || tree_common != Path::new(&w.common_dir)
+        || toplevel.trim_end_matches('\n') != w.view.path
+        || git_dir.trim_end_matches('\n') != path_text(&admin)?
     {
         return Err(Error::guard("workspace repository backlink mismatch"));
     }
+    // Ancestry runs only after the worktree is bound to this object database.
+    // A missing commit or a foreign Git directory is evidence, not a retry.
+    require_head(w, &admin, &tree)?;
     Ok((tree_identity, admin))
+}
+
+fn evidence_path(result: Result<PathBuf>) -> Result<PathBuf> {
+    match result {
+        Ok(path) => Ok(path),
+        Err(Error::GitFailed { detail }) => Err(Error::guard(format!(
+            "workspace evidence rejected: {detail}"
+        ))),
+        Err(error) => Err(error),
+    }
+}
+
+fn evidence_git(path: &Path, args: &[&str]) -> Result<String> {
+    match git(path, args) {
+        Ok(text) => Ok(text),
+        Err(Error::GitFailed { detail }) => Err(Error::guard(format!(
+            "workspace evidence rejected: {detail}"
+        ))),
+        Err(error) => Err(error),
+    }
+}
+
+fn evidence_git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    match git_bytes(path, args) {
+        Ok(bytes) => Ok(bytes),
+        Err(Error::GitFailed { detail }) => Err(Error::guard(format!(
+            "workspace evidence rejected: {detail}"
+        ))),
+        Err(error) => Err(error),
+    }
 }
 
 /// `creating` still requires the admin HEAD to be the frozen base. Once
@@ -531,6 +594,18 @@ fn require_head(w: &WorkspaceRecord, admin: &Path, tree: &Path) -> Result<()> {
         return Err(Error::guard(
             "workspace binding, lock reason or frozen HEAD mismatch",
         ));
+    }
+    // `cat-file -e <head>^{commit}` fails when HEAD is not a commit in this
+    // object database. That is a binding mismatch, including merge-base's
+    // exit 128 for a missing object.
+    match git(tree, &["cat-file", "-e", &format!("{head}^{{commit}}")]) {
+        Ok(_) => {}
+        Err(Error::GitFailed { .. }) => {
+            return Err(Error::guard(
+                "workspace HEAD is not a commit in this repository",
+            ));
+        }
+        Err(error) => return Err(error),
     }
     if base_is_ancestor(tree, &w.view.base_sha, head)? {
         Ok(())
@@ -553,9 +628,9 @@ fn base_is_ancestor(repo: &Path, base: &str, head: &str) -> Result<bool> {
     match status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
-        _ => Err(Error::GitFailed {
-            detail: format!("git merge-base --is-ancestor failed ({status})"),
-        }),
+        _ => Err(Error::guard(format!(
+            "workspace HEAD is not a commit in this repository ({status})"
+        ))),
     }
 }
 
@@ -570,8 +645,10 @@ pub(crate) fn verify(w: &WorkspaceRecord) -> Result<(String, String)> {
         return Err(Error::guard("missing worktree index"));
     }
     // Validate index readability while retaining legitimate staged/dirty edits.
-    git_bytes(tree, &["ls-files", "--stage", "-z"])?;
-    if git(
+    // A corrupt index or missing frozen tree is evidence, not a transient
+    // Git failure that would be retried forever.
+    evidence_git_bytes(tree, &["ls-files", "--stage", "-z"])?;
+    if evidence_git(
         tree,
         &["cat-file", "-t", &format!("{}^{{tree}}", w.view.base_sha)],
     )?
@@ -581,7 +658,7 @@ pub(crate) fn verify(w: &WorkspaceRecord) -> Result<(String, String)> {
         return Err(Error::guard("frozen workspace tree is unavailable"));
     }
     if w.view.state == "creating"
-        && !git_bytes(
+        && !evidence_git_bytes(
             tree,
             &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
         )?

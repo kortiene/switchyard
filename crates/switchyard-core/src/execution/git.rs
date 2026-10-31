@@ -1,7 +1,7 @@
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
 
 use crate::canonical::sha256_hex;
 use crate::domain::RepoIdentity;
@@ -113,10 +113,10 @@ fn base_command(path: &Path) -> Command {
 /// Disable every discovered driver at command scope. Configuration discovery
 /// itself does not run a driver, and inherited Git config/environment is cleared.
 ///
-/// Drivers are cached per checkout for this process. The operator's Git
-/// configuration must not change while a host is using that checkout, and a
-/// worktree path is cached separately from its source so `includeIf` still
-/// applies there on first use.
+/// Discovery is cached only inside a [`FilterCacheScope`]. The scope is one
+/// prepare or verify, so a driver added afterwards — including through
+/// `includeIf` — is seen on the next call. Outside a scope every command
+/// rediscovers.
 pub(super) fn command(path: &Path) -> Result<Command> {
     let mut command = base_command(path);
     for setting in filter_overrides(path)? {
@@ -125,20 +125,52 @@ pub(super) fn command(path: &Path) -> Result<Command> {
     Ok(command)
 }
 
+/// Cache of disabled filter drivers for the current prepare/verify.
+/// Nested scopes share one map. The outermost drop clears it.
+#[must_use]
+pub(crate) struct FilterCacheScope;
+
+thread_local! {
+    static FILTER_SCOPE_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static FILTER_CACHE: RefCell<HashMap<PathBuf, Vec<String>>> = RefCell::new(HashMap::new());
+}
+
+impl FilterCacheScope {
+    pub(crate) fn enter() -> Self {
+        FILTER_SCOPE_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for FilterCacheScope {
+    fn drop(&mut self) {
+        FILTER_SCOPE_DEPTH.with(|depth| {
+            let next = depth.get().saturating_sub(1);
+            depth.set(next);
+            if next == 0 {
+                FILTER_CACHE.with(|cache| cache.borrow_mut().clear());
+            }
+        });
+    }
+}
+
 fn filter_overrides(path: &Path) -> Result<Vec<String>> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Vec<String>>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = path.to_path_buf();
-    if let Some(cached) = cache
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .get(&key)
-    {
-        return Ok(cached.clone());
+    let in_scope = FILTER_SCOPE_DEPTH.with(|depth| depth.get() > 0);
+    if in_scope {
+        let cached = FILTER_CACHE.with(|cache| cache.borrow().get(path).cloned());
+        if let Some(cached) = cached {
+            return Ok(cached);
+        }
     }
     let discovered = discover_filter_overrides(path)?;
-    let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
-    Ok(guard.entry(key).or_insert(discovered).clone())
+    if in_scope {
+        FILTER_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .insert(path.to_path_buf(), discovered.clone());
+        });
+    }
+    Ok(discovered)
 }
 
 fn discover_filter_overrides(path: &Path) -> Result<Vec<String>> {
@@ -191,5 +223,114 @@ mod tests {
             strip_userinfo("https://github.com/kortiene/switchyard.git"),
             "https://github.com/kortiene/switchyard.git"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filter_driver_added_after_first_use_is_still_disabled() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Stdio;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.email", "filter@example.com"]);
+        git(&["config", "user.name", "Filter"]);
+        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+        git(&["add", "README.md"]);
+        git(&["commit", "-m", "init"]);
+
+        {
+            let _scope = super::FilterCacheScope::enter();
+            let output = super::command(&repo)
+                .unwrap()
+                .args(["status", "--porcelain=v1"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+        }
+
+        let sentinel = dir.path().join("executed");
+        let hook = dir.path().join("hook");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\ncat\n", sentinel.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let included = dir.path().join("late.gitconfig");
+        std::fs::write(
+            &included,
+            format!(
+                "[filter \"late\"]\n\tclean = {hook}\n\tsmudge = {hook}\n\tprocess = {hook}\n\trequired = true\n",
+                hook = hook.display()
+            ),
+        )
+        .unwrap();
+        let git_dir =
+            String::from_utf8(git_out(&repo, &["rev-parse", "--absolute-git-dir"])).unwrap();
+        // `gitdir:<exact>/.path` is parsed as a trailing-slash pattern and does
+        // not match the repository. The variable is `.path` on the exact gitdir.
+        let pattern = format!("includeIf.gitdir:{}.path", git_dir.trim());
+        git(&["config", &pattern, included.to_str().unwrap()]);
+        std::fs::write(repo.join(".gitattributes"), "*.md filter=late\n").unwrap();
+        std::fs::write(repo.join("README.md"), "changed\n").unwrap();
+        let configured =
+            String::from_utf8(git_out(&repo, &["config", "--get", "filter.late.clean"])).unwrap();
+        assert!(
+            configured.contains(&hook.display().to_string()),
+            "includeIf filter was not visible to git: {configured}"
+        );
+        let attr = String::from_utf8(git_out(&repo, &["check-attr", "filter", "--", "README.md"]))
+            .unwrap();
+        assert!(
+            attr.contains("filter: late"),
+            "attribute did not select the new driver: {attr}"
+        );
+
+        {
+            let _scope = super::FilterCacheScope::enter();
+            let output = super::command(&repo)
+                .unwrap()
+                .args(["add", "--", "README.md"])
+                .stderr(Stdio::piped())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert!(
+            !sentinel.exists(),
+            "a filter driver added after the first git call still ran"
+        );
+    }
+
+    #[cfg(unix)]
+    fn git_out(repo: &std::path::Path, args: &[&str]) -> Vec<u8> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        output.stdout
     }
 }

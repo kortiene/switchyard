@@ -79,6 +79,7 @@ enum MissionCommand {
         mission: Option<String>,
     },
     /// Admit a command. Dispatches pending runtime work unless `--persist-only`.
+    /// `--persist-only` does not reconcile a workspace or run `git worktree add`.
     Command {
         #[arg(long)]
         db: PathBuf,
@@ -96,6 +97,8 @@ enum MissionCommand {
         actor: String,
         #[arg(long, default_value = "{}")]
         payload: String,
+        /// Record the command only. Does not reconcile a workspace, dispatch,
+        /// or run `git worktree add`.
         #[arg(long)]
         persist_only: bool,
     },
@@ -245,7 +248,22 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 persist_only,
             } => {
                 let mut host = Host::open(&db)?;
-                host.dispatch_pending(&mission)?;
+                // Reconcile once per invocation. `--persist-only` skips that
+                // and both dispatches, so it cannot create a worktree.
+                // Isolated workspace failures still allow admission; only
+                // dispatch is gated.
+                let workspace_error = if persist_only {
+                    None
+                } else {
+                    match host.recover_workspace(&mission) {
+                        Ok(_) => None,
+                        Err(error) if error.is_isolated_workspace_failure() => Some(error),
+                        Err(error) => return Err(error),
+                    }
+                };
+                if !persist_only && workspace_error.is_none() {
+                    host.dispatch_reconciled(&mission)?;
+                }
                 let current = host.snapshot(&mission)?;
                 let body = command_body(
                     &kind,
@@ -261,8 +279,11 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     origin: CommandOrigin::Operator,
                     body,
                 })?;
-                if !persist_only {
-                    host.dispatch_pending(&mission)?;
+                if !persist_only && workspace_error.is_none() {
+                    host.dispatch_reconciled(&mission)?;
+                }
+                if let Some(error) = workspace_error {
+                    return Err(error);
                 }
                 Ok(json!({
                     "ok": true,

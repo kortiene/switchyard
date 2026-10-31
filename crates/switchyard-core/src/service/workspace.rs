@@ -22,6 +22,9 @@ impl Host {
         root: &Path,
         mut checkpoint: impl FnMut(&str) -> Result<()>,
     ) -> Result<WorkspaceView> {
+        // One filter-discovery cache for this prepare/verify. Dropping it
+        // forces the next call to see drivers added in between.
+        let _filters = fs_workspace::FilterCacheScope::enter();
         self.store.assert_workspace_owner()?;
         let mission = self.store.load_mission(mission_id)?;
         if mission.attempt.id != attempt_id {

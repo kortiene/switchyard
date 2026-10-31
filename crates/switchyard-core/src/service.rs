@@ -206,15 +206,6 @@ impl NotifyOutcome {
     }
 }
 
-/// Workspace uncertainty and a live creator are properties of that workspace.
-/// They must not abort owner recovery of runtime observations.
-fn workspace_failure_is_isolated(error: &Error) -> bool {
-    matches!(
-        error,
-        Error::WorkspaceUncertain { .. } | Error::WorkspaceBusy { .. }
-    )
-}
-
 pub fn journal_path(db_path: &Path) -> PathBuf {
     let mut name = db_path.as_os_str().to_os_string();
     name.push(".fake-runtime.json");
@@ -525,12 +516,18 @@ impl Host {
     /// Deliver pending commands. A recorded workspace is reconciled in this
     /// owner generation before the readiness gate, so a CLI command opened
     /// after preparation can dispatch without a separate recover.
+    ///
+    /// Reconciles once. A caller that admits in the same invocation should
+    /// use [`Self::dispatch_reconciled`] for any later dispatch so the
+    /// workspace is not verified again.
     pub fn dispatch_pending(&mut self, mission_id: &str) -> Result<usize> {
         self.recover_workspace(mission_id)?;
         self.dispatch_reconciled(mission_id)
     }
 
-    fn dispatch_reconciled(&mut self, mission_id: &str) -> Result<usize> {
+    /// Dispatch pending commands without verifying the workspace again.
+    /// The caller must already have reconciled it in this owner generation.
+    pub fn dispatch_reconciled(&mut self, mission_id: &str) -> Result<usize> {
         let mission = self.store.load_mission(mission_id)?;
         self.store.require_workspace_ready(&mission.attempt.id)?;
         let recorded = self.store.list_commands(mission_id)?;
@@ -761,13 +758,14 @@ impl Host {
     }
 
     /// Reconcile one workspace, deliver pending commands, poll observations,
-    /// and return a snapshot. An uncertain or busy workspace skips dispatch
-    /// but does not block polling or the snapshot; that failure is returned
-    /// after those steps.
+    /// and return a snapshot. An uncertain, busy, or transient workspace
+    /// failure skips dispatch but does not block polling or the snapshot;
+    /// that failure is returned after those steps. Stale generation and other
+    /// host-level failures abort before either runs.
     pub fn recover(&mut self, mission_id: &str) -> Result<MissionSnapshot> {
         let workspace_error = match self.recover_workspace(mission_id) {
             Ok(_) => None,
-            Err(error) if workspace_failure_is_isolated(&error) => Some(error),
+            Err(error) if error.is_isolated_workspace_failure() => Some(error),
             Err(error) => return Err(error),
         };
         if workspace_error.is_none() {

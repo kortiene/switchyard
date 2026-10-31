@@ -98,14 +98,18 @@ workspace. Failures retain diagnostics/files and record durable uncertainty.
 These are process-crash guarantees, not a claim of power-loss durability for all
 Git working files.
 
-`Host::dispatch_pending` reconciles a recorded workspace in the current owner
-generation before its readiness gate, so `mission command` can dispatch a
-workspace prepared by an earlier process. `Host::recover` does that same
-reconciliation, then dispatch, poll, and snapshot. An uncertain or busy
-workspace skips dispatch and is returned after polling and the snapshot, so
-one workspace does not block runtime recovery. Direct dispatch still refuses a
-workspace that is not ready for this generation. `mission status` reports
-recorded state read-only, without Git operations or a workspace lease.
+`Host::dispatch_pending` reconciles a recorded workspace once in the current
+owner generation before its readiness gate, so `mission command` can dispatch
+a workspace prepared by an earlier process. A second dispatch in that same
+invocation does not verify again. Admission is not gated by an uncertain,
+busy, or transient workspace failure; only dispatch is. `--persist-only`
+records the command and does not reconcile, so it does not run
+`git worktree add`. `Host::recover` reconciles, then dispatches, polls, and
+snapshots. An uncertain, busy, storage, or Git failure skips dispatch and is
+returned after polling and the snapshot. Stale generation still aborts before
+either runs. Direct dispatch still refuses a workspace that is not ready for
+this generation. `mission status` reports recorded state read-only, without
+Git operations or a workspace lease.
 
 ## Git boundary and remaining S3 work
 
@@ -114,8 +118,11 @@ Git override variables and model/forge credentials are cleared. System/global
 config, hooks, fsmonitor, configured clean/smudge/process filters, submodule
 recursion, sparse checkout, lazy fetch, replacement objects and network protocols
 are disabled. Submodules are not initialized. Repository filters are not
-materialized: an LFS pointer, for example, stays a pointer. The trusted operator's
-executable, configuration and control directories must not change concurrently.
+materialized: an LFS pointer, for example, stays a pointer. Filter discovery
+is cached only for one prepare or verify, then discarded, so a driver added
+to the shared config or an `includeIf` target is disabled on the next call.
+The trusted operator's executable and control directories must not change
+during that call.
 
 Canonical paths and inode checks address ordinary aliasing and replacement;
 they do not defeat hostile filesystem races. OS confinement, inaccessible

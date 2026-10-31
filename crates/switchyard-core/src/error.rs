@@ -127,6 +127,13 @@ impl Error {
             Self::Storage { .. } | Self::GitFailed { .. } | Self::WorkspaceBusy { .. }
         )
     }
+
+    /// Workspace problems that must not block command admission or observation
+    /// polling. Dispatch stays gated until the workspace is ready again.
+    /// Stale generation and other host-level failures are not included.
+    pub fn is_isolated_workspace_failure(&self) -> bool {
+        matches!(self, Self::WorkspaceUncertain { .. }) || self.is_transient()
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

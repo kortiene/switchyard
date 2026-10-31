@@ -992,3 +992,152 @@ fn recover_still_polls_when_the_workspace_is_busy() {
     assert_eq!(workspace.id, view.id);
     assert!(workspace.detail.is_none());
 }
+
+#[test]
+fn missing_head_object_and_corrupt_index_are_uncertain() {
+    for defect in ["missing-head", "corrupt-index"] {
+        let w = world();
+        let mut h = Host::open(&w.db).unwrap();
+        let m = mission(&mut h, &w);
+        prepare(&mut h, &m, &w);
+        let record = h.store.load_workspace(&m.attempt_id).unwrap().unwrap();
+        let admin = Path::new(record.git_dir.as_ref().unwrap());
+        match defect {
+            "missing-head" => {
+                fs::write(
+                    admin.join("HEAD"),
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+                )
+                .unwrap();
+            }
+            "corrupt-index" => fs::write(admin.join("index"), "not a git index").unwrap(),
+            _ => unreachable!(),
+        }
+        let error = h.recover_workspace(&m.mission_id).unwrap_err();
+        assert_eq!(error.category(), "workspace_uncertain", "{defect}: {error}");
+        assert_eq!(
+            h.snapshot(&m.mission_id).unwrap().workspace.unwrap().state,
+            "uncertain"
+        );
+        assert_eq!(
+            h.recover_workspace(&m.mission_id).unwrap_err().category(),
+            "workspace_uncertain",
+            "{defect} was retried instead of staying uncertain"
+        );
+    }
+}
+
+#[test]
+fn mkdir_failure_worker() {
+    let Some(db) = std::env::var_os("SW_WORKSPACE_DB") else {
+        return;
+    };
+    let root = PathBuf::from(std::env::var_os("SW_WORKSPACE_ROOT").unwrap());
+    let mission = std::env::var("SW_WORKSPACE_MISSION").unwrap();
+    let attempt = std::env::var("SW_WORKSPACE_ATTEMPT").unwrap();
+    let mut h = Host::open(Path::new(&db)).unwrap();
+    match h.prepare_workspace(&mission, &attempt, &root) {
+        Ok(_) => panic!("slot creation was expected to fail after mkdir"),
+        Err(error) => {
+            let state = h.snapshot(&mission).unwrap().workspace.unwrap().state;
+            println!("WORKSPACE-RESULT {} {state}", error.category());
+        }
+    }
+}
+
+#[test]
+fn transient_failure_after_mkdir_removes_the_new_slot() {
+    let w = world();
+    let mut h = Host::open(&w.db).unwrap();
+    let m = mission(&mut h, &w);
+    drop(h);
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "service::workspace::tests::mkdir_failure_worker",
+            "--nocapture",
+        ])
+        .env("SW_WORKSPACE_DB", &w.db)
+        .env("SW_WORKSPACE_ROOT", &w.root)
+        .env("SW_WORKSPACE_MISSION", &m.mission_id)
+        .env("SW_WORKSPACE_ATTEMPT", &m.attempt_id)
+        .env("SW_WORKSPACE_FAIL_AFTER_MKDIR", "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "worker failed: {stdout}{stderr}");
+    assert!(
+        stdout.contains("WORKSPACE-RESULT storage_failed reserved"),
+        "{stdout}{stderr}"
+    );
+    assert!(
+        !w.root.join(&m.attempt_id).exists(),
+        "failed slot creation left a directory behind"
+    );
+    let recorded = Host::inspect(&w.db, Some(&m.mission_id))
+        .unwrap()
+        .remove(0)
+        .workspace
+        .unwrap();
+    assert_eq!(recorded.state, "reserved");
+    assert!(recorded.detail.is_none());
+    let mut h = Host::open(&w.db).unwrap();
+    let ready = h
+        .prepare_workspace(&m.mission_id, &m.attempt_id, &w.root)
+        .unwrap();
+    assert_eq!(ready.id, recorded.id);
+    assert_eq!(ready.state, "ready");
+}
+
+#[cfg(unix)]
+#[test]
+fn recover_still_polls_when_workspace_storage_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let w = world();
+    let mut h = Host::open(&w.db).unwrap();
+    let m = mission(&mut h, &w);
+    drop(h);
+    crash_at(&w, &m, "reserved");
+    let original = fs::metadata(&w.root).unwrap().permissions();
+    let _restore = RestorePerms(w.root.clone(), original);
+    let mut perms = fs::metadata(&w.root).unwrap().permissions();
+    perms.set_mode(0o555);
+    fs::set_permissions(&w.root, perms).unwrap();
+    let mut h = Host::open(&w.db).unwrap();
+    h.runtime_mut()
+        .unwrap()
+        .push_notification(RuntimeNotification::Uncertainty {
+            reason: AttentionReason::Uncertainty,
+            detail: "storage blocked creation".into(),
+        });
+    let error = h.recover(&m.mission_id).unwrap_err();
+    assert_eq!(error.category(), "storage_failed", "{error}");
+    let snap = h.snapshot(&m.mission_id).unwrap();
+    assert_eq!(snap.phase, Phase::NeedsAttention);
+    let workspace = snap.workspace.unwrap();
+    assert_eq!(workspace.state, "reserved");
+    assert!(workspace.detail.is_none());
+    assert_eq!(h.runtime_mut().unwrap().queued_notifications(), 0);
+}
+
+#[test]
+fn recover_aborts_before_poll_when_the_owner_generation_is_stale() {
+    let w = world();
+    let mut h = Host::open(&w.db).unwrap();
+    let m = mission(&mut h, &w);
+    h.runtime_mut()
+        .unwrap()
+        .push_notification(RuntimeNotification::Uncertainty {
+            reason: AttentionReason::Uncertainty,
+            detail: "stale owner".into(),
+        });
+    Connection::open(&w.db)
+        .unwrap()
+        .execute("UPDATE host_owner SET generation=generation+1", [])
+        .unwrap();
+    let error = h.recover(&m.mission_id).unwrap_err();
+    assert_eq!(error.category(), "stale_generation", "{error}");
+    assert_eq!(h.snapshot(&m.mission_id).unwrap().phase, Phase::Draft);
+    assert_eq!(h.runtime_mut().unwrap().queued_notifications(), 1);
+}
