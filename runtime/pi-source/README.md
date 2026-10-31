@@ -18,6 +18,12 @@ npm ci
 npm run verify
 ```
 
+CI selects npm through `node install-npm.mjs`: it downloads the exact tarball
+from `pins.json`, checks its committed SHA-512 before installation, disables
+lifecycle scripts and verifies the installed version. An optional prefix path
+argument installs into an isolated directory for local validation. This is a
+byte-integrity check; independent signature verification is not claimed.
+
 The build needs Git, curl, npm registry access, the pinned upstream commit and
 the immutable pi.dev catalog URL on a catalog-cache miss. It fails on missing inputs, version mismatch,
 changed source/lock/catalog, or artifact drift. It never falls back to `latest`,
@@ -70,3 +76,7 @@ These remove the demonstrated package/API mismatch. They do not prove the
 Rust process bridge, durable payload conflicts, tool replay, cancellation,
 transport limits, operating-system confinement, or real issue-to-PR acceptance.
 S2 stays open, and Pi-dependent live work stays blocked until the full gate.
+
+The dependent [process-bridge probe](../../docs/rust-first/s2-bridge-probe.md)
+adds a feature-gated Rust supervisor and credential-free wire/replay tests.
+Its extra tests are partial S2 evidence; the regular mission CLI is unchanged.

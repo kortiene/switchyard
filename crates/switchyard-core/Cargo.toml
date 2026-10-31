@@ -7,6 +7,9 @@ rust-version.workspace = true
 version.workspace = true
 description = "Switchyard mission authority: transitions, ledger, and fake runtime (S1)."
 
+[features]
+pi-contract = []
+
 [dependencies]
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json = "1"
