@@ -355,7 +355,15 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 })?;
                 if !persist_only {
                     if is_stop || workspace_error.is_some() {
-                        host.dispatch_stops(&mission)?;
+                        host.dispatch_stops(&mission).map_err(|stop_error| {
+                            if let Some(error) = &workspace_error {
+                                stop_error.with_context(format!(
+                                    "workspace reconciliation also failed: {error}"
+                                ))
+                            } else {
+                                stop_error
+                            }
+                        })?;
                     } else {
                         host.dispatch_reconciled(&mission)?;
                     }

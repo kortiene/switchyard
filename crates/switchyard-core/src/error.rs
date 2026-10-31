@@ -128,7 +128,8 @@ impl Error {
         }
     }
 
-    pub(crate) fn with_context(self, detail: impl Into<String>) -> Self {
+    /// Attach diagnostics while preserving the primary category and retry semantics.
+    pub fn with_context(self, detail: impl Into<String>) -> Self {
         Self::WithContext {
             source: Box::new(self),
             detail: detail.into(),

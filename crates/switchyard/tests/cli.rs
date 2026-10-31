@@ -343,7 +343,8 @@ fn uncertain_workspace_delivers_pause_and_cancel_and_reports_the_block() {
     assert_eq!(paused["mission"]["workspace"]["state"], "ready");
     let paused_revision = paused["mission"]["revision"].as_u64().unwrap();
 
-    let (code, cancelled, error) = run(&[
+    let paused_revision_arg = paused_revision.to_string();
+    let cancel_args = [
         "mission",
         "command",
         "--db",
@@ -353,8 +354,29 @@ fn uncertain_workspace_delivers_pause_and_cancel_and_reports_the_block() {
         "--kind",
         "cancel",
         "--expected-revision",
-        &paused_revision.to_string(),
-    ]);
+        &paused_revision_arg,
+        "--command-id",
+        "c-cancel-uncertain",
+    ];
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch("CREATE TRIGGER reject_stop_ack BEFORE UPDATE OF state ON commands
+        WHEN NEW.state='acknowledged' BEGIN SELECT RAISE(ABORT,'injected stop acknowledgement failure'); END;").unwrap();
+    let (code, _, error) = run(&cancel_args);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(error["error"]["category"], "storage_failed");
+    let diagnostic = error["error"]["message"].as_str().unwrap();
+    assert!(
+        diagnostic.contains("injected stop acknowledgement failure"),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("workspace reconciliation also failed"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("uncertain"), "{diagnostic}");
+    conn.execute_batch("DROP TRIGGER reject_stop_ack;").unwrap();
+    let (code, cancelled, error) = run(&cancel_args);
+
     assert_eq!(code, 3, "{cancelled} {error}");
     assert!(error.is_null(), "{error}");
     assert_eq!(cancelled["ok"], true);
@@ -632,11 +654,56 @@ fn abandon_execution_is_audited_idempotently_and_keeps_the_block() {
         },
     };
     assert!(host.execute_fake_operation(&request).is_err());
+    assert_eq!(
+        host.snapshot(&m.mission_id).unwrap().phase,
+        Phase::NeedsAttention
+    );
+    admit(&mut host, CommandBody::Cancel);
+    host.dispatch_stops(&m.mission_id).unwrap();
     let snapshot = host.snapshot(&m.mission_id).unwrap();
-    assert_eq!(snapshot.phase, Phase::NeedsAttention);
+    assert_eq!(snapshot.phase, Phase::Cancelling);
+    assert!(
+        snapshot.to_json()["nextSteps"]
+            .to_string()
+            .contains("detect_uncertainty")
+    );
     let effect = &snapshot.execution_effects[0];
-    let revision = snapshot.revision.to_string();
+    let stop_revision = snapshot.revision.to_string();
     drop(host);
+    let (code, attention, err) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        &m.mission_id,
+        "--attempt",
+        &m.attempt_id,
+        "--kind",
+        "detect_uncertainty",
+        "--payload",
+        r#"{"reason":"execution_uncertain"}"#,
+        "--expected-revision",
+        &stop_revision,
+        "--command-id",
+        "operator-detect-stop-uncertainty",
+        "--persist-only",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(attention["mission"]["phase"], "needs_attention");
+    assert_eq!(attention["mission"]["priorPhase"], "cancelling");
+    assert_eq!(
+        attention["mission"]["commands"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["origin"],
+        "operator"
+    );
+    let revision = attention["mission"]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
     let args = [
         "mission",
         "abandon-execution",

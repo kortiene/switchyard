@@ -220,7 +220,12 @@ impl MissionSnapshot {
             steps.push("Status is read-only and does not probe the workspace lease or Git; recorded readiness is not a current filesystem or quiescence check.".into());
         }
         if self.execution_blocked {
-            steps.push("Unresolved execution effects still block pause/cancel completion, recovery and workspace reuse. Inspect the effects and use the #125 evidence/resolution protocol; an abandoned effect remains blocking.".into());
+            steps.push("Unresolved execution effects still block pause/cancel completion, recovery and workspace reuse. Inspect each block and its evidence protocol (#125 for execution effects); an abandoned effect remains blocking.".into());
+            if self.runtime_adapter == "fake"
+                && matches!(self.phase, Phase::Pausing | Phase::Cancelling)
+            {
+                steps.push(format!("To enter needs_attention for #125 resolution, admit DetectUncertainty as the operator: mission command --kind detect_uncertainty --payload '{{\"reason\":\"execution_uncertain\"}}' --expected-revision {} --persist-only, using this mission/attempt and a stable --command-id. This records uncertainty without clearing any effect. Resolve with matching evidence, then explicitly recover the recorded stop target; abandonment remains blocking.", self.revision));
+            }
         }
         steps
     }
@@ -569,7 +574,10 @@ impl Host {
         match self.recover_workspace(mission_id) {
             Ok(_) => self.dispatch_reconciled(mission_id),
             Err(error) if error.is_isolated_workspace_failure() => {
-                self.dispatch_stops(mission_id)?;
+                self.dispatch_stops(mission_id).map_err(|stop_error| {
+                    stop_error
+                        .with_context(format!("workspace reconciliation also failed: {error}"))
+                })?;
                 Err(error)
             }
             Err(error) => Err(error),
@@ -594,6 +602,9 @@ impl Host {
                 && matches!(command.kind, CommandKind::Pause | CommandKind::Cancel)
         }) {
             self.accept_runtime_binding(&binding, mission_id)?;
+            // Successors have a new mission ID; list_commands is mission-scoped.
+            // A different attempt here is an integrity error, not ordinary stale
+            // work to silently discard. Keep its evidence and fail closed.
             if command.attempt_id != binding.attempt_id {
                 return Err(Error::BindingMismatch {
                     detail: "stop command does not belong to the active attempt".into(),
@@ -860,8 +871,10 @@ impl Host {
         };
         if workspace_error.is_none() {
             self.dispatch_reconciled(mission_id)?;
-        } else {
-            self.dispatch_stops(mission_id)?;
+        } else if let Some(error) = &workspace_error {
+            self.dispatch_stops(mission_id).map_err(|stop_error| {
+                stop_error.with_context(format!("workspace reconciliation also failed: {error}"))
+            })?;
         }
         self.poll_runtime(mission_id)?;
         let snapshot = self.snapshot(mission_id)?;

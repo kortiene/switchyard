@@ -1188,6 +1188,11 @@ fn delivered_stops_preserve_execution_uncertainty_and_completion_guards() {
                 .to_string()
                 .contains("Unresolved execution effects")
         );
+        assert!(
+            after["nextSteps"]
+                .to_string()
+                .contains("detect_uncertainty")
+        );
         let result = host.admit(AdmitRequest {
             command_id: None,
             mission_id: mission.clone(),
@@ -1200,9 +1205,18 @@ fn delivered_stops_preserve_execution_uncertainty_and_completion_guards() {
         assert!(result.unwrap_err().to_string().contains("not quiescent"));
         if !abandon {
             // #125 still requires an explicit attention/recovery cycle.
-            let current = host.store.load_mission(mission).unwrap();
-            host.uncertainty(&current, AttentionReason::ExecutionUncertain)
-                .unwrap();
+            command(
+                &mut host,
+                mission,
+                CommandBody::DetectUncertainty {
+                    reason: AttentionReason::ExecutionUncertain,
+                    content_digest: None,
+                },
+            );
+            let attention = host.snapshot(mission).unwrap();
+            assert_eq!(attention.phase, Phase::NeedsAttention);
+            assert_eq!(attention.prior_phase, Some(Phase::Cancelling));
+            assert_eq!(attention.commands.last().unwrap().origin, "operator");
             let resolution = resolution_request(
                 &host,
                 &request,
@@ -1257,4 +1271,33 @@ fn pause_abort_is_delivered_even_when_reconciliation_discovers_a_prepared_effect
         .to_string()
         .contains("not quiescent")
     );
+
+    command(
+        &mut host,
+        mission,
+        CommandBody::DetectUncertainty {
+            reason: AttentionReason::ExecutionUncertain,
+            content_digest: None,
+        },
+    );
+    let attention = host.snapshot(mission).unwrap();
+    assert_eq!(attention.phase, Phase::NeedsAttention);
+    assert_eq!(attention.prior_phase, Some(Phase::Pausing));
+    assert_eq!(attention.commands.last().unwrap().origin, "operator");
+    let resolution = resolution_request(
+        &host,
+        &request,
+        crate::ExecutionResolutionDecision::NotApplied,
+    );
+    host.resolve_fake_execution(&resolution).unwrap();
+    command(
+        &mut host,
+        mission,
+        CommandBody::ExplicitRecovery {
+            expected_target: Phase::Paused,
+            ownership_proven: true,
+            effects: crate::domain::EffectProof::Reconciled,
+        },
+    );
+    assert_eq!(host.snapshot(mission).unwrap().phase, Phase::Paused);
 }
