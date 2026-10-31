@@ -1,9 +1,15 @@
 # Rust-first Switchyard prototype
 
-Status: direction accepted 2026-10-29; S1 foundation implemented; published S2 package NO-GO; source candidate and partial bridge probes available, full S2–S8 integration incomplete.
-Planning date: 2026-10-28 (America/New_York).  
-Direction update: 2026-10-29 (America/New_York). Rust is the sole long-term engine. Pi Durable is the M1 proof-of-concept adapter.  
+Status: direction accepted 2026-10-29. S1 implemented (#105). S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and [s2-feasibility.md](s2-feasibility.md). S3–S8 are planned. The native Rust agent runtime is the long-term target and is not implemented.
+
+Planning date: 2026-10-28 (America/New_York).
+
+Direction update: 2026-10-29 (America/New_York). Rust is the sole long-term engine. Pi Durable is the proof-of-concept adapter only.
+
 S1 decisions recorded 2026-10-29.
+
+Disposition recorded 2026-10-30. See [#109](https://github.com/kortiene/switchyard/issues/109) for current disposition.
+
 Milestone tracker: [#94 — One Recoverable, Verified Change](https://github.com/kortiene/switchyard/issues/94).
 
 ## Outcome and user experience
@@ -16,15 +22,29 @@ Recovery is conditional on the host, session storage, and workspace being availa
 
 Read the [runtime protocol](runtime-protocol.md) and [delivery plan](delivery-plan.md) before implementation.
 
+## Implementation status
+
+This table is navigation as of 2026-10-30. See [#109](https://github.com/kortiene/switchyard/issues/109) for current disposition. It does not change the normative transitions below, and it does not record an S2 GO or a live run.
+
+| Work | Status |
+| --- | --- |
+| S1 ([#95](https://github.com/kortiene/switchyard/issues/95), [#105](https://github.com/kortiene/switchyard/pull/105)) | Implemented. `crates/switchyard-core/` and `crates/switchyard/` persist missions and drive them with a fake runtime. No model calls, GitHub writes, state v1 resume, or confinement. |
+| S2 ([#96](https://github.com/kortiene/switchyard/issues/96)) | **NO-GO**. See [#96](https://github.com/kortiene/switchyard/issues/96) and [s2-feasibility.md](s2-feasibility.md). |
+| S3 ([#97](https://github.com/kortiene/switchyard/issues/97)) | Planned. Owns worktree lifecycle natively in Rust. TypeScript managed-worktree work is stopped. |
+| S4–S8 ([#98](https://github.com/kortiene/switchyard/issues/98)–[#102](https://github.com/kortiene/switchyard/issues/102)) | Planned. Pi-dependent live work stays blocked while S2 is NO-GO. |
+| Native Rust agent runtime | Accepted long-term target (2026-10-29). Not implemented. A published-package NO-GO does not select the TypeScript engine instead. |
+
+`runtime/pi/` is the published-package audit. `runtime/pi-source/` is the reproducible source candidate. Neither is the product runtime. S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and [s2-feasibility.md](s2-feasibility.md).
+
 ## Repository baseline
 
-The inspected Switchyard main is [`4b07a8ed72be`](https://github.com/kortiene/switchyard/tree/4b07a8ed72be97b4eb7dd5a5a37ad89d4eae4c21). It is a TypeScript/Node control plane in `adw_sdlc/`, with phase orchestration, four runner adapters, explicit project checks, Git/forge authority, and persisted ADW state. Its existing Pi runner is not evidence of Pi Durable integration. Run `babe0070` (PR #73) is partial evidence for that legacy runner only: it needed one scope fix from the owner, and an unassisted Pi real-issue run is still owed. `runner-pi` and the TypeScript execution path are frozen legacy (fixes only), to be retired with the TypeScript engine.
+The planning baseline (2026-10-28) is [`4b07a8ed72be`](https://github.com/kortiene/switchyard/tree/4b07a8ed72be97b4eb7dd5a5a37ad89d4eae4c21). That tree is a TypeScript/Node control plane in `adw_sdlc/`, with phase orchestration, four runner adapters, explicit project checks, Git/forge authority, and persisted ADW state. Its existing Pi runner is not evidence of Pi Durable integration. Run `babe0070` (PR #73) is partial evidence for that legacy runner only: it needed one scope fix from the owner, and an unassisted Pi real-issue run is still owed. `runner-pi` and the TypeScript execution path are frozen legacy (fixes only), to be retired with the TypeScript engine.
 
 Existing implementation and reference sources:
 
 - [Orchestrator](../../adw_sdlc/src/orchestrator.ts), [state](../../adw_sdlc/src/state.ts), and [runner seam](../../adw_sdlc/src/invoker.ts).
 - [Control-plane invariants](../../wiki/decisions/invariants.md) and [worktree design](../../adw_sdlc/docs/DESIGN-managed-git-worktrees.md).
-- [Current package guide](../../adw_sdlc/README.md), [readiness](../../adw_sdlc/MVP-READINESS.md), and [contributor workflow](../../wiki/workflows/contributing.md).
+- [TypeScript package guide](../../adw_sdlc/README.md), [readiness](../../adw_sdlc/MVP-READINESS.md), and [contributor workflow](../../wiki/workflows/contributing.md).
 
 Switchyard is unreleased and has no users. Rust is the sole engine long term, including a native Rust agent runtime. Pi Durable 1.4.0 behind the sandboxed TypeScript bridge is the M1 proof-of-concept runtime behind a replaceable adapter, not the end state. Keep `adw_sdlc/`, its CLI, runtime defaults, and generated prompt mirrors in tree as a reference while useful. Do not move or delete that package as part of M1. There is no long-term coexistence or user-compatibility promise. State v1 (`adw/state.schema.json`, `agents/<adw-id>/state.json`) is frozen as is: no further changes and no new consumers. Rust missions do not resume legacy ADW runs.
 
@@ -56,7 +76,7 @@ flowchart TD
     CORE --> FORGE["GitHub delivery"]
 ```
 
-Start with one Rust library crate and one executable, using modules before adding more crates. S1 adds `crates/switchyard-core/` and `crates/switchyard/`. `runtime/pi/` contains the published-package audit. `runtime/pi-source/` contains the reproducible source candidate and [partial bridge probe](s2-bridge-probe.md), which is enabled only by the Rust `pi-contract` feature and does not replace the CLI's fake runtime. `web/` and `tests/acceptance/` remain planned paths, not packages or usable product commands.
+Start with one Rust library crate and one executable, using modules before adding more crates. S1 adds `crates/switchyard-core/` and `crates/switchyard/`. `runtime/pi/` contains the published-package audit. `runtime/pi-source/` contains the pinned source candidate from #107 and the [partial bridge probe](s2-bridge-probe.md). The Rust client is enabled only by `pi-contract` and does not replace the CLI's fake runtime. S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and [s2-feasibility.md](s2-feasibility.md). `web/` and `tests/acceptance/` remain planned paths, not packages or usable product commands.
 
 ## Runtime baseline
 
@@ -65,9 +85,10 @@ Pi was inspected at [`e65b3b88c084`](https://github.com/earendil-works/pi/tree/e
 S2 must establish an exact installable version and lockfile, supported Node version, source/package compatibility, and public API contract tests. A source version string does not prove a registry release is available.
 
 The [S2 feasibility audit](s2-feasibility.md) found that npm 1.4.0 comes from a
-different source commit and lacks reviewed admission APIs. It records NO-GO,
-reproducible faux-provider probes, and a proposed pinned source-build remedy.
-The diagnostic `pi-package-audit` job does not satisfy `pi-bridge-contract` or
+different source commit and lacks reviewed admission APIs. It records NO-GO
+(2026-10-29) and reproducible faux-provider probes. S2 is NO-GO; see
+[#96](https://github.com/kortiene/switchyard/issues/96) and that audit. The
+diagnostic `pi-package-audit` job does not satisfy `pi-bridge-contract` or
 authorize live execution.
 
 Relevant semantics:

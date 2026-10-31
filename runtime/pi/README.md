@@ -2,9 +2,11 @@
 
 This directory is a **feasibility probe, not the runtime bridge**. The decision
 for npm `@earendil-works/pi-durable@1.4.0` against the reviewed source baseline is
-**NO-GO**. See the [evidence and remedy](../../docs/rust-first/s2-feasibility.md).
-The mission CLI still uses S1's fake runtime. There is no model-provider spend,
-workspace execution, GitHub publication, or claim of confinement here.
+**NO-GO** (2026-10-29). See the [evidence and current status](../../docs/rust-first/s2-feasibility.md).
+S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and that
+audit. The mission CLI still uses S1's
+fake runtime. There is no model-provider spend, workspace execution, GitHub
+publication, or claim of confinement here.
 
 Use exactly Node **22.23.4**, recorded in `.node-version`:
 

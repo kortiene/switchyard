@@ -3,12 +3,14 @@ type: Architecture
 title: System architecture
 description: The boundaries between Switchyard's deterministic kernel, project policy, runners, providers, and generated state.
 tags: [architecture, kernel, project-pack, control-plane]
-timestamp: "2026-07-18T13:26:10Z"
+timestamp: "2026-10-30T22:00:00Z"
 ---
 
 # Context
 
-Switchyard separates deterministic delivery mechanics from repository-specific policy and interchangeable external integrations.
+This page describes the frozen TypeScript reference control plane in `adw_sdlc/`. The active mission host is the Rust S1 ledger in `crates/`. Its contracts are in the [Rust-first architecture](../../docs/rust-first/README.md). S2 remains NO-GO; see [decisions](/decisions/invariants.md).
+
+The reference package separates deterministic delivery mechanics from repository-specific policy and interchangeable external integrations.
 
 ```text
 operator / cockpit

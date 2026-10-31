@@ -3,7 +3,7 @@ type: Testing Reference
 title: Testing and CI
 description: The focused-test workflow, canonical verification chain, coverage policy, and CI execution matrix.
 tags: [reference, testing, coverage, ci, verification]
-timestamp: "2026-10-29T19:30:00Z"
+timestamp: "2026-10-30T22:00:00Z"
 ---
 
 # Canonical gate
@@ -66,12 +66,16 @@ Its five probes and typecheck can pass while the integration remains NO-GO.
 `pi-bridge-contract` check and grants no downstream live-execution readiness.
 The [audit package](../../runtime/pi/README.md) documents commands and limits.
 
-The separate [source candidate](../../runtime/pi-source/README.md) rebuilds the
-reviewed Pi workspace closure and checks artifact hashes in `pi-source-candidate`.
-The dependent `pi-bridge-probe` job runs the feature-gated Rust transport and
-credential-free recovery probes. Both remain partial evidence; see the
-[remaining S2 acceptance](../../docs/rust-first/s2-bridge-probe.md). Neither job
-replaces `pi-bridge-contract` or enables live execution.
+# Pinned source candidate
+
+[#107](https://github.com/kortiene/switchyard/pull/107) added `pi-source-candidate`. It rebuilds `runtime/pi-source/` when that path, its workflow, or `docs/rust-first/` changes. The job is not `pi-bridge-contract`. S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and the [S2 feasibility audit](../../docs/rust-first/s2-feasibility.md). A green audit or source rebuild is not live execution and is not S2 acceptance.
+
+# Partial bridge probe
+
+The `pi-bridge-probe` job runs the feature-gated Rust transport and credential-free
+recovery probes against the rebuilt source candidate. See the
+[remaining S2 acceptance](../../docs/rust-first/s2-bridge-probe.md).
+It does not replace `pi-bridge-contract` or enable live execution.
 
 # Wiki validation policy
 
@@ -87,4 +91,4 @@ OKF consumers must tolerate missing links. Switchyard's producer-side `wiki:chec
 
 [4] [Rust core gate](../../scripts/rust-verify.sh)
 
-[4] [Verification script invariants](https://github.com/kortiene/switchyard/blob/main/adw_sdlc/test/scaffold.test.ts)
+[5] [Verification script invariants](https://github.com/kortiene/switchyard/blob/main/adw_sdlc/test/scaffold.test.ts)

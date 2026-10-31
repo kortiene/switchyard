@@ -1,5 +1,11 @@
 # adw_sdlc
 
+> Status: frozen reference (2026-10-29). Fixes only. This package and
+> `runner-pi` will be retired with the TypeScript engine. It is not the active
+> Rust host and not the Pi Durable proof-of-concept adapter. Python
+> compatibility is dropped. State v1 is frozen as-is. The default engine in
+> this package remains `ts`. See the [repository README](../README.md).
+
 A TypeScript/Node control plane for the **phased ADW (Agentic Developer
 Workflow) SDLC pipeline**. It drives one work item (e.g. a GitHub issue)
 through a deterministic chain of single-purpose agent phases, where each phase
@@ -54,6 +60,38 @@ npm install
 npm run issue -- <work-item-id> --dry-run     # preview the plan, run nothing
 npm run issue -- <work-item-id> --runner claude
 ```
+
+### Before a live run
+
+A live run is more demanding than `--dry-run`. Before starting, have:
+
+- An open issue in a repository you are authorized to change.
+- An authenticated GitHub CLI (`gh auth status`).
+- Access and authentication for the selected runner.
+- A clean, preferably dedicated target checkout. A live run creates and switches branches there.
+- A deterministic test command for that repository.
+- Approval to spend model-provider credits and run project commands locally.
+
+> [!WARNING]
+> A live run can execute repository commands, edit files, post issue updates,
+> push a branch, open a pull request, watch CI, and spend provider credits.
+> Only target repositories you trust.
+
+```bash
+gh auth status
+npm run issue -- 123 \
+  --runner claude \
+  --no-merge \
+  --test-cmd "npm run verify" \
+  --timeout 1800 \
+  --max-budget-usd 10
+```
+
+Replace `123` with a real issue. `--no-merge` leaves the pull request open.
+`--timeout 1800` limits each runner call to 30 minutes. For Claude,
+`--max-budget-usd 10` is a per-call guardrail, not a guaranteed ceiling for
+the whole run. This repository's default test command is empty, so pass
+`--test-cmd`.
 
 `npm run issue` maps to `tsx src/cli.ts`. The command name `issue` is kept as a
 backward-compatible GitHub alias. Work-item ids may be numeric GitHub issue

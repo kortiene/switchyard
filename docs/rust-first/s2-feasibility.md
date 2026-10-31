@@ -4,6 +4,17 @@ Decision: **NO-GO for the currently published 1.4.0 package against the reviewed
 S2 baseline** (2026-10-29). Tracking: [#96](https://github.com/kortiene/switchyard/issues/96),
 parent [#94](https://github.com/kortiene/switchyard/issues/94).
 
+## Current status — 2026-10-30
+
+[#106](https://github.com/kortiene/switchyard/pull/106) merged this published-package
+NO-GO. [#107](https://github.com/kortiene/switchyard/pull/107) merged the pinned
+source candidate in `runtime/pi-source/`; its verdict is `NEEDS-FULL-S2`.
+[#108](https://github.com/kortiene/switchyard/pull/108) merged the partial bridge probe (feature-gated `pi-contract` client and the `pi-bridge-probe` CI job); see [s2-bridge-probe.md](s2-bridge-probe.md). It is not S2 acceptance or live execution. [#96](https://github.com/kortiene/switchyard/issues/96) remains
+**NO-GO** until the complete gate in that issue passes. This section is the
+status to update when S2 work in #96 moves. This note does not execute the gate and
+does not claim GO or live execution. The 2026-10-29 evidence below stays as
+recorded.
+
 S1 is complete in [#105](https://github.com/kortiene/switchyard/pull/105).
 S2 is not complete. Rust remains the sole long-term engine, including the native
 agent runtime accepted in #104. This finding neither rejects Pi in general nor
@@ -105,7 +116,8 @@ snapshot recovery, stable multi-effect and nested-tool replay through Rust
 receipts, registry restrictions, and observable abort settlement. Exported
 `taskId` and nested-call types alone do not prove replay behavior.
 
-There is no process bridge in this change. In particular, the S1 fake runtime's
+This audit did not add a process bridge. Later bridge work is tracked in
+Current status above. In particular, the S1 fake runtime's
 verification/publication notifications are not exposed to Pi. Future external
 frames must not authorize verification PASS, approval, publication, or writer
 quiescence; those remain Rust-owned facts. S3 confinement and S8 live acceptance
@@ -113,25 +125,25 @@ are separate gates even after S2 succeeds.
 
 ## Recommended bounded remedy
 
-The reproducible candidate now lives in [runtime/pi-source](../../runtime/pi-source/README.md).
-Its complete five-package workspace closure is built from the reviewed source
-with the upstream pinned catalog. Two local builds matched every committed
-artifact hash, and four public-API compatibility tests pass. Its verdict remains
-`NEEDS-FULL-S2`; this does not alter the published-package NO-GO below or approve
-the still-unproven process bridge.
+The 2026-10-29 audit recommended a separately reviewable source build of
+`e65b3b88c08412bb8ffbd21fb5dc5756064a6e5a`, with the workspace dependency closure,
+Node, build tools, upstream lockfile, and source provenance pinned, and with a
+check that the emitted artifacts expose the reviewed APIs. That recommendation
+did not approve a bridge. Do not mix the built source with similarly numbered
+published workspace packages without a documented compatibility check.
 
-Prepare a separately reviewable, reproducible source-build candidate for the
-already-reviewed commit `e65b3b88c08412bb8ffbd21fb5dc5756064a6e5a`. Pin the entire
-required workspace dependency closure, Node/build tools, upstream lockfile and
-source provenance; verify that emitted artifacts expose the reviewed APIs.
-Do not mix this source with similarly numbered published workspace packages
-without a documented compatibility check. The candidate has been built and
-tested and merged in PR #107; the full S2 bridge gate remains open. The
-separate [bridge probe](s2-bridge-probe.md) records partial conformance evidence
-without changing this package verdict.
+[#107](https://github.com/kortiene/switchyard/pull/107) merged that candidate in
+[runtime/pi-source](../../runtime/pi-source/README.md). Its complete five-package
+workspace closure is built from the reviewed source with the upstream pinned
+catalog. Two local builds matched every committed artifact hash, and four
+public-API compatibility tests pass. Its verdict remains `NEEDS-FULL-S2`. It does
+not alter the published-package NO-GO above. The separate
+[bridge probe](s2-bridge-probe.md) records partial conformance evidence; it
+does not complete the integration gate.
 
-Then review the artifact/pin, implement the bridge against its public APIs, and
-rerun the **whole** S2 gate. A newer compatible published package with reviewed
-provenance is another bounded remedy when available. If neither is viable,
-review a native-Rust implementation gate and downstream scope. Retain S1/fake
-operation; do not promote the legacy TypeScript engine or weaken the contract.
+S2 is NO-GO until the whole gate passes; see Current status and
+[#96](https://github.com/kortiene/switchyard/issues/96). A newer compatible published package with
+reviewed provenance is another bounded remedy when available. If neither the
+source candidate nor a published pin can pass that gate, review a native-Rust
+implementation gate and downstream scope. Retain S1/fake operation; do not
+promote the legacy TypeScript engine or weaken the contract.

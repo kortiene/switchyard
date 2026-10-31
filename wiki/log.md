@@ -1,5 +1,11 @@
 # Switchyard wiki update log
 
+## 2026-10-30
+
+* **Active path**: The root README now leads with the Rust S1 host, `./scripts/rust-verify.sh`, and a repository role map. The TypeScript walkthrough, Cockpit, and quality-gate detail are one legacy reference with links to the package README and [Testing and CI](reference/testing-and-ci.md).
+* **S2 status**: Live S2 status stays in the [feasibility audit](../docs/rust-first/s2-feasibility.md). Other pages say S2 is NO-GO and point there and at #96. The 2026-10-29 package-audit evidence stays dated. This log does not claim S2 GO or live execution.
+* **Backlog**: The delivery-plan triage matches [#109](https://github.com/kortiene/switchyard/issues/109). #34 is closed as not planned, not completed. That close does not authorize deleting `adw/` or `adw_sdlc/`.
+
 ## 2026-10-29
 
 * **S2 package NO-GO**: Recorded the published Pi Durable 1.4.0/source mismatch and executable faux-provider/storage probes. The diagnostic `pi-package-audit` job is not the S2 integration gate; #96 and Pi-dependent live work remain blocked.

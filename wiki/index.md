@@ -18,8 +18,8 @@ okf_version: "0.1"
 
 # Canonical documentation
 
-* [Repository README](../README.md) - Repository map and quick start.
-* [Package README](../adw_sdlc/README.md) - Canonical package, CLI, configuration, and development guide.
+* [Repository README](../README.md) - Active Rust path, local checks, repository map, and the legacy TypeScript reference.
+* [Package README](../adw_sdlc/README.md) - Frozen TypeScript reference package guide.
 
 # Format
 
