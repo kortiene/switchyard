@@ -95,8 +95,10 @@ impl PiBridge {
         binding: RuntimeBinding,
         fixture: &str,
     ) -> Result<Self> {
-        if !matches!(fixture, "answer" | "tools" | "recover")
-            || binding.generation == 0
+        if !matches!(
+            fixture,
+            "answer" | "tools" | "recover" | "crash-before-admission" | "crash-after-admission"
+        ) || binding.generation == 0
             || binding.generation > 9_007_199_254_740_991
             || [
                 &binding.mission_id,
@@ -434,7 +436,7 @@ fn binding_json(binding: &RuntimeBinding) -> Value {
         "sessionId": binding.session_id, "generation": binding.generation})
 }
 
-fn safe_json(value: &Value) -> Result<()> {
+pub(super) fn safe_json(value: &Value) -> Result<()> {
     match value {
         Value::Number(n) => {
             let signed = n

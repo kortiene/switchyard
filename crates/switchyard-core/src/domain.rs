@@ -769,6 +769,7 @@ pub struct AttemptRecord {
 
 #[derive(Clone, Debug)]
 pub struct CommandRecord {
+    pub payload_canonical: String,
     pub id: String,
     pub mission_id: String,
     pub attempt_id: String,

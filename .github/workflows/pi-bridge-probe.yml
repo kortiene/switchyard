@@ -46,9 +46,9 @@ jobs:
           node build.mjs
           npm ci
           npm run verify
-      - name: Rust transport and replay probes
+      - name: Rust transport, Host outbox and replay probes
         run: |
           export SWITCHYARD_PI_NODE="$(command -v node)"
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --features pi-contract --locked -- -D warnings
-          cargo test -p switchyard-core --features pi-contract --locked --test pi_bridge
+          cargo test --workspace --features pi-contract --locked

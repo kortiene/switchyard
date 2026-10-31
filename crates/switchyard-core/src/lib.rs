@@ -1,7 +1,8 @@
 //! Switchyard mission authority for the Rust-first S1 slice.
 //!
 //! This crate owns mission transitions, the application SQLite ledger, the
-//! single-host owner lock, and a fake agent runtime. It does not read model
+//! single-host owner lock, and a default fake agent runtime. The optional
+//! `pi-contract` feature adds a credential-free Host/Pi outbox probe. It does not read model
 //! credentials, write to GitHub, resume legacy ADW state, or confine a Pi
 //! process. Those boundaries belong to later slices.
 

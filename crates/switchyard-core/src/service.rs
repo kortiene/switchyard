@@ -11,8 +11,8 @@ use crate::domain::{
 };
 use crate::error::{Error, Result};
 use crate::execution::{
-    FakeRuntime, OwnerLock, RuntimeBinding, RuntimeNotification, RuntimeReceipt, RuntimeRequest,
-    inspect_repo, operation_id, parse_notification, try_acquire,
+    FakeRuntime, OwnerLock, RuntimeAdapter, RuntimeBinding, RuntimeNotification, RuntimeReceipt,
+    RuntimeRequest, inspect_repo, operation_id, parse_notification, try_acquire,
 };
 use crate::persistence::{CreatedMission, NewCommand, Store};
 use crate::policy::{self, Facts};
@@ -26,7 +26,7 @@ use crate::verification::NewVerification;
 /// admitted before a restart.
 pub struct Host {
     store: Store,
-    runtime: FakeRuntime,
+    runtime: RuntimeAdapter,
     lock: OwnerLock,
 }
 
@@ -230,12 +230,28 @@ pub fn canonical_db_path(path: &Path) -> Result<PathBuf> {
 impl Host {
     pub fn open(db_path: &Path) -> Result<Self> {
         let db_path = canonical_db_path(db_path)?;
-        let mut lock = try_acquire(&db_path)?;
-        let mut store = Store::open_writer(&db_path)?;
+        let runtime = RuntimeAdapter::Fake(FakeRuntime::open(&journal_path(&db_path))?);
+        Self::open_with_runtime(&db_path, runtime)
+    }
+
+    /// Explicit, credential-free S2-A probe. Uses the committed faux launcher;
+    /// it enables neither model calls nor workspace effects. FakeRuntime remains
+    /// the CLI/default adapter. A ledger cannot be switched between adapters.
+    #[cfg(feature = "pi-contract")]
+    pub fn open_pi_probe(db_path: &Path, node: &Path) -> Result<Self> {
+        let db_path = canonical_db_path(db_path)?;
+        let runtime =
+            RuntimeAdapter::Pi(Box::new(crate::execution::PiRuntime::new(&db_path, node)?));
+        Self::open_with_runtime(&db_path, runtime)
+    }
+
+    fn open_with_runtime(db_path: &Path, runtime: RuntimeAdapter) -> Result<Self> {
+        let mut lock = try_acquire(db_path)?;
+        let mut store = Store::open_writer(db_path)?;
         store.migrate()?;
+        store.require_runtime_config(&runtime.configuration())?;
         store.bump_generation(&mut lock)?;
         store.bind_owner_generation(lock.generation);
-        let runtime = FakeRuntime::open(&journal_path(&db_path))?;
         Ok(Self {
             store,
             runtime,
@@ -247,8 +263,12 @@ impl Host {
         self.lock.generation
     }
 
+    /// Fake-runtime simulation seam, available only on hosts opened with `open`.
+    /// Panics for an explicitly selected Pi probe; it cannot inject Pi authority.
     pub fn runtime_mut(&mut self) -> &mut FakeRuntime {
-        &mut self.runtime
+        self.runtime
+            .fake_mut()
+            .expect("runtime_mut is a FakeRuntime-only simulation seam")
     }
 
     pub fn durability(&self) -> Result<(String, i64)> {
@@ -277,6 +297,7 @@ impl Host {
     pub fn create_mission(&mut self, request: CreateMission) -> Result<MissionSnapshot> {
         let repo = inspect_repo(&request.repo)?;
         let created = CreatedMission {
+            runtime_config: canonicalize(&self.runtime.configuration())?,
             id: crate::domain::new_id("m"),
             task_id: crate::domain::new_id("t"),
             attempt_id: crate::domain::new_id("a"),
@@ -317,6 +338,7 @@ impl Host {
         let before_phase = source.phase;
         let repo = inspect_repo(Path::new(&source.repo.toplevel))?;
         let created = CreatedMission {
+            runtime_config: canonicalize(&self.runtime.configuration())?,
             id: crate::domain::new_id("m"),
             task_id: crate::domain::new_id("t"),
             attempt_id: crate::domain::new_id("a"),
@@ -369,6 +391,17 @@ impl Host {
             .command_id
             .clone()
             .unwrap_or_else(|| crate::domain::new_id("c"));
+        self.runtime
+            .validate_admission(&request.body, request.origin)?;
+        if request.body.kind().is_runtime_bound() {
+            let runtime_request = RuntimeRequest {
+                binding: self.binding(&mission),
+                request_id: format!("{attempt_id}:{command_id}"),
+                payload_hash: hash.clone(),
+                method: runtime_method(request.body.kind()),
+            };
+            self.runtime.validate_command(&runtime_request, &payload)?;
+        }
         if let Some(existing) = self.store.find_command(&command_id)? {
             if existing.payload_hash != hash {
                 return Err(Error::CommandConflict {
@@ -468,21 +501,61 @@ impl Host {
             command.state == CommandState::Acknowledged && is_runtime_work(command.kind)
         });
         let pending: Vec<_> = recorded
-            .into_iter()
+            .iter()
             .filter(|command| command.state == CommandState::Pending)
+            .cloned()
             .collect();
         let binding = self.binding(&mission);
         self.accept_runtime_binding(&binding, mission_id)?;
+        #[cfg(feature = "pi-contract")]
+        if let RuntimeAdapter::Pi(runtime) = &mut self.runtime {
+            let initialized = self.store.runtime_initialized(&mission.attempt.id)?;
+            runtime.open(&binding, initialized)?;
+            if !initialized {
+                self.store.mark_runtime_initialized(&mission.attempt.id)?;
+            }
+            if runtime.needs_resume {
+                // Validate previous ACKs before admitting any new work. A valid
+                // session with a missing command is not an empty session to refill.
+                for command in recorded
+                    .iter()
+                    .filter(|c| c.state == CommandState::Acknowledged && c.kind.is_runtime_bound())
+                {
+                    let request = RuntimeRequest {
+                        binding: binding.clone(),
+                        request_id: command.request_id.clone(),
+                        payload_hash: command.payload_hash.clone(),
+                        method: runtime_method(command.kind),
+                    };
+                    let payload: Value =
+                        serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+                    runtime.require_acknowledged(
+                        &request,
+                        &payload,
+                        command.runtime_receipt_json.as_deref(),
+                    )?;
+                }
+            }
+        }
         let mut dispatched = 0;
         for command in pending {
-            if let Some(receipt) = self.runtime.stored_receipt(&command.request_id) {
+            let request = RuntimeRequest {
+                binding: binding.clone(),
+                request_id: command.request_id.clone(),
+                payload_hash: command.payload_hash.clone(),
+                method: runtime_method(command.kind),
+            };
+            let payload: Value =
+                serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+            self.runtime.validate_command(&request, &payload)?;
+            if let Some(receipt) = self.runtime.reconcile(&request, &payload)? {
                 if receipt.payload_hash != command.payload_hash {
                     return Err(Error::CommandConflict {
                         command_id: command.id,
                     });
                 }
                 self.store
-                    .acknowledge(&command.id, &receipt_json(&receipt))?;
+                    .acknowledge(&command.id, &receipt_json(&receipt, self.runtime.name()))?;
                 admitted_runtime_work |= is_runtime_work(command.kind);
                 dispatched += 1;
                 continue;
@@ -494,23 +567,77 @@ impl Host {
                 )?;
                 continue;
             }
-            let request = RuntimeRequest {
-                binding: binding.clone(),
-                request_id: command.request_id.clone(),
-                payload_hash: command.payload_hash.clone(),
-                method: runtime_method(command.kind),
-            };
-            let receipt = match command.kind {
-                CommandKind::Pause | CommandKind::Cancel => self.runtime.abort(&request)?,
-                CommandKind::Steer => self.runtime.steer(&request)?,
-                _ => self.runtime.submit(&request)?,
-            };
+            #[cfg(feature = "pi-contract")]
+            if matches!(self.runtime, RuntimeAdapter::Pi(_))
+                && is_runtime_work(command.kind)
+                && self.store.ops_blocked(mission_id)?
+            {
+                return Err(Error::guard("uncertain effects block Pi dispatch"));
+            }
+            let receipt = self.runtime.dispatch(&request, &payload)?;
             self.store
-                .acknowledge(&command.id, &receipt_json(&receipt))?;
+                .acknowledge(&command.id, &receipt_json(&receipt, self.runtime.name()))?;
             admitted_runtime_work |= is_runtime_work(command.kind);
             dispatched += 1;
         }
+        #[cfg(feature = "pi-contract")]
+        self.resume_reconciled_pi(&mission)?;
         Ok(dispatched)
+    }
+
+    /// Resume only an already reconciled, authorized submission. A pending stop
+    /// is drained above, and a closed/uncertain mission never reaches this path.
+    #[cfg(feature = "pi-contract")]
+    fn resume_reconciled_pi(&mut self, mission: &MissionRecord) -> Result<()> {
+        if !matches!(mission.phase, Phase::Planning | Phase::Implementing) {
+            return Ok(());
+        }
+        let binding = self.binding(mission);
+        self.accept_runtime_binding(&binding, &mission.id)?;
+        let RuntimeAdapter::Pi(runtime) = &mut self.runtime else {
+            return Ok(());
+        };
+        if !runtime.needs_resume {
+            return Ok(());
+        }
+        if self.store.ops_blocked(&mission.id)? {
+            return Err(Error::guard("uncertain effects block Pi scheduling"));
+        }
+        let commands = self.store.list_commands(&mission.id)?;
+        if commands.iter().any(|c| c.state == CommandState::Pending) {
+            return Err(Error::guard("outbox must reconcile before Pi scheduling"));
+        }
+        // Stop at the most recent delivered abort. Earlier activity must not
+        // suppress a new continuation or revive work from before that boundary.
+        let candidate = commands
+            .iter()
+            .rev()
+            .take_while(|c| {
+                !(c.state == CommandState::Acknowledged
+                    && matches!(c.kind, CommandKind::Pause | CommandKind::Cancel))
+            })
+            .find(|c| c.state == CommandState::Acknowledged && is_runtime_work(c.kind));
+        let Some(command) = candidate else {
+            return Ok(());
+        };
+        let request = RuntimeRequest {
+            binding,
+            request_id: command.request_id.clone(),
+            payload_hash: command.payload_hash.clone(),
+            method: runtime_method(command.kind),
+        };
+        let payload: Value =
+            serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+        let original = runtime.require_acknowledged(
+            &request,
+            &payload,
+            command.runtime_receipt_json.as_deref(),
+        )?;
+        let resumed = runtime.dispatch(&request, &payload)?;
+        if resumed != original {
+            return Err(Error::guard("Pi replay changed the original receipt"));
+        }
+        Ok(())
     }
 
     pub fn recover(&mut self, mission_id: &str) -> Result<MissionSnapshot> {
@@ -521,11 +648,15 @@ impl Host {
 
     pub fn poll_runtime(&mut self, mission_id: &str) -> Result<Vec<NotifyOutcome>> {
         let mut outcomes = Vec::new();
-        while let Some(note) = self.runtime.pop_notification() {
+        while let Some(note) = self
+            .runtime
+            .fake_mut()
+            .and_then(FakeRuntime::pop_notification)
+        {
             match self.apply_notification(mission_id, note.clone()) {
                 Ok(outcome) => outcomes.push(outcome),
                 Err(error) if error.is_transient() => {
-                    self.runtime.requeue_front(note);
+                    self.runtime_mut().requeue_front(note);
                     return Err(error);
                 }
                 Err(error) => {
@@ -536,7 +667,7 @@ impl Host {
                         &error.to_string(),
                         &frame,
                     ) {
-                        self.runtime.requeue_front(note);
+                        self.runtime_mut().requeue_front(note);
                         return Err(storage);
                     }
                 }
@@ -563,6 +694,11 @@ impl Host {
         mission_id: &str,
         notification: RuntimeNotification,
     ) -> Result<NotifyOutcome> {
+        if self.runtime.fake_mut().is_none() {
+            return Err(Error::guard(
+                "fake observations cannot certify Pi mission facts",
+            ));
+        }
         let mission = self.store.load_mission(mission_id)?;
         match notification {
             RuntimeNotification::Idle => Ok(unchanged(&mission)),
@@ -1360,12 +1496,12 @@ fn runtime_method(kind: CommandKind) -> &'static str {
     }
 }
 
-fn receipt_json(receipt: &RuntimeReceipt) -> String {
+fn receipt_json(receipt: &RuntimeReceipt, adapter: &str) -> String {
     json!({
         "receiptId": receipt.receipt_id,
         "requestId": receipt.request_id,
         "payloadHash": receipt.payload_hash,
-        "adapter": "fake",
+        "adapter": adapter,
         "credentials": "none",
     })
     .to_string()
@@ -1391,3 +1527,7 @@ fn rationale(body: &CommandBody) -> String {
         other => other.kind().as_str().to_string(),
     }
 }
+
+#[cfg(all(test, feature = "pi-contract"))]
+#[path = "pi_host_tests.rs"]
+mod pi_host_tests;

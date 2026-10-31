@@ -18,7 +18,6 @@ use crate::execution::OwnerLock;
 use crate::policy::TransitionPlan;
 use crate::verification::NewVerification;
 
-const RUNTIME_CONFIG: &str = r#"{"adapter":"fake","credentials":"none"}"#;
 const VERIFIER_JSON: &str = r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}"#;
 const ENVIRONMENT_JSON: &str = r#"{"confinement":"deferred_to_s3","host":"single"}"#;
 
@@ -45,6 +44,7 @@ pub struct NewCommand {
 }
 
 pub struct CreatedMission {
+    pub runtime_config: String,
     pub id: String,
     pub task_id: String,
     pub attempt_id: String,
@@ -140,6 +140,70 @@ impl Store {
 
     pub fn bind_owner_generation(&mut self, generation: u64) {
         self.owner_generation = Some(generation);
+    }
+
+    /// A ledger never silently changes adapters, source pins, or adapter code.
+    pub fn require_runtime_config(&self, expected: &Value) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT runtime_config_json FROM attempts")
+            .map_err(Error::storage)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(Error::storage)?;
+        for row in rows {
+            let mut config: Value =
+                serde_json::from_str(&row.map_err(Error::storage)?).map_err(Error::storage)?;
+            if let Some(object) = config.as_object_mut() {
+                object.remove("sessionInitialized");
+            }
+            if &config != expected {
+                return Err(Error::guard(
+                    "ledger runtime configuration mismatch; no adapter replacement",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "pi-contract")]
+    pub fn runtime_initialized(&self, attempt_id: &str) -> Result<bool> {
+        let raw: String = self
+            .conn
+            .query_row(
+                "SELECT runtime_config_json FROM attempts WHERE id=?1",
+                [attempt_id],
+                |row| row.get(0),
+            )
+            .map_err(Error::storage)?;
+        let config: Value = serde_json::from_str(&raw).map_err(Error::storage)?;
+        match config.get("sessionInitialized") {
+            None | Some(Value::Bool(false)) => Ok(false),
+            Some(Value::Bool(true)) => Ok(true),
+            _ => Err(Error::guard("invalid runtime initialization marker")),
+        }
+    }
+
+    /// Commit before the first command can reach Pi. If this bit is true, open
+    /// must find the original session; absent/empty storage is never a new run.
+    #[cfg(feature = "pi-contract")]
+    pub fn mark_runtime_initialized(&mut self, attempt_id: &str) -> Result<()> {
+        let tx = self.immediate()?;
+        let raw: String = tx
+            .query_row(
+                "SELECT runtime_config_json FROM attempts WHERE id=?1",
+                [attempt_id],
+                |row| row.get(0),
+            )
+            .map_err(Error::storage)?;
+        let mut config: Value = serde_json::from_str(&raw).map_err(Error::storage)?;
+        config["sessionInitialized"] = json!(true);
+        tx.execute(
+            "UPDATE attempts SET runtime_config_json=?1 WHERE id=?2",
+            params![canonicalize(&config)?, attempt_id],
+        )
+        .map_err(Error::storage)?;
+        tx.commit().map_err(Error::storage)
     }
 
     pub fn durability(&self) -> Result<(String, i64)> {
@@ -308,7 +372,7 @@ impl Store {
                 created.task_id,
                 created.repo.head_sha,
                 created.session_id,
-                RUNTIME_CONFIG,
+                created.runtime_config,
                 policy_json,
                 policy_hash,
                 VERIFIER_JSON,
@@ -390,7 +454,7 @@ impl Store {
         self.conn
             .query_row(
                 "SELECT id, mission_id, attempt_id, kind, payload_hash, expected_revision,
-                        resulting_revision, state, request_id, origin, runtime_receipt_json
+                        resulting_revision, state, request_id, origin, runtime_receipt_json, payload_canonical
                  FROM commands WHERE id = ?1",
                 params![command_id],
                 map_command,
@@ -404,7 +468,7 @@ impl Store {
             .conn
             .prepare(
                 "SELECT id, mission_id, attempt_id, kind, payload_hash, expected_revision,
-                        resulting_revision, state, request_id, origin, runtime_receipt_json
+                        resulting_revision, state, request_id, origin, runtime_receipt_json, payload_canonical
                  FROM commands WHERE mission_id = ?1 ORDER BY seq, id",
             )
             .map_err(Error::storage)?;
@@ -1193,6 +1257,7 @@ fn map_command(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommandRecord> {
     let state: String = row.get(7)?;
     let origin: String = row.get(9)?;
     Ok(CommandRecord {
+        payload_canonical: row.get(11)?,
         id: row.get(0)?,
         mission_id: row.get(1)?,
         attempt_id: row.get(2)?,
@@ -1424,6 +1489,7 @@ mod tests {
 
     fn sample_mission() -> CreatedMission {
         CreatedMission {
+            runtime_config: r#"{"adapter":"fake","credentials":"none"}"#.into(),
             id: "m-1".into(),
             task_id: "t-1".into(),
             attempt_id: "a-1".into(),

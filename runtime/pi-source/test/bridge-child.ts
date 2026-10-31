@@ -7,7 +7,7 @@ import { Runtime } from '../src/runtime.ts';
 import { Transport } from '../src/transport.ts';
 
 const [database, bindingJson, mode] = process.argv.slice(2);
-if (!database || !bindingJson || !['answer', 'tools', 'recover'].includes(mode)) throw new Error('Invalid launcher arguments');
+if (!database || !bindingJson || !['answer', 'tools', 'recover', 'crash-before-admission', 'crash-after-admission'].includes(mode)) throw new Error('Invalid launcher arguments');
 const binding = JSON.parse(bindingJson) as Binding;
 const faux = fauxProvider();
 faux.setResponses(mode === 'tools' ? [
@@ -18,5 +18,9 @@ faux.setResponses(mode === 'tools' ? [
 const models = createModels();
 models.setProvider(faux.provider);
 const transport = new Transport(binding);
-const runtime = new Runtime(database, binding, models, forwarders(binding, transport));
-transport.start(frame => runtime.dispatch(frame));
+const runtime = new Runtime(database, binding, models, forwarders(binding, transport),
+  mode === 'crash-after-admission' ? () => { process.kill(process.pid, 'SIGKILL'); } : undefined);
+transport.start(frame => {
+  if (mode === 'crash-before-admission' && frame.method === 'runtime.submit') process.kill(process.pid, 'SIGKILL');
+  return runtime.dispatch(frame);
+});
