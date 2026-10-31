@@ -16,6 +16,15 @@ Hosted runner images/kernels still evolve: this is a recorded tested environment
 not a fully reproducible VM image. Package disappearance/version drift fails
 until the pin is deliberately reviewed.
 
+Refresh policy: use a dedicated reviewed PR to bump the exact package revision
+in both the workflow and verification script, and this document. Review Ubuntu's
+package/security changelog, rerun every confinement scenario on the declared
+runner, and retain the new environment evidence before merging. If the upstream
+Bubblewrap version changes, also review its policy semantics and update the
+runtime version assertion. Do not silently select latest or bypass the gate when
+an archive revision disappears. Installation is noninteractive and explicitly
+allows the reviewed pin to replace a newer runner package.
+
 Bubblewrap was chosen for a small namespace/mount policy without introducing a
 container daemon or binding the Host to Pi. This probe does not establish a
 container-image distribution system, VM-grade kernel isolation or a production
@@ -76,8 +85,11 @@ protected state.
 
 This observer and status channel are for deterministic fixtures. They are not a
 durable, adversarial process handle or operator quiescence certificate. The
-fixture's stdout is reserved for Bubblewrap status; a future hostile program
-requires a separate trusted status channel. The Rust supervisor is a test
+Bubblewrap status uses a dedicated fd 3 file channel. A fixed trusted shell
+duplicates the preopened file descriptor, disconnects fixture stdout to
+/dev/null, and execs prlimit; Bubblewrap closes the status descriptor before
+fixture exec. Fixture stderr remains the separately bounded diagnostic stream.
+This separation does not make the procfs observer an adversarial certificate. The Rust supervisor is a test
 process, not the product Host. Host machine reboot, power failure, PID-namespace
 nesting attacks and arbitrary malicious workloads are outside this proof.
 

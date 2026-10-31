@@ -22,7 +22,11 @@ mkdir -p "${SWITCHYARD_CONFINEMENT_EVIDENCE:?set evidence directory}"
   git status --short
   printf 'runner_image=%s\nrunner_image_version=%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
   for setting in /proc/sys/kernel/apparmor_restrict_unprivileged_userns /proc/sys/user/max_user_namespaces; do
-    [[ -r "$setting" ]] && printf '%s=%s\n' "$setting" "$(cat "$setting")"
+    if [[ -r "$setting" ]]; then
+      printf '%s=%s\n' "$setting" "$(cat "$setting")"
+    else
+      printf '%s=unreadable\n' "$setting"
+    fi
   done
   cat tools/confinement-probe/ci/bwrap.apparmor
 } | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/environment.txt"

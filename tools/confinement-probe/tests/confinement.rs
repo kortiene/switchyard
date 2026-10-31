@@ -193,13 +193,20 @@ fn observe(root: &Path) -> (PathBuf, Vec<ProcessIdentity>) {
         let local_pid = fs::read_to_string(root.join(format!("workspace/{role}.ready"))).unwrap();
         assert!(
             members.iter().any(|p| {
-                fs::read_to_string(format!("/proc/{}/status", p.pid))
-                    .unwrap()
-                    .lines()
-                    .any(|line| {
-                        line.starts_with("NSpid:")
-                            && line.split_whitespace().last() == Some(local_pid.as_str())
-                    })
+                let status = match fs::read_to_string(format!("/proc/{}/status", p.pid)) {
+                    Ok(status) => status,
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::NotFound
+                            || e.raw_os_error() == Some(3) =>
+                    {
+                        return false;
+                    }
+                    Err(e) => panic!("cannot observe process {} for {role}: {e}", p.pid),
+                };
+                status.lines().any(|line| {
+                    line.starts_with("NSpid:")
+                        && line.split_whitespace().last() == Some(local_pid.as_str())
+                })
             }),
             "unobserved {role}"
         );
@@ -309,17 +316,22 @@ fn output_is_bounded_and_missing_backend_fails_closed() {
         fs::metadata(world.root().join("stderr.log")).unwrap().len(),
         1048576
     );
-    let status = Command::new(fixture())
+    let output = Command::new(fixture())
         .arg("supervisor")
         .arg(world.root())
         .env_clear()
         .env("SWITCHYARD_BWRAP", world.root().join("missing-backend"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::piped())
+        .output()
         .unwrap();
-    assert!(!status.success());
+    assert!(!output.status.success());
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains("sandbox prerequisites") && diagnostic.contains("NotFound"),
+        "expected missing-backend prerequisite rejection, got: {diagnostic}"
+    );
     assert!(!world.root().join("workspace/tree.ready").exists());
     world.assert_unchanged();
 }

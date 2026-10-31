@@ -34,7 +34,16 @@ pub fn command(root: &Path, fixture: &Path, mode: &str) -> io::Result<Command> {
     }
     let root = fs::canonicalize(root)?;
     let fixture = fs::canonicalize(fixture)?;
-    let mut cmd = Command::new("/usr/bin/prlimit");
+    // A fixed trusted shell duplicates the status file onto fd 3, then execs
+    // prlimit (no extra supervisor). Fixture stdout is disconnected from it.
+    // Bubblewrap closes its status descriptor before executing the fixture.
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args([
+        "-c",
+        "exec 3>&1; exec 1>/dev/null; exec \"$@\"",
+        "confinement-launch",
+        "/usr/bin/prlimit",
+    ]);
     cmd.env_clear()
         .args([
             "--as=536870912:536870912",
@@ -58,7 +67,7 @@ pub fn command(root: &Path, fixture: &Path, mode: &str) -> io::Result<Command> {
             "--die-with-parent",
             "--new-session",
             "--json-status-fd",
-            "1",
+            "3",
             "--clearenv",
             "--setenv",
             "PATH",
@@ -166,7 +175,14 @@ pub struct ProcessIdentity {
     pub start: String,
 }
 fn stat(pid: u32) -> io::Result<(char, String)> {
-    let raw = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let raw = fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|e| {
+        // Linux ESRCH can race a procfs read when the process disappears.
+        if e.raw_os_error() == Some(3) {
+            io::Error::new(io::ErrorKind::NotFound, e)
+        } else {
+            e
+        }
+    })?;
     let (_, rest) = raw
         .rsplit_once(") ")
         .ok_or_else(|| io::Error::other("bad proc stat"))?;
