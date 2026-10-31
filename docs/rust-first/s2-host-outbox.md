@@ -98,16 +98,21 @@ must match the method and full mapped payload; it is recorded in the original
 Rust command row. An incomplete abort is replayed to settle, never acknowledged
 prematurely. Uncertain transport failures leave the row pending.
 
-A Pi response with `admission: "rejected"` and no stored receipt is a definite
-admission refusal (`idle`, `busy`, `stopping`, and any other rejected category
-that did not store a command). The Host records that row as `rejected` with
-`admission: rejected` and the Pi category, then continues the outbox. Recovery
-does not retry it, so a later command and scheduling resume are reachable.
-`command_conflict` and any refusal that already has a receipt stay fail-closed.
-Transport loss, a missing `admission` field, and `admission: "uncertain"` leave
-the row pending. This is command-admission settlement only. Effect callbacks
-still return `execution_uncertain`; typed effect rejection versus uncertain
-admission remains [#96](https://github.com/kortiene/switchyard/issues/96).
+The Host does not trust `ProtocolError.admission`. An unlabeled protocol error
+is `unspecified`, not a refusal. Only `idle` and `stopping`, with no stored
+receipt, are settled as command state `rejected`. Recovery does not retry those
+rows. `busy` stays pending and is sent again on a later dispatch, so a Continue
+that races a running turn still goes through once that turn ends. Every other
+category (`host_command_mismatch`, `session_unavailable`, `handshake_required`,
+`binding_mismatch`, `stale_generation`, `invalid_*`, `command_conflict`, and
+anything unknown) is a guard error and the row stays pending. Transport loss
+stays pending as well. This is command-admission settlement only. Effect
+callbacks still return `execution_uncertain`; typed effect rejection versus
+uncertain admission remains [#96](https://github.com/kortiene/switchyard/issues/96).
+
+After a Pi child has been closed, dispatch applies the same suppression rules
+as an open session. Rows that would not be sent are superseded. The restart
+error is returned only when a runtime command would still have to be delivered.
 
 Reconciliation itself does not resume Pi. Pending pause/cancel intent is processed
 first under the existing S1 suppression rules; unsent continuations are superseded
@@ -134,7 +139,7 @@ still resume the original submission. Tests restart the Host and use public Pi
 inspection to compare the original receipt, then prove it finishes without a new
 mission, attempt, or command. The product constructor selects neither crash mode.
 
-Twenty Host tests cover:
+Twenty-four Host tests cover:
 
 - crash before admission, crash after admission before Rust acknowledgement,
   repeated restarts, resumption of the original submission, and a recovery
@@ -148,6 +153,10 @@ Twenty Host tests cover:
 - stale generation, forged mission observations, unsafe integers and frame limits;
 - an idle-rejected steer settled as `rejected`, with a later continue admitted
   and resumed, including after restart;
+- `stopping` settled as `rejected`, `busy` left pending and retried, and
+  `host_command_mismatch` left pending as a guard error;
+- a successor that closes the child before the old outbox is drained, with
+  suppressed rows superseded and a still-deliverable pause left to a restart;
 - an uncertain crash-before-admission leaving the row pending and blocking a
   later steer until that row itself is acknowledged;
 - closing the Pi child when its attempt is terminal or superseded, and an

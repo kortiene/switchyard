@@ -814,3 +814,136 @@ fn acknowledged_batch_checks_more_than_32_commands() {
         .require_acknowledged_batch(&checks)
         .expect("33 acknowledged rows require a second inspect batch");
 }
+
+fn command_receipt(db: &Path, request_id: &str) -> Option<String> {
+    Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT runtime_receipt_json FROM commands WHERE request_id=?1",
+            [request_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn stopping_is_settled_as_rejected() {
+    let w = world();
+    let mut h = host(&w, "stopping-once");
+    let mission = create(&mut h, &w);
+    let start = admit(&mut h, &mission.mission_id, CommandBody::StartPlanning).unwrap();
+    assert_eq!(h.dispatch_pending(&mission.mission_id).unwrap(), 0);
+    let snap = h.snapshot(&mission.mission_id).unwrap();
+    assert!(snap.pending_commands.is_empty());
+    assert_eq!(snap.commands[0].state, "rejected");
+    assert_eq!(snap.commands[0].request_id, start.request_id);
+    let receipt = command_receipt(&w.db, &start.request_id).unwrap();
+    assert!(receipt.contains("stopping"), "{receipt}");
+    assert!(receipt.contains("\"admission\":\"rejected\""), "{receipt}");
+}
+
+#[test]
+fn host_command_mismatch_stays_pending_as_a_guard_error() {
+    let w = world();
+    let mut h = host(&w, "mismatch");
+    let mission = create(&mut h, &w);
+    let start = admit(&mut h, &mission.mission_id, CommandBody::StartPlanning).unwrap();
+    let error = h.dispatch_pending(&mission.mission_id).unwrap_err();
+    assert_eq!(error.category(), "guard_failed");
+    assert!(error.rejected_admission().is_none(), "{error}");
+    assert!(
+        error.to_string().contains("host_command_mismatch"),
+        "{error}"
+    );
+    let snap = h.snapshot(&mission.mission_id).unwrap();
+    assert_eq!(snap.pending_commands.len(), 1);
+    assert_eq!(snap.pending_commands[0].request_id, start.request_id);
+    assert_eq!(snap.commands[0].state, "pending");
+    assert!(command_receipt(&w.db, &start.request_id).is_none());
+}
+
+#[test]
+fn busy_continue_stays_pending_and_a_later_dispatch_retries_it() {
+    let w = world();
+    let mut h = host(&w, "busy-once");
+    let mission = create(&mut h, &w);
+    let start = admit(&mut h, &mission.mission_id, CommandBody::StartPlanning).unwrap();
+    assert_eq!(h.dispatch_pending(&mission.mission_id).unwrap(), 1);
+    let start_req = request(&h, &mission.mission_id, &start, "submit");
+    wait_until_terminal(&mut h, &start_req);
+    let continued = admit(
+        &mut h,
+        &mission.mission_id,
+        CommandBody::Continue {
+            activity: "planning".into(),
+        },
+    )
+    .unwrap();
+    let error = h.dispatch_pending(&mission.mission_id).unwrap_err();
+    assert_eq!(error.category(), "guard_failed");
+    assert!(error.rejected_admission().is_none(), "{error}");
+    assert!(error.to_string().contains("bridge: busy"), "{error}");
+    let blocked = h.snapshot(&mission.mission_id).unwrap();
+    assert_eq!(blocked.pending_commands.len(), 1);
+    assert_eq!(blocked.pending_commands[0].request_id, continued.request_id);
+    assert_eq!(h.dispatch_pending(&mission.mission_id).unwrap(), 1);
+    let snap = h.snapshot(&mission.mission_id).unwrap();
+    assert!(snap.pending_commands.is_empty());
+    assert_eq!(
+        snap.commands
+            .iter()
+            .find(|command| command.request_id == continued.request_id)
+            .unwrap()
+            .state,
+        "acknowledged"
+    );
+}
+
+#[test]
+fn successor_supersedes_an_undrained_outbox_and_keeps_a_deliverable_pause_pending() {
+    let w = world();
+    let mut h = host(&w, "answer");
+    let first = create(&mut h, &w);
+    admit(&mut h, &first.mission_id, CommandBody::StartPlanning).unwrap();
+    assert_eq!(h.dispatch_pending(&first.mission_id).unwrap(), 1);
+    let continued = admit(
+        &mut h,
+        &first.mission_id,
+        CommandBody::Continue {
+            activity: "planning".into(),
+        },
+    )
+    .unwrap();
+    let pause = admit(&mut h, &first.mission_id, CommandBody::Pause).unwrap();
+    Connection::open(&w.db)
+        .unwrap()
+        .execute(
+            "UPDATE missions SET phase='cancelled' WHERE id=?1",
+            [&first.mission_id],
+        )
+        .unwrap();
+    h.create_successor(&first.mission_id, "operator").unwrap();
+    let error = h.dispatch_pending(&first.mission_id).unwrap_err();
+    assert_eq!(error.category(), "guard_failed");
+    assert!(
+        error.to_string().contains("restart to dispatch it again"),
+        "{error}"
+    );
+    let snap = h.snapshot(&first.mission_id).unwrap();
+    assert_eq!(
+        snap.commands
+            .iter()
+            .find(|command| command.request_id == continued.request_id)
+            .unwrap()
+            .state,
+        "superseded"
+    );
+    let pause_row = snap
+        .commands
+        .iter()
+        .find(|command| command.request_id == pause.request_id)
+        .unwrap();
+    assert_eq!(pause_row.state, "pending");
+    assert_eq!(snap.pending_commands.len(), 1);
+    assert_eq!(snap.pending_commands[0].request_id, pause.request_id);
+}

@@ -20,7 +20,9 @@ export type Frame = { protocol: number; kind: string; id: string; binding: Bindi
 export class ProtocolError extends Error {
   category: string;
   admission: string;
-  constructor(category: string, admission = 'rejected') { super(category); this.category = category; this.admission = admission; }
+  // Unlabeled errors are not definite refusals. Callers that mean "Pi will not
+  // store this command" pass admission 'rejected' explicitly.
+  constructor(category: string, admission = 'unspecified') { super(category); this.category = category; this.admission = admission; }
 }
 
 export function canonical(value: unknown): string {

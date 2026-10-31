@@ -1588,6 +1588,169 @@ mod tests {
     }
 
     #[test]
+    fn v1_ledger_upgrade_keeps_command_rows_and_turns_foreign_keys_back_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mission.sqlite");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(include_str!("migrations/001_init.sql"))
+            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at INTEGER NOT NULL
+            );
+            INSERT INTO schema_migrations(version, applied_at) VALUES (1, 1);
+            PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO missions(
+                id, revision, phase, objective, repo_identity_json, source_issue_json,
+                resume_target, prior_phase, attention_reason, permitted_recovery_target,
+                reconcile_only, content_digest, plan_digest, plan_body, reviewed_digest,
+                successor_of_mission_id, created_at, updated_at
+            ) VALUES (
+                'm-1', 1, 'planning', 'objective', ?1, ?2,
+                NULL, NULL, NULL, NULL, 0, 'digest', NULL, NULL, NULL, NULL, 1, 1
+            )",
+            params![
+                r#"{"toplevel":"/repo","headSha":"abc","branch":"main","porcelainHash":"sha256:00"}"#,
+                r#"{"provider":"github","title":"title","number":1,"snapshotAt":0}"#,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks(id, mission_id, acceptance_criteria, root, frozen, created_at)
+             VALUES ('t-1', 'm-1', 'acceptance', 1, 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO attempts(
+                id, mission_id, task_id, base_sha, session_id, runtime_config_json, policy_json,
+                policy_hash, verifier_json, environment_json, successor_of, active, repair_count,
+                max_repairs, plan_revision_count, max_plan_revisions, created_at
+            ) VALUES (
+                'a-1', 'm-1', 't-1', 'abc', 's-1',
+                '{\"adapter\":\"fake\",\"credentials\":\"none\"}', '{}', 'h', '{}', '{}',
+                NULL, 1, 0, 1, 0, 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        for (id, seq, state, request, receipt) in [
+            ("c-pending", 1, "pending", "a-1:c-pending", None),
+            (
+                "c-ack",
+                2,
+                "acknowledged",
+                "a-1:c-ack",
+                Some(r#"{"receiptId":"r-ack"}"#),
+            ),
+            (
+                "c-old",
+                3,
+                "superseded",
+                "a-1:c-old",
+                Some(r#"{"superseded":true,"reason":"closed"}"#),
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO commands(
+                    id, mission_id, attempt_id, seq, kind, payload_canonical, payload_hash,
+                    expected_revision, resulting_revision, state, request_id, origin,
+                    runtime_receipt_json, created_at, updated_at
+                ) VALUES (
+                    ?1, 'm-1', 'a-1', ?2, 'start_planning', ?3, ?4,
+                    1, 2, ?5, ?6, 'operator', ?7, 1, 1
+                )",
+                params![
+                    id,
+                    seq,
+                    format!(r#"{{"kind":"start_planning","id":"{id}"}}"#),
+                    format!("hash-{id}"),
+                    state,
+                    request,
+                    receipt,
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let mut store = Store::open_writer(&db).unwrap();
+        store.migrate().unwrap();
+        let foreign_keys: i64 = store
+            .conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(user_version(&store.conn).unwrap(), 2);
+        let index: String = store
+            .conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='commands_mission_state'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, "commands_mission_state");
+        let rows: Vec<(String, String, String, Option<String>)> = store
+            .conn
+            .prepare(
+                "SELECT id, state, payload_hash, runtime_receipt_json
+                 FROM commands ORDER BY seq",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "c-pending".into(),
+                    "pending".into(),
+                    "hash-c-pending".into(),
+                    None,
+                ),
+                (
+                    "c-ack".into(),
+                    "acknowledged".into(),
+                    "hash-c-ack".into(),
+                    Some(r#"{"receiptId":"r-ack"}"#.into()),
+                ),
+                (
+                    "c-old".into(),
+                    "superseded".into(),
+                    "hash-c-old".into(),
+                    Some(r#"{"superseded":true,"reason":"closed"}"#.into()),
+                ),
+            ]
+        );
+        drop(store);
+
+        let host = crate::Host::open(&db).unwrap();
+        let snap = host.snapshot("m-1").unwrap();
+        let states: Vec<_> = snap
+            .commands
+            .iter()
+            .map(|command| (command.id.as_str(), command.state.as_str()))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                ("c-pending", "pending"),
+                ("c-ack", "acknowledged"),
+                ("c-old", "superseded"),
+            ]
+        );
+    }
+
+    #[test]
     fn runtime_config_mismatch_names_each_differing_key() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("mission.sqlite");

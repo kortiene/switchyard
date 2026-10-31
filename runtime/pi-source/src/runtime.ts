@@ -86,8 +86,9 @@ export class Runtime {
       if (frame.method === 'runtime.abort') return await this.abort(frame.commandId, payloadHash);
       return await this.submit(frame.commandId, frame.method!, payloadHash, params);
     } catch (error) {
-      if (error instanceof ConversationIdle) throw new ProtocolError('idle');
-      if (error instanceof ConversationBusy) throw new ProtocolError('busy');
+      if (error instanceof ConversationIdle) throw new ProtocolError('idle', 'rejected');
+      // Busy is retryable: a Continue racing a running turn is sent again later.
+      if (error instanceof ConversationBusy) throw new ProtocolError('busy', 'retry');
       throw error;
     }
   }
@@ -137,7 +138,7 @@ export class Runtime {
       const state = await tx.doc(Session);
       const command = await tx.doc(Command, commandId, null);
       if (command.hash && (command.hash !== payloadHash || command.method !== method)) throw new ProtocolError('command_conflict');
-      if (state.stopCommand) throw new ProtocolError('stopping');
+      if (state.stopCommand) throw new ProtocolError('stopping', 'rejected');
       if (command.receipt) return { receipt: command.receipt, fresh: false };
       const id = await root.submit(tx, draft);
       command.hash = payloadHash; command.method = method; command.receipt = String(id); command.settled = true;
@@ -157,7 +158,7 @@ export class Runtime {
       const command = await tx.doc(Command, commandId, null);
       if (command.hash && (command.hash !== payloadHash || command.method !== 'runtime.abort')) throw new ProtocolError('command_conflict');
       if (command.settled) return true;
-      if (state.stopCommand && state.stopCommand !== commandId) throw new ProtocolError('stopping');
+      if (state.stopCommand && state.stopCommand !== commandId) throw new ProtocolError('stopping', 'rejected');
       state.stopCommand = commandId;
       command.hash = payloadHash; command.method = 'runtime.abort'; command.receipt = commandId;
       return false;

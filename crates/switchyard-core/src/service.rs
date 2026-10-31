@@ -526,15 +526,34 @@ impl Host {
             RuntimeAdapter::Pi(runtime) if runtime.was_closed(&binding)
         );
         #[cfg(feature = "pi-contract")]
+        let mut pending = pending;
+        #[cfg(feature = "pi-contract")]
         if pi_closed {
-            if pending
-                .iter()
-                .any(|command| command.kind.is_runtime_bound())
-            {
+            // Supersede rows the closed phase would not send, then fail only if
+            // a runtime command would still have to reach the evicted child.
+            let mut kept = Vec::new();
+            let mut must_send = false;
+            for command in pending {
+                if command.kind.is_runtime_bound()
+                    && suppress_pending(mission.phase, command.kind, admitted_runtime_work)
+                {
+                    self.store.supersede_pending(
+                        &command.id,
+                        "admission closed before the runtime accepted this command",
+                    )?;
+                    continue;
+                }
+                if command.kind.is_runtime_bound() {
+                    must_send = true;
+                }
+                kept.push(command);
+            }
+            if must_send {
                 return Err(Error::guard(
                     "Pi session was closed for this host generation; restart to dispatch it again",
                 ));
             }
+            pending = kept;
         } else if let RuntimeAdapter::Pi(runtime) = &mut self.runtime {
             let initialized = self.store.runtime_initialized(&mission.attempt.id)?;
             runtime.open(&binding, initialized)?;
