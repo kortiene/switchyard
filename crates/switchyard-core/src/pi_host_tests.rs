@@ -519,8 +519,6 @@ fn one_host_dispatches_a_successor_attempt_on_its_own_bridge() {
     assert!(snap_b.commands[0].receipt_id.is_some());
     let binding_a = h.binding(&h.store.load_mission(&first.mission_id).unwrap());
     let binding_b = h.binding(&h.store.load_mission(&second.mission_id).unwrap());
-    let req = request(&h, &first.mission_id, &start_a, "submit");
-    assert!(first_receipt(&mut h, &req)["receipt"]["receipt"].is_string());
     let db_a = pi(&mut h).database(&binding_a);
     let db_b = pi(&mut h).database(&binding_b);
     assert!(db_a.is_file());
@@ -597,4 +595,222 @@ fn crash_after_admission_replay_keeps_the_fixture_and_does_not_sigkill() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert_eq!(counts(&w), (1, 1, 1));
+}
+
+fn wait_until_terminal(host: &mut Host, req: &RuntimeRequest) -> Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let state = first_receipt(host, req);
+        if state["status"] == "done" || state["status"] == "unanswered" {
+            return state;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "submission did not settle: {state}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn process_alive(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[test]
+fn idle_rejected_steer_is_settled_and_later_work_resumes() {
+    let w = world();
+    let mut h = host(&w, "answer");
+    let mission = create(&mut h, &w);
+    let start = admit(&mut h, &mission.mission_id, CommandBody::StartPlanning).unwrap();
+    assert_eq!(h.dispatch_pending(&mission.mission_id).unwrap(), 1);
+    let start_req = request(&h, &mission.mission_id, &start, "submit");
+    wait_until_terminal(&mut h, &start_req);
+    let steer = admit(
+        &mut h,
+        &mission.mission_id,
+        CommandBody::Steer {
+            content: "adjust the plan".into(),
+        },
+    )
+    .unwrap();
+    let continued = admit(
+        &mut h,
+        &mission.mission_id,
+        CommandBody::Continue {
+            activity: "planning".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(h.dispatch_pending(&mission.mission_id).unwrap(), 1);
+    let snap = h.snapshot(&mission.mission_id).unwrap();
+    let steer_row = snap
+        .commands
+        .iter()
+        .find(|command| command.request_id == steer.request_id)
+        .unwrap();
+    let continue_row = snap
+        .commands
+        .iter()
+        .find(|command| command.request_id == continued.request_id)
+        .unwrap();
+    assert_eq!(steer_row.state, "rejected");
+    assert!(steer_row.receipt_id.is_none());
+    assert_eq!(continue_row.state, "acknowledged");
+    assert!(snap.pending_commands.is_empty());
+    let continue_req = request(&h, &mission.mission_id, &continued, "submit");
+    wait_until_terminal(&mut h, &continue_req);
+    drop(h);
+
+    let mut h = host(&w, "recover");
+    let after = h.recover(&mission.mission_id).unwrap();
+    assert!(after.pending_commands.is_empty());
+    assert_eq!(
+        after
+            .commands
+            .iter()
+            .find(|command| command.request_id == steer.request_id)
+            .unwrap()
+            .state,
+        "rejected"
+    );
+    assert_eq!(
+        after
+            .commands
+            .iter()
+            .find(|command| command.request_id == continued.request_id)
+            .unwrap()
+            .state,
+        "acknowledged"
+    );
+    assert_eq!(
+        after
+            .commands
+            .iter()
+            .find(|command| command.request_id == start.request_id)
+            .unwrap()
+            .receipt_id
+            .as_deref(),
+        snap.commands
+            .iter()
+            .find(|command| command.request_id == start.request_id)
+            .unwrap()
+            .receipt_id
+            .as_deref()
+    );
+}
+
+#[test]
+fn uncertain_admission_stays_pending_and_blocks_later_commands() {
+    let w = world();
+    let mut h = host(&w, "crash-before-admission");
+    let mission = create(&mut h, &w);
+    let start = admit(&mut h, &mission.mission_id, CommandBody::StartPlanning).unwrap();
+    let steer = admit(
+        &mut h,
+        &mission.mission_id,
+        CommandBody::Steer {
+            content: "too soon".into(),
+        },
+    )
+    .unwrap();
+    let error = h.dispatch_pending(&mission.mission_id).unwrap_err();
+    assert!(error.rejected_admission().is_none(), "{error}");
+    let blocked = h.snapshot(&mission.mission_id).unwrap();
+    assert_eq!(blocked.pending_commands.len(), 2);
+    assert!(
+        blocked
+            .commands
+            .iter()
+            .all(|command| command.state == "pending")
+    );
+    drop(h);
+
+    let mut h = host(&w, "recover");
+    let recovered = h.recover(&mission.mission_id);
+    let snap = h.snapshot(&mission.mission_id).unwrap();
+    let start_row = snap
+        .commands
+        .iter()
+        .find(|command| command.request_id == start.request_id)
+        .unwrap();
+    assert_eq!(start_row.state, "acknowledged");
+    assert_ne!(start_row.state, "rejected");
+    let steer_row = snap
+        .commands
+        .iter()
+        .find(|command| command.request_id == steer.request_id)
+        .unwrap();
+    assert_ne!(steer_row.state, "acknowledged");
+    if recovered.is_err() {
+        assert_eq!(steer_row.state, "pending");
+    } else {
+        assert!(snap.pending_commands.is_empty());
+        assert_eq!(steer_row.state, "rejected");
+    }
+}
+
+#[test]
+fn terminal_or_superseded_attempt_closes_its_pi_child() {
+    let w = world();
+    let mut h = host(&w, "answer");
+    let first = create(&mut h, &w);
+    admit(&mut h, &first.mission_id, CommandBody::StartPlanning).unwrap();
+    assert_eq!(h.dispatch_pending(&first.mission_id).unwrap(), 1);
+    let binding = h.binding(&h.store.load_mission(&first.mission_id).unwrap());
+    let pid = pi(&mut h).process_id(&binding).expect("child");
+    assert!(process_alive(pid));
+    Connection::open(&w.db)
+        .unwrap()
+        .execute(
+            "UPDATE missions SET phase='cancelled' WHERE id=?1",
+            [&first.mission_id],
+        )
+        .unwrap();
+    let second = h.create_successor(&first.mission_id, "operator").unwrap();
+    assert!(!process_alive(pid), "terminal attempt kept pid {pid}");
+    assert!(pi(&mut h).process_id(&binding).is_none());
+    assert!(pi(&mut h).database(&binding).is_file());
+    admit(&mut h, &second.mission_id, CommandBody::StartPlanning).unwrap();
+    assert_eq!(h.dispatch_pending(&second.mission_id).unwrap(), 1);
+    let successor = h.binding(&h.store.load_mission(&second.mission_id).unwrap());
+    let successor_pid = pi(&mut h).process_id(&successor).expect("successor child");
+    assert_ne!(successor_pid, pid);
+    assert!(process_alive(successor_pid));
+    assert!(!process_alive(pid));
+}
+
+#[test]
+fn acknowledged_batch_checks_more_than_32_commands() {
+    let w = world();
+    let mut h = host(&w, "answer");
+    let mission = create(&mut h, &w);
+    let binding = h.binding(&h.store.load_mission(&mission.mission_id).unwrap());
+    pi(&mut h).open(&binding, false).unwrap();
+    let mut checks = Vec::new();
+    for index in 0..33 {
+        let payload = CommandBody::Pause.payload(&mission.mission_id, &mission.attempt_id);
+        let request = RuntimeRequest {
+            binding: binding.clone(),
+            request_id: format!("pause-{index}"),
+            payload_hash: payload_hash(&payload).unwrap(),
+            method: "abort",
+        };
+        let receipt = pi(&mut h).dispatch(&request, &payload).unwrap();
+        checks.push(crate::execution::AcknowledgedCheck {
+            request,
+            payload,
+            recorded: Some(
+                json!({
+                    "receiptId": receipt.receipt_id,
+                    "requestId": receipt.request_id,
+                    "payloadHash": receipt.payload_hash,
+                    "adapter": "pi-probe-v1",
+                })
+                .to_string(),
+            ),
+        });
+    }
+    pi(&mut h)
+        .require_acknowledged_batch(&checks)
+        .expect("33 acknowledged rows require a second inspect batch");
 }

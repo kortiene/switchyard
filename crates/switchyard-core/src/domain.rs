@@ -274,6 +274,8 @@ pub enum CommandState {
     Acknowledged,
     Reconciled,
     Superseded,
+    /// Pi refused admission and stored no receipt. Not retried.
+    Rejected,
 }
 
 impl CommandState {
@@ -283,6 +285,7 @@ impl CommandState {
             Self::Acknowledged => "acknowledged",
             Self::Reconciled => "reconciled",
             Self::Superseded => "superseded",
+            Self::Rejected => "rejected",
         }
     }
 }
@@ -296,6 +299,7 @@ impl FromStr for CommandState {
             "acknowledged" => Ok(Self::Acknowledged),
             "reconciled" => Ok(Self::Reconciled),
             "superseded" => Ok(Self::Superseded),
+            "rejected" => Ok(Self::Rejected),
             other => Err(Error::storage(format!("unknown command state {other}"))),
         }
     }

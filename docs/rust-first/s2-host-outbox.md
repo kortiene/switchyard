@@ -10,6 +10,9 @@ It does not enable live model calls, workspace effects, or a product runtime.
 `Host::open` and the product CLI still select FakeRuntime. With `pi-contract`,
 `Host::open_pi_probe(ledger, node)` explicitly selects the bundled faux launcher.
 The runtime enum is internal; there is no new plugin or provider framework.
+Both constructors take the owner lock before opening the runtime.
+`FakeRuntime::open` loads its journal only after that lock, because `persist`
+rewrites the whole journal from the in-memory snapshot.
 Each ledger records one adapter configuration in its existing attempt snapshots.
 Opening a ledger with a different adapter, source, Node pin, or bridge fingerprint
 fails before generation advancement. Existing fake ledgers keep their original
@@ -67,6 +70,12 @@ session that is already open in this process fails closed; it does not replace
 the child or the storage file. Restarting the Host starts a new generation and
 new children. `Host::open` and the product CLI stay on FakeRuntime.
 
+When an open attempt becomes terminal, or another attempt records it as
+`successor_of`, the Host drops that session's child. Drop kills and reaps the
+process and releases its sqlite lock. The session file stays on disk for a
+later owner. A planning session that is still the active attempt is left
+running.
+
 1. Open Pi inertly and validate its pinned handshake and persisted session binding.
 2. Commit `sessionInitialized: true` in the attempt's existing runtime config.
 3. Only then inspect or dispatch outbox commands.
@@ -88,6 +97,17 @@ lookup before deciding whether dispatch is necessary. An existing settled receip
 must match the method and full mapped payload; it is recorded in the original
 Rust command row. An incomplete abort is replayed to settle, never acknowledged
 prematurely. Uncertain transport failures leave the row pending.
+
+A Pi response with `admission: "rejected"` and no stored receipt is a definite
+admission refusal (`idle`, `busy`, `stopping`, and any other rejected category
+that did not store a command). The Host records that row as `rejected` with
+`admission: rejected` and the Pi category, then continues the outbox. Recovery
+does not retry it, so a later command and scheduling resume are reachable.
+`command_conflict` and any refusal that already has a receipt stay fail-closed.
+Transport loss, a missing `admission` field, and `admission: "uncertain"` leave
+the row pending. This is command-admission settlement only. Effect callbacks
+still return `execution_uncertain`; typed effect rejection versus uncertain
+admission remains [#96](https://github.com/kortiene/switchyard/issues/96).
 
 Reconciliation itself does not resume Pi. Pending pause/cancel intent is processed
 first under the existing S1 suppression rules; unsent continuations are superseded
@@ -114,7 +134,7 @@ still resume the original submission. Tests restart the Host and use public Pi
 inspection to compare the original receipt, then prove it finishes without a new
 mission, attempt, or command. The product constructor selects neither crash mode.
 
-Sixteen Host tests cover:
+Twenty Host tests cover:
 
 - crash before admission, crash after admission before Rust acknowledgement,
   repeated restarts, resumption of the original submission, and a recovery
@@ -126,6 +146,12 @@ Sixteen Host tests cover:
 - changed canonical content with a valid but conflicting hash;
 - missing, empty, corrupt and incompatible storage/configuration;
 - stale generation, forged mission observations, unsafe integers and frame limits;
+- an idle-rejected steer settled as `rejected`, with a later continue admitted
+  and resumed, including after restart;
+- an uncertain crash-before-admission leaving the row pending and blocking a
+  later steer until that row itself is acknowledged;
+- closing the Pi child when its attempt is terminal or superseded, and an
+  acknowledgement batch larger than the 32-id inspect cap;
 - uncertain effects blocking both fresh dispatch and recovered scheduling;
 - an acknowledged Rust command absent in Pi;
 - interruption after inert session open but before the Rust initialization marker.

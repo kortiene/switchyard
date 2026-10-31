@@ -230,8 +230,11 @@ pub fn canonical_db_path(path: &Path) -> Result<PathBuf> {
 impl Host {
     pub fn open(db_path: &Path) -> Result<Self> {
         let db_path = canonical_db_path(db_path)?;
-        let runtime = RuntimeAdapter::Fake(FakeRuntime::open(&journal_path(&db_path))?);
-        Self::open_with_runtime(&db_path, runtime)
+        Self::open_with_runtime(&db_path, |db_path| {
+            Ok(RuntimeAdapter::Fake(FakeRuntime::open(&journal_path(
+                db_path,
+            ))?))
+        })
     }
 
     /// Explicit, credential-free S2-A probe. Uses the committed faux launcher;
@@ -240,13 +243,23 @@ impl Host {
     #[cfg(feature = "pi-contract")]
     pub fn open_pi_probe(db_path: &Path, node: &Path) -> Result<Self> {
         let db_path = canonical_db_path(db_path)?;
-        let runtime =
-            RuntimeAdapter::Pi(Box::new(crate::execution::PiRuntime::new(&db_path, node)?));
-        Self::open_with_runtime(&db_path, runtime)
+        let node = node.to_path_buf();
+        Self::open_with_runtime(&db_path, |db_path| {
+            Ok(RuntimeAdapter::Pi(Box::new(
+                crate::execution::PiRuntime::new(db_path, &node)?,
+            )))
+        })
     }
 
-    fn open_with_runtime(db_path: &Path, runtime: RuntimeAdapter) -> Result<Self> {
+    /// Acquire the owner lock before constructing the runtime. `FakeRuntime::open`
+    /// loads the journal into memory, and `persist` rewrites that whole file.
+    /// Loading first would let a handoff keep a stale snapshot.
+    fn open_with_runtime(
+        db_path: &Path,
+        open_runtime: impl FnOnce(&Path) -> Result<RuntimeAdapter>,
+    ) -> Result<Self> {
         let mut lock = try_acquire(db_path)?;
+        let runtime = open_runtime(db_path)?;
         let mut store = Store::open_writer(db_path)?;
         store.migrate()?;
         store.require_runtime_config(&runtime.configuration())?;
@@ -360,6 +373,8 @@ impl Host {
                 "successor creation modified the terminal mission",
             ));
         }
+        #[cfg(feature = "pi-contract")]
+        self.release_finished_sessions()?;
         self.snapshot(&id)
     }
 
@@ -506,7 +521,21 @@ impl Host {
         let binding = self.binding(&mission);
         self.accept_runtime_binding(&binding, mission_id)?;
         #[cfg(feature = "pi-contract")]
-        if let RuntimeAdapter::Pi(runtime) = &mut self.runtime {
+        let pi_closed = matches!(
+            &self.runtime,
+            RuntimeAdapter::Pi(runtime) if runtime.was_closed(&binding)
+        );
+        #[cfg(feature = "pi-contract")]
+        if pi_closed {
+            if pending
+                .iter()
+                .any(|command| command.kind.is_runtime_bound())
+            {
+                return Err(Error::guard(
+                    "Pi session was closed for this host generation; restart to dispatch it again",
+                ));
+            }
+        } else if let RuntimeAdapter::Pi(runtime) = &mut self.runtime {
             let initialized = self.store.runtime_initialized(&mission.attempt.id)?;
             runtime.open(&binding, initialized)?;
             if !initialized {
@@ -573,7 +602,26 @@ impl Host {
             {
                 return Err(Error::guard("uncertain effects block Pi dispatch"));
             }
-            let receipt = self.runtime.dispatch(&request, &payload)?;
+            let receipt = match self.runtime.dispatch(&request, &payload) {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    let Some(category) = error.rejected_admission().map(str::to_string) else {
+                        return Err(error);
+                    };
+                    // Confirm Pi stored nothing. A receipt or a conflict stays
+                    // fail-closed; only a definite refusal is settled.
+                    match self.runtime.reconcile(&request, &payload)? {
+                        Some(receipt) => receipt,
+                        None => {
+                            self.store.reject_pending(
+                                &command.id,
+                                &rejection_json(&category, self.runtime.name()),
+                            )?;
+                            continue;
+                        }
+                    }
+                }
+            };
             self.store
                 .acknowledge(&command.id, &receipt_json(&receipt, self.runtime.name()))?;
             admitted_runtime_work |= is_runtime_work(command.kind);
@@ -581,6 +629,8 @@ impl Host {
         }
         #[cfg(feature = "pi-contract")]
         self.resume_reconciled_pi(&mission)?;
+        #[cfg(feature = "pi-contract")]
+        self.release_finished_sessions()?;
         Ok(dispatched)
     }
 
@@ -635,6 +685,34 @@ impl Host {
         let resumed = runtime.dispatch(&request, &payload)?;
         if resumed != original {
             return Err(Error::guard("Pi replay changed the original receipt"));
+        }
+        Ok(())
+    }
+
+    /// Drop Pi children whose attempt is terminal or has been superseded.
+    /// The sqlite file stays; only the process and its lock are released.
+    #[cfg(feature = "pi-contract")]
+    fn release_finished_sessions(&mut self) -> Result<()> {
+        let open = match &self.runtime {
+            RuntimeAdapter::Pi(runtime) => runtime.open_bindings(),
+            RuntimeAdapter::Fake(_) => return Ok(()),
+        };
+        let mut finished = Vec::new();
+        for binding in open {
+            let mission = self.store.load_mission(&binding.mission_id)?;
+            let superseded = self.store.attempt_has_successor(&binding.attempt_id)?;
+            if mission.phase.is_terminal()
+                || superseded
+                || mission.attempt.id != binding.attempt_id
+                || mission.attempt.session_id != binding.session_id
+            {
+                finished.push(binding);
+            }
+        }
+        if let RuntimeAdapter::Pi(runtime) = &mut self.runtime {
+            for binding in &finished {
+                runtime.evict(binding);
+            }
         }
         Ok(())
     }
@@ -1499,6 +1577,16 @@ fn runtime_method(kind: CommandKind) -> &'static str {
         CommandKind::Steer => "steer",
         _ => "submit",
     }
+}
+
+fn rejection_json(category: &str, adapter: &str) -> String {
+    json!({
+        "admission": "rejected",
+        "category": category,
+        "adapter": adapter,
+        "credentials": "none",
+    })
+    .to_string()
 }
 
 fn receipt_json(receipt: &RuntimeReceipt, adapter: &str) -> String {

@@ -1,4 +1,4 @@
-use super::fixtures::{admit_expect, create, fingerprint, git, git_out, open_world};
+use super::fixtures::{admit, admit_expect, create, fingerprint, git, git_out, open_world};
 use crate::{CommandBody, Host, Phase};
 
 #[test]
@@ -25,6 +25,64 @@ fn second_active_owner_is_rejected_and_inspection_does_not_take_the_lock() {
     std::fs::remove_file(crate::execution::lock_path(&world.db)).unwrap();
     let _ = Host::inspect(&world.db, Some(&created.mission_id)).unwrap();
     assert!(!crate::execution::lock_path(&world.db).exists());
+}
+
+#[test]
+fn incoming_host_sees_the_outgoing_hosts_latest_journal() {
+    let world = open_world();
+    let mut outgoing = Host::open(&world.db).unwrap();
+    let created = create(&mut outgoing, &world.repo, 1);
+    let admitted = admit(
+        &mut outgoing,
+        &created.mission_id,
+        CommandBody::StartPlanning,
+    );
+    outgoing.dispatch_pending(&created.mission_id).unwrap();
+    let receipt = outgoing
+        .runtime_mut()
+        .unwrap()
+        .stored_receipt(&admitted.request_id)
+        .expect("outgoing admission");
+    match Host::open(&world.db) {
+        Err(error) => assert_eq!(error.category(), "second_active_owner"),
+        Ok(_) => panic!("incoming host acquired the lock while the owner still held it"),
+    }
+    drop(outgoing);
+
+    let mut incoming = Host::open(&world.db).unwrap();
+    let stored = incoming
+        .runtime_mut()
+        .unwrap()
+        .stored_receipt(&admitted.request_id)
+        .expect("journal loaded after the lock");
+    assert_eq!(stored, receipt);
+    let continued = admit(
+        &mut incoming,
+        &created.mission_id,
+        CommandBody::Continue {
+            activity: "planning".into(),
+        },
+    );
+    incoming.dispatch_pending(&created.mission_id).unwrap();
+    assert_eq!(
+        incoming
+            .runtime_mut()
+            .unwrap()
+            .stored_receipt(&admitted.request_id)
+            .expect("persist kept the outgoing receipt")
+            .receipt_id,
+        receipt.receipt_id
+    );
+    assert!(
+        incoming
+            .runtime_mut()
+            .unwrap()
+            .stored_receipt(&continued.request_id)
+            .is_some()
+    );
+    let journal = std::fs::read_to_string(crate::journal_path(&world.db)).unwrap();
+    assert!(journal.contains(&receipt.receipt_id), "{journal}");
+    assert!(journal.contains(&continued.request_id), "{journal}");
 }
 
 #[test]

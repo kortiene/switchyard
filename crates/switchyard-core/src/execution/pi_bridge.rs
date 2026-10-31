@@ -245,8 +245,13 @@ impl PiBridge {
         params: Value,
         effect: &mut dyn FnMut(&Value) -> Result<Value>,
     ) -> Result<Value> {
-        self.call_inner(method, command_id, params, effect)
-            .map_err(|error| self.failure(error))
+        match self.call_inner(method, command_id, params, effect) {
+            Ok(value) => Ok(value),
+            // A definite protocol refusal is a complete response. Killing the
+            // peer would turn it into a transport failure and wedge later rows.
+            Err(error) if error.rejected_admission().is_some() => Err(error),
+            Err(error) => Err(self.failure(error)),
+        }
     }
 
     fn call_inner(
@@ -337,10 +342,16 @@ impl PiBridge {
                 return Err(Error::guard("unexpected bridge response"));
             }
             if let Some(error) = frame.get("error") {
-                return Err(Error::guard(format!(
-                    "bridge: {}",
-                    text(error, "category")?
-                )));
+                let category = text(error, "category")?;
+                // Missing admission is uncertain. Only an explicit rejected
+                // admission is a definite refusal; the peer stays up for it.
+                let admission = error.get("admission").and_then(Value::as_str);
+                if admission == Some("rejected") {
+                    return Err(Error::AdmissionRejected {
+                        category: category.to_string(),
+                    });
+                }
+                return Err(Error::guard(format!("bridge: {category}")));
             }
             let result = frame["result"].clone();
             safe_json(&result)?;

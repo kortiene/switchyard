@@ -91,7 +91,7 @@ impl Store {
                 detail: "database is not initialized".into(),
             });
         }
-        if version > 1 {
+        if version > 2 {
             return Err(Error::Storage {
                 detail: format!("database schema version {version} is newer than this host"),
             });
@@ -233,7 +233,7 @@ impl Store {
                 |row| row.get(0),
             )
             .map_err(Error::storage)?;
-        if current > 1 {
+        if current > 2 {
             return Err(Error::Storage {
                 detail: format!("database schema version {current} is newer than this host"),
             });
@@ -250,6 +250,27 @@ impl Store {
             tx.execute_batch("PRAGMA user_version = 1;")
                 .map_err(Error::storage)?;
             tx.commit().map_err(Error::storage)?;
+        }
+        if current < 2 {
+            // Rebuild commands so a definite admission refusal can be stored.
+            // foreign_keys cannot change inside a transaction.
+            self.conn
+                .execute_batch("PRAGMA foreign_keys=OFF;")
+                .map_err(Error::storage)?;
+            let tx = self.immediate()?;
+            tx.execute_batch(include_str!("migrations/002_rejected_command.sql"))
+                .map_err(Error::storage)?;
+            tx.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (2, ?1)",
+                [now_ms()],
+            )
+            .map_err(Error::storage)?;
+            tx.execute_batch("PRAGMA user_version = 2;")
+                .map_err(Error::storage)?;
+            tx.commit().map_err(Error::storage)?;
+            self.conn
+                .execute_batch("PRAGMA foreign_keys=ON;")
+                .map_err(Error::storage)?;
         }
         Ok(())
     }
@@ -727,6 +748,50 @@ impl Store {
         }
         tx.commit().map_err(Error::storage)?;
         Ok(())
+    }
+
+    /// Record that Pi refused this pending command and stored no receipt.
+    pub fn reject_pending(&mut self, command_id: &str, receipt_json: &str) -> Result<()> {
+        let tx = self.immediate()?;
+        let changed = tx
+            .execute(
+                "UPDATE commands SET state = 'rejected', runtime_receipt_json = ?1, updated_at = ?2
+                 WHERE id = ?3 AND state = 'pending'",
+                params![receipt_json, now_ms(), command_id],
+            )
+            .map_err(Error::storage)?;
+        if changed != 1 {
+            let state: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM commands WHERE id = ?1",
+                    params![command_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(Error::storage)?;
+            if state.as_deref() == Some("rejected") {
+                tx.commit().map_err(Error::storage)?;
+                return Ok(());
+            }
+            return Err(Error::Storage {
+                detail: format!("command {command_id} could not be rejected"),
+            });
+        }
+        tx.commit().map_err(Error::storage)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "pi-contract")]
+    pub fn attempt_has_successor(&self, attempt_id: &str) -> Result<bool> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM attempts WHERE successor_of = ?1",
+                [attempt_id],
+                |row| row.get(0),
+            )
+            .map_err(Error::storage)?;
+        Ok(count > 0)
     }
 
     pub fn observe_content(

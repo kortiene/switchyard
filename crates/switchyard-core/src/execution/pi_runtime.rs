@@ -1,6 +1,6 @@
 //! Feature-gated S1 outbox adapter for the credential-free Pi probe.
 //! Inspect first; never resume a recovered submission merely to learn its receipt.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -31,7 +31,10 @@ pub(crate) struct PiRuntime {
     directory: PathBuf,
     /// Keyed by session id: that id also names the sqlite file, so each mission
     /// or attempt gets its own child. The child stores the full binding.
+    /// Terminal and superseded attempts are removed so the child is reaped.
     sessions: BTreeMap<String, BoundSession>,
+    /// Sessions closed in this process. Pi will not accept the same generation again.
+    closed: BTreeSet<String>,
     pub(crate) fixture: &'static str,
 }
 
@@ -44,6 +47,7 @@ impl PiRuntime {
             node,
             directory: directory.into(),
             sessions: BTreeMap::new(),
+            closed: BTreeSet::new(),
             fixture: "answer",
         })
     }
@@ -115,6 +119,45 @@ impl PiRuntime {
         self.sessions
             .get(&binding.session_id)
             .is_some_and(|session| session.bridge.binding() == binding && session.needs_resume)
+    }
+
+    pub(crate) fn open_bindings(&self) -> Vec<RuntimeBinding> {
+        self.sessions
+            .values()
+            .map(|session| session.bridge.binding().clone())
+            .collect()
+    }
+
+    /// Kill and reap this session's child and drop its sqlite lock.
+    /// The storage file is left in place.
+    pub(crate) fn evict(&mut self, binding: &RuntimeBinding) -> bool {
+        let Some(session) = self.sessions.get(&binding.session_id) else {
+            return false;
+        };
+        if session.bridge.binding() != binding {
+            return false;
+        }
+        let mut session = self
+            .sessions
+            .remove(&binding.session_id)
+            .expect("session was present");
+        session.bridge.terminate();
+        self.closed.insert(binding.session_id.clone());
+        true
+    }
+
+    /// This process already reaped the child. Pi rejects another open at the
+    /// same generation, so the caller must not spawn a replacement.
+    pub(crate) fn was_closed(&self, binding: &RuntimeBinding) -> bool {
+        self.closed.contains(&binding.session_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn process_id(&self, binding: &RuntimeBinding) -> Option<u32> {
+        self.sessions
+            .get(&binding.session_id)
+            .filter(|session| session.bridge.binding() == binding)
+            .map(|session| session.bridge.process_id())
     }
 
     #[cfg(test)]
