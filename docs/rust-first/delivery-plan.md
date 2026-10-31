@@ -111,16 +111,16 @@ Planning snapshot (2026-10-28): eight of these issues were open, and the reposit
 
 | Existing issue | Disposition aligned with #109 |
 | --- | --- |
-| [#28](https://github.com/kortiene/switchyard/issues/28) — fenced-output sample | Legacy/deferred. Retained open, with no M1 dependency and no new TypeScript feature investment. |
-| [#30](https://github.com/kortiene/switchyard/issues/30) — nudge rate | Legacy/deferred. Retained open as prior cost/latency evidence, with no M1 dependency and no new TypeScript feature investment. |
+| [#28](https://github.com/kortiene/switchyard/issues/28) — fenced-output sample | Closed 2026-10-30 as not planned. Frozen TypeScript work; historical evidence retained, not completed. No M1 dependency. |
+| [#30](https://github.com/kortiene/switchyard/issues/30) — nudge rate | Closed 2026-10-30 as not planned. Prior cost/latency evidence retained, not completed. No M1 dependency. |
 | [#34](https://github.com/kortiene/switchyard/issues/34) — Python/TS cutover | Closed 2026-10-30 as not planned. The 2026-10-29 Rust direction supersedes the old cutover. Not marked completed. Closing it does not authorize deleting `adw/` or `adw_sdlc/`. State v1 stays frozen: no further changes, no new consumers. |
-| [#38](https://github.com/kortiene/switchyard/issues/38) — TS linter | Legacy/deferred. Retained open, with no M1 dependency and no new TypeScript feature investment. Bridge checks keep their own explicit scope. |
-| [#40](https://github.com/kortiene/switchyard/issues/40) — Pi TUI tests | Legacy/deferred. Retained open. Existing Cockpit work is not S7, and this track does not add TypeScript feature investment. |
+| [#38](https://github.com/kortiene/switchyard/issues/38) — TS linter | Closed 2026-10-30 as not planned. Frozen TypeScript work, not completed. Bridge checks keep their own explicit scope. |
+| [#40](https://github.com/kortiene/switchyard/issues/40) — Pi TUI tests | Closed 2026-10-30 as not planned. Frozen Cockpit work, not completed or replaced by S7 in this cleanup. |
 | [#42](https://github.com/kortiene/switchyard/issues/42) — provider code plugins | Deferred and demand-gated. No implementation in the consolidation track. Distinct from a bundled trusted Pi adapter. |
 | [#43](https://github.com/kortiene/switchyard/issues/43) — provider extension tail | Deferred and demand-gated. No implementation in the consolidation track. M1 has one GitHub delivery path. |
 | [#44](https://github.com/kortiene/switchyard/issues/44) — institutional memory | Deferred and demand-gated. No implementation in the consolidation track. Beyond M1. |
 
-Preserve historical issue bodies. If this table and #109 diverge, update #109 rather than growing a second queue here.
+Preserve historical issue bodies. Reconcile this dated table with #109 when status changes; keep delivery sequencing in #109 rather than growing a second queue here.
 
 Reuse behavior and test cases from the existing implementation where relevant: secret allowlists, Git ownership, worktree reconciliation, dry-run expectations, bounded repair and structured errors. Do not port the entire phase engine, generalized provider framework, or all runner backends before demonstrating one mission.
 

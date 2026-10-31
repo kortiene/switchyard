@@ -9,11 +9,12 @@ parent [#94](https://github.com/kortiene/switchyard/issues/94).
 [#106](https://github.com/kortiene/switchyard/pull/106) merged this published-package
 NO-GO. [#107](https://github.com/kortiene/switchyard/pull/107) merged the pinned
 source candidate in `runtime/pi-source/`; its verdict is `NEEDS-FULL-S2`.
-[#108](https://github.com/kortiene/switchyard/pull/108) is an open draft with
-partial bridge probes. It is not merged, and it is not S2 acceptance or live
+[#108](https://github.com/kortiene/switchyard/pull/108) is open and ready for review with
+partial bridge probes. Its diagnostic finding is corrected and re-reviewed.
+It is not merged, and it is not S2 acceptance or live
 execution. [#96](https://github.com/kortiene/switchyard/issues/96) remains
 **NO-GO** until the complete gate in that issue passes. This section is the
-status to update when that draft moves. This note does not execute the gate and
+status to update when that PR moves. This note does not execute the gate and
 does not claim GO or live execution. The 2026-10-29 evidence below stays as
 recorded.
 
