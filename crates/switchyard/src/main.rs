@@ -30,6 +30,33 @@ enum Command {
 
 #[derive(Subcommand)]
 enum MissionCommand {
+    /// Audit an uncertain effect without clearing its block or replaying it.
+    /// The mission stays blocked in needs_attention. You can request cancel,
+    /// but unresolved effects still prevent cancellation from completing.
+    /// Lifting the block requires a future evidence protocol (#125).
+    /// Reuse command ID and all arguments after a lost response.
+    AbandonExecution {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        mission: String,
+        #[arg(long)]
+        attempt: String,
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        payload_hash: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        command_id: String,
+        #[arg(long)]
+        actor: String,
+        #[arg(long)]
+        rationale: String,
+    },
     /// Create or reopen this attempt's owned worktree. Does not execute agent commands.
     Workspace {
         #[arg(long)]
@@ -182,6 +209,41 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> switchyard_core::Result<Value> {
     match cli.command {
         Command::Mission { action } => match action {
+            MissionCommand::AbandonExecution {
+                db,
+                mission,
+                attempt,
+                session,
+                operation_id,
+                payload_hash,
+                expected_revision,
+                command_id,
+                actor,
+                rationale,
+            } => {
+                let mut host = Host::open(&db)?;
+                let audit =
+                    host.resolve_fake_execution(&switchyard_core::ExecutionResolutionRequest {
+                        command_id,
+                        binding: switchyard_core::RuntimeBinding {
+                            mission_id: mission.clone(),
+                            attempt_id: attempt,
+                            session_id: session,
+                            generation: host.generation(),
+                        },
+                        operation_id,
+                        payload_hash,
+                        expected_revision,
+                        actor,
+                        rationale,
+                        decision: switchyard_core::ExecutionResolutionDecision::Abandon,
+                    })?;
+                Ok(
+                    json!({"ok":true, "resolution":audit, "executionBlockRetained":true,
+                    "nextSteps":"The execution block remains. On abandonment the mission stays in needs_attention. You can request cancel, but unresolved effects prevent cancellation from completing. Lifting the block requires a future evidence protocol (#125).",
+                    "mission":host.snapshot(&mission)?.to_json()}),
+                )
+            }
             MissionCommand::Workspace {
                 db,
                 mission,

@@ -43,7 +43,7 @@ hash, starting generation and state. The older generic `settle_operation` API
 cannot complete these effects. Unfinished execution effects participate in the
 existing `ops_blocked` policy gates. Read-only inspection of v1–v3 remains
 supported without migration. v4 databases remain inspectable and upgrade
-forward to v5.
+forward through v6 (the additive operator-decision journal).
 
 | Boundary | Recovery behavior |
 | --- | --- |
@@ -109,6 +109,7 @@ operator resolution/abandonment path and is a prerequisite for enabling a real
 ExecutionEnv backend. Resolution must retain intent/history, require current
 ownership and matching evidence, prove writer quiescence and record an auditable,
 idempotent operator decision. Abandonment must not manufacture proof that an
-effect never happened or allow blind replay under a new ID. Until that contract
-is delivered, uncertain effects remain blocked; the generic S1 settlement API
-is not an escape hatch.
+effect never happened or allow blind replay under a new ID. The first
+[simulation-only resolution implementation](s3-execution-resolution.md) records
+Host-proven outcomes or a blocking abandonment decision. Real-backend evidence
+and quiescence remain open in #125; generic S1 settlement is not an escape hatch.

@@ -549,3 +549,142 @@ fn ledger_text(db: &Path) -> String {
     }
     String::from_utf8_lossy(&bytes).into_owned()
 }
+
+#[test]
+fn abandon_execution_is_audited_idempotently_and_keeps_the_block() {
+    use switchyard_core::*;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    let root = tmp.path().join("workspaces");
+    init_repo(&repo);
+    std::fs::create_dir(&root).unwrap();
+    let mut host = Host::open(&db).unwrap();
+    let m = host
+        .create_mission(CreateMission {
+            repo,
+            issue_number: 125,
+            issue_title: "resolution".into(),
+            objective: "audit".into(),
+            acceptance: "retain block".into(),
+            actor: "operator".into(),
+            max_repairs: 1,
+            max_plan_revisions: 1,
+        })
+        .unwrap();
+    host.prepare_workspace(&m.mission_id, &m.attempt_id, &root)
+        .unwrap();
+    let admit = |host: &mut Host, body| {
+        host.admit(AdmitRequest {
+            command_id: None,
+            mission_id: m.mission_id.clone(),
+            attempt_id: None,
+            expected_revision: host.snapshot(&m.mission_id).unwrap().revision,
+            actor: "operator".into(),
+            origin: CommandOrigin::Operator,
+            body,
+        })
+        .unwrap();
+    };
+    admit(&mut host, CommandBody::StartPlanning);
+    host.dispatch_pending(&m.mission_id).unwrap();
+    // Bind the simulation observation to the canonical plan digest.
+    host.apply_notification(
+        &m.mission_id,
+        parse_notification(&serde_json::json!({
+            "kind":"plan_completed", "plan":"plan", "quiescent":true,
+            "digest":payload_hash(&serde_json::json!("plan")).unwrap()
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let snapshot = host.snapshot(&m.mission_id).unwrap();
+    admit(
+        &mut host,
+        CommandBody::ApprovePlan {
+            plan_digest: snapshot.plan_digest.unwrap(),
+        },
+    );
+    rusqlite::Connection::open(&db).unwrap().execute_batch(
+        "CREATE TRIGGER fail_completion BEFORE UPDATE OF state ON execution_effects WHEN NEW.state='completed'
+         BEGIN SELECT RAISE(ABORT, 'lost simulated receipt'); END;",
+    ).unwrap();
+    let request = ExecutionRequest {
+        binding: RuntimeBinding {
+            mission_id: m.mission_id.clone(),
+            attempt_id: m.attempt_id.clone(),
+            session_id: m.session_id.clone(),
+            generation: host.generation(),
+        },
+        tool_task_id: "task".into(),
+        effect_key: "write".into(),
+        capability_scope: FAKE_WRITE_SCOPE.into(),
+        deadline_ms: i64::MAX,
+        operation: ExecutionOperation::WriteFile {
+            path: "out.txt".into(),
+            content: "data".into(),
+        },
+    };
+    assert!(host.execute_fake_operation(&request).is_err());
+    let snapshot = host.snapshot(&m.mission_id).unwrap();
+    assert_eq!(snapshot.phase, Phase::NeedsAttention);
+    let effect = &snapshot.execution_effects[0];
+    let revision = snapshot.revision.to_string();
+    drop(host);
+    let args = [
+        "mission",
+        "abandon-execution",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        &m.mission_id,
+        "--attempt",
+        &m.attempt_id,
+        "--session",
+        &m.session_id,
+        "--operation-id",
+        &effect.operation_id,
+        "--payload-hash",
+        &effect.payload_hash,
+        "--expected-revision",
+        &revision,
+        "--command-id",
+        "resolution-cli-1",
+        "--actor",
+        "operator",
+        "--rationale",
+        "Evidence lost on restart",
+    ];
+    let (code, first, err) = run(&args);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(first["executionBlockRetained"], true);
+    let guidance = first["nextSteps"].as_str().unwrap();
+    assert!(guidance.contains("needs_attention"));
+    assert!(guidance.contains("prevent cancellation from completing"));
+    assert!(guidance.contains("#125"));
+    let help = Command::new(bin())
+        .args(["mission", "abandon-execution", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("needs_attention"));
+    assert!(help.contains("prevent cancellation from completing"));
+    assert!(help.contains("#125"));
+    let (code, replay, err) = run(&args);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(replay["resolution"], first["resolution"]);
+    assert_eq!(replay["mission"]["revision"], first["mission"]["revision"]);
+    assert_eq!(replay["mission"]["phase"], "needs_attention");
+    assert_eq!(
+        replay["mission"]["executionEffects"][0]["state"],
+        "uncertain"
+    );
+    assert_eq!(
+        replay["mission"]["executionResolutions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}

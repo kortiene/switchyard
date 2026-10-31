@@ -286,7 +286,7 @@ fn v3_inspection_and_forward_upgrade_preserve_mission_and_workspace() {
     drop(host);
     let db = dir.path().join("mission.sqlite");
     let conn = Connection::open(&db).unwrap();
-    conn.execute_batch("DROP TABLE execution_effects; DELETE FROM schema_migrations WHERE version>=4; PRAGMA user_version=3;").unwrap();
+    conn.execute_batch("DROP TABLE execution_resolutions; DROP TABLE execution_effects; DELETE FROM schema_migrations WHERE version>=4; PRAGMA user_version=3;").unwrap();
     drop(conn);
     let inspected = Host::inspect(&db, Some(&request.binding.mission_id)).unwrap();
     assert_eq!(inspected[0].workspace, before.workspace);
@@ -302,7 +302,7 @@ fn v3_inspection_and_forward_upgrade_preserve_mission_and_workspace() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        5
+        6
     );
 }
 
@@ -414,8 +414,13 @@ fn sigkill_at_intent_effect_and_receipt_boundaries() {
 #[test]
 fn prepared_effect_rejects_late_settlement_from_a_previous_owner() {
     let (dir, mut host, request) = setup();
-    host.store.prepare_execution(&request).unwrap();
-    let receipt = host.runtime_mut().unwrap().apply(&request).unwrap();
+    host.execution_evidence
+        .prepare(&mut host.store, &request)
+        .unwrap();
+    let receipt = host
+        .execution_evidence
+        .apply(&mut host.runtime, &request)
+        .unwrap();
     drop(host);
     let mut host = Host::open(&dir.path().join("mission.sqlite")).unwrap();
     assert_eq!(
@@ -668,7 +673,7 @@ fn v4_upgrade_preserves_completed_prepared_and_uncertain_effects() {
         .unwrap();
     conn.execute_batch(
         "INSERT INTO execution_effects SELECT * FROM saved_effects; DROP TABLE saved_effects;
-        DELETE FROM schema_migrations WHERE version=5; PRAGMA user_version=4; COMMIT;",
+        DROP TABLE execution_resolutions; DELETE FROM schema_migrations WHERE version>=5; PRAGMA user_version=4; COMMIT;",
     )
     .unwrap();
     drop(conn);
@@ -696,7 +701,7 @@ fn v4_upgrade_preserves_completed_prepared_and_uncertain_effects() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        5
+        6
     );
     assert_eq!(
         conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
@@ -733,4 +738,421 @@ fn guard_failure_keeps_category_when_uncertainty_persistence_fails() {
         Phase::Implementing
     );
     assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 0);
+}
+
+fn resolution_request(
+    host: &Host,
+    request: &ExecutionRequest,
+    decision: crate::ExecutionResolutionDecision,
+) -> crate::ExecutionResolutionRequest {
+    crate::ExecutionResolutionRequest {
+        command_id: "resolve-1".into(),
+        binding: RuntimeBinding {
+            generation: host.generation(),
+            ..request.binding.clone()
+        },
+        operation_id: request.operation_id().unwrap(),
+        payload_hash: request.payload_hash().unwrap(),
+        expected_revision: host.snapshot(&request.binding.mission_id).unwrap().revision,
+        actor: "operator".into(),
+        rationale: "Inspect interrupted simulated execution".into(),
+        decision,
+    }
+}
+
+fn interrupt_effect(host: &mut Host, request: &ExecutionRequest, checkpoint: &str) {
+    assert!(
+        host.execute_fake_at(request, |at| {
+            if at == checkpoint {
+                Err(Error::storage("lost response"))
+            } else {
+                Ok(())
+            }
+        })
+        .is_err()
+    );
+    host.reconcile_execution(&request.binding.mission_id)
+        .unwrap();
+}
+
+#[test]
+fn resolution_proofs_settle_once_and_replay_after_restart_without_execution() {
+    use crate::ExecutionResolutionDecision::{Completed, NotApplied};
+    for (at, decision) in [("prepared", NotApplied), ("effect", Completed)] {
+        let (dir, mut host, mut request) = setup();
+        interrupt_effect(&mut host, &request, at);
+        let mut resolve = resolution_request(&host, &request, decision);
+        let audit = host.resolve_fake_execution(&resolve).unwrap();
+        assert_eq!(host.resolve_fake_execution(&resolve).unwrap(), audit);
+        let snapshot = host.snapshot(&request.binding.mission_id).unwrap();
+        assert_eq!(snapshot.phase, Phase::NeedsAttention);
+        assert_eq!(snapshot.revision, resolve.expected_revision + 1);
+        assert_eq!(snapshot.execution_resolutions, vec![audit.clone()]);
+        assert!(
+            !host
+                .store
+                .execution_blocked(&request.binding.mission_id)
+                .unwrap()
+        );
+        let replay = host.execute_fake_operation(&request);
+        if decision == Completed {
+            assert_eq!(replay.unwrap().to_json(), audit["evidence"]["receipt"]);
+        } else {
+            assert_eq!(replay.unwrap_err().category(), "execution_not_applied");
+        }
+        let mut changed = resolve.clone();
+        changed.rationale = "changed decision".into();
+        assert_eq!(
+            host.resolve_fake_execution(&changed)
+                .unwrap_err()
+                .category(),
+            "command_conflict"
+        );
+        drop(host);
+        let mut host = Host::open(&dir.path().join("mission.sqlite")).unwrap();
+        assert_eq!(
+            host.resolve_fake_execution(&resolve)
+                .unwrap_err()
+                .category(),
+            "stale_generation"
+        );
+        resolve.binding.generation = host.generation();
+        request.binding.generation = host.generation();
+        assert_eq!(host.resolve_fake_execution(&resolve).unwrap(), audit);
+        assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 0);
+        command(
+            &mut host,
+            &request.binding.mission_id,
+            CommandBody::ExplicitRecovery {
+                expected_target: Phase::Implementing,
+                ownership_proven: true,
+                effects: crate::EffectProof::Reconciled,
+            },
+        );
+        assert_eq!(
+            host.snapshot(&request.binding.mission_id).unwrap().phase,
+            Phase::Implementing
+        );
+        let replay = host.execute_fake_operation(&request);
+        assert_eq!(replay.is_ok(), decision == Completed);
+        assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 0);
+    }
+}
+
+#[test]
+fn resolution_rejects_missing_mismatched_or_stale_evidence_and_abandonment_stays_blocked() {
+    use crate::ExecutionResolutionDecision::{Abandon, Completed, NotApplied};
+    let (dir, mut host, mut request) = setup();
+    interrupt_effect(&mut host, &request, "effect");
+    let mut resolve = resolution_request(&host, &request, NotApplied);
+    assert!(host.resolve_fake_execution(&resolve).is_err());
+    resolve.decision = Completed;
+    let mut bad = resolve.clone();
+    bad.expected_revision -= 1;
+    assert_eq!(
+        host.resolve_fake_execution(&bad).unwrap_err().category(),
+        "stale_revision"
+    );
+    let mut bad = resolve.clone();
+    bad.binding.session_id = "wrong-session".into();
+    assert_eq!(
+        host.resolve_fake_execution(&bad).unwrap_err().category(),
+        "binding_mismatch"
+    );
+    let mut bad = resolve.clone();
+    bad.payload_hash = "wrong-payload".into();
+    assert_eq!(
+        host.resolve_fake_execution(&bad).unwrap_err().category(),
+        "operation_conflict"
+    );
+    let mut bad = resolve.clone();
+    bad.rationale.clear();
+    assert!(host.resolve_fake_execution(&bad).is_err());
+    assert!(
+        host.snapshot(&request.binding.mission_id)
+            .unwrap()
+            .execution_resolutions
+            .is_empty()
+    );
+    drop(host);
+    let mut host = Host::open(&dir.path().join("mission.sqlite")).unwrap();
+    resolve.binding.generation = host.generation();
+    request.binding.generation = host.generation();
+    assert!(host.resolve_fake_execution(&resolve).is_err());
+    resolve.decision = NotApplied;
+    assert!(host.resolve_fake_execution(&resolve).is_err());
+    resolve.decision = Abandon;
+    let audit = host.resolve_fake_execution(&resolve).unwrap();
+    assert_eq!(audit["evidence"]["blockRetained"], true);
+    assert!(host.store.ops_blocked(&request.binding.mission_id).unwrap());
+    let mut fresh = request.clone();
+    fresh.effect_key = "new-id".into();
+    assert_eq!(
+        host.execute_fake_operation(&fresh).unwrap_err().category(),
+        "execution_blocked"
+    );
+    let revision = host.snapshot(&request.binding.mission_id).unwrap().revision;
+    assert!(
+        host.admit(AdmitRequest {
+            command_id: None,
+            mission_id: request.binding.mission_id.clone(),
+            attempt_id: None,
+            expected_revision: revision,
+            actor: "operator".into(),
+            origin: CommandOrigin::Operator,
+            body: CommandBody::ExplicitRecovery {
+                expected_target: Phase::Implementing,
+                ownership_proven: true,
+                effects: crate::EffectProof::Reconciled
+            },
+        })
+        .is_err()
+    );
+    let mut another = resolve.clone();
+    another.command_id = "second-decision".into();
+    another.expected_revision = revision;
+    assert!(host.resolve_fake_execution(&another).is_err());
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 0);
+    drop(host);
+    let mut host = Host::open(&dir.path().join("mission.sqlite")).unwrap();
+    resolve.binding.generation = host.generation();
+    assert_eq!(host.resolve_fake_execution(&resolve).unwrap(), audit);
+    assert!(host.store.ops_blocked(&request.binding.mission_id).unwrap());
+}
+
+#[test]
+fn resolution_audit_failure_rolls_back_effect_and_mission_revision() {
+    let (dir, mut host, request) = setup();
+    interrupt_effect(&mut host, &request, "effect");
+    let resolve = resolution_request(
+        &host,
+        &request,
+        crate::ExecutionResolutionDecision::Completed,
+    );
+    let before = host.snapshot(&request.binding.mission_id).unwrap();
+    let conn = Connection::open(dir.path().join("mission.sqlite")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER fail_resolution BEFORE INSERT ON execution_resolutions
+        BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END;",
+    )
+    .unwrap();
+    assert!(
+        host.resolve_fake_execution(&resolve)
+            .unwrap_err()
+            .to_string()
+            .contains("injected audit failure")
+    );
+    let after = host.snapshot(&request.binding.mission_id).unwrap();
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.execution_effects, before.execution_effects);
+    assert!(after.execution_resolutions.is_empty());
+    conn.execute_batch("DROP TRIGGER fail_resolution;").unwrap();
+    host.resolve_fake_execution(&resolve).unwrap();
+}
+
+#[test]
+fn resolved_effect_does_not_clear_other_operations_or_allow_terminal_mutation() {
+    let (dir, mut host, request) = setup();
+    interrupt_effect(&mut host, &request, "effect");
+    host.record_operation(
+        &request.binding.mission_id,
+        "other-op",
+        &serde_json::json!({}),
+        crate::OperationState::Prepared,
+    )
+    .unwrap();
+    let resolve = resolution_request(
+        &host,
+        &request,
+        crate::ExecutionResolutionDecision::Completed,
+    );
+    let audit = host.resolve_fake_execution(&resolve).unwrap();
+    assert!(host.store.ops_blocked(&request.binding.mission_id).unwrap());
+    let revision = host.snapshot(&request.binding.mission_id).unwrap().revision;
+    assert!(
+        host.admit(AdmitRequest {
+            command_id: None,
+            mission_id: request.binding.mission_id.clone(),
+            attempt_id: None,
+            expected_revision: revision,
+            actor: "operator".into(),
+            origin: CommandOrigin::Operator,
+            body: CommandBody::ExplicitRecovery {
+                expected_target: Phase::Implementing,
+                ownership_proven: true,
+                effects: crate::EffectProof::Reconciled
+            },
+        })
+        .is_err()
+    );
+    // Terminal policy is independently enforced even for a matching old effect.
+    Connection::open(dir.path().join("mission.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE missions SET phase='cancelled' WHERE id=?1",
+            [&request.binding.mission_id],
+        )
+        .unwrap();
+    assert_eq!(host.resolve_fake_execution(&resolve).unwrap(), audit);
+    let mut fresh = resolve.clone();
+    fresh.command_id = "new-decision".into();
+    fresh.expected_revision = revision;
+    assert_eq!(
+        host.resolve_fake_execution(&fresh).unwrap_err().category(),
+        "terminal_immutable"
+    );
+    assert_eq!(
+        host.snapshot(&request.binding.mission_id).unwrap().phase,
+        Phase::Cancelled
+    );
+}
+
+#[test]
+fn v5_read_only_inspection_and_upgrade_preserve_unresolved_effects() {
+    let (dir, mut host, request) = setup();
+    interrupt_effect(&mut host, &request, "prepared");
+    let before = host
+        .snapshot(&request.binding.mission_id)
+        .unwrap()
+        .execution_effects;
+    drop(host);
+    let db = dir.path().join("mission.sqlite");
+    Connection::open(&db).unwrap().execute_batch(
+        "DROP TABLE execution_resolutions; DELETE FROM schema_migrations WHERE version=6; PRAGMA user_version=5;",
+    ).unwrap();
+    let inspected = Host::inspect(&db, Some(&request.binding.mission_id)).unwrap();
+    assert_eq!(inspected[0].execution_effects, before);
+    assert!(inspected[0].execution_resolutions.is_empty());
+    let host = Host::open(&db).unwrap();
+    assert_eq!(
+        host.snapshot(&request.binding.mission_id)
+            .unwrap()
+            .execution_effects,
+        before
+    );
+    assert!(
+        host.store
+            .execution_blocked(&request.binding.mission_id)
+            .unwrap()
+    );
+}
+
+#[test]
+fn apply_consumes_stale_absence_proof_even_when_backend_returns_an_error() {
+    let (_dir, mut host, request) = setup();
+    // Emulate a future retry path reaching apply with an old absence marker.
+    host.execution_evidence
+        .prepare(&mut host.store, &request)
+        .unwrap();
+    let id = request.operation_id().unwrap();
+    assert!(matches!(host.execution_evidence.get(&id), Some(None)));
+    host.runtime_mut().unwrap().fail_next_simulated_effect();
+    let error = host
+        .execution_evidence
+        .apply(&mut host.runtime, &request)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("injected error after simulated effect")
+    );
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 1);
+    assert!(host.execution_evidence.get(&id).is_none());
+    host.reconcile_execution(&request.binding.mission_id)
+        .unwrap();
+    let resolve = resolution_request(
+        &host,
+        &request,
+        crate::ExecutionResolutionDecision::NotApplied,
+    );
+    assert!(
+        host.resolve_fake_execution(&resolve)
+            .unwrap_err()
+            .to_string()
+            .contains("evidence is unavailable")
+    );
+    assert!(
+        host.store
+            .execution_blocked(&request.binding.mission_id)
+            .unwrap()
+    );
+    assert!(
+        host.snapshot(&request.binding.mission_id)
+            .unwrap()
+            .execution_resolutions
+            .is_empty()
+    );
+}
+
+#[test]
+fn abandonment_rejects_known_outcomes_without_discarding_their_proof() {
+    use crate::ExecutionResolutionDecision::{Abandon, Completed, NotApplied};
+    for (at, outcome) in [("prepared", NotApplied), ("effect", Completed)] {
+        let (_dir, mut host, request) = setup();
+        interrupt_effect(&mut host, &request, at);
+        let mut resolve = resolution_request(&host, &request, Abandon);
+        let evidence = host.execution_evidence.get(&resolve.operation_id).cloned();
+        assert!(evidence.is_some());
+        let before = host.snapshot(&request.binding.mission_id).unwrap();
+        assert!(
+            host.resolve_fake_execution(&resolve)
+                .unwrap_err()
+                .to_string()
+                .contains("resolve the proven outcome")
+        );
+        assert_eq!(
+            host.execution_evidence.get(&resolve.operation_id).cloned(),
+            evidence
+        );
+        let after = host.snapshot(&request.binding.mission_id).unwrap();
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.execution_effects, before.execution_effects);
+        assert!(after.execution_resolutions.is_empty());
+        resolve.decision = outcome;
+        let audit = host.resolve_fake_execution(&resolve).unwrap();
+        assert_eq!(audit["request"]["decision"], outcome.as_str());
+        assert!(
+            !host
+                .store
+                .execution_blocked(&request.binding.mission_id)
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn resolution_status_uses_commit_order_not_operator_command_ids() {
+    let (dir, mut host, first) = setup();
+    let mut second = first.clone();
+    second.effect_key = "second-effect".into();
+    host.execution_evidence
+        .prepare(&mut host.store, &first)
+        .unwrap();
+    host.execution_evidence
+        .prepare(&mut host.store, &second)
+        .unwrap();
+    host.reconcile_execution(&first.binding.mission_id).unwrap();
+    let mut audits = Vec::new();
+    for (request, id) in [(&first, "z-first"), (&second, "a-second")] {
+        let mut resolve = resolution_request(
+            &host,
+            request,
+            crate::ExecutionResolutionDecision::NotApplied,
+        );
+        resolve.command_id = id.into();
+        audits.push(host.resolve_fake_execution(&resolve).unwrap());
+    }
+    assert_eq!(
+        host.snapshot(&first.binding.mission_id)
+            .unwrap()
+            .execution_resolutions,
+        audits
+    );
+    drop(host);
+    let inspected = Host::inspect(
+        &dir.path().join("mission.sqlite"),
+        Some(&first.binding.mission_id),
+    )
+    .unwrap();
+    assert_eq!(inspected[0].execution_resolutions, audits);
 }

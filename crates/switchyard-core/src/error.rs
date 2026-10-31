@@ -43,6 +43,11 @@ pub enum Error {
     #[error("new execution blocked for mission {mission_id}: {detail}")]
     ExecutionBlocked { mission_id: String, detail: String },
 
+    #[error(
+        "execution was proven not applied for {operation_id}; original identity cannot be replayed"
+    )]
+    ExecutionNotApplied { operation_id: String },
+
     #[error("execution outcome is uncertain for {operation_id}")]
     ExecutionUncertain { operation_id: String },
 
@@ -105,6 +110,7 @@ impl Error {
             Self::CommandConflict { .. } => "command_conflict",
             Self::OperationConflict { .. } => "operation_conflict",
             Self::ExecutionUncertain { .. } => "execution_uncertain",
+            Self::ExecutionNotApplied { .. } => "execution_not_applied",
             Self::ExecutionDeadlineExceeded { .. } => "execution_deadline_exceeded",
             Self::ExecutionBlocked { .. } => "execution_blocked",
             Self::StaleGeneration { .. } => "stale_generation",
