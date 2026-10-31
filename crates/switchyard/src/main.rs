@@ -81,7 +81,9 @@ enum MissionCommand {
     /// Admit a command. Dispatches pending runtime work unless `--persist-only`.
     /// `--persist-only` does not reconcile a workspace or run `git worktree add`.
     /// If the command is recorded but the workspace blocks dispatch, the process
-    /// exits 3 and the JSON includes `workspaceError`. Exit 2 means it was not recorded.
+    /// exits 3 and the JSON includes `workspaceError`. Exit 2 means rejection or
+    /// failure, possibly after recording. Supply `--command-id` before the first
+    /// attempt and reuse it with the same request to resolve an ambiguous result.
     Command {
         #[arg(long)]
         db: PathBuf,
@@ -155,7 +157,8 @@ fn main() -> ExitCode {
         Ok(value) => {
             println!("{value}");
             // Exit 3: recorded, not dispatched (`ok` with `workspaceError`).
-            // Exit 0 is full success. Exit 2 means the command was not recorded.
+            // Exit 0 is success (including persist-only). Exit 2 is rejection
+            // or failure and does not prove that admission did not occur.
             if value.get("workspaceError").is_some() {
                 ExitCode::from(3)
             } else {

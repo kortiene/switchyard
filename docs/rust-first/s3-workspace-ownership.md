@@ -104,8 +104,20 @@ a workspace prepared by an earlier process. A second dispatch in that same
 invocation does not verify again. Admission is not gated by an uncertain,
 busy, or transient workspace failure; only dispatch is. When that happens,
 `mission command` prints `ok: true` with the admitted command and a
-`workspaceError` field, and exits 3. Exit 2 still means the command was not
-recorded. `--persist-only`
+`workspaceError` field, and exits 3. Exit 0 means success, including a
+persist-only admission; it does not by itself prove runtime execution. Exit 2
+means rejection or failure and does not prove the command was not recorded:
+post-admission dispatch or snapshot failures also use that exit code.
+
+For retryable callers, supply an explicit `--command-id` on the first invocation
+and retain the complete request. After an ambiguous result, retry with that same
+ID, mission, attempt, actor, kind, payload and original `--expected-revision`;
+an already-recorded matching command is recognized before the revision check.
+Use `--persist-only` on that replay to avoid workspace reconciliation and runtime
+dispatch, and inspect `mission status` for the recorded command and its state.
+Do not generate a new command ID merely because an invocation exited 2.
+
+`--persist-only`
 records the command and does not reconcile, so it does not run
 `git worktree add`. `Host::recover` reconciles, then dispatches, polls, and
 snapshots. An uncertain, busy, storage, or Git failure skips dispatch and is
