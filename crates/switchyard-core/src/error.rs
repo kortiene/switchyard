@@ -6,6 +6,10 @@ use std::fmt;
 /// itself a compatibility contract.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Additional diagnostics without changing the primary failure semantics.
+    #[error("{source}; {detail}")]
+    WithContext { source: Box<Error>, detail: String },
+
     #[error("illegal transition from {from} via {command}")]
     IllegalTransition { from: String, command: String },
 
@@ -114,6 +118,14 @@ impl Error {
             Self::GitFailed { .. } => "git_failed",
             Self::Canonical { .. } => "canonical_rejected",
             Self::Storage { .. } => "storage_failed",
+            Self::WithContext { source, .. } => source.category(),
+        }
+    }
+
+    pub(crate) fn with_context(self, detail: impl Into<String>) -> Self {
+        Self::WithContext {
+            source: Box::new(self),
+            detail: detail.into(),
         }
     }
 
@@ -128,6 +140,7 @@ impl Error {
     pub fn rejected_admission(&self) -> Option<&str> {
         match self {
             Self::AdmissionRejected { category } => Some(category.as_str()),
+            Self::WithContext { source, .. } => source.rejected_admission(),
             _ => None,
         }
     }
@@ -150,12 +163,16 @@ impl Error {
     pub fn git_exit_code(&self) -> Option<i32> {
         match self {
             Self::GitFailed { exit_code, .. } => *exit_code,
+            Self::WithContext { source, .. } => source.git_exit_code(),
             _ => None,
         }
     }
 
     /// Storage and IO failures can be retried. Semantic rejections cannot.
     pub fn is_transient(&self) -> bool {
+        if let Self::WithContext { source, .. } = self {
+            return source.is_transient();
+        }
         matches!(
             self,
             Self::Storage { .. } | Self::GitFailed { .. } | Self::WorkspaceBusy { .. }
@@ -166,6 +183,9 @@ impl Error {
     /// polling. Dispatch stays gated until the workspace is ready again.
     /// Stale generation and other host-level failures are not included.
     pub fn is_isolated_workspace_failure(&self) -> bool {
+        if let Self::WithContext { source, .. } = self {
+            return source.is_isolated_workspace_failure();
+        }
         matches!(self, Self::WorkspaceUncertain { .. }) || self.is_transient()
     }
 }

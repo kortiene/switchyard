@@ -513,6 +513,17 @@ fn apply_and_receipt_errors_immediately_quarantine_without_hiding_the_cause() {
         let snapshot = host.snapshot(&request.binding.mission_id).unwrap();
         assert_eq!(snapshot.phase, Phase::NeedsAttention);
         assert_eq!(snapshot.execution_effects[0].state, "uncertain");
+        let mut fresh = request.clone();
+        fresh.effect_key = "fresh-effect".into();
+        let blocked = host.execute_fake_operation(&fresh).unwrap_err();
+        assert_eq!(blocked.category(), "execution_blocked");
+        assert!(blocked.to_string().contains("unresolved execution effects"));
+        assert!(
+            host.store
+                .execution_effect(&fresh.operation_id().unwrap())
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             host.execute_fake_operation(&request)
                 .unwrap_err()
@@ -617,6 +628,8 @@ fn error_reconciliation_cannot_mutate_a_committed_result_or_a_new_owner() {
     let mut host = Host::open(&dir.path().join("mission.sqlite")).unwrap();
     let error = host.execution_failure(&pending, Error::storage("late failure"));
     assert_eq!(error.category(), "stale_generation");
+    assert!(error.to_string().contains("late failure"));
+    assert!(!error.is_transient());
     assert_eq!(
         state(
             &dir.path().join("mission.sqlite"),
@@ -690,4 +703,34 @@ fn v4_upgrade_preserves_completed_prepared_and_uncertain_effects() {
             .unwrap(),
         "ok"
     );
+}
+
+#[test]
+fn guard_failure_keeps_category_when_uncertainty_persistence_fails() {
+    let (dir, mut host, request) = setup();
+    host.store.prepare_execution(&request).unwrap();
+    Connection::open(dir.path().join("mission.sqlite"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_updates BEFORE UPDATE ON execution_effects
+             BEGIN SELECT RAISE(ABORT, 'injected ledger unavailable'); END;",
+        )
+        .unwrap();
+    let error = host.execution_failure(&request, Error::guard("receipt/intent mismatch"));
+    assert_eq!(error.category(), "guard_failed");
+    assert!(!error.is_transient());
+    assert!(error.to_string().contains("receipt/intent mismatch"));
+    assert!(error.to_string().contains("injected ledger unavailable"));
+    assert_eq!(
+        state(
+            &dir.path().join("mission.sqlite"),
+            &request.operation_id().unwrap()
+        ),
+        "prepared"
+    );
+    assert_eq!(
+        host.snapshot(&request.binding.mission_id).unwrap().phase,
+        Phase::Implementing
+    );
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 0);
 }

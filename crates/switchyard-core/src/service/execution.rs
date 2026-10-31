@@ -72,11 +72,6 @@ impl Host {
             return Err(Error::ExecutionUncertain { operation_id: id });
         }
         request.validate()?;
-        if mission.phase != Phase::Implementing {
-            return Err(Error::guard(
-                "new execution requires an implementing mission",
-            ));
-        }
         if self.store.execution_blocked(&mission.id)? {
             return Err(Error::ExecutionBlocked {
                 mission_id: mission.id,
@@ -88,6 +83,11 @@ impl Host {
                 mission_id: mission.id,
                 detail: "unresolved generic S1 operations; this request was not attempted".into(),
             });
+        }
+        if mission.phase != Phase::Implementing {
+            return Err(Error::guard(
+                "new execution requires an implementing mission",
+            ));
         }
         if request.deadline_ms <= now() {
             return Err(Error::ExecutionDeadlineExceeded { operation_id: id });
@@ -145,9 +145,11 @@ impl Host {
         })();
         match reconcile {
             Ok(()) => original,
-            Err(error @ Error::StaleGeneration { .. }) => error,
-            Err(error) => Error::storage(format!(
-                "{original}; could not record execution uncertainty: {error}"
+            Err(error @ Error::StaleGeneration { .. }) => {
+                error.with_context(format!("original execution failure: {original}"))
+            }
+            Err(error) => original.with_context(format!(
+                "could not record execution uncertainty: {error}"
             )),
         }
     }
