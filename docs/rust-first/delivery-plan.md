@@ -150,3 +150,10 @@ All eight issue acceptance checklists are satisfied and an acceptance ledger rec
 - original-checkout preservation, limitations, and any blocked/deferred cases.
 
 M1 does not promise cross-host failover, lossless power-failure recovery, exactly-once arbitrary effects, hard provider billing caps, green external CI, automatic merge, or deployment. Claims should be no stronger than the recorded evidence.
+
+### S3-A3 partial confinement evidence
+
+The [Linux confinement probe](s3-linux-confinement.md) in #127 introduces the
+`execution-confinement` check for deterministic Bubblewrap boundary and lifecycle
+scenarios. It is not the complete bridge/agent contract in the table above.
+Full S3 acceptance, real-backend #125 evidence and S2 GO remain separate gates.

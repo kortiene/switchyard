@@ -1,0 +1,27 @@
+[package]
+name = "switchyard-confinement-probe"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+description = "Test-only S3-A3 Linux confinement probe; not an ExecutionEnv backend."
+
+[features]
+linux-confinement = []
+
+[dependencies]
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "confinement-fixture"
+path = "src/main.rs"
+required-features = ["linux-confinement"]
+
+[[test]]
+name = "confinement"
+path = "tests/confinement.rs"
+required-features = ["linux-confinement"]
