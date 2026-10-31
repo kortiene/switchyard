@@ -436,6 +436,8 @@ impl Drop for PiBridge {
     }
 }
 
+const BRIDGE_BUSY_MESSAGE: &str = "bridge: busy";
+
 /// Only these categories are durable refusals. `busy` is retried. Every other
 /// category, including one that claims `admission: rejected`, stays pending.
 fn classify_bridge_error(category: &str) -> Error {
@@ -443,6 +445,7 @@ fn classify_bridge_error(category: &str) -> Error {
         "idle" | "stopping" => Error::AdmissionRejected {
             category: category.to_string(),
         },
+        "busy" => Error::guard(BRIDGE_BUSY_MESSAGE),
         other => Error::guard(format!("bridge: {other}")),
     }
 }
@@ -451,7 +454,7 @@ fn keeps_peer(error: &Error) -> bool {
     if error.rejected_admission().is_some() {
         return true;
     }
-    matches!(error, Error::GuardFailed { detail } if detail == "bridge: busy")
+    matches!(error, Error::GuardFailed { detail } if detail == BRIDGE_BUSY_MESSAGE)
 }
 
 fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {

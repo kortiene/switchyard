@@ -67,7 +67,7 @@ export class Runtime {
       this.closing = true;
       if ((await this.harness.inspect(BACKGROUND_CONTEXT)).tasks.length > 0) {
         this.closing = false;
-        throw new ProtocolError('busy');
+        throw new ProtocolError('busy', 'retry');
       }
       await this.harness.close(withAbortSignal(AbortSignal.timeout(DEADLINE_MS), BACKGROUND_CONTEXT));
       return { closed: true };

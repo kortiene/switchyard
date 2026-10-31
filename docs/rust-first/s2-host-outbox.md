@@ -85,7 +85,7 @@ and the new owner reopens the same session using its next generation. After
 step 2, both a missing file and an existing database without the original session
 are errors. Corrupt storage and incompatible fingerprints also block recovery;
 no new session is substituted. The initialization bit is operational metadata,
-not an editable runtime pin; no table/schema migration is introduced.
+not an editable runtime pin; it does not itself require a schema change.
 
 ## Recovery and scheduling
 
@@ -109,6 +109,13 @@ anything unknown) is a guard error and the row stays pending. Transport loss
 stays pending as well. This is command-admission settlement only. Effect
 callbacks still return `execution_uncertain`; typed effect rejection versus
 uncertain admission remains [#96](https://github.com/kortiene/switchyard/issues/96).
+
+Durable command refusal adds a forward migration of the Rust S1 ledger from v1
+to v2, widening the command-state constraint to include `rejected`. The migration
+preserves existing command rows and their order, identities, payloads and receipts,
+and restores foreign-key enforcement. A populated v1 database is covered by an
+upgrade test. This is separate from the frozen legacy TypeScript state v1 format,
+which is unchanged.
 
 After a Pi child has been closed, dispatch applies the same suppression rules
 as an open session. Rows that would not be sent are superseded. The restart
@@ -154,7 +161,7 @@ Twenty-four Host tests cover:
 - an idle-rejected steer settled as `rejected`, with a later continue admitted
   and resumed, including after restart;
 - `stopping` settled as `rejected`, `busy` left pending and retried, and
-  `host_command_mismatch` left pending as a guard error;
+  `host_command_mismatch` left pending even when the peer labels it `rejected`;
 - a successor that closes the child before the old outbox is drained, with
   suppressed rows superseded and a still-deliverable pause left to a restart;
 - an uncertain crash-before-admission leaving the row pending and blocking a

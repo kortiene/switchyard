@@ -33,6 +33,6 @@ transport.start(frame => {
     stoppingOnce = false;
     throw new ProtocolError('stopping', 'rejected');
   }
-  if (mode === 'mismatch' && frame.method === 'runtime.submit') throw new ProtocolError('host_command_mismatch');
+  if (mode === 'mismatch' && frame.method === 'runtime.submit') throw new ProtocolError('host_command_mismatch', 'rejected');
   return runtime.dispatch(frame);
 });
