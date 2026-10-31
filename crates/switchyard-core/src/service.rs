@@ -32,6 +32,8 @@ pub struct Host {
     runtime: RuntimeAdapter,
     lock: OwnerLock,
     ledger_path: PathBuf,
+    // Process-local, Host-observed proof; never reconstructed from operator claims.
+    execution_evidence: std::collections::BTreeMap<String, Option<crate::ExecutionReceipt>>,
 }
 
 pub struct CreateMission {
@@ -129,12 +131,13 @@ pub struct MissionSnapshot {
     pub delivery: Option<DeliveryView>,
     pub workspace: Option<crate::WorkspaceView>,
     pub execution_effects: Vec<crate::ExecutionView>,
+    pub execution_resolutions: Vec<Value>,
     pub quarantined: Vec<(i64, String, String, String)>,
 }
 
 impl MissionSnapshot {
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut value = json!({
             "missionId": self.mission_id,
             "revision": self.revision,
             "phase": self.phase.as_str(),
@@ -182,7 +185,9 @@ impl MissionSnapshot {
                 "reason": reason,
                 "frame": frame,
             })).collect::<Vec<_>>(),
-        })
+        });
+        value["executionResolutions"] = json!(self.execution_resolutions);
+        value
     }
 }
 
@@ -278,6 +283,7 @@ impl Host {
             runtime,
             lock,
             ledger_path: db_path.to_path_buf(),
+            execution_evidence: Default::default(),
         })
     }
 
@@ -1443,6 +1449,7 @@ fn snapshot_from(store: &Store, mission_id: &str, generation: u64) -> Result<Mis
         delivery,
         workspace,
         execution_effects: store.execution_views(mission_id)?,
+        execution_resolutions: store.execution_resolutions(mission_id)?,
         quarantined: store.list_quarantine(mission_id)?,
     })
 }

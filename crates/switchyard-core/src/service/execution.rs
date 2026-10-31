@@ -1,4 +1,5 @@
 use super::*;
+mod resolution;
 use crate::execution_env::ExecutionEnv;
 use crate::{ExecutionReceipt, ExecutionRequest};
 
@@ -60,6 +61,9 @@ impl Host {
                 return Err(Error::OperationConflict { operation_id: id });
             }
             if existing.state == "not_applied" {
+                if self.store.execution_resolution_for(&id)?.is_some() {
+                    return Err(Error::ExecutionNotApplied { operation_id: id });
+                }
                 return Err(Error::ExecutionDeadlineExceeded { operation_id: id });
             }
             if let Some(receipt) = existing.receipt {
@@ -97,6 +101,7 @@ impl Host {
             .ok_or_else(|| Error::guard("execution requires an owned workspace"))?;
         self.store.require_workspace_ready(&workspace.attempt_id)?;
         self.store.prepare_execution(request)?;
+        self.execution_evidence.insert(id.clone(), None);
         checkpoint("prepared")?;
         self.accept_runtime_binding(&request.binding, &mission.id)?;
         if request.deadline_ms <= now() {
@@ -108,6 +113,7 @@ impl Host {
         }
         // Reborrow after the Host/Store operations. Both checks use the typed
         // adapter accessor; no adapter-name string or panic establishes authority.
+        self.execution_evidence.remove(&id);
         let applied = self
             .runtime
             .fake_mut()
@@ -117,11 +123,14 @@ impl Host {
             Ok(receipt) => receipt,
             Err(error) => return Err(self.execution_failure(request, error)),
         };
+        self.execution_evidence
+            .insert(id.clone(), Some(receipt.clone()));
         checkpoint("effect")?;
         self.accept_runtime_binding(&request.binding, &mission.id)?;
         if let Err(error) = self.store.complete_execution(request, &receipt) {
             return Err(self.execution_failure(request, error));
         }
+        self.execution_evidence.remove(&id);
         checkpoint("completed")?;
         Ok(receipt)
     }

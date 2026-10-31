@@ -14,9 +14,11 @@ mod domain;
 mod error;
 mod execution;
 mod execution_env;
+mod execution_resolution;
 pub use execution_env::{
     ExecutionOperation, ExecutionReceipt, ExecutionRequest, ExecutionView, FAKE_WRITE_SCOPE,
 };
+pub use execution_resolution::{ExecutionResolutionDecision, ExecutionResolutionRequest};
 mod persistence;
 mod policy;
 mod service;
