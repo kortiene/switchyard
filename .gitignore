@@ -18,3 +18,6 @@ agents/
 
 # Parallel-batch artifact archives (logs, per-attempt metrics, run states)
 batch-artifacts-*/
+
+# S3-A3 CI diagnostic artifacts
+/confinement-evidence/

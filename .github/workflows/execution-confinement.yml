@@ -1,0 +1,43 @@
+name: Execution confinement
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: execution-confinement-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  # Partial S3-A3 evidence, not full S3 or S2 GO. An administrator must add
+  # this exact check name to branch protection; YAML alone cannot do that.
+  execution-confinement:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      SWITCHYARD_BWRAP: /usr/local/libexec/switchyard-bwrap
+      SWITCHYARD_CONFINEMENT_EVIDENCE: ${{ github.workspace }}/confinement-evidence
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+      - name: Install the reviewed backend and per-binary userns permission
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --allow-downgrades --no-install-recommends bubblewrap=0.9.0-1ubuntu0.3 apparmor
+          sudo install -d -m 0755 /usr/local/libexec
+          sudo install -o root -g root -m 0755 /usr/bin/bwrap "$SWITCHYARD_BWRAP"
+          sudo install -m 0644 tools/confinement-probe/ci/bwrap.apparmor /etc/apparmor.d/switchyard-confinement-bwrap
+          sudo apparmor_parser -r /etc/apparmor.d/switchyard-confinement-bwrap
+      - name: Prove boundaries and process-tree termination
+        run: ./scripts/confinement-verify.sh
+      - name: Retain environment and test evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: execution-confinement-evidence
+          path: confinement-evidence/
+          if-no-files-found: warn
+          retention-days: 14

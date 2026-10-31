@@ -1,0 +1,8 @@
+# CI-only permission to create user namespaces for this root-owned copy.
+# This is NOT the sandbox policy: the fixed Bubblewrap arguments provide it.
+# No global userns restriction is disabled. Nested userns are disabled by bwrap.
+abi <abi/4.0>,
+include <tunables/global>
+profile switchyard-confinement-bwrap /usr/local/libexec/switchyard-bwrap flags=(unconfined) {
+  userns,
+}
