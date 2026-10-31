@@ -132,6 +132,7 @@ pub struct MissionSnapshot {
     pub workspace: Option<crate::WorkspaceView>,
     pub execution_effects: Vec<crate::ExecutionView>,
     pub execution_resolutions: Vec<Value>,
+    pub execution_blocked: bool,
     pub quarantined: Vec<(i64, String, String, String)>,
 }
 
@@ -187,7 +188,41 @@ impl MissionSnapshot {
             })).collect::<Vec<_>>(),
         });
         value["executionResolutions"] = json!(self.execution_resolutions);
+        value["executionBlocked"] = json!(self.execution_blocked);
+        value["nextSteps"] = json!(self.next_steps());
         value
+    }
+
+    fn next_steps(&self) -> Vec<String> {
+        let mut steps = Vec::new();
+        if matches!(
+            self.phase,
+            Phase::Pausing | Phase::Paused | Phase::Cancelling | Phase::NeedsAttention
+        ) {
+            for stop in self
+                .commands
+                .iter()
+                .filter(|c| matches!(c.kind.as_str(), "pause" | "cancel"))
+            {
+                match stop.state.as_str() {
+                    "pending" => steps.push(format!("{} abort {} is pending. Retry recovery with the same command identity to deliver it.", stop.kind, stop.id)),
+                    "acknowledged" => steps.push(format!("{} abort {} was delivered (receipt {}). Delivery does not prove writer quiescence or complete the stop.", stop.kind, stop.id, stop.receipt_id.as_deref().unwrap_or("unavailable"))),
+                    _ => {}
+                }
+            }
+        }
+        if let Some(workspace) = &self.workspace {
+            if workspace.state != "ready" {
+                steps.push(format!("Workspace remains {}. Preserve its ownership evidence; do not reuse it or dispatch work until explicit reconciliation succeeds.", workspace.state));
+            } else if workspace.verified_generation != Some(self.recorded_owner_generation) {
+                steps.push("Workspace is not verified for the current owner. Explicit recovery is required before work dispatch.".into());
+            }
+            steps.push("Status is read-only and does not probe the workspace lease or Git; recorded readiness is not a current filesystem or quiescence check.".into());
+        }
+        if self.execution_blocked {
+            steps.push("Unresolved execution effects still block pause/cancel completion, recovery and workspace reuse. Inspect the effects and use the #125 evidence/resolution protocol; an abandoned effect remains blocking.".into());
+        }
+        steps
     }
 }
 
@@ -530,14 +565,62 @@ impl Host {
     /// use [`Self::dispatch_reconciled`] for any later dispatch so the
     /// workspace is not verified again.
     pub fn dispatch_pending(&mut self, mission_id: &str) -> Result<usize> {
-        self.recover_workspace(mission_id)?;
-        self.dispatch_reconciled(mission_id)
+        self.reconcile_execution(mission_id)?;
+        match self.recover_workspace(mission_id) {
+            Ok(_) => self.dispatch_reconciled(mission_id),
+            Err(error) if error.is_isolated_workspace_failure() => {
+                self.dispatch_stops(mission_id)?;
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Deliver only already-admitted FakeRuntime Pause/Cancel commands. This
+    /// does not inspect or mutate a workspace, apply effects, or complete a stop.
+    /// Pi stop delivery remains behind its existing S2/Track B contract.
+    pub fn dispatch_stops(&mut self, mission_id: &str) -> Result<usize> {
+        self.reconcile_execution(mission_id)?;
+        if !matches!(self.runtime, RuntimeAdapter::Fake(_)) {
+            return Ok(0);
+        }
+        let mission = self.store.load_mission(mission_id)?;
+        let binding = self.binding(&mission);
+        self.accept_runtime_binding(&binding, mission_id)?;
+        let pending = self.store.list_commands(mission_id)?;
+        let mut dispatched = 0;
+        for command in pending.iter().filter(|command| {
+            command.state == CommandState::Pending
+                && matches!(command.kind, CommandKind::Pause | CommandKind::Cancel)
+        }) {
+            self.accept_runtime_binding(&binding, mission_id)?;
+            if command.attempt_id != binding.attempt_id {
+                return Err(Error::BindingMismatch {
+                    detail: "stop command does not belong to the active attempt".into(),
+                });
+            }
+            let request = RuntimeRequest {
+                binding: binding.clone(),
+                request_id: command.request_id.clone(),
+                payload_hash: command.payload_hash.clone(),
+                method: "abort",
+            };
+            let payload =
+                serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+            // FakeRuntime's idempotent abort validates stored identity, method
+            // and payload on replay, returning the original durable receipt.
+            let receipt = self.runtime.dispatch(&request, &payload)?;
+            self.store
+                .acknowledge(&command.id, &receipt_json(&receipt, self.runtime.name()))?;
+            dispatched += 1;
+        }
+        Ok(dispatched)
     }
 
     /// Dispatch pending commands without verifying the workspace again.
     /// The caller must already have reconciled it in this owner generation.
     pub fn dispatch_reconciled(&mut self, mission_id: &str) -> Result<usize> {
-        self.reconcile_execution(mission_id)?;
+        let stops_dispatched = self.dispatch_stops(mission_id)?;
         let mission = self.store.load_mission(mission_id)?;
         self.store.require_workspace_ready(&mission.attempt.id)?;
         let recorded = self.store.list_commands(mission_id)?;
@@ -615,7 +698,7 @@ impl Host {
                 runtime.require_acknowledged_batch(&acknowledged)?;
             }
         }
-        let mut dispatched = 0;
+        let mut dispatched = stops_dispatched;
         for command in pending {
             let request = RuntimeRequest {
                 binding: binding.clone(),
@@ -645,12 +728,8 @@ impl Host {
                 )?;
                 continue;
             }
-            #[cfg(feature = "pi-contract")]
-            if matches!(self.runtime, RuntimeAdapter::Pi(_))
-                && is_runtime_work(command.kind)
-                && self.store.ops_blocked(mission_id)?
-            {
-                return Err(Error::guard("uncertain effects block Pi dispatch"));
+            if is_runtime_work(command.kind) && self.store.ops_blocked(mission_id)? {
+                return Err(Error::guard("uncertain effects block runtime dispatch"));
             }
             let receipt = match self.runtime.dispatch(&request, &payload) {
                 Ok(receipt) => receipt,
@@ -769,7 +848,7 @@ impl Host {
 
     /// Reconcile one workspace, deliver pending commands, poll observations,
     /// and return a snapshot. An uncertain, busy, or transient workspace
-    /// failure skips dispatch but does not block polling or the snapshot;
+    /// failure permits FakeRuntime stop delivery, polling and the snapshot;
     /// that failure is returned after those steps. Stale generation and other
     /// host-level failures abort before either runs.
     pub fn recover(&mut self, mission_id: &str) -> Result<MissionSnapshot> {
@@ -781,6 +860,8 @@ impl Host {
         };
         if workspace_error.is_none() {
             self.dispatch_reconciled(mission_id)?;
+        } else {
+            self.dispatch_stops(mission_id)?;
         }
         self.poll_runtime(mission_id)?;
         let snapshot = self.snapshot(mission_id)?;
@@ -1450,6 +1531,7 @@ fn snapshot_from(store: &Store, mission_id: &str, generation: u64) -> Result<Mis
         workspace,
         execution_effects: store.execution_views(mission_id)?,
         execution_resolutions: store.execution_resolutions(mission_id)?,
+        execution_blocked: store.ops_blocked(mission_id)?,
         quarantined: store.list_quarantine(mission_id)?,
     })
 }

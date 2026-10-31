@@ -1212,3 +1212,5 @@ fn signaled_git_during_verify_stays_retryable() {
         assert_eq!(recovered.id, view.id);
     }
 }
+
+mod stop_delivery;

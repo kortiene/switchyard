@@ -10,7 +10,11 @@ impl Host {
         if self.store.execution_blocked(mission_id)? {
             self.store.quarantine_pending_execution(mission_id)?;
             let mission = self.store.load_mission(mission_id)?;
-            if !mission.phase.is_terminal() {
+            // Preserve an admitted stop while retaining every execution block.
+            // A delivered abort cannot authorize ConfirmStopped/ConfirmCancelled.
+            let stopping_fake = matches!(self.runtime, RuntimeAdapter::Fake(_))
+                && matches!(mission.phase, Phase::Pausing | Phase::Cancelling);
+            if !mission.phase.is_terminal() && !stopping_fake {
                 self.uncertainty(&mission, AttentionReason::ExecutionUncertain)?;
             }
         }

@@ -55,7 +55,9 @@ forward through v6 (the additive operator-decision journal).
 | `uncertain` | Retain the row, block new work; no automatic reset or settlement API. |
 
 `recover` and dispatch reconciliation quarantine unfinished intents and record
-`execution_uncertain` / `needs_attention` for nonterminal missions. Replaying an
+`execution_uncertain` / `needs_attention` for nonterminal missions, except that
+an admitted FakeRuntime `pausing`/`cancelling` intent is retained while its effects
+remain blocked (see [stop delivery](s3-stop-delivery.md)). Replaying an
 unfinished operation does the same. Terminal missions remain terminal. If a
 crash splits row quarantine and mission transition, the next reconciliation
 repeats the missing transition; the unfinished row blocks new work throughout.
@@ -97,7 +99,8 @@ prove power-loss durability or recovery of real filesystem/process effects.
 
 Next Track A work implements confined file/process backends, a supported Linux
 confinement backend, bounded resources/output and process-tree supervision.
-Stop-direction delivery must bypass blocked workspace dispatch before real
+[Stop delivery](s3-stop-delivery.md) now bypasses blocked workspace dispatch for
+FakeRuntime. Real stop/escalation and quiescence remain required before real
 execution is enabled. Pi tool identity propagation and typed effect outcomes
 remain #96 / Track B work, gated on S2 GO. No full S3 acceptance checkbox is
 satisfied merely by passing these simulation tests.

@@ -102,9 +102,11 @@ Git working files.
 owner generation before its readiness gate, so `mission command` can dispatch
 a workspace prepared by an earlier process. A second dispatch in that same
 invocation does not verify again. Admission is not gated by an uncertain,
-busy, or transient workspace failure; only dispatch is. When that happens,
-`mission command` prints `ok: true` with the admitted command and a
-`workspaceError` field, and exits 3. Exit 0 means success, including a
+busy, or transient workspace failure; work dispatch remains gated. FakeRuntime
+[Pause/Cancel delivery](s3-stop-delivery.md) bypasses that gate. When a workspace
+failure occurs, `mission command` prints `ok: true` with the admitted command and a
+`workspaceError` field, and exits 3. Stops may still be acknowledged: inspect
+`dispatched`, `commandState` and the receipt. Exit 0 means success, including a
 persist-only admission; it does not by itself prove runtime execution. Exit 2
 means rejection or failure and does not prove the command was not recorded:
 post-admission dispatch or snapshot failures also use that exit code.
@@ -120,11 +122,11 @@ Do not generate a new command ID merely because an invocation exited 2.
 `--persist-only`
 records the command and does not reconcile, so it does not run
 `git worktree add`. `Host::recover` reconciles, then dispatches, polls, and
-snapshots. An uncertain, busy, storage, or Git failure skips dispatch and is
-returned after polling and the snapshot. Stale generation still aborts before
-either runs. Direct dispatch still refuses a workspace that is not ready for
-this generation. `mission status` reports recorded state read-only, without
-Git operations or a workspace lease.
+snapshots. An uncertain, busy, storage, or Git failure skips work dispatch but
+permits FakeRuntime stop delivery, and is returned after polling and the snapshot.
+Stale generation still aborts before dispatch or polling. Direct dispatch still
+refuses work when the workspace is not ready for this generation. `mission status`
+reports recorded state read-only, without Git operations or a workspace lease.
 
 ## Git boundary and remaining S3 work
 

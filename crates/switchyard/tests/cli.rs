@@ -284,7 +284,7 @@ fn mission_command_reconciles_a_prepared_workspace() {
 }
 
 #[test]
-fn uncertain_workspace_admits_pause_and_cancel_without_dispatch() {
+fn uncertain_workspace_delivers_pause_and_cancel_and_reports_the_block() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     let db = tmp.path().join("mission.sqlite");
@@ -358,8 +358,8 @@ fn uncertain_workspace_admits_pause_and_cancel_without_dispatch() {
     assert_eq!(code, 3, "{cancelled} {error}");
     assert!(error.is_null(), "{error}");
     assert_eq!(cancelled["ok"], true);
-    assert_eq!(cancelled["dispatched"], false);
-    assert_eq!(cancelled["commandState"], "pending");
+    assert_eq!(cancelled["dispatched"], true);
+    assert_eq!(cancelled["commandState"], "acknowledged");
     assert!(cancelled["commandId"].as_str().unwrap().starts_with("c-"));
     assert!(cancelled["revision"].as_u64().unwrap() > paused_revision);
     assert_eq!(
@@ -401,16 +401,22 @@ fn uncertain_workspace_admits_pause_and_cancel_without_dispatch() {
     assert_eq!(mission_status["phase"], "cancelling");
     assert_eq!(mission_status["revision"], recorded_revision);
     assert_eq!(mission_status["workspace"]["state"], "uncertain");
+    let guidance = mission_status["nextSteps"].to_string();
+    assert!(guidance.contains("was delivered"), "{guidance}");
+    assert!(
+        guidance.contains("Workspace remains uncertain"),
+        "{guidance}"
+    );
     let commands = mission_status["commands"].as_array().unwrap();
     assert!(
         commands
             .iter()
-            .any(|command| command["kind"] == "pause" && command["state"] == "pending")
+            .any(|command| command["kind"] == "pause" && command["state"] == "acknowledged")
     );
     assert!(
         commands
             .iter()
-            .any(|command| command["kind"] == "cancel" && command["state"] == "pending")
+            .any(|command| command["kind"] == "cancel" && command["state"] == "acknowledged")
     );
     assert_eq!(
         commands
@@ -686,5 +692,77 @@ fn abandon_execution_is_audited_idempotently_and_keeps_the_block() {
             .unwrap()
             .len(),
         1
+    );
+}
+
+#[test]
+fn cancel_is_admitted_before_dispatching_earlier_work() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "129",
+        "--objective",
+        "stop before work",
+        "--acceptance",
+        "abort only",
+        "--admit",
+        "start_planning",
+        "--persist-only",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let revision = created["mission"]["revision"].as_u64().unwrap().to_string();
+    let (code, stopped, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--kind",
+        "cancel",
+        "--expected-revision",
+        &revision,
+        "--command-id",
+        "stop-once",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(stopped["commandState"], "acknowledged");
+    assert_eq!(stopped["dispatched"], true);
+    let journal: Value =
+        serde_json::from_slice(&std::fs::read(switchyard_core::journal_path(&db)).unwrap())
+            .unwrap();
+    let submissions = journal["submissions"].as_object().unwrap();
+    assert_eq!(submissions.len(), 1);
+    assert_eq!(submissions.values().next().unwrap()["method"], "abort");
+    let (code, replay, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--kind",
+        "cancel",
+        "--expected-revision",
+        &revision,
+        "--command-id",
+        "stop-once",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(replay["idempotent"], true);
+    assert_eq!(replay["requestId"], stopped["requestId"]);
+    assert_eq!(
+        replay["mission"]["commands"],
+        stopped["mission"]["commands"]
     );
 }
