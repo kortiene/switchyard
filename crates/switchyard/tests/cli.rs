@@ -136,6 +136,82 @@ fn create_status_and_recover_keep_the_same_attempt() {
 }
 
 #[test]
+fn explicit_workspace_command_and_recovery_keep_identity_without_inherited_git_authority() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    let root = tmp.path().join("workspaces");
+    std::fs::create_dir(&root).unwrap();
+    init_repo(&repo);
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "118",
+        "--objective",
+        "workspace",
+        "--acceptance",
+        "same workspace",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let attempt = created["mission"]["attemptId"].as_str().unwrap();
+    let output = Command::new(bin())
+        .args([
+            "mission",
+            "workspace",
+            "--db",
+            db.to_str().unwrap(),
+            "--mission",
+            mission,
+            "--attempt",
+            attempt,
+            "--root",
+            root.to_str().unwrap(),
+        ])
+        .env("GIT_DIR", "/nonexistent/git-authority")
+        .env("GIT_WORK_TREE", "/nonexistent/worktree")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.worktree")
+        .env("GIT_CONFIG_VALUE_0", "/nonexistent/injected")
+        .env("GH_TOKEN", "WORKSPACE_TOKEN_MUST_NOT_PERSIST")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let prepared: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let workspace = &prepared["workspace"];
+    assert_eq!(workspace["state"], "ready");
+    assert_eq!(workspace["baseSha"], created["mission"]["baseSha"]);
+    let (code, recovered, error) = run(&[
+        "mission",
+        "recover",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(recovered["mission"]["workspace"]["id"], workspace["id"]);
+    assert_eq!(recovered["mission"]["workspace"]["path"], workspace["path"]);
+    assert_eq!(head(&repo), created["mission"]["baseSha"].as_str().unwrap());
+    let slot = root.join(attempt);
+    for path in [db, slot.join("owner.json"), slot.join("git-create.log")] {
+        assert!(
+            !String::from_utf8_lossy(&std::fs::read(path).unwrap())
+                .contains("WORKSPACE_TOKEN_MUST_NOT_PERSIST")
+        );
+    }
+}
+
+#[test]
 fn second_owner_is_rejected_while_status_still_reads() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("mission.sqlite");

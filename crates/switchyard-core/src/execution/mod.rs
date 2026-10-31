@@ -6,6 +6,7 @@ mod pi_bridge;
 #[cfg(feature = "pi-contract")]
 mod pi_runtime;
 mod runtime;
+pub(crate) mod workspace;
 
 pub use git::inspect_repo;
 pub use owner::{OwnerLock, lock_path, try_acquire};

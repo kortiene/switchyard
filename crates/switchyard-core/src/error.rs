@@ -21,6 +21,15 @@ pub enum Error {
     #[error("a second active owner already holds the host lock")]
     SecondActiveOwner,
 
+    #[error("workspace {workspace_id} still has an active creator")]
+    WorkspaceBusy { workspace_id: String },
+
+    #[error("workspace {workspace_id} is uncertain: {detail}")]
+    WorkspaceUncertain {
+        workspace_id: String,
+        detail: String,
+    },
+
     #[error("command conflict for {command_id}")]
     CommandConflict { command_id: String },
 
@@ -72,6 +81,8 @@ impl Error {
             Self::StaleRevision { .. } => "stale_revision",
             Self::BindingMismatch { .. } => "binding_mismatch",
             Self::SecondActiveOwner => "second_active_owner",
+            Self::WorkspaceBusy { .. } => "workspace_busy",
+            Self::WorkspaceUncertain { .. } => "workspace_uncertain",
             Self::CommandConflict { .. } => "command_conflict",
             Self::OperationConflict { .. } => "operation_conflict",
             Self::StaleGeneration { .. } => "stale_generation",
@@ -111,7 +122,10 @@ impl Error {
 
     /// Storage and IO failures can be retried. Semantic rejections cannot.
     pub fn is_transient(&self) -> bool {
-        matches!(self, Self::Storage { .. } | Self::GitFailed { .. })
+        matches!(
+            self,
+            Self::Storage { .. } | Self::GitFailed { .. } | Self::WorkspaceBusy { .. }
+        )
     }
 }
 
