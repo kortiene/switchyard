@@ -38,7 +38,10 @@ struct World {
 }
 impl World {
     fn new() -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix("confinement-")
+            .tempdir()
+            .unwrap();
         let root = temp.path();
         fs::create_dir(root.join("original")).unwrap();
         let repo = root.join("original");

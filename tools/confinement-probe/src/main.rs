@@ -62,18 +62,26 @@ fn main() {
 }
 
 fn heartbeat(role: &str) {
-    // Namespace-local process identity lets the outside observer map each role
-    // through NSpid, rather than mistaking an unrelated host process for it.
-    fs::write(
-        format!("/workspace/{role}.ready"),
-        std::process::id().to_string(),
-    )
-    .unwrap();
     let mut log = OpenOptions::new()
         .create(true)
         .append(true)
         .open(format!("/workspace/{role}.heartbeat"))
         .unwrap();
+    // Publish readiness only after the first heartbeat and complete PID exist.
+    log.write_all(b"tick\n").unwrap();
+    log.flush().unwrap();
+    // Namespace-local process identity lets the outside observer map each role
+    // through NSpid, rather than mistaking an unrelated host process for it.
+    fs::write(
+        format!("/workspace/{role}.ready.tmp"),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+    fs::rename(
+        format!("/workspace/{role}.ready.tmp"),
+        format!("/workspace/{role}.ready"),
+    )
+    .unwrap();
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(25) {
         log.write_all(b"tick\n").unwrap();
