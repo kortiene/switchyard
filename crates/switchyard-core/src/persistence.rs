@@ -18,6 +18,8 @@ use crate::execution::OwnerLock;
 use crate::policy::TransitionPlan;
 use crate::verification::NewVerification;
 
+mod workspace;
+
 const VERIFIER_JSON: &str = r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}"#;
 const ENVIRONMENT_JSON: &str = r#"{"confinement":"deferred_to_s3","host":"single"}"#;
 
@@ -91,7 +93,7 @@ impl Store {
                 detail: "database is not initialized".into(),
             });
         }
-        if version > 2 {
+        if version > 3 {
             return Err(Error::Storage {
                 detail: format!("database schema version {version} is newer than this host"),
             });
@@ -233,7 +235,7 @@ impl Store {
                 |row| row.get(0),
             )
             .map_err(Error::storage)?;
-        if current > 2 {
+        if current > 3 {
             return Err(Error::Storage {
                 detail: format!("database schema version {current} is newer than this host"),
             });
@@ -271,6 +273,19 @@ impl Store {
             self.conn
                 .execute_batch("PRAGMA foreign_keys=ON;")
                 .map_err(Error::storage)?;
+        }
+        if current < 3 {
+            let tx = self.immediate()?;
+            tx.execute_batch(include_str!("migrations/003_workspaces.sql"))
+                .map_err(Error::storage)?;
+            tx.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (3, ?1)",
+                [now_ms()],
+            )
+            .map_err(Error::storage)?;
+            tx.execute_batch("PRAGMA user_version = 3;")
+                .map_err(Error::storage)?;
+            tx.commit().map_err(Error::storage)?;
         }
         Ok(())
     }
@@ -1685,7 +1700,7 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
             .unwrap();
         assert_eq!(foreign_keys, 1);
-        assert_eq!(user_version(&store.conn).unwrap(), 2);
+        assert_eq!(user_version(&store.conn).unwrap(), 3);
         let index: String = store
             .conn
             .query_row(

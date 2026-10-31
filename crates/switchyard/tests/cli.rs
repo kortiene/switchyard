@@ -136,6 +136,292 @@ fn create_status_and_recover_keep_the_same_attempt() {
 }
 
 #[test]
+fn explicit_workspace_command_and_recovery_keep_identity_without_inherited_git_authority() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    let root = tmp.path().join("workspaces");
+    std::fs::create_dir(&root).unwrap();
+    init_repo(&repo);
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "118",
+        "--objective",
+        "workspace",
+        "--acceptance",
+        "same workspace",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let attempt = created["mission"]["attemptId"].as_str().unwrap();
+    let output = Command::new(bin())
+        .args([
+            "mission",
+            "workspace",
+            "--db",
+            db.to_str().unwrap(),
+            "--mission",
+            mission,
+            "--attempt",
+            attempt,
+            "--root",
+            root.to_str().unwrap(),
+        ])
+        .env("GIT_DIR", "/nonexistent/git-authority")
+        .env("GIT_WORK_TREE", "/nonexistent/worktree")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.worktree")
+        .env("GIT_CONFIG_VALUE_0", "/nonexistent/injected")
+        .env("GH_TOKEN", "WORKSPACE_TOKEN_MUST_NOT_PERSIST")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let prepared: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let workspace = &prepared["workspace"];
+    assert_eq!(workspace["state"], "ready");
+    assert_eq!(workspace["baseSha"], created["mission"]["baseSha"]);
+    let (code, recovered, error) = run(&[
+        "mission",
+        "recover",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(recovered["mission"]["workspace"]["id"], workspace["id"]);
+    assert_eq!(recovered["mission"]["workspace"]["path"], workspace["path"]);
+    assert_eq!(head(&repo), created["mission"]["baseSha"].as_str().unwrap());
+    let slot = root.join(attempt);
+    for path in [db, slot.join("owner.json"), slot.join("git-create.log")] {
+        assert!(
+            !String::from_utf8_lossy(&std::fs::read(path).unwrap())
+                .contains("WORKSPACE_TOKEN_MUST_NOT_PERSIST")
+        );
+    }
+}
+
+#[test]
+fn mission_command_reconciles_a_prepared_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    let root = tmp.path().join("workspaces");
+    std::fs::create_dir(&root).unwrap();
+    init_repo(&repo);
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "118",
+        "--objective",
+        "workspace command",
+        "--acceptance",
+        "command reconciles",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let attempt = created["mission"]["attemptId"].as_str().unwrap();
+    let revision = created["mission"]["revision"].as_u64().unwrap();
+    let (code, prepared, error) = run(&[
+        "mission",
+        "workspace",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--attempt",
+        attempt,
+        "--root",
+        root.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let (code, commanded, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--kind",
+        "start_planning",
+        "--expected-revision",
+        &revision.to_string(),
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(commanded["mission"]["phase"], "planning");
+    assert_eq!(commanded["mission"]["commands"][0]["state"], "acknowledged");
+    assert_eq!(
+        commanded["mission"]["pendingCommands"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(commanded["mission"]["workspace"]["state"], "ready");
+    assert_eq!(
+        commanded["mission"]["workspace"]["id"],
+        prepared["workspace"]["id"]
+    );
+    assert_ne!(
+        commanded["mission"]["workspace"]["verifiedGeneration"],
+        prepared["workspace"]["verifiedGeneration"]
+    );
+}
+
+#[test]
+fn uncertain_workspace_admits_pause_and_cancel_without_dispatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    let root = tmp.path().join("workspaces");
+    std::fs::create_dir(&root).unwrap();
+    init_repo(&repo);
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "118",
+        "--objective",
+        "stop despite uncertainty",
+        "--acceptance",
+        "pause and cancel are recorded",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let attempt = created["mission"]["attemptId"].as_str().unwrap();
+    let revision = created["mission"]["revision"].as_u64().unwrap();
+    let (code, _, error) = run(&[
+        "mission",
+        "workspace",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--attempt",
+        attempt,
+        "--root",
+        root.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{error}");
+    std::fs::remove_file(root.join(attempt).join("owner.json")).unwrap();
+
+    let (code, paused, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--kind",
+        "pause",
+        "--expected-revision",
+        &revision.to_string(),
+        "--persist-only",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(paused["commandState"], "pending");
+    assert_eq!(paused["mission"]["phase"], "pausing");
+    assert_eq!(paused["mission"]["workspace"]["state"], "ready");
+    let paused_revision = paused["mission"]["revision"].as_u64().unwrap();
+
+    let (code, cancelled, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--kind",
+        "cancel",
+        "--expected-revision",
+        &paused_revision.to_string(),
+    ]);
+    assert_eq!(code, 3, "{cancelled} {error}");
+    assert!(error.is_null(), "{error}");
+    assert_eq!(cancelled["ok"], true);
+    assert_eq!(cancelled["dispatched"], false);
+    assert_eq!(cancelled["commandState"], "pending");
+    assert!(cancelled["commandId"].as_str().unwrap().starts_with("c-"));
+    assert!(cancelled["revision"].as_u64().unwrap() > paused_revision);
+    assert_eq!(
+        cancelled["workspaceError"]["category"],
+        "workspace_uncertain"
+    );
+    assert_eq!(cancelled["mission"]["phase"], "cancelling");
+    let recorded_revision = cancelled["revision"].as_u64().unwrap();
+
+    let (code, _, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--kind",
+        "cancel",
+        "--expected-revision",
+        &paused_revision.to_string(),
+    ]);
+    assert_eq!(
+        code, 2,
+        "a retry must be a rejection, not another recorded cancel"
+    );
+    assert_eq!(error["error"]["category"], "stale_revision");
+    assert_eq!(error["ok"], false);
+
+    let (code, status, error) = run(&[
+        "mission",
+        "status",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission_status = &status["missions"][0];
+    assert_eq!(mission_status["phase"], "cancelling");
+    assert_eq!(mission_status["revision"], recorded_revision);
+    assert_eq!(mission_status["workspace"]["state"], "uncertain");
+    let commands = mission_status["commands"].as_array().unwrap();
+    assert!(
+        commands
+            .iter()
+            .any(|command| command["kind"] == "pause" && command["state"] == "pending")
+    );
+    assert!(
+        commands
+            .iter()
+            .any(|command| command["kind"] == "cancel" && command["state"] == "pending")
+    );
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command["kind"] == "cancel")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn second_owner_is_rejected_while_status_still_reads() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("mission.sqlite");

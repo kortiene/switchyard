@@ -18,6 +18,9 @@ mod policy;
 mod service;
 mod transitions;
 mod verification;
+mod workspace;
+
+pub use workspace::WorkspaceView;
 
 pub use canonical::{canonicalize, payload_hash};
 pub use delivery::{proof_matches, publication_operation_id};

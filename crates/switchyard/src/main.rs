@@ -12,7 +12,7 @@ use switchyard_core::{
 #[command(
     name = "switchyard",
     version,
-    about = "Switchyard Rust mission host (S1). Fake runtime only; no model credentials or GitHub writes."
+    about = "Switchyard Rust mission host. Fake runtime and owned worktrees; no model credentials or GitHub writes."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -30,6 +30,18 @@ enum Command {
 
 #[derive(Subcommand)]
 enum MissionCommand {
+    /// Create or reopen this attempt's owned worktree. Does not execute agent commands.
+    Workspace {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        mission: String,
+        #[arg(long)]
+        attempt: String,
+        /// Existing canonical absolute directory, outside the source checkout.
+        #[arg(long)]
+        root: PathBuf,
+    },
     /// Create a draft mission and one attempt from a local Git repository.
     Create {
         #[arg(long)]
@@ -67,6 +79,11 @@ enum MissionCommand {
         mission: Option<String>,
     },
     /// Admit a command. Dispatches pending runtime work unless `--persist-only`.
+    /// `--persist-only` does not reconcile a workspace or run `git worktree add`.
+    /// If the command is recorded but the workspace blocks dispatch, the process
+    /// exits 3 and the JSON includes `workspaceError`. Exit 2 means rejection or
+    /// failure, possibly after recording. Supply `--command-id` before the first
+    /// attempt and reuse it with the same request to resolve an ambiguous result.
     Command {
         #[arg(long)]
         db: PathBuf,
@@ -84,6 +101,8 @@ enum MissionCommand {
         actor: String,
         #[arg(long, default_value = "{}")]
         payload: String,
+        /// Record the command only. Does not reconcile a workspace, dispatch,
+        /// or run `git worktree add`.
         #[arg(long)]
         persist_only: bool,
     },
@@ -137,7 +156,14 @@ fn main() -> ExitCode {
     match run(cli) {
         Ok(value) => {
             println!("{value}");
-            ExitCode::SUCCESS
+            // Exit 3: recorded, not dispatched (`ok` with `workspaceError`).
+            // Exit 0 is success (including persist-only). Exit 2 is rejection
+            // or failure and does not prove that admission did not occur.
+            if value.get("workspaceError").is_some() {
+                ExitCode::from(3)
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(error) => {
             let body = json!({
@@ -156,6 +182,16 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> switchyard_core::Result<Value> {
     match cli.command {
         Command::Mission { action } => match action {
+            MissionCommand::Workspace {
+                db,
+                mission,
+                attempt,
+                root,
+            } => {
+                let mut host = Host::open(&db)?;
+                let workspace = host.prepare_workspace(&mission, &attempt, &root)?;
+                Ok(json!({"ok": true, "workspace": workspace.to_json()}))
+            }
             MissionCommand::Create {
                 db,
                 repo,
@@ -223,7 +259,22 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 persist_only,
             } => {
                 let mut host = Host::open(&db)?;
-                host.dispatch_pending(&mission)?;
+                // Reconcile once per invocation. `--persist-only` skips that
+                // and both dispatches, so it cannot create a worktree.
+                // Isolated workspace failures still allow admission; only
+                // dispatch is gated.
+                let workspace_error = if persist_only {
+                    None
+                } else {
+                    match host.recover_workspace(&mission) {
+                        Ok(_) => None,
+                        Err(error) if error.is_isolated_workspace_failure() => Some(error),
+                        Err(error) => return Err(error),
+                    }
+                };
+                if !persist_only && workspace_error.is_none() {
+                    host.dispatch_reconciled(&mission)?;
+                }
                 let current = host.snapshot(&mission)?;
                 let body = command_body(
                     &kind,
@@ -239,8 +290,27 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     origin: CommandOrigin::Operator,
                     body,
                 })?;
-                if !persist_only {
-                    host.dispatch_pending(&mission)?;
+                if !persist_only && workspace_error.is_none() {
+                    host.dispatch_reconciled(&mission)?;
+                }
+                if let Some(error) = workspace_error {
+                    let mission_json = host.snapshot(&mission)?.to_json();
+                    let revision = mission_json["revision"].clone();
+                    return Ok(json!({
+                        "ok": true,
+                        "dispatched": false,
+                        "idempotent": admitted.idempotent,
+                        "commandId": admitted.command_id,
+                        "requestId": admitted.request_id,
+                        "payloadHash": admitted.payload_hash,
+                        "commandState": admitted.state.as_str(),
+                        "revision": revision,
+                        "workspaceError": {
+                            "category": error.category(),
+                            "message": error.to_string(),
+                        },
+                        "mission": mission_json,
+                    }));
                 }
                 Ok(json!({
                     "ok": true,

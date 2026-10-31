@@ -21,6 +21,15 @@ pub enum Error {
     #[error("a second active owner already holds the host lock")]
     SecondActiveOwner,
 
+    #[error("workspace {workspace_id} still has an active creator")]
+    WorkspaceBusy { workspace_id: String },
+
+    #[error("workspace {workspace_id} is uncertain: {detail}")]
+    WorkspaceUncertain {
+        workspace_id: String,
+        detail: String,
+    },
+
     #[error("command conflict for {command_id}")]
     CommandConflict { command_id: String },
 
@@ -54,8 +63,14 @@ pub enum Error {
     #[error("an active mission already exists")]
     ActiveMissionExists,
 
+    /// `exit_code` is `None` when Git was killed by a signal, or the failure
+    /// was not a completed process exit. Signal death stays retryable.
+    /// A real non-zero exit is evidence when a workspace check converts it.
     #[error("git inspection failed: {detail}")]
-    GitFailed { detail: String },
+    GitFailed {
+        detail: String,
+        exit_code: Option<i32>,
+    },
 
     #[error("canonical JSON rejected: {detail}")]
     Canonical { detail: String },
@@ -72,6 +87,8 @@ impl Error {
             Self::StaleRevision { .. } => "stale_revision",
             Self::BindingMismatch { .. } => "binding_mismatch",
             Self::SecondActiveOwner => "second_active_owner",
+            Self::WorkspaceBusy { .. } => "workspace_busy",
+            Self::WorkspaceUncertain { .. } => "workspace_uncertain",
             Self::CommandConflict { .. } => "command_conflict",
             Self::OperationConflict { .. } => "operation_conflict",
             Self::StaleGeneration { .. } => "stale_generation",
@@ -109,9 +126,35 @@ impl Error {
         }
     }
 
+    pub fn git(detail: impl Into<String>, exit_code: Option<i32>) -> Self {
+        Self::GitFailed {
+            detail: detail.into(),
+            exit_code,
+        }
+    }
+
+    /// Completed Git exit, as opposed to a signal kill. Evidence checks turn
+    /// only this case into a permanent workspace mismatch.
+    pub fn git_exit_code(&self) -> Option<i32> {
+        match self {
+            Self::GitFailed { exit_code, .. } => *exit_code,
+            _ => None,
+        }
+    }
+
     /// Storage and IO failures can be retried. Semantic rejections cannot.
     pub fn is_transient(&self) -> bool {
-        matches!(self, Self::Storage { .. } | Self::GitFailed { .. })
+        matches!(
+            self,
+            Self::Storage { .. } | Self::GitFailed { .. } | Self::WorkspaceBusy { .. }
+        )
+    }
+
+    /// Workspace problems that must not block command admission or observation
+    /// polling. Dispatch stays gated until the workspace is ready again.
+    /// Stale generation and other host-level failures are not included.
+    pub fn is_isolated_workspace_failure(&self) -> bool {
+        matches!(self, Self::WorkspaceUncertain { .. }) || self.is_transient()
     }
 }
 

@@ -19,6 +19,8 @@ use crate::policy::{self, Facts};
 use crate::transitions::target_spec;
 use crate::verification::NewVerification;
 
+mod workspace;
+
 /// Open the host, take the single-host lock, and reuse the active attempt.
 ///
 /// Opening does not dispatch pending commands and does not create an attempt.
@@ -28,6 +30,7 @@ pub struct Host {
     store: Store,
     runtime: RuntimeAdapter,
     lock: OwnerLock,
+    ledger_path: PathBuf,
 }
 
 pub struct CreateMission {
@@ -123,6 +126,7 @@ pub struct MissionSnapshot {
     pub runtime_adapter: String,
     pub verifier_json: String,
     pub delivery: Option<DeliveryView>,
+    pub workspace: Option<crate::WorkspaceView>,
     pub quarantined: Vec<(i64, String, String, String)>,
 }
 
@@ -153,6 +157,7 @@ impl MissionSnapshot {
             "successorOfMissionId": self.successor_of_mission_id,
             "headSha": self.head_sha,
             "runtimeAdapter": self.runtime_adapter,
+            "workspace": self.workspace.as_ref().map(crate::WorkspaceView::to_json),
             "verifier": serde_json::from_str::<Value>(&self.verifier_json).ok(),
             "pendingCommands": self.pending_commands.iter().map(command_json).collect::<Vec<_>>(),
             "commands": self.commands.iter().map(command_json).collect::<Vec<_>>(),
@@ -269,6 +274,7 @@ impl Host {
             store,
             runtime,
             lock,
+            ledger_path: db_path.to_path_buf(),
         })
     }
 
@@ -507,8 +513,23 @@ impl Host {
         Ok(result_of(&command, plan.next, false))
     }
 
+    /// Deliver pending commands. A recorded workspace is reconciled in this
+    /// owner generation before the readiness gate, so a CLI command opened
+    /// after preparation can dispatch without a separate recover.
+    ///
+    /// Reconciles once. A caller that admits in the same invocation should
+    /// use [`Self::dispatch_reconciled`] for any later dispatch so the
+    /// workspace is not verified again.
     pub fn dispatch_pending(&mut self, mission_id: &str) -> Result<usize> {
+        self.recover_workspace(mission_id)?;
+        self.dispatch_reconciled(mission_id)
+    }
+
+    /// Dispatch pending commands without verifying the workspace again.
+    /// The caller must already have reconciled it in this owner generation.
+    pub fn dispatch_reconciled(&mut self, mission_id: &str) -> Result<usize> {
         let mission = self.store.load_mission(mission_id)?;
+        self.store.require_workspace_ready(&mission.attempt.id)?;
         let recorded = self.store.list_commands(mission_id)?;
         let mut admitted_runtime_work = recorded.iter().any(|command| {
             command.state == CommandState::Acknowledged && is_runtime_work(command.kind)
@@ -736,10 +757,26 @@ impl Host {
         Ok(())
     }
 
+    /// Reconcile one workspace, deliver pending commands, poll observations,
+    /// and return a snapshot. An uncertain, busy, or transient workspace
+    /// failure skips dispatch but does not block polling or the snapshot;
+    /// that failure is returned after those steps. Stale generation and other
+    /// host-level failures abort before either runs.
     pub fn recover(&mut self, mission_id: &str) -> Result<MissionSnapshot> {
-        self.dispatch_pending(mission_id)?;
+        let workspace_error = match self.recover_workspace(mission_id) {
+            Ok(_) => None,
+            Err(error) if error.is_isolated_workspace_failure() => Some(error),
+            Err(error) => return Err(error),
+        };
+        if workspace_error.is_none() {
+            self.dispatch_reconciled(mission_id)?;
+        }
         self.poll_runtime(mission_id)?;
-        self.snapshot(mission_id)
+        let snapshot = self.snapshot(mission_id)?;
+        if let Some(error) = workspace_error {
+            return Err(error);
+        }
+        Ok(snapshot)
     }
 
     pub fn poll_runtime(&mut self, mission_id: &str) -> Result<Vec<NotifyOutcome>> {
@@ -1343,6 +1380,9 @@ impl Host {
 
 fn snapshot_from(store: &Store, mission_id: &str, generation: u64) -> Result<MissionSnapshot> {
     let mission = store.load_mission(mission_id)?;
+    let workspace = store
+        .load_workspace(&mission.attempt.id)?
+        .map(|workspace| workspace.view);
     let commands = store.list_commands(mission_id)?;
     let views: Vec<CommandView> = commands.into_iter().map(command_view).collect();
     let pending = views
@@ -1396,6 +1436,7 @@ fn snapshot_from(store: &Store, mission_id: &str, generation: u64) -> Result<Mis
         runtime_adapter: mission.attempt.runtime_adapter,
         verifier_json: mission.attempt.verifier_json,
         delivery,
+        workspace,
         quarantined: store.list_quarantine(mission_id)?,
     })
 }
