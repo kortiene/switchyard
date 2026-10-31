@@ -10,8 +10,9 @@ or user-compatibility promise.
 
 > [!IMPORTANT]
 > Active development is the Rust mission host under `crates/`. The runnable
-> capability in this checkout is S1: a local SQLite ledger driven by a fake
-> runtime. The TypeScript package in `adw_sdlc/` is a frozen reference.
+> capability is a local SQLite ledger driven by a fake runtime, plus explicit
+> Rust-owned worktree preparation/recovery (S3-A1). The TypeScript package in
+> `adw_sdlc/` is a frozen reference.
 
 ## Direction
 
@@ -55,6 +56,11 @@ recover after restart, and record fake-runtime observations. It does not call
 a model, write to GitHub, confine a process, or resume frozen state v1.
 `switchyard mission status` is read-only and does not take the owner lock.
 
+`switchyard mission workspace` explicitly creates or reopens an attempt’s
+[owned worktree at its frozen base](./docs/rust-first/s3-workspace-ownership.md).
+Uncertain ownership blocks recovery and retains evidence. This does not enable
+agent commands or provide confinement.
+
 ```bash
 cargo run --locked -p switchyard -- --help
 ./scripts/rust-verify.sh
@@ -83,7 +89,8 @@ in the [package development guide](./adw_sdlc/README.md#development).
 | --- | --- |
 | **S1** [#95](https://github.com/kortiene/switchyard/issues/95) | Implemented. Mission ledger, command outbox, fake runtime. |
 | **S2** [#96](https://github.com/kortiene/switchyard/issues/96) | **NO-GO**. See [#96](https://github.com/kortiene/switchyard/issues/96) and the [S2 feasibility audit](./docs/rust-first/s2-feasibility.md). |
-| **S3–S8** [#97](https://github.com/kortiene/switchyard/issues/97)–[#102](https://github.com/kortiene/switchyard/issues/102) | Planned. S3 owns native worktree lifecycle. Pi-dependent live work stays blocked while S2 is NO-GO. |
+| **S3** [#97](https://github.com/kortiene/switchyard/issues/97) | S3-A1 adds explicit [worktree ownership/recovery](./docs/rust-first/s3-workspace-ownership.md). Effects, confinement and process supervision remain open. |
+| **S4–S8** [#98](https://github.com/kortiene/switchyard/issues/98)–[#102](https://github.com/kortiene/switchyard/issues/102) | Planned. Pi-dependent live work stays blocked while S2 is NO-GO. |
 | **Native Rust agent runtime** | Accepted long-term target (2026-10-29). Not implemented. Replacing the proof-of-concept adapter needs its own reviewed gate. |
 
 Product milestone:

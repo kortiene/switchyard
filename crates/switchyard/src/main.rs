@@ -12,7 +12,7 @@ use switchyard_core::{
 #[command(
     name = "switchyard",
     version,
-    about = "Switchyard Rust mission host (S1). Fake runtime only; no model credentials or GitHub writes."
+    about = "Switchyard Rust mission host. Fake runtime and owned worktrees; no model credentials or GitHub writes."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -30,6 +30,18 @@ enum Command {
 
 #[derive(Subcommand)]
 enum MissionCommand {
+    /// Create or reopen this attempt's owned worktree. Does not execute agent commands.
+    Workspace {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        mission: String,
+        #[arg(long)]
+        attempt: String,
+        /// Existing canonical absolute directory, outside the source checkout.
+        #[arg(long)]
+        root: PathBuf,
+    },
     /// Create a draft mission and one attempt from a local Git repository.
     Create {
         #[arg(long)]
@@ -156,6 +168,16 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> switchyard_core::Result<Value> {
     match cli.command {
         Command::Mission { action } => match action {
+            MissionCommand::Workspace {
+                db,
+                mission,
+                attempt,
+                root,
+            } => {
+                let mut host = Host::open(&db)?;
+                let workspace = host.prepare_workspace(&mission, &attempt, &root)?;
+                Ok(json!({"ok": true, "workspace": workspace.to_json()}))
+            }
             MissionCommand::Create {
                 db,
                 repo,

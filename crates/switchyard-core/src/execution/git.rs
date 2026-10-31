@@ -51,33 +51,19 @@ pub fn strip_userinfo(url: &str) -> String {
     format!("{}://{}", &url[..scheme_end], &rest[at + 1..])
 }
 
-fn git(path: &Path, args: &[&str]) -> Result<String> {
+pub(super) fn git(path: &Path, args: &[&str]) -> Result<String> {
     let bytes = git_bytes(path, args)?;
     String::from_utf8(bytes).map_err(|error| Error::GitFailed {
         detail: format!("git output was not utf-8: {error}"),
     })
 }
 
-fn git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let mut command = Command::new("git");
-    command.env_clear();
-    if let Some(path_var) = std::env::var_os("PATH") {
-        command.env("PATH", path_var);
-    }
-    command.env("GIT_OPTIONAL_LOCKS", "0");
-    command.env("GIT_CONFIG_NOSYSTEM", "1");
-    command.env("GIT_TERMINAL_PROMPT", "0");
-    command
-        .arg("-c")
-        .arg("core.fsmonitor=")
-        .arg("-c")
-        .arg("core.hooksPath=/dev/null")
-        .arg("-C")
-        .arg(path);
-    command.args(args);
-    let output = command.output().map_err(|error| Error::GitFailed {
-        detail: format!("failed to run git: {error}"),
-    })?;
+pub(super) fn git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let output = command(path)?.args(args).output().map_err(Error::storage)?;
+    checked_output(args, output)
+}
+
+pub(super) fn checked_output(args: &[&str], output: std::process::Output) -> Result<Vec<u8>> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(Error::GitFailed {
@@ -85,6 +71,75 @@ fn git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
         });
     }
     Ok(output.stdout)
+}
+
+fn base_command(path: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.env_clear();
+    if let Some(path_var) = std::env::var_os("PATH") {
+        command.env("PATH", path_var);
+    }
+    command.env("GIT_OPTIONAL_LOCKS", "0");
+    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    command.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    command.env("GIT_CONFIG_SYSTEM", "/dev/null");
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    command.env("GIT_NO_REPLACE_OBJECTS", "1");
+    command.env("GIT_NO_LAZY_FETCH", "1");
+    command.env("GIT_ATTR_NOSYSTEM", "1");
+    for setting in [
+        "core.fsmonitor=false",
+        "core.hooksPath=/dev/null",
+        "core.attributesFile=/dev/null",
+        "submodule.recurse=false",
+        "core.sparseCheckout=false",
+        "core.sparseCheckoutCone=false",
+        "core.autocrlf=false",
+        "core.eol=lf",
+        "protocol.allow=never",
+        "gc.auto=0",
+        "maintenance.auto=false",
+        "checkout.workers=1",
+    ] {
+        command.args(["-c", setting]);
+    }
+    command.arg("-C").arg(path);
+    command
+}
+
+/// Git checkout/status can execute configured filters, even without hooks.
+/// Disable every discovered driver at command scope. Configuration discovery
+/// itself does not run a driver, and inherited Git config/environment is cleared.
+pub(super) fn command(path: &Path) -> Result<Command> {
+    let args = [
+        "config",
+        "--null",
+        "--name-only",
+        "--get-regexp",
+        "^filter\\..*\\.(clean|smudge|process|required)$",
+    ];
+    let output = base_command(path)
+        .args(args)
+        .output()
+        .map_err(Error::storage)?;
+    let mut command = base_command(path);
+    if output.status.code() == Some(1) {
+        return Ok(command);
+    }
+    let keys = String::from_utf8(checked_output(&args, output)?).map_err(Error::storage)?;
+    let mut drivers = std::collections::BTreeSet::new();
+    for key in keys.split('\0').filter(|key| !key.is_empty()) {
+        let (driver, _) = key
+            .rsplit_once('.')
+            .ok_or_else(|| Error::guard("invalid filter key"))?;
+        drivers.insert(driver);
+    }
+    for driver in drivers {
+        for suffix in ["clean=", "smudge=", "process=", "required=false"] {
+            command.arg("-c").arg(format!("{driver}.{suffix}"));
+        }
+    }
+    Ok(command)
 }
 
 #[cfg(test)]
