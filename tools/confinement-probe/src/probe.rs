@@ -118,7 +118,7 @@ pub fn command(root: &Path, fixture: &Path, mode: &str) -> io::Result<Command> {
             mode,
         ])
         .stdin(Stdio::null())
-        .stdout(File::create(root.join("stdout.log"))?)
+        .stdout(File::create(root.join("status.jsonl"))?)
         .stderr(File::create(root.join("stderr.log"))?);
     Ok(cmd)
 }
@@ -203,7 +203,7 @@ impl ProcessIdentity {
 }
 
 pub fn namespace_from_status(root: &Path) -> io::Result<PathBuf> {
-    let log = fs::read_to_string(root.join("stdout.log"))?;
+    let log = fs::read_to_string(root.join("status.jsonl"))?;
     for line in log.lines() {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(line)
             && let Some(pid) = value["child-pid"].as_u64()

@@ -154,7 +154,7 @@ impl Drop for World {
         if let Some(destination) = std::env::var_os("SWITCHYARD_CONFINEMENT_EVIDENCE") {
             let target = PathBuf::from(destination).join(self.root().file_name().unwrap());
             fs::create_dir_all(&target).expect("preserve confinement evidence");
-            for name in ["stdout.log", "stderr.log", "supervisor.log", "case.json"] {
+            for name in ["status.jsonl", "stderr.log", "supervisor.log", "case.json"] {
                 let source = self.root().join(name);
                 if source.exists() {
                     fs::copy(source, target.join(name)).expect("save diagnostic");

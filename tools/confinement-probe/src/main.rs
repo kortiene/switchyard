@@ -91,6 +91,15 @@ fn heartbeat(role: &str) {
 }
 
 fn check() {
+    // Inspect before opening fixture files, which could reuse a closed fd 3.
+    let status_fd = fs::read_link("/proc/self/fd/3")
+        .expect_err("Bubblewrap status descriptor leaked into the fixture");
+    assert_eq!(status_fd.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(
+        fs::read_link("/proc/self/fd/1").unwrap(),
+        Path::new("/dev/null"),
+        "fixture stdout must not reach the status channel"
+    );
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read("/case.json").unwrap()).unwrap();
     assert_eq!(std::env::current_dir().unwrap(), Path::new("/workspace"));

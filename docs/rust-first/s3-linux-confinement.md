@@ -85,10 +85,11 @@ protected state.
 
 This observer and status channel are for deterministic fixtures. They are not a
 durable, adversarial process handle or operator quiescence certificate. The
-Bubblewrap status uses a dedicated fd 3 file channel. A fixed trusted shell
+Bubblewrap status uses a dedicated fd 3 file channel, saved as `status.jsonl`. A fixed trusted shell
 duplicates the preopened file descriptor, disconnects fixture stdout to
 /dev/null, and execs prlimit; Bubblewrap closes the status descriptor before
-fixture exec. Fixture stderr remains the separately bounded diagnostic stream.
+fixture exec. Before opening any files, the check fixture asserts that fd 3 is
+absent and stdout points to /dev/null. Fixture stderr remains the separately bounded diagnostic stream.
 This separation does not make the procfs observer an adversarial certificate. The Rust supervisor is a test
 process, not the product Host. Host machine reboot, power failure, PID-namespace
 nesting attacks and arbitrary malicious workloads are outside this proof.
