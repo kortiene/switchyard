@@ -113,14 +113,19 @@ fn incomplete_notification_frames_do_not_advance_and_errors_keep_the_queue() {
         Phase::Verifying
     );
 
-    host.runtime_mut().push_notification(pass_note(&digest));
-    host.runtime_mut().push_notification(plan_note("later"));
     host.runtime_mut()
+        .unwrap()
+        .push_notification(pass_note(&digest));
+    host.runtime_mut()
+        .unwrap()
+        .push_notification(plan_note("later"));
+    host.runtime_mut()
+        .unwrap()
         .push_notification(RuntimeNotification::Idle);
     host.poll_runtime(&created.mission_id).unwrap();
     let snap = host.snapshot(&created.mission_id).unwrap();
     assert_eq!(snap.phase, Phase::AwaitingReview);
-    assert_eq!(host.runtime_mut().queued_notifications(), 0);
+    assert_eq!(host.runtime_mut().unwrap().queued_notifications(), 0);
     assert_eq!(snap.quarantined.len(), 1);
     assert_eq!(snap.quarantined[0].1, "illegal_transition");
     assert!(snap.quarantined[0].3.contains("plan_completed"));

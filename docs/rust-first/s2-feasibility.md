@@ -4,7 +4,7 @@ Decision: **NO-GO for the currently published 1.4.0 package against the reviewed
 S2 baseline** (2026-10-29). Tracking: [#96](https://github.com/kortiene/switchyard/issues/96),
 parent [#94](https://github.com/kortiene/switchyard/issues/94).
 
-## Current status — 2026-10-30
+## Current status — 2026-10-31
 
 [#106](https://github.com/kortiene/switchyard/pull/106) merged this published-package
 NO-GO. [#107](https://github.com/kortiene/switchyard/pull/107) merged the pinned
@@ -14,6 +14,11 @@ source candidate in `runtime/pi-source/`; its verdict is `NEEDS-FULL-S2`.
 status to update when S2 work in #96 moves. This note does not execute the gate and
 does not claim GO or live execution. The 2026-10-29 evidence below stays as
 recorded.
+
+The [S2-A Host/outbox slice](s2-host-outbox.md) connects an explicitly selected
+faux Pi adapter to the real Host ledger and tests the admission/acknowledgement
+crash boundary. This is additional partial evidence for #119; the default CLI
+remains fake and the full S2 gate is still required.
 
 S1 is complete in [#105](https://github.com/kortiene/switchyard/pull/105).
 S2 is not complete. Rust remains the sole long-term engine, including the native

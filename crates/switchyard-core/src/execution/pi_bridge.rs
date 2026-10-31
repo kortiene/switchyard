@@ -95,8 +95,17 @@ impl PiBridge {
         binding: RuntimeBinding,
         fixture: &str,
     ) -> Result<Self> {
-        if !matches!(fixture, "answer" | "tools" | "recover")
-            || binding.generation == 0
+        if !matches!(
+            fixture,
+            "answer"
+                | "tools"
+                | "recover"
+                | "crash-before-admission"
+                | "crash-after-admission"
+                | "busy-once"
+                | "stopping-once"
+                | "mismatch"
+        ) || binding.generation == 0
             || binding.generation > 9_007_199_254_740_991
             || [
                 &binding.mission_id,
@@ -243,8 +252,13 @@ impl PiBridge {
         params: Value,
         effect: &mut dyn FnMut(&Value) -> Result<Value>,
     ) -> Result<Value> {
-        self.call_inner(method, command_id, params, effect)
-            .map_err(|error| self.failure(error))
+        match self.call_inner(method, command_id, params, effect) {
+            Ok(value) => Ok(value),
+            // idle/stopping and busy are complete responses. Killing the peer
+            // would hide the refusal or make a busy Continue impossible to retry.
+            Err(error) if keeps_peer(&error) => Err(error),
+            Err(error) => Err(self.failure(error)),
+        }
     }
 
     fn call_inner(
@@ -335,10 +349,10 @@ impl PiBridge {
                 return Err(Error::guard("unexpected bridge response"));
             }
             if let Some(error) = frame.get("error") {
-                return Err(Error::guard(format!(
-                    "bridge: {}",
-                    text(error, "category")?
-                )));
+                let category = text(error, "category")?;
+                // Do not trust ProtocolError.admission. Its TypeScript default
+                // used to be "rejected", so an unlabeled error is not a refusal.
+                return Err(classify_bridge_error(category));
             }
             let result = frame["result"].clone();
             safe_json(&result)?;
@@ -422,6 +436,27 @@ impl Drop for PiBridge {
     }
 }
 
+const BRIDGE_BUSY_MESSAGE: &str = "bridge: busy";
+
+/// Only these categories are durable refusals. `busy` is retried. Every other
+/// category, including one that claims `admission: rejected`, stays pending.
+fn classify_bridge_error(category: &str) -> Error {
+    match category {
+        "idle" | "stopping" => Error::AdmissionRejected {
+            category: category.to_string(),
+        },
+        "busy" => Error::guard(BRIDGE_BUSY_MESSAGE),
+        other => Error::guard(format!("bridge: {other}")),
+    }
+}
+
+fn keeps_peer(error: &Error) -> bool {
+    if error.rejected_admission().is_some() {
+        return true;
+    }
+    matches!(error, Error::GuardFailed { detail } if detail == BRIDGE_BUSY_MESSAGE)
+}
+
 fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value
         .get(key)
@@ -434,7 +469,7 @@ fn binding_json(binding: &RuntimeBinding) -> Value {
         "sessionId": binding.session_id, "generation": binding.generation})
 }
 
-fn safe_json(value: &Value) -> Result<()> {
+pub(super) fn safe_json(value: &Value) -> Result<()> {
     match value {
         Value::Number(n) => {
             let signed = n

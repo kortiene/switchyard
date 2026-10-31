@@ -3,7 +3,9 @@
 Status: **NEEDS-FULL-S2**. This work depends on the source candidate in
 [PR #107](https://github.com/kortiene/switchyard/pull/107), now merged.
 It is a reviewable bridge implementation and credential-free probe, not S2 GO.
-The product CLI and `Host` continue to use the S1 fake runtime.
+The product CLI and default `Host` continue to use the S1 fake runtime.
+The explicit feature-gated [S2-A Host adapter](s2-host-outbox.md) adds real outbox
+reconciliation against the same faux child without granting S2 GO.
 
 ## Implemented boundary
 
@@ -113,8 +115,8 @@ metadata during CI.
 The `pi-bridge-probe` CI job is deliberately separate from the future full
 `pi-bridge-contract` gate. Remaining work includes:
 
-- integrating the adapter with the actual S1 mission outbox/recovery policy,
-  including the precise lost-reply boundary and pending stop intents;
+- extending the [S2-A Host/outbox evidence](s2-host-outbox.md) into the full
+  contract, including remaining scheduling and cancellation races;
 - durable Rust operation receipts for conflicts and uncertain-effect
   reconciliation rather than the probe's simulated receipt table;
 - non-cooperative cancellation, sustained backpressure, corrupt storage and

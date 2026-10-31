@@ -18,7 +18,6 @@ use crate::execution::OwnerLock;
 use crate::policy::TransitionPlan;
 use crate::verification::NewVerification;
 
-const RUNTIME_CONFIG: &str = r#"{"adapter":"fake","credentials":"none"}"#;
 const VERIFIER_JSON: &str = r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}"#;
 const ENVIRONMENT_JSON: &str = r#"{"confinement":"deferred_to_s3","host":"single"}"#;
 
@@ -45,6 +44,7 @@ pub struct NewCommand {
 }
 
 pub struct CreatedMission {
+    pub runtime_config: String,
     pub id: String,
     pub task_id: String,
     pub attempt_id: String,
@@ -91,7 +91,7 @@ impl Store {
                 detail: "database is not initialized".into(),
             });
         }
-        if version > 1 {
+        if version > 2 {
             return Err(Error::Storage {
                 detail: format!("database schema version {version} is newer than this host"),
             });
@@ -142,6 +142,68 @@ impl Store {
         self.owner_generation = Some(generation);
     }
 
+    /// A ledger never silently changes adapters, source pins, or adapter code.
+    pub fn require_runtime_config(&self, expected: &Value) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT runtime_config_json FROM attempts")
+            .map_err(Error::storage)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(Error::storage)?;
+        for row in rows {
+            let mut config: Value =
+                serde_json::from_str(&row.map_err(Error::storage)?).map_err(Error::storage)?;
+            if let Some(object) = config.as_object_mut() {
+                object.remove("sessionInitialized");
+            }
+            if &config != expected {
+                return Err(Error::guard(runtime_config_mismatch(&config, expected)));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "pi-contract")]
+    pub fn runtime_initialized(&self, attempt_id: &str) -> Result<bool> {
+        let raw: String = self
+            .conn
+            .query_row(
+                "SELECT runtime_config_json FROM attempts WHERE id=?1",
+                [attempt_id],
+                |row| row.get(0),
+            )
+            .map_err(Error::storage)?;
+        let config: Value = serde_json::from_str(&raw).map_err(Error::storage)?;
+        match config.get("sessionInitialized") {
+            None | Some(Value::Bool(false)) => Ok(false),
+            Some(Value::Bool(true)) => Ok(true),
+            _ => Err(Error::guard("invalid runtime initialization marker")),
+        }
+    }
+
+    /// Commit before the first command can reach Pi. If this bit is true, open
+    /// must find the original session; absent/empty storage is never a new run.
+    #[cfg(feature = "pi-contract")]
+    pub fn mark_runtime_initialized(&mut self, attempt_id: &str) -> Result<()> {
+        let tx = self.immediate()?;
+        let raw: String = tx
+            .query_row(
+                "SELECT runtime_config_json FROM attempts WHERE id=?1",
+                [attempt_id],
+                |row| row.get(0),
+            )
+            .map_err(Error::storage)?;
+        let mut config: Value = serde_json::from_str(&raw).map_err(Error::storage)?;
+        config["sessionInitialized"] = json!(true);
+        tx.execute(
+            "UPDATE attempts SET runtime_config_json=?1 WHERE id=?2",
+            params![canonicalize(&config)?, attempt_id],
+        )
+        .map_err(Error::storage)?;
+        tx.commit().map_err(Error::storage)
+    }
+
     pub fn durability(&self) -> Result<(String, i64)> {
         let mode: String = self
             .conn
@@ -171,7 +233,7 @@ impl Store {
                 |row| row.get(0),
             )
             .map_err(Error::storage)?;
-        if current > 1 {
+        if current > 2 {
             return Err(Error::Storage {
                 detail: format!("database schema version {current} is newer than this host"),
             });
@@ -188,6 +250,27 @@ impl Store {
             tx.execute_batch("PRAGMA user_version = 1;")
                 .map_err(Error::storage)?;
             tx.commit().map_err(Error::storage)?;
+        }
+        if current < 2 {
+            // Rebuild commands so a definite admission refusal can be stored.
+            // foreign_keys cannot change inside a transaction.
+            self.conn
+                .execute_batch("PRAGMA foreign_keys=OFF;")
+                .map_err(Error::storage)?;
+            let tx = self.immediate()?;
+            tx.execute_batch(include_str!("migrations/002_rejected_command.sql"))
+                .map_err(Error::storage)?;
+            tx.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (2, ?1)",
+                [now_ms()],
+            )
+            .map_err(Error::storage)?;
+            tx.execute_batch("PRAGMA user_version = 2;")
+                .map_err(Error::storage)?;
+            tx.commit().map_err(Error::storage)?;
+            self.conn
+                .execute_batch("PRAGMA foreign_keys=ON;")
+                .map_err(Error::storage)?;
         }
         Ok(())
     }
@@ -308,7 +391,7 @@ impl Store {
                 created.task_id,
                 created.repo.head_sha,
                 created.session_id,
-                RUNTIME_CONFIG,
+                created.runtime_config,
                 policy_json,
                 policy_hash,
                 VERIFIER_JSON,
@@ -390,7 +473,7 @@ impl Store {
         self.conn
             .query_row(
                 "SELECT id, mission_id, attempt_id, kind, payload_hash, expected_revision,
-                        resulting_revision, state, request_id, origin, runtime_receipt_json
+                        resulting_revision, state, request_id, origin, runtime_receipt_json, payload_canonical
                  FROM commands WHERE id = ?1",
                 params![command_id],
                 map_command,
@@ -404,7 +487,7 @@ impl Store {
             .conn
             .prepare(
                 "SELECT id, mission_id, attempt_id, kind, payload_hash, expected_revision,
-                        resulting_revision, state, request_id, origin, runtime_receipt_json
+                        resulting_revision, state, request_id, origin, runtime_receipt_json, payload_canonical
                  FROM commands WHERE mission_id = ?1 ORDER BY seq, id",
             )
             .map_err(Error::storage)?;
@@ -665,6 +748,50 @@ impl Store {
         }
         tx.commit().map_err(Error::storage)?;
         Ok(())
+    }
+
+    /// Record that Pi refused this pending command and stored no receipt.
+    pub fn reject_pending(&mut self, command_id: &str, receipt_json: &str) -> Result<()> {
+        let tx = self.immediate()?;
+        let changed = tx
+            .execute(
+                "UPDATE commands SET state = 'rejected', runtime_receipt_json = ?1, updated_at = ?2
+                 WHERE id = ?3 AND state = 'pending'",
+                params![receipt_json, now_ms(), command_id],
+            )
+            .map_err(Error::storage)?;
+        if changed != 1 {
+            let state: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM commands WHERE id = ?1",
+                    params![command_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(Error::storage)?;
+            if state.as_deref() == Some("rejected") {
+                tx.commit().map_err(Error::storage)?;
+                return Ok(());
+            }
+            return Err(Error::Storage {
+                detail: format!("command {command_id} could not be rejected"),
+            });
+        }
+        tx.commit().map_err(Error::storage)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "pi-contract")]
+    pub fn attempt_has_successor(&self, attempt_id: &str) -> Result<bool> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM attempts WHERE successor_of = ?1",
+                [attempt_id],
+                |row| row.get(0),
+            )
+            .map_err(Error::storage)?;
+        Ok(count > 0)
     }
 
     pub fn observe_content(
@@ -1193,6 +1320,7 @@ fn map_command(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommandRecord> {
     let state: String = row.get(7)?;
     let origin: String = row.get(9)?;
     Ok(CommandRecord {
+        payload_canonical: row.get(11)?,
         id: row.get(0)?,
         mission_id: row.get(1)?,
         attempt_id: row.get(2)?,
@@ -1310,6 +1438,43 @@ fn json_str(value: &Value, key: &str) -> Result<String> {
         })
 }
 
+/// Fail closed, and name every key whose stored value differs from the host.
+/// `sessionInitialized` is removed by the caller before this runs.
+fn runtime_config_mismatch(found: &Value, expected: &Value) -> String {
+    let (Some(found_map), Some(expected_map)) = (found.as_object(), expected.as_object()) else {
+        return format!(
+            "ledger runtime configuration mismatch; no adapter replacement (config: expected {expected}, found {found})"
+        );
+    };
+    let mut keys: Vec<&String> = found_map.keys().chain(expected_map.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    let parts: Vec<String> = keys
+        .into_iter()
+        .filter(|key| found_map.get(*key) != expected_map.get(*key))
+        .map(|key| {
+            format!(
+                "{key}: expected {}, found {}",
+                render_config_value(expected_map.get(key)),
+                render_config_value(found_map.get(key))
+            )
+        })
+        .collect();
+    let detail = if parts.is_empty() {
+        "configuration differs".to_string()
+    } else {
+        parts.join("; ")
+    };
+    format!("ledger runtime configuration mismatch; no adapter replacement ({detail})")
+}
+
+fn render_config_value(value: Option<&Value>) -> String {
+    match value {
+        None => "absent".to_string(),
+        Some(value) => value.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1422,8 +1587,236 @@ mod tests {
         assert_eq!(store.load_mission("m-1").unwrap().attempt.id, "a-1");
     }
 
+    #[test]
+    fn v1_ledger_upgrade_keeps_command_rows_and_turns_foreign_keys_back_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mission.sqlite");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(include_str!("migrations/001_init.sql"))
+            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at INTEGER NOT NULL
+            );
+            INSERT INTO schema_migrations(version, applied_at) VALUES (1, 1);
+            PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO missions(
+                id, revision, phase, objective, repo_identity_json, source_issue_json,
+                resume_target, prior_phase, attention_reason, permitted_recovery_target,
+                reconcile_only, content_digest, plan_digest, plan_body, reviewed_digest,
+                successor_of_mission_id, created_at, updated_at
+            ) VALUES (
+                'm-1', 1, 'planning', 'objective', ?1, ?2,
+                NULL, NULL, NULL, NULL, 0, 'digest', NULL, NULL, NULL, NULL, 1, 1
+            )",
+            params![
+                r#"{"toplevel":"/repo","headSha":"abc","branch":"main","porcelainHash":"sha256:00"}"#,
+                r#"{"provider":"github","title":"title","number":1,"snapshotAt":0}"#,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks(id, mission_id, acceptance_criteria, root, frozen, created_at)
+             VALUES ('t-1', 'm-1', 'acceptance', 1, 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO attempts(
+                id, mission_id, task_id, base_sha, session_id, runtime_config_json, policy_json,
+                policy_hash, verifier_json, environment_json, successor_of, active, repair_count,
+                max_repairs, plan_revision_count, max_plan_revisions, created_at
+            ) VALUES (
+                'a-1', 'm-1', 't-1', 'abc', 's-1',
+                '{\"adapter\":\"fake\",\"credentials\":\"none\"}', '{}', 'h', '{}', '{}',
+                NULL, 1, 0, 1, 0, 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        for (id, seq, state, request, receipt) in [
+            ("c-pending", 1, "pending", "a-1:c-pending", None),
+            (
+                "c-ack",
+                2,
+                "acknowledged",
+                "a-1:c-ack",
+                Some(r#"{"receiptId":"r-ack"}"#),
+            ),
+            (
+                "c-old",
+                3,
+                "superseded",
+                "a-1:c-old",
+                Some(r#"{"superseded":true,"reason":"closed"}"#),
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO commands(
+                    id, mission_id, attempt_id, seq, kind, payload_canonical, payload_hash,
+                    expected_revision, resulting_revision, state, request_id, origin,
+                    runtime_receipt_json, created_at, updated_at
+                ) VALUES (
+                    ?1, 'm-1', 'a-1', ?2, 'start_planning', ?3, ?4,
+                    1, 2, ?5, ?6, 'operator', ?7, 1, 1
+                )",
+                params![
+                    id,
+                    seq,
+                    format!(r#"{{"kind":"start_planning","id":"{id}"}}"#),
+                    format!("hash-{id}"),
+                    state,
+                    request,
+                    receipt,
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let mut store = Store::open_writer(&db).unwrap();
+        store.migrate().unwrap();
+        let foreign_keys: i64 = store
+            .conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(user_version(&store.conn).unwrap(), 2);
+        let index: String = store
+            .conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='commands_mission_state'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, "commands_mission_state");
+        let rows: Vec<(String, String, String, Option<String>)> = store
+            .conn
+            .prepare(
+                "SELECT id, state, payload_hash, runtime_receipt_json
+                 FROM commands ORDER BY seq",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "c-pending".into(),
+                    "pending".into(),
+                    "hash-c-pending".into(),
+                    None,
+                ),
+                (
+                    "c-ack".into(),
+                    "acknowledged".into(),
+                    "hash-c-ack".into(),
+                    Some(r#"{"receiptId":"r-ack"}"#.into()),
+                ),
+                (
+                    "c-old".into(),
+                    "superseded".into(),
+                    "hash-c-old".into(),
+                    Some(r#"{"superseded":true,"reason":"closed"}"#.into()),
+                ),
+            ]
+        );
+        drop(store);
+
+        let host = crate::Host::open(&db).unwrap();
+        let snap = host.snapshot("m-1").unwrap();
+        let states: Vec<_> = snap
+            .commands
+            .iter()
+            .map(|command| (command.id.as_str(), command.state.as_str()))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                ("c-pending", "pending"),
+                ("c-ack", "acknowledged"),
+                ("c-old", "superseded"),
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_config_mismatch_names_each_differing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mission.sqlite");
+        let mut store = Store::open_writer(&db).unwrap();
+        store.migrate().unwrap();
+        let mut mission = sample_mission();
+        mission.runtime_config = r#"{"adapter":"pi-probe-v1","credentials":"none","fingerprint":"sha256:old","node":"22.23.4","source":"abc"}"#.into();
+        store.create_mission(mission).unwrap();
+        let expected = json!({
+            "adapter": "pi-probe-v1",
+            "credentials": "none",
+            "fingerprint": "sha256:new",
+            "node": "22.23.5",
+            "source": "def",
+            "extra": true
+        });
+        let message = store
+            .require_runtime_config(&expected)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("fingerprint: expected \"sha256:new\", found \"sha256:old\""),
+            "{message}"
+        );
+        assert!(
+            message.contains("node: expected \"22.23.5\", found \"22.23.4\""),
+            "{message}"
+        );
+        assert!(
+            message.contains("source: expected \"def\", found \"abc\""),
+            "{message}"
+        );
+        assert!(
+            message.contains("extra: expected true, found absent"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("adapter:") && !message.contains("credentials:"),
+            "{message}"
+        );
+        assert!(message.contains("no adapter replacement"), "{message}");
+        store
+            .conn
+            .execute(
+                "UPDATE attempts SET runtime_config_json=json_set(runtime_config_json,'$.sessionInitialized',json('true'))",
+                [],
+            )
+            .unwrap();
+        let matching = json!({
+            "adapter": "pi-probe-v1",
+            "credentials": "none",
+            "fingerprint": "sha256:old",
+            "node": "22.23.4",
+            "source": "abc"
+        });
+        store.require_runtime_config(&matching).unwrap();
+        let drifted = store
+            .require_runtime_config(&expected)
+            .unwrap_err()
+            .to_string();
+        assert!(!drifted.contains("sessionInitialized"), "{drifted}");
+    }
+
     fn sample_mission() -> CreatedMission {
         CreatedMission {
+            runtime_config: r#"{"adapter":"fake","credentials":"none"}"#.into(),
             id: "m-1".into(),
             task_id: "t-1".into(),
             attempt_id: "a-1".into(),

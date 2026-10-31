@@ -68,7 +68,7 @@ fn restart_after_admission_keeps_mission_attempt_and_pending_command() {
 
     let mut host = Host::open(&world.db).unwrap();
     assert_eq!(host.dispatch_pending(&created.mission_id).unwrap(), 1);
-    assert_eq!(host.runtime_mut().submission_count(), 1);
+    assert_eq!(host.runtime_mut().unwrap().submission_count(), 1);
     assert_eq!(host.dispatch_pending(&created.mission_id).unwrap(), 0);
     let snap = host.snapshot(&created.mission_id).unwrap();
     assert!(snap.pending_commands.is_empty());
@@ -198,14 +198,14 @@ fn failed_journal_write_is_not_acknowledged_on_retry_or_restart() {
     let mut host = Host::open(&world.db).unwrap();
     let created = create(&mut host, &world.repo, 2);
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
-    host.runtime_mut().fail_next_persist();
+    host.runtime_mut().unwrap().fail_next_persist();
     let error = host.dispatch_pending(&created.mission_id).unwrap_err();
     assert_eq!(error.category(), "storage_failed");
-    assert_eq!(host.runtime_mut().submission_count(), 0);
+    assert_eq!(host.runtime_mut().unwrap().submission_count(), 0);
     let pending = host.snapshot(&created.mission_id).unwrap();
     assert_eq!(pending.pending_commands.len(), 1);
     assert_eq!(host.dispatch_pending(&created.mission_id).unwrap(), 1);
-    assert_eq!(host.runtime_mut().submission_count(), 1);
+    assert_eq!(host.runtime_mut().unwrap().submission_count(), 1);
     let request_id = host.snapshot(&created.mission_id).unwrap().commands[0]
         .request_id
         .clone();
@@ -215,13 +215,13 @@ fn failed_journal_write_is_not_acknowledged_on_retry_or_restart() {
     let mut host = Host::open(&world.db).unwrap();
     let created = create(&mut host, &world.repo, 2);
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
-    host.runtime_mut().fail_next_persist();
+    host.runtime_mut().unwrap().fail_next_persist();
     assert!(host.dispatch_pending(&created.mission_id).is_err());
     drop(host);
     let journal = std::fs::read_to_string(crate::journal_path(&world.db)).unwrap_or_default();
     assert!(!journal.contains("start_planning") && !journal.contains("payloadHash"));
     let mut host = Host::open(&world.db).unwrap();
-    assert_eq!(host.runtime_mut().submission_count(), 0);
+    assert_eq!(host.runtime_mut().unwrap().submission_count(), 0);
     assert_eq!(
         host.snapshot(&created.mission_id)
             .unwrap()
@@ -230,7 +230,7 @@ fn failed_journal_write_is_not_acknowledged_on_retry_or_restart() {
         1
     );
     assert_eq!(host.dispatch_pending(&created.mission_id).unwrap(), 1);
-    assert_eq!(host.runtime_mut().submission_count(), 1);
+    assert_eq!(host.runtime_mut().unwrap().submission_count(), 1);
     let _ = request_id;
 }
 
@@ -266,6 +266,7 @@ fn cancelled_mission_does_not_dispatch_pending_work_and_outbox_keeps_admission_o
     assert_eq!(snap.commands[0].state, "superseded");
     assert!(
         host.runtime_mut()
+            .unwrap()
             .stored_receipt(&format!("{}:z-start", created.attempt_id))
             .is_none()
     );
@@ -312,7 +313,7 @@ fn cancelled_mission_does_not_dispatch_pending_work_and_outbox_keeps_admission_o
     let second = ids.iter().position(|id| *id == "a-steer").unwrap();
     assert!(first < second, "admission order lost: {ids:?}");
     host.dispatch_pending(&created.mission_id).unwrap();
-    let order = host.runtime_mut().admission_order().to_vec();
+    let order = host.runtime_mut().unwrap().admission_order().to_vec();
     assert_eq!(
         order.last().map(String::as_str),
         Some(snap.commands[second].request_id.as_str())
@@ -355,6 +356,7 @@ fn resume_enqueues_a_runtime_continuation_for_withheld_work() {
     deliver(&mut host, &created.mission_id);
     assert!(
         host.runtime_mut()
+            .unwrap()
             .stored_receipt(&continuation.request_id)
             .is_some()
     );
@@ -393,7 +395,7 @@ fn resume_enqueues_a_runtime_continuation_for_withheld_work() {
             .any(|command| command.kind == "continue" && command.state == "pending")
     );
     deliver(&mut host, &created.mission_id);
-    assert!(host.runtime_mut().submission_count() >= 2);
+    assert!(host.runtime_mut().unwrap().submission_count() >= 2);
 
     let world = open_world();
     let mut host = Host::open(&world.db).unwrap();
@@ -447,6 +449,7 @@ fn resume_enqueues_a_runtime_continuation_for_withheld_work() {
     deliver(&mut host, &created.mission_id);
     assert!(
         host.runtime_mut()
+            .unwrap()
             .stored_receipt(&continuation.request_id)
             .is_some()
     );

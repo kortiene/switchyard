@@ -21,6 +21,10 @@ proof-of-concept adapter only, not that runtime. The planned M1 shape is Pi
 Durable 1.4.0 behind a sandboxed TypeScript bridge. That bridge is not an
 accepted integration.
 
+The optional `pi-contract` feature also exposes a credential-free
+[Host/outbox recovery probe](./docs/rust-first/s2-host-outbox.md) for #119.
+The default CLI still uses FakeRuntime.
+
 S2 is **NO-GO**. See
 [#96](https://github.com/kortiene/switchyard/issues/96) and the
 [S2 feasibility audit](./docs/rust-first/s2-feasibility.md).

@@ -36,6 +36,12 @@ pub enum Error {
     #[error("usage limit exhausted ({count}/{max})")]
     UsageLimitExhausted { count: u32, max: u32 },
 
+    /// Pi refused to admit the command and the protocol marks that refusal as
+    /// definite. Transport loss and `admission: uncertain` stay [`Self::GuardFailed`]
+    /// or [`Self::Storage`]. Effect-level rejection is still #96.
+    #[error("admission rejected: {category}")]
+    AdmissionRejected { category: String },
+
     #[error("guard failed: {detail}")]
     GuardFailed { detail: String },
 
@@ -71,6 +77,7 @@ impl Error {
             Self::StaleGeneration { .. } => "stale_generation",
             Self::RepairLimitExhausted { .. } => "repair_limit_exhausted",
             Self::UsageLimitExhausted { .. } => "usage_limit_exhausted",
+            Self::AdmissionRejected { .. } => "admission_rejected",
             Self::GuardFailed { .. } => "guard_failed",
             Self::UnknownNotification { .. } => "unknown_notification",
             Self::NotFound => "not_found",
@@ -84,6 +91,15 @@ impl Error {
     pub fn guard(detail: impl Into<String>) -> Self {
         Self::GuardFailed {
             detail: detail.into(),
+        }
+    }
+
+    /// Category when Pi definitely refused admission. `None` for uncertain
+    /// transport, unknown admission, and every other failure.
+    pub fn rejected_admission(&self) -> Option<&str> {
+        match self {
+            Self::AdmissionRejected { category } => Some(category.as_str()),
+            _ => None,
         }
     }
 

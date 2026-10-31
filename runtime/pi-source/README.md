@@ -80,3 +80,7 @@ S2 stays open, and Pi-dependent live work stays blocked until the full gate.
 The dependent [process-bridge probe](../../docs/rust-first/s2-bridge-probe.md)
 adds a feature-gated Rust supervisor and credential-free wire/replay tests.
 Its extra tests are partial S2 evidence; the regular mission CLI is unchanged.
+
+The [S2-A Host/outbox probe](../../docs/rust-first/s2-host-outbox.md) uses the same
+pinned faux child with the real Rust ledger. It adds deterministic admission-gap
+crashes and recovery tests; S2 remains NO-GO.
