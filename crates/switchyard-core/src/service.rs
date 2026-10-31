@@ -206,6 +206,15 @@ impl NotifyOutcome {
     }
 }
 
+/// Workspace uncertainty and a live creator are properties of that workspace.
+/// They must not abort owner recovery of runtime observations.
+fn workspace_failure_is_isolated(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::WorkspaceUncertain { .. } | Error::WorkspaceBusy { .. }
+    )
+}
+
 pub fn journal_path(db_path: &Path) -> PathBuf {
     let mut name = db_path.as_os_str().to_os_string();
     name.push(".fake-runtime.json");
@@ -513,7 +522,15 @@ impl Host {
         Ok(result_of(&command, plan.next, false))
     }
 
+    /// Deliver pending commands. A recorded workspace is reconciled in this
+    /// owner generation before the readiness gate, so a CLI command opened
+    /// after preparation can dispatch without a separate recover.
     pub fn dispatch_pending(&mut self, mission_id: &str) -> Result<usize> {
+        self.recover_workspace(mission_id)?;
+        self.dispatch_reconciled(mission_id)
+    }
+
+    fn dispatch_reconciled(&mut self, mission_id: &str) -> Result<usize> {
         let mission = self.store.load_mission(mission_id)?;
         self.store.require_workspace_ready(&mission.attempt.id)?;
         let recorded = self.store.list_commands(mission_id)?;
@@ -743,11 +760,25 @@ impl Host {
         Ok(())
     }
 
+    /// Reconcile one workspace, deliver pending commands, poll observations,
+    /// and return a snapshot. An uncertain or busy workspace skips dispatch
+    /// but does not block polling or the snapshot; that failure is returned
+    /// after those steps.
     pub fn recover(&mut self, mission_id: &str) -> Result<MissionSnapshot> {
-        self.recover_workspace(mission_id)?;
-        self.dispatch_pending(mission_id)?;
+        let workspace_error = match self.recover_workspace(mission_id) {
+            Ok(_) => None,
+            Err(error) if workspace_failure_is_isolated(&error) => Some(error),
+            Err(error) => return Err(error),
+        };
+        if workspace_error.is_none() {
+            self.dispatch_reconciled(mission_id)?;
+        }
         self.poll_runtime(mission_id)?;
-        self.snapshot(mission_id)
+        let snapshot = self.snapshot(mission_id)?;
+        if let Some(error) = workspace_error {
+            return Err(error);
+        }
+        Ok(snapshot)
     }
 
     pub fn poll_runtime(&mut self, mission_id: &str) -> Result<Vec<NotifyOutcome>> {

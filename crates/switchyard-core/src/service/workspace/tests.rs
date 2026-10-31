@@ -1,6 +1,6 @@
 use super::*;
 use rusqlite::Connection;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -73,6 +73,41 @@ fn count(w: &World) -> i64 {
         .unwrap()
 }
 
+/// `mission command` opens a host and dispatches before any explicit recover.
+/// A prepared workspace must reconcile in that new owner generation.
+#[test]
+fn command_dispatch_reconciles_a_ready_workspace_in_the_new_generation() {
+    let w = world();
+    let mut h = Host::open(&w.db).unwrap();
+    let m = mission(&mut h, &w);
+    let view = prepare(&mut h, &m, &w);
+    assert_eq!(view.state, "ready");
+    assert_eq!(view.verified_generation, Some(h.generation()));
+    drop(h);
+
+    let mut h = Host::open(&w.db).unwrap();
+    assert!(h.generation() > view.verified_generation.unwrap());
+    assert_eq!(h.dispatch_pending(&m.mission_id).unwrap(), 0);
+    let reconciled = h.snapshot(&m.mission_id).unwrap().workspace.unwrap();
+    assert_eq!(reconciled.id, view.id);
+    assert_eq!(reconciled.path, view.path);
+    assert_eq!(reconciled.state, "ready");
+    assert_eq!(reconciled.verified_generation, Some(h.generation()));
+    let admitted = h
+        .admit(AdmitRequest {
+            command_id: None,
+            mission_id: m.mission_id.clone(),
+            attempt_id: Some(m.attempt_id.clone()),
+            expected_revision: m.revision,
+            actor: "operator".into(),
+            origin: CommandOrigin::Operator,
+            body: CommandBody::StartPlanning,
+        })
+        .unwrap();
+    assert_eq!(admitted.state, CommandState::Pending);
+    assert_eq!(admitted.phase, Phase::Planning);
+}
+
 #[test]
 fn dirty_source_and_frozen_base_survive_idempotent_workspace_reopen() {
     let w = world();
@@ -124,9 +159,14 @@ fn dirty_source_and_frozen_base_survive_idempotent_workspace_reopen() {
     assert_eq!(inspected[0].workspace.as_ref().unwrap(), &view);
     let mut h = Host::open(&w.db).unwrap();
     assert!(h.generation() > generation);
-    assert!(
-        h.dispatch_pending(&m.mission_id).is_err(),
-        "new owner must reconcile first"
+    assert_eq!(h.dispatch_pending(&m.mission_id).unwrap(), 0);
+    assert_eq!(
+        h.snapshot(&m.mission_id)
+            .unwrap()
+            .workspace
+            .unwrap()
+            .verified_generation,
+        Some(h.generation())
     );
     let recovered = h.recover(&m.mission_id).unwrap().workspace.unwrap();
     assert_eq!(recovered.id, view.id);
@@ -565,4 +605,390 @@ fn v2_ledger_is_inspectable_then_migrates_without_creating_workspaces() {
     assert!(h.recover(&m.mission_id).unwrap().workspace.is_none());
     assert_eq!(count(&w), 0);
     assert_eq!(fs::read_dir(&w.root).unwrap().count(), 0);
+}
+
+fn sha(repo: &Path) -> String {
+    String::from_utf8(git(repo, &["rev-parse", "HEAD"]))
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+fn worktree_count(repo: &Path) -> usize {
+    String::from_utf8(git(repo, &["worktree", "list", "--porcelain"]))
+        .unwrap()
+        .matches("worktree ")
+        .count()
+}
+
+#[test]
+fn ready_head_may_descend_from_the_frozen_base() {
+    let w = world();
+    let mut h = Host::open(&w.db).unwrap();
+    let m = mission(&mut h, &w);
+    let view = prepare(&mut h, &m, &w);
+    let tree = Path::new(&view.path);
+    git(tree, &["commit", "--allow-empty", "-m", "agent"]);
+    let head = sha(tree);
+    assert_ne!(head, m.base_sha);
+    drop(h);
+    let mut h = Host::open(&w.db).unwrap();
+    let reconciled = h.recover_workspace(&m.mission_id).unwrap().unwrap();
+    assert_eq!(reconciled.state, "ready");
+    assert_eq!(reconciled.id, view.id);
+    assert_eq!(reconciled.base_sha, m.base_sha);
+    assert_eq!(sha(tree), head);
+    git(tree, &["commit", "--allow-empty", "-m", "again"]);
+    let later = sha(tree);
+    assert_eq!(
+        h.prepare_workspace(&m.mission_id, &m.attempt_id, &w.root)
+            .unwrap()
+            .state,
+        "ready"
+    );
+    assert_eq!(sha(tree), later);
+    assert_eq!(
+        h.snapshot(&m.mission_id)
+            .unwrap()
+            .workspace
+            .unwrap()
+            .base_sha,
+        m.base_sha
+    );
+}
+
+#[test]
+fn ready_head_outside_the_frozen_history_is_uncertain() {
+    let w = world();
+    let mut h = Host::open(&w.db).unwrap();
+    let m = mission(&mut h, &w);
+    let view = prepare(&mut h, &m, &w);
+    git(&w.repo, &["checkout", "--orphan", "unrelated"]);
+    fs::write(w.repo.join("side.txt"), "side\n").unwrap();
+    git(&w.repo, &["add", "side.txt"]);
+    git(&w.repo, &["commit", "-m", "unrelated"]);
+    let unrelated = sha(&w.repo);
+    git(&w.repo, &["checkout", "main"]);
+    git(Path::new(&view.path), &["reset", "--hard", &unrelated]);
+    let error = h.recover_workspace(&m.mission_id).unwrap_err();
+    assert_eq!(error.category(), "workspace_uncertain", "{error}");
+    let recorded = h.snapshot(&m.mission_id).unwrap().workspace.unwrap();
+    assert_eq!(recorded.state, "uncertain");
+    assert_eq!(recorded.id, view.id);
+    assert!(Path::new(&view.path).join(".git").is_file());
+}
+
+#[test]
+fn creating_head_must_still_equal_the_frozen_base() {
+    let w = world();
+    let mut h = Host::open(&w.db).unwrap();
+    let m = mission(&mut h, &w);
+    drop(h);
+    crash_at(&w, &m, "after_git");
+    let tree = w.root.join(&m.attempt_id).join("tree");
+    git(&tree, &["commit", "--allow-empty", "-m", "before ready"]);
+    let head = sha(&tree);
+    assert_ne!(head, m.base_sha);
+    let mut h = Host::open(&w.db).unwrap();
+    assert_eq!(
+        h.recover_workspace(&m.mission_id).unwrap_err().category(),
+        "workspace_uncertain"
+    );
+    assert_eq!(
+        h.snapshot(&m.mission_id).unwrap().workspace.unwrap().state,
+        "uncertain"
+    );
+    assert_eq!(sha(&tree), head);
+}
+
+#[test]
+fn crash_after_matching_owner_marker_reclaims_the_reserved_slot() {
+    let w = world();
+    let mut h = Host::open(&w.db).unwrap();
+    let m = mission(&mut h, &w);
+    drop(h);
+    crash_at(&w, &m, "slot");
+    let slot = w.root.join(&m.attempt_id);
+    let marker = fs::read(slot.join("owner.json")).unwrap();
+    assert!(!slot.join("tree").exists());
+    let mut h = Host::open(&w.db).unwrap();
+    let recovered = h.recover(&m.mission_id).unwrap().workspace.unwrap();
+    assert_eq!(recovered.state, "ready");
+    assert_eq!(recovered.base_sha, m.base_sha);
+    assert_eq!(recovered.path, slot.join("tree").to_str().unwrap());
+    assert_eq!(fs::read(slot.join("owner.json")).unwrap(), marker);
+    assert_eq!(count(&w), 1);
+    assert_eq!(worktree_count(&w.repo), 2);
+}
+
+#[test]
+fn reserved_slot_without_matching_marker_stays_uncertain() {
+    for defect in ["extra", "marker"] {
+        let w = world();
+        let mut h = Host::open(&w.db).unwrap();
+        let m = mission(&mut h, &w);
+        drop(h);
+        crash_at(&w, &m, "slot");
+        let slot = w.root.join(&m.attempt_id);
+        match defect {
+            "extra" => fs::write(slot.join("extra.txt"), "keep").unwrap(),
+            "marker" => fs::write(slot.join("owner.json"), "{\"version\":1}").unwrap(),
+            _ => unreachable!(),
+        }
+        let mut h = Host::open(&w.db).unwrap();
+        assert_eq!(
+            h.recover_workspace(&m.mission_id).unwrap_err().category(),
+            "workspace_uncertain",
+            "{defect}"
+        );
+        assert_eq!(
+            h.snapshot(&m.mission_id).unwrap().workspace.unwrap().state,
+            "uncertain"
+        );
+        assert_eq!(
+            h.recover_workspace(&m.mission_id).unwrap_err().category(),
+            "workspace_uncertain"
+        );
+        assert_eq!(worktree_count(&w.repo), 1);
+        if defect == "extra" {
+            assert_eq!(fs::read_to_string(slot.join("extra.txt")).unwrap(), "keep");
+        } else {
+            assert_eq!(
+                fs::read_to_string(slot.join("owner.json")).unwrap(),
+                "{\"version\":1}"
+            );
+        }
+    }
+}
+
+#[test]
+fn equivalent_workspace_root_spellings_match_the_reservation() {
+    let w = world();
+    let mut h = Host::open(&w.db).unwrap();
+    let m = mission(&mut h, &w);
+    let slash = PathBuf::from(format!("{}/", w.root.display()));
+    let view = h
+        .prepare_workspace(&m.mission_id, &m.attempt_id, &slash)
+        .unwrap();
+    assert_eq!(view.state, "ready");
+    assert!(!view.path.ends_with('/'));
+    assert_eq!(
+        h.prepare_workspace(&m.mission_id, &m.attempt_id, &w.root)
+            .unwrap()
+            .id,
+        view.id
+    );
+    let parent = w.root.parent().unwrap();
+    let name = w.root.file_name().unwrap().to_str().unwrap();
+    let doubled = PathBuf::from(format!("{}//{name}/", parent.display()));
+    assert_eq!(
+        h.prepare_workspace(&m.mission_id, &m.attempt_id, &doubled)
+            .unwrap()
+            .id,
+        view.id
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn transient_slot_creation_failure_stays_retryable() {
+    use std::os::unix::fs::PermissionsExt;
+    let w = world();
+    let original = fs::metadata(&w.root).unwrap().permissions();
+    let root = w.root.clone();
+    let _restore = RestorePerms(root, original);
+    let mut h = Host::open(&w.db).unwrap();
+    let m = mission(&mut h, &w);
+    let error = h
+        .prepare_workspace_at(&m.mission_id, &m.attempt_id, &w.root, |point| {
+            if point == "reserved" {
+                let mut perms = fs::metadata(&w.root).unwrap().permissions();
+                perms.set_mode(0o555);
+                fs::set_permissions(&w.root, perms).unwrap();
+            }
+            Ok(())
+        })
+        .unwrap_err();
+    assert_eq!(error.category(), "storage_failed", "{error}");
+    let recorded = h.snapshot(&m.mission_id).unwrap().workspace.unwrap();
+    assert_eq!(recorded.state, "reserved");
+    assert!(recorded.detail.is_none());
+    let mut perms = fs::metadata(&w.root).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&w.root, perms).unwrap();
+    let ready = h
+        .prepare_workspace(&m.mission_id, &m.attempt_id, &w.root)
+        .unwrap();
+    assert_eq!(ready.state, "ready");
+    assert_eq!(ready.id, recorded.id);
+}
+
+#[cfg(unix)]
+struct RestorePerms(PathBuf, fs::Permissions);
+#[cfg(unix)]
+impl Drop for RestorePerms {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.0, self.1.clone());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn git_failure_worker() {
+    let Some(db) = std::env::var_os("SW_WORKSPACE_DB") else {
+        return;
+    };
+    let root = PathBuf::from(std::env::var_os("SW_WORKSPACE_ROOT").unwrap());
+    let mission = std::env::var("SW_WORKSPACE_MISSION").unwrap();
+    let attempt = std::env::var("SW_WORKSPACE_ATTEMPT").unwrap();
+    let mut h = Host::open(Path::new(&db)).unwrap();
+    match h.prepare_workspace(&mission, &attempt, &root) {
+        Ok(_) => panic!("git worktree add was expected to fail"),
+        Err(error) => {
+            let state = h.snapshot(&mission).unwrap().workspace.unwrap().state;
+            println!("WORKSPACE-RESULT {} {state}", error.category());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_git_creation_failure_stays_retryable() {
+    use std::os::unix::fs::PermissionsExt;
+    let w = world();
+    let mut h = Host::open(&w.db).unwrap();
+    let m = mission(&mut h, &w);
+    drop(h);
+    let tools = w._dir.path().join("tools");
+    fs::create_dir(&tools).unwrap();
+    let wrapper = tools.join("git");
+    fs::write(
+        &wrapper,
+        "#!/bin/sh\ncase \" $* \" in\n*\" worktree add \"*) exit 1 ;;\nesac\nexec /usr/bin/git \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", tools.display(), std::env::var("PATH").unwrap());
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "service::workspace::tests::git_failure_worker",
+            "--nocapture",
+        ])
+        .env("SW_WORKSPACE_DB", &w.db)
+        .env("SW_WORKSPACE_ROOT", &w.root)
+        .env("SW_WORKSPACE_MISSION", &m.mission_id)
+        .env("SW_WORKSPACE_ATTEMPT", &m.attempt_id)
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "worker failed: {stdout}{stderr}");
+    assert!(
+        stdout.contains("WORKSPACE-RESULT git_failed creating"),
+        "{stdout}{stderr}"
+    );
+    let recorded = Host::inspect(&w.db, Some(&m.mission_id))
+        .unwrap()
+        .remove(0)
+        .workspace
+        .unwrap();
+    assert_eq!(recorded.state, "creating");
+    assert!(recorded.detail.is_some());
+    let mut h = Host::open(&w.db).unwrap();
+    let ready = h
+        .prepare_workspace(&m.mission_id, &m.attempt_id, &w.root)
+        .unwrap();
+    assert_eq!(ready.id, recorded.id);
+    assert_eq!(ready.state, "ready");
+    assert!(ready.detail.is_none());
+    assert_eq!(worktree_count(&w.repo), 2);
+}
+
+#[test]
+fn recover_still_polls_when_the_workspace_is_uncertain() {
+    let w = world();
+    let mut h = Host::open(&w.db).unwrap();
+    let m = mission(&mut h, &w);
+    let view = prepare(&mut h, &m, &w);
+    fs::remove_file(Path::new(&view.path).parent().unwrap().join("owner.json")).unwrap();
+    h.runtime_mut()
+        .unwrap()
+        .push_notification(RuntimeNotification::Uncertainty {
+            reason: AttentionReason::Uncertainty,
+            detail: "workspace blocked".into(),
+        });
+    let error = h.recover(&m.mission_id).unwrap_err();
+    assert_eq!(error.category(), "workspace_uncertain", "{error}");
+    let snap = h.snapshot(&m.mission_id).unwrap();
+    assert_eq!(snap.phase, Phase::NeedsAttention);
+    assert_eq!(snap.workspace.unwrap().state, "uncertain");
+    assert_eq!(h.runtime_mut().unwrap().queued_notifications(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn lock_holder_worker() {
+    let Some(path) = std::env::var_os("SW_WORKSPACE_LOCK") else {
+        return;
+    };
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    file.try_lock().unwrap();
+    println!("WORKSPACE-BARRIER");
+    std::io::stdout().flush().unwrap();
+    loop {
+        std::thread::park();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn recover_still_polls_when_the_workspace_is_busy() {
+    let w = world();
+    let mut h = Host::open(&w.db).unwrap();
+    let m = mission(&mut h, &w);
+    let view = prepare(&mut h, &m, &w);
+    let lock = Path::new(&view.path).parent().unwrap().join("owner.lock");
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "service::workspace::tests::lock_holder_worker",
+            "--nocapture",
+        ])
+        .env("SW_WORKSPACE_LOCK", &lock)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let mut holder = Worker(command.spawn().unwrap());
+    let stdout = holder.0.stdout.take().unwrap();
+    let (send, recv) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if line.unwrap().contains("WORKSPACE-BARRIER") {
+                let _ = send.send(());
+                return;
+            }
+        }
+    });
+    recv.recv_timeout(Duration::from_secs(20))
+        .expect("lock holder did not start");
+    h.runtime_mut()
+        .unwrap()
+        .push_notification(RuntimeNotification::Uncertainty {
+            reason: AttentionReason::Uncertainty,
+            detail: "creator still holds the lease".into(),
+        });
+    let error = h.recover(&m.mission_id).unwrap_err();
+    assert_eq!(error.category(), "workspace_busy", "{error}");
+    let snap = h.snapshot(&m.mission_id).unwrap();
+    assert_eq!(snap.phase, Phase::NeedsAttention);
+    let workspace = snap.workspace.unwrap();
+    assert_eq!(workspace.state, "ready");
+    assert_eq!(workspace.id, view.id);
+    assert!(workspace.detail.is_none());
 }

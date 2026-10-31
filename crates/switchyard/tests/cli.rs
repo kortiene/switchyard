@@ -212,6 +212,72 @@ fn explicit_workspace_command_and_recovery_keep_identity_without_inherited_git_a
 }
 
 #[test]
+fn mission_command_reconciles_a_prepared_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    let root = tmp.path().join("workspaces");
+    std::fs::create_dir(&root).unwrap();
+    init_repo(&repo);
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "118",
+        "--objective",
+        "workspace command",
+        "--acceptance",
+        "command reconciles",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let attempt = created["mission"]["attemptId"].as_str().unwrap();
+    let revision = created["mission"]["revision"].as_u64().unwrap();
+    let (code, prepared, error) = run(&[
+        "mission",
+        "workspace",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--attempt",
+        attempt,
+        "--root",
+        root.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let (code, commanded, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--kind",
+        "start_planning",
+        "--expected-revision",
+        &revision.to_string(),
+        "--persist-only",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(commanded["commandState"], "pending");
+    assert_eq!(commanded["mission"]["phase"], "planning");
+    assert_eq!(commanded["mission"]["workspace"]["state"], "ready");
+    assert_eq!(
+        commanded["mission"]["workspace"]["id"],
+        prepared["workspace"]["id"]
+    );
+    assert_ne!(
+        commanded["mission"]["workspace"]["verifiedGeneration"],
+        prepared["workspace"]["verifiedGeneration"]
+    );
+}
+
+#[test]
 fn second_owner_is_rejected_while_status_still_reads() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("mission.sqlite");

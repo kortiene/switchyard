@@ -95,6 +95,24 @@ impl Store {
         tx.commit().map_err(Error::storage)
     }
 
+    /// Remember a retryable creation failure without leaving `reserved` or
+    /// `creating`. `uncertain` has no exit in this slice, so transient errors
+    /// must not use it.
+    pub(crate) fn record_workspace_retry(&mut self, id: &str, detail: &str) -> Result<()> {
+        let tx = self.immediate()?;
+        let changed = tx
+            .execute(
+                "UPDATE workspaces SET detail=?1, updated_at=?2
+             WHERE id=?3 AND state IN ('reserved', 'creating')",
+                params![detail, now_ms(), id],
+            )
+            .map_err(Error::storage)?;
+        if changed != 1 {
+            return Err(Error::guard("workspace cannot record a retryable failure"));
+        }
+        tx.commit().map_err(Error::storage)
+    }
+
     pub(crate) fn uncertain_workspace(&mut self, id: &str, detail: &str) -> Result<()> {
         let tx = self.immediate()?;
         tx.execute(

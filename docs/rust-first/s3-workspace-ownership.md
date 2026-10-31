@@ -44,8 +44,9 @@ migration. Frozen legacy TypeScript state v1 is unchanged.
 The Host owner lock and generation fence guard every operation, including an
 idempotent reopen. The filesystem marker and Git lock reason bind the workspace
 to the same mission, attempt, base and repository. Recovery checks device/inode
-identities, canonical paths, both Git backlinks, detached frozen HEAD, lock
-reason, readable index and the frozen Git tree. Missing or mismatched metadata
+identities, canonical paths, both Git backlinks, a detached HEAD, lock
+reason, readable index and the frozen Git tree. While `creating`, HEAD must
+equal the frozen base. Once `ready`, HEAD may be that base or a descendant. Missing or mismatched metadata
 never authorizes adoption of an existing directory. A copied/moved ledger at a
 different path cannot adopt the original workspace through a different owner lock.
 
@@ -61,19 +62,23 @@ a new workspace. A successor gets a distinct slot; the old workspace is retained
 | --- | --- |
 | No reservation | Opening/recovery does not create a workspace implicitly. |
 | `reserved`, no slot | The persisted intent authorizes one exclusive slot creation. |
-| `reserved`, slot present | Ownership is ambiguous: retain it and record `uncertain`. |
+| `reserved`, slot with a matching `owner.json` and no other entries besides `owner.lock` | Reclaim that slot and continue creation. The marker is the ownership proof for the gap before `creating` is committed. |
+| `reserved`, slot present without that proof | Ownership is ambiguous: retain it and record `uncertain`. |
 | `creating`, a creator holds the lease | Return `workspace_busy`; keep the intent pending. |
-| `creating`, complete matching clean checkout | Acknowledge the existing workspace as `ready`; do not repeat Git creation. |
-| `creating`, absent/partial/changed checkout | Record `uncertain`, retain evidence and block. |
-| `ready`, matching identity | Return the original workspace, verified for this owner generation. |
-| `ready`, missing/replaced/rebound metadata | Record `uncertain`; never create a replacement. |
+| `creating`, complete matching clean checkout at the frozen base | Acknowledge the existing workspace as `ready`; do not repeat Git creation. |
+| `creating`, absent/partial/changed checkout | Record `uncertain`, retain evidence and block. A clean Git failure with no tree and no worktree registration is the exception: it stays `creating` and can be retried. |
+| `ready`, identity matches and detached HEAD descends from the frozen base | Return the original workspace, verified for this owner generation. Equality with the base still matches; later descendant commits do too. |
+| `ready`, missing/replaced/rebound metadata, or HEAD that does not descend from the base | Record `uncertain`; never create a replacement. |
 | `uncertain` | Stay blocked; this slice has no automatic repair/reset API. |
 
 The Host commits `reserved` before filesystem changes, creates and syncs the
-ownership slot, takes its lease, then commits `creating` before Git. A crash in
-the slot/marker-to-ledger gap blocks conservatively. A crash after `creating` but
-before Git begins also blocks when there is no complete checkout: absence alone
-cannot prove an old writer never existed.
+ownership slot, takes its lease, then commits `creating` before Git. A crash
+after a matching `owner.json` is durable and before `creating` is committed
+reclaims that slot. A crash that leaves no matching marker still blocks
+conservatively. A crash after `creating` but before Git begins also blocks when
+there is no complete checkout: absence alone cannot prove an old writer never
+existed. An observed storage or Git failure does not record `uncertain` unless
+it leaves workspace evidence; those errors stay retryable.
 
 Creation uses `git worktree add --no-checkout --detach --lock --reason ...`,
 checks the new binding, then performs a one-time `git reset --hard` only in that
@@ -93,10 +98,14 @@ workspace. Failures retain diagnostics/files and record durable uncertainty.
 These are process-crash guarantees, not a claim of power-loss durability for all
 Git working files.
 
-`Host::recover` reconciles a recorded workspace before dispatch. Direct dispatch
-requires a ready workspace verified for the current generation when a reservation
-exists. `mission status` reports recorded state read-only, without Git operations
-or a workspace lease.
+`Host::dispatch_pending` reconciles a recorded workspace in the current owner
+generation before its readiness gate, so `mission command` can dispatch a
+workspace prepared by an earlier process. `Host::recover` does that same
+reconciliation, then dispatch, poll, and snapshot. An uncertain or busy
+workspace skips dispatch and is returned after polling and the snapshot, so
+one workspace does not block runtime recovery. Direct dispatch still refuses a
+workspace that is not ready for this generation. `mission status` reports
+recorded state read-only, without Git operations or a workspace lease.
 
 ## Git boundary and remaining S3 work
 

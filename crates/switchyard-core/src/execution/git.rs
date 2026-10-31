@@ -1,5 +1,7 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use crate::canonical::sha256_hex;
 use crate::domain::RepoIdentity;
@@ -110,7 +112,36 @@ fn base_command(path: &Path) -> Command {
 /// Git checkout/status can execute configured filters, even without hooks.
 /// Disable every discovered driver at command scope. Configuration discovery
 /// itself does not run a driver, and inherited Git config/environment is cleared.
+///
+/// Drivers are cached per checkout for this process. The operator's Git
+/// configuration must not change while a host is using that checkout, and a
+/// worktree path is cached separately from its source so `includeIf` still
+/// applies there on first use.
 pub(super) fn command(path: &Path) -> Result<Command> {
+    let mut command = base_command(path);
+    for setting in filter_overrides(path)? {
+        command.arg("-c").arg(setting);
+    }
+    Ok(command)
+}
+
+fn filter_overrides(path: &Path) -> Result<Vec<String>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Vec<String>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = path.to_path_buf();
+    if let Some(cached) = cache
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(&key)
+    {
+        return Ok(cached.clone());
+    }
+    let discovered = discover_filter_overrides(path)?;
+    let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+    Ok(guard.entry(key).or_insert(discovered).clone())
+}
+
+fn discover_filter_overrides(path: &Path) -> Result<Vec<String>> {
     let args = [
         "config",
         "--null",
@@ -122,9 +153,8 @@ pub(super) fn command(path: &Path) -> Result<Command> {
         .args(args)
         .output()
         .map_err(Error::storage)?;
-    let mut command = base_command(path);
     if output.status.code() == Some(1) {
-        return Ok(command);
+        return Ok(Vec::new());
     }
     let keys = String::from_utf8(checked_output(&args, output)?).map_err(Error::storage)?;
     let mut drivers = std::collections::BTreeSet::new();
@@ -132,14 +162,15 @@ pub(super) fn command(path: &Path) -> Result<Command> {
         let (driver, _) = key
             .rsplit_once('.')
             .ok_or_else(|| Error::guard("invalid filter key"))?;
-        drivers.insert(driver);
+        drivers.insert(driver.to_string());
     }
+    let mut settings = Vec::new();
     for driver in drivers {
         for suffix in ["clean=", "smudge=", "process=", "required=false"] {
-            command.arg("-c").arg(format!("{driver}.{suffix}"));
+            settings.push(format!("{driver}.{suffix}"));
         }
     }
-    Ok(command)
+    Ok(settings)
 }
 
 #[cfg(test)]

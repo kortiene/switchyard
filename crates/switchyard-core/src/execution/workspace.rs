@@ -24,10 +24,12 @@ pub(crate) fn canonical_directory(path: &Path) -> Result<PathBuf> {
             "workspace paths must be absolute without dot components",
         ));
     }
-    let canonical = fs::canonicalize(path).map_err(Error::storage)?;
-    if canonical.as_os_str() != path.as_os_str()
-        || !fs::metadata(&canonical).map_err(Error::storage)?.is_dir()
-    {
+    // `components` drops a trailing slash and duplicate separators. The
+    // canonical path must still name the same directory, so symlinks stay
+    // rejected while `/workspaces/` matches `/workspaces`.
+    let normalized: PathBuf = path.components().collect();
+    let canonical = fs::canonicalize(&normalized).map_err(evidence_io)?;
+    if canonical != normalized || !fs::metadata(&canonical).map_err(evidence_io)?.is_dir() {
         return Err(Error::guard(
             "workspace paths cannot use symlinks or aliases",
         ));
@@ -49,7 +51,7 @@ pub(crate) fn path_text(path: &Path) -> Result<String> {
 #[cfg(unix)]
 pub(crate) fn identity(path: &Path) -> Result<String> {
     use std::os::unix::fs::MetadataExt;
-    let metadata = fs::symlink_metadata(path).map_err(Error::storage)?;
+    let metadata = fs::symlink_metadata(path).map_err(evidence_io)?;
     if metadata.file_type().is_symlink() {
         return Err(Error::guard("symlink in workspace ownership metadata"));
     }
@@ -73,15 +75,23 @@ fn check_identity(path: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
+fn evidence_io(error: std::io::Error) -> Error {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        Error::guard(format!("workspace evidence is missing: {error}"))
+    } else {
+        Error::storage(error)
+    }
+}
+
 fn regular_text(path: &Path) -> Result<String> {
-    let metadata = fs::symlink_metadata(path).map_err(Error::storage)?;
+    let metadata = fs::symlink_metadata(path).map_err(evidence_io)?;
     if !metadata.is_file() || metadata.len() > 16 * 1024 {
         return Err(Error::guard(format!(
             "invalid workspace metadata: {}",
             path.display()
         )));
     }
-    fs::read_to_string(path).map_err(Error::storage)
+    fs::read_to_string(path).map_err(evidence_io)
 }
 
 fn common_dir(source: &Path) -> Result<PathBuf> {
@@ -192,7 +202,20 @@ pub(crate) fn require_absent(path: &Path) -> Result<()> {
 
 pub(crate) fn initialize_slot(w: &WorkspaceRecord) -> Result<(WorkspaceLease, String, String)> {
     validate_source(w)?;
-    require_absent(&w.slot())?;
+    match fs::symlink_metadata(w.slot()) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => create_slot(w),
+        Err(error) => Err(Error::storage(error)),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(Error::guard(format!(
+                "workspace path already exists: {}",
+                w.slot().display()
+            )))
+        }
+        Ok(_) => adopt_reserved_slot(w),
+    }
+}
+
+fn create_slot(w: &WorkspaceRecord) -> Result<(WorkspaceLease, String, String)> {
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -200,24 +223,9 @@ pub(crate) fn initialize_slot(w: &WorkspaceRecord) -> Result<(WorkspaceLease, St
         builder.mode(0o700);
     }
     builder.create(w.slot()).map_err(Error::storage)?;
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
     let lease_path = w.slot().join("owner.lock");
-    let lease = options.open(&lease_path).map_err(Error::storage)?;
-    lease.try_lock().map_err(Error::storage)?;
-    lease.sync_all().map_err(Error::storage)?;
-    let mut marker = options
-        .open(w.slot().join("owner.json"))
-        .map_err(Error::storage)?;
-    marker
-        .write_all(w.marker().to_string().as_bytes())
-        .map_err(Error::storage)?;
-    marker.sync_all().map_err(Error::storage)?;
+    let lease = create_lock(&lease_path)?;
+    write_marker(w)?;
     sync_directory(&w.slot())?;
     sync_directory(Path::new(&w.root))?;
     Ok((
@@ -225,6 +233,110 @@ pub(crate) fn initialize_slot(w: &WorkspaceRecord) -> Result<(WorkspaceLease, St
         identity(&w.slot())?,
         identity(&lease_path)?,
     ))
+}
+
+/// A crash after the slot and `owner.json` are durable, but before `creating`
+/// is committed, still has the marker the host just wrote. Reclaim that slot
+/// instead of treating it as a foreign directory. Anything else stays evidence.
+fn adopt_reserved_slot(w: &WorkspaceRecord) -> Result<(WorkspaceLease, String, String)> {
+    let marker_path = w.slot().join("owner.json");
+    let marker = read_marker(&marker_path)?;
+    if marker != w.marker() {
+        return Err(Error::guard(format!(
+            "workspace path already exists: {}",
+            w.slot().display()
+        )));
+    }
+    for entry in fs::read_dir(w.slot()).map_err(Error::storage)? {
+        let name = entry.map_err(Error::storage)?.file_name();
+        if name != "owner.json" && name != "owner.lock" {
+            return Err(Error::guard(
+                "reserved workspace slot holds unexpected evidence",
+            ));
+        }
+    }
+    let lease_path = w.slot().join("owner.lock");
+    let lease = match fs::symlink_metadata(&lease_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => create_lock(&lease_path)?,
+        Err(error) => return Err(Error::storage(error)),
+        Ok(metadata) if metadata.is_file() => open_lock(&lease_path, &w.view.id)?,
+        Ok(_) => return Err(Error::guard("invalid workspace lease")),
+    };
+    if read_marker(&marker_path)? != w.marker() {
+        return Err(Error::guard("workspace ownership marker mismatch"));
+    }
+    sync_directory(&w.slot())?;
+    Ok((
+        WorkspaceLease(lease),
+        identity(&w.slot())?,
+        identity(&lease_path)?,
+    ))
+}
+
+fn exclusive_file_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+}
+
+fn create_lock(path: &Path) -> Result<File> {
+    let lease = exclusive_file_options()
+        .open(path)
+        .map_err(Error::storage)?;
+    match lease.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => {
+            return Err(Error::guard("workspace lease is already held"));
+        }
+        Err(fs::TryLockError::Error(error)) => return Err(Error::storage(error)),
+    }
+    lease.sync_all().map_err(Error::storage)?;
+    Ok(lease)
+}
+
+fn open_lock(path: &Path, workspace_id: &str) -> Result<File> {
+    let lease = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(Error::storage)?;
+    match lease.try_lock() {
+        Ok(()) => Ok(lease),
+        Err(fs::TryLockError::WouldBlock) => Err(Error::WorkspaceBusy {
+            workspace_id: workspace_id.to_string(),
+        }),
+        Err(fs::TryLockError::Error(error)) => Err(Error::storage(error)),
+    }
+}
+
+fn write_marker(w: &WorkspaceRecord) -> Result<()> {
+    let mut marker = exclusive_file_options()
+        .open(w.slot().join("owner.json"))
+        .map_err(Error::storage)?;
+    marker
+        .write_all(w.marker().to_string().as_bytes())
+        .map_err(Error::storage)?;
+    marker.sync_all().map_err(Error::storage)?;
+    Ok(())
+}
+
+fn read_marker(path: &Path) -> Result<Value> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Error::guard(
+                "workspace path already exists: missing ownership marker",
+            ));
+        }
+        Err(error) => return Err(Error::storage(error)),
+        Ok(_) => {}
+    }
+    let text = regular_text(path)?;
+    serde_json::from_str(&text).map_err(|_| Error::guard("workspace ownership marker mismatch"))
 }
 
 /// `None` means an earlier creator still holds the lease. Do not quarantine or
@@ -238,8 +350,7 @@ pub(crate) fn acquire(w: &WorkspaceRecord) -> Result<Option<WorkspaceLease>> {
             .as_deref()
             .ok_or_else(|| Error::guard("missing slot identity"))?,
     )?;
-    let marker: Value = serde_json::from_str(&regular_text(&w.slot().join("owner.json"))?)
-        .map_err(Error::storage)?;
+    let marker = read_marker(&w.slot().join("owner.json"))?;
     if marker != w.marker() {
         return Err(Error::guard("workspace ownership marker mismatch"));
     }
@@ -249,17 +360,14 @@ pub(crate) fn acquire(w: &WorkspaceRecord) -> Result<Option<WorkspaceLease>> {
         .as_deref()
         .ok_or_else(|| Error::guard("missing lease identity"))?;
     check_identity(&path, expected)?;
-    if !fs::symlink_metadata(&path)
-        .map_err(Error::storage)?
-        .is_file()
-    {
+    if !fs::symlink_metadata(&path).map_err(evidence_io)?.is_file() {
         return Err(Error::guard("invalid workspace lease"));
     }
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .open(&path)
-        .map_err(Error::storage)?;
+        .map_err(evidence_io)?;
     match file.try_lock() {
         Ok(()) => {
             check_identity(&path, expected)?;
@@ -289,16 +397,7 @@ pub(crate) fn create(w: &WorkspaceRecord, lease: &WorkspaceLease) -> Result<()> 
     ];
     // Durable diagnostics avoid a broken stdout/stderr pipe killing Git when
     // the host disappears. The child keeps both its log and creation lease.
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let log = options
-        .open(w.slot().join("git-create.log"))
-        .map_err(Error::storage)?;
+    let log = open_creation_log(&w.slot().join("git-create.log"))?;
     creation_git(w, lease, &log, Path::new(&w.source), &args)?;
     // Discover filters again in the new worktree: includeIf/worktree config
     // can activate drivers that were absent in the source checkout.
@@ -313,6 +412,39 @@ pub(crate) fn create(w: &WorkspaceRecord, lease: &WorkspaceLease) -> Result<()> 
     }
     creation_git(w, lease, &log, tree, &["reset", "--hard", &w.view.base_sha])?;
     Ok(())
+}
+
+fn open_creation_log(path: &Path) -> Result<File> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => exclusive_file_options()
+            .write(true)
+            .open(path)
+            .map_err(Error::storage),
+        Err(error) => Err(Error::storage(error)),
+        Ok(metadata) if metadata.is_file() => OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map_err(Error::storage),
+        Ok(_) => Err(Error::guard("invalid workspace creation log")),
+    }
+}
+
+/// True when Git registered this workspace or left a tree behind. A failed
+/// `worktree add` that did neither can be repeated; partial evidence cannot.
+pub(crate) fn creation_left_evidence(w: &WorkspaceRecord) -> Result<bool> {
+    if fs::symlink_metadata(Path::new(&w.view.path)).is_ok() {
+        return Ok(true);
+    }
+    let listing = git_bytes(
+        Path::new(&w.source),
+        &["worktree", "list", "--porcelain", "-z"],
+    )?;
+    let listing = String::from_utf8(listing).map_err(Error::storage)?;
+    Ok(listing.split('\0').any(|field| {
+        field
+            .strip_prefix("worktree ")
+            .is_some_and(|path| path == w.view.path)
+    }))
 }
 
 fn creation_git(
@@ -366,12 +498,12 @@ fn verify_binding(w: &WorkspaceRecord) -> Result<(String, PathBuf)> {
     }
     if regular_text(&admin.join("gitdir"))?.trim_end_matches('\n') != path_text(&tree.join(".git"))?
         || regular_text(&admin.join("locked"))?.trim_end_matches('\n') != w.reason()
-        || regular_text(&admin.join("HEAD"))?.trim_end_matches('\n') != w.view.base_sha
     {
         return Err(Error::guard(
             "workspace binding, lock reason or frozen HEAD mismatch",
         ));
     }
+    require_head(w, &admin, &tree)?;
     let relative_common = regular_text(&admin.join("commondir"))?;
     if fs::canonicalize(admin.join(relative_common.trim_end_matches('\n')))
         .map_err(Error::storage)?
@@ -384,6 +516,47 @@ fn verify_binding(w: &WorkspaceRecord) -> Result<(String, PathBuf)> {
         return Err(Error::guard("workspace repository backlink mismatch"));
     }
     Ok((tree_identity, admin))
+}
+
+/// `creating` still requires the admin HEAD to be the frozen base. Once
+/// `ready`, later commits are ownership-preserving when HEAD stays detached
+/// and descends from that base.
+fn require_head(w: &WorkspaceRecord, admin: &Path, tree: &Path) -> Result<()> {
+    let head = regular_text(&admin.join("HEAD"))?;
+    let head = head.trim_end_matches('\n');
+    if head == w.view.base_sha {
+        return Ok(());
+    }
+    if w.view.state == "creating" || !is_commit_sha(head) {
+        return Err(Error::guard(
+            "workspace binding, lock reason or frozen HEAD mismatch",
+        ));
+    }
+    if base_is_ancestor(tree, &w.view.base_sha, head)? {
+        Ok(())
+    } else {
+        Err(Error::guard(
+            "workspace HEAD does not descend from the frozen base",
+        ))
+    }
+}
+
+fn is_commit_sha(value: &str) -> bool {
+    [40, 64].contains(&value.len()) && value.bytes().all(|c| c.is_ascii_hexdigit())
+}
+
+fn base_is_ancestor(repo: &Path, base: &str, head: &str) -> Result<bool> {
+    let status = command(repo)?
+        .args(["merge-base", "--is-ancestor", base, head])
+        .status()
+        .map_err(Error::storage)?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(Error::GitFailed {
+            detail: format!("git merge-base --is-ancestor failed ({status})"),
+        }),
+    }
 }
 
 pub(crate) fn verify(w: &WorkspaceRecord) -> Result<(String, String)> {

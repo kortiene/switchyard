@@ -29,9 +29,24 @@ impl Host {
                 detail: "workspace attempt does not belong to this mission".into(),
             });
         }
-        let mut workspace = match self.store.load_workspace(attempt_id)? {
+        let existing = self.store.load_workspace(attempt_id)?;
+        let root = match fs_workspace::canonical_directory(root) {
+            Ok(root) => root,
+            Err(error) => {
+                let Some(workspace) = existing else {
+                    return Err(error);
+                };
+                if same_workspace_root(&workspace.root, root) {
+                    return self.block_workspace(&workspace, error);
+                }
+                return Err(Error::guard(
+                    "workspace identity/path conflicts with its reservation",
+                ));
+            }
+        };
+        let mut workspace = match existing {
             Some(workspace) => {
-                if Path::new(&workspace.root).as_os_str() != root.as_os_str()
+                if Path::new(&workspace.root) != root.as_path()
                     || workspace.view.mission_id != mission_id
                     || workspace.view.base_sha != mission.attempt.base_sha
                     || Path::new(&workspace.ledger_path) != self.ledger_path
@@ -49,7 +64,7 @@ impl Host {
                     });
                 }
                 let workspace =
-                    fs_workspace::reserve(&mission, root, &self.ledger_path, self.generation())?;
+                    fs_workspace::reserve(&mission, &root, &self.ledger_path, self.generation())?;
                 self.store.reserve_workspace(&workspace)?;
                 workspace
             }
@@ -74,6 +89,7 @@ impl Host {
                 Ok(value) => value,
                 Err(error) => return self.block_workspace(&workspace, error),
             };
+            checkpoint("slot")?;
             self.store
                 .start_workspace(&workspace.view.id, &slot, &file)?;
             workspace.slot_identity = Some(slot);
@@ -82,12 +98,12 @@ impl Host {
             checkpoint("before_git")?;
             self.store.assert_workspace_owner()?;
             if let Err(error) = fs_workspace::create(&workspace, &lease) {
-                return self.block_workspace(&workspace, error);
+                return self.settle_create_failure(&workspace, error);
             }
             checkpoint("after_git")?;
             lease
         } else {
-            match fs_workspace::acquire(&workspace) {
+            let lease = match fs_workspace::acquire(&workspace) {
                 Ok(Some(lease)) => lease,
                 Ok(None) => {
                     return Err(Error::WorkspaceBusy {
@@ -95,7 +111,22 @@ impl Host {
                     });
                 }
                 Err(error) => return self.block_workspace(&workspace, error),
+            };
+            // A clean `git worktree add` failure stays in `creating` with a
+            // retry note. Absence without that note is still the crash gap.
+            if workspace.view.state == "creating" && workspace.view.detail.is_some() {
+                match fs_workspace::creation_left_evidence(&workspace) {
+                    Ok(false) => {
+                        if let Err(error) = fs_workspace::create(&workspace, &lease) {
+                            return self.settle_create_failure(&workspace, error);
+                        }
+                    }
+                    Ok(true) => {}
+                    Err(error) if error.is_transient() => return Err(error),
+                    Err(error) => return self.block_workspace(&workspace, error),
+                }
             }
+            lease
         };
         let (tree, git_dir) = match fs_workspace::verify(&workspace) {
             Ok(value) => value,
@@ -123,7 +154,30 @@ impl Host {
             .map(Some)
     }
 
+    fn settle_create_failure<T>(&mut self, workspace: &WorkspaceRecord, error: Error) -> Result<T> {
+        if error.is_transient() {
+            match fs_workspace::creation_left_evidence(workspace) {
+                Ok(false) => {
+                    self.store
+                        .record_workspace_retry(&workspace.view.id, &error.to_string())?;
+                    return Err(error);
+                }
+                Ok(true) => return self.quarantine_workspace(workspace, error),
+                Err(probe) if probe.is_transient() => return Err(error),
+                Err(probe) => return self.quarantine_workspace(workspace, probe),
+            }
+        }
+        self.quarantine_workspace(workspace, error)
+    }
+
     fn block_workspace<T>(&mut self, workspace: &WorkspaceRecord, error: Error) -> Result<T> {
+        if error.is_transient() {
+            return Err(error);
+        }
+        self.quarantine_workspace(workspace, error)
+    }
+
+    fn quarantine_workspace<T>(&mut self, workspace: &WorkspaceRecord, error: Error) -> Result<T> {
         let detail = error.to_string();
         self.store
             .uncertain_workspace(&workspace.view.id, &detail)?;
@@ -132,6 +186,11 @@ impl Host {
             detail,
         })
     }
+}
+
+fn same_workspace_root(stored: &str, requested: &Path) -> bool {
+    let normalized: std::path::PathBuf = requested.components().collect();
+    Path::new(stored) == normalized
 }
 
 #[cfg(test)]
