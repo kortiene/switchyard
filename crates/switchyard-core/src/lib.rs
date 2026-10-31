@@ -13,6 +13,10 @@ mod delivery;
 mod domain;
 mod error;
 mod execution;
+mod execution_env;
+pub use execution_env::{
+    ExecutionOperation, ExecutionReceipt, ExecutionRequest, ExecutionView, FAKE_WRITE_SCOPE,
+};
 mod persistence;
 mod policy;
 mod service;
