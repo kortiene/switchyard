@@ -224,7 +224,7 @@ impl MissionSnapshot {
             if self.runtime_adapter == "fake"
                 && matches!(self.phase, Phase::Pausing | Phase::Cancelling)
             {
-                steps.push(format!("To enter needs_attention for #125 resolution, admit DetectUncertainty as the operator: mission command --kind detect_uncertainty --payload '{{\"reason\":\"execution_uncertain\"}}' --expected-revision {} --persist-only, using this mission/attempt and a stable --command-id. This records uncertainty without clearing any effect. Resolve with matching evidence, then explicitly recover the recorded stop target; abandonment remains blocking.", self.revision));
+                steps.push(format!("To enter needs_attention for #125 resolution, admit DetectUncertainty as the operator: switchyard mission command --db '<DB_PATH>' --mission {} --attempt {} --command-id '<STABLE_COMMAND_ID>' --kind detect_uncertainty --payload '{{\"reason\":\"execution_uncertain\"}}' --expected-revision {} --persist-only. Replace the quoted placeholders and reuse the command ID on retry. This records uncertainty without clearing any effect. Resolve with matching evidence, then explicitly recover the recorded stop target; abandonment remains blocking.", self.mission_id, self.attempt_id, self.revision));
             }
         }
         steps

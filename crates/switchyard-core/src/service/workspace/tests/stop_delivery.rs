@@ -218,6 +218,39 @@ fn stop_only_dispatch_does_not_verify_the_workspace_or_drain_work() {
             .to_string()
             .contains("not verified for the current owner")
     );
+
+    let pause_receipt = h
+        .runtime_mut()
+        .unwrap()
+        .stored_receipt(&pause.request_id)
+        .unwrap();
+    // Restore readiness through the public dispatch path. Closed-phase work
+    // must be superseded, never admitted after the abort was delivered first.
+    assert_eq!(h.dispatch_pending(&m.mission_id).unwrap(), 0);
+    let ready = h.snapshot(&m.mission_id).unwrap();
+    assert_eq!(
+        ready.workspace.as_ref().unwrap().verified_generation,
+        Some(h.generation())
+    );
+    let withheld = ready
+        .commands
+        .iter()
+        .find(|c| c.id == start.command_id)
+        .unwrap();
+    assert_eq!(withheld.state, "superseded");
+    assert!(withheld.receipt_id.is_none());
+    assert!(
+        h.runtime_mut()
+            .unwrap()
+            .stored_receipt(&start.request_id)
+            .is_none()
+    );
+    assert_eq!(
+        h.runtime_mut().unwrap().stored_receipt(&pause.request_id),
+        Some(pause_receipt)
+    );
+    assert_eq!(h.runtime_mut().unwrap().submission_count(), 1);
+    assert!(ready.pending_commands.is_empty());
 }
 
 #[test]

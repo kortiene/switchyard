@@ -669,6 +669,19 @@ fn abandon_execution_is_audited_idempotently_and_keeps_the_block() {
     );
     let effect = &snapshot.execution_effects[0];
     let stop_revision = snapshot.revision.to_string();
+    let guidance = snapshot.to_json()["nextSteps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|step| step.contains("detect_uncertainty"))
+        .unwrap()
+        .to_string();
+    assert!(guidance.contains(&format!("--mission {}", m.mission_id)));
+    assert!(guidance.contains(&format!("--attempt {}", m.attempt_id)));
+    assert!(guidance.contains(&format!("--expected-revision {stop_revision}")));
+    assert!(guidance.contains("--db '<DB_PATH>'"));
+    assert!(guidance.contains("--command-id '<STABLE_COMMAND_ID>'"));
     drop(host);
     let (code, attention, err) = run(&[
         "mission",
