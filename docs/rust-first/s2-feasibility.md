@@ -140,7 +140,9 @@ published workspace packages without a documented compatibility check.
 workspace closure is built from the reviewed source with the upstream pinned
 catalog. Two local builds matched every committed artifact hash, and four
 public-API compatibility tests pass. Its verdict remains `NEEDS-FULL-S2`. It does
-not alter the published-package NO-GO above.
+not alter the published-package NO-GO above. The separate
+[bridge probe](s2-bridge-probe.md) records partial conformance evidence; it
+does not complete the integration gate.
 
 S2 is NO-GO until the whole gate passes; see Current status and
 [#96](https://github.com/kortiene/switchyard/issues/96). A newer compatible published package with

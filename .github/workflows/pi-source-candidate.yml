@@ -32,8 +32,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: runtime/pi-source/.node-version
-      - name: Select pinned build tooling
-        run: npm install --global npm@11.9.0 --ignore-scripts --no-audit --no-fund
+      - name: Verify and install pinned build tooling
+        run: node install-npm.mjs
       - name: Read pinned catalog revision
         id: catalog
         run: node -e 'console.log("revision=" + require("./pins.json").catalogRevision)' >> "$GITHUB_OUTPUT"

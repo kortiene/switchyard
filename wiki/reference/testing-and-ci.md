@@ -70,6 +70,13 @@ The [audit package](../../runtime/pi/README.md) documents commands and limits.
 
 [#107](https://github.com/kortiene/switchyard/pull/107) added `pi-source-candidate`. It rebuilds `runtime/pi-source/` when that path, its workflow, or `docs/rust-first/` changes. The job is not `pi-bridge-contract`. S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and the [S2 feasibility audit](../../docs/rust-first/s2-feasibility.md). A green audit or source rebuild is not live execution and is not S2 acceptance.
 
+# Partial bridge probe
+
+The `pi-bridge-probe` job runs the feature-gated Rust transport and credential-free
+recovery probes against the rebuilt source candidate. See the
+[remaining S2 acceptance](../../docs/rust-first/s2-bridge-probe.md).
+It does not replace `pi-bridge-contract` or enable live execution.
+
 # Wiki validation policy
 
 OKF consumers must tolerate missing links. Switchyard's producer-side `wiki:check` deliberately uses a stricter policy and rejects broken local concept and repository-source links before changes enter the repository. External URLs and heading anchors are not fetched or validated.
