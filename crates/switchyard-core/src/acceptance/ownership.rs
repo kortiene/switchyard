@@ -1,4 +1,5 @@
-use super::*;
+use super::fixtures::{admit_expect, create, fingerprint, git, git_out, open_world};
+use crate::{CommandBody, Host, Phase};
 
 #[test]
 fn second_active_owner_is_rejected_and_inspection_does_not_take_the_lock() {

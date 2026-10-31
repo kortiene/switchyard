@@ -1,4 +1,4 @@
-use super::*;
+use std::path::Path;
 
 #[test]
 fn ci_pins_the_rust_core_job_without_replacing_npm_verify() {
@@ -17,7 +17,7 @@ fn ci_pins_the_rust_core_job_without_replacing_npm_verify() {
 #[test]
 fn core_manifest_has_no_model_or_forge_client() {
     let manifest = include_str!("../../Cargo.toml");
-    for banned in ["reqwest", "octocrab", "git2", "libgit2", "reqwest"] {
+    for banned in ["reqwest", "octocrab", "git2", "libgit2"] {
         assert!(
             !manifest.contains(banned),
             "{banned} must not be a dependency"

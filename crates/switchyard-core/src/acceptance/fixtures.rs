@@ -1,4 +1,9 @@
-use super::*;
+use crate::execution::RuntimeNotification;
+use crate::policy::plan_digest_for;
+use crate::{AdmitRequest, CommandBody, CommandOrigin, Error, Host, Phase};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use tempfile::TempDir;
 
 pub(super) struct World {
     pub(super) _tmp: TempDir,
@@ -141,15 +146,6 @@ pub(super) fn fail_note(digest: &str) -> RuntimeNotification {
         evidence: "assertion failed".into(),
         requirements: vec!["Restart restores the same attempt".into()],
         completeness: "complete".into(),
-    }
-}
-
-pub(super) fn proof_for(digest: &str, pr_id: &str) -> PublicationProof {
-    PublicationProof {
-        content_digest: digest.into(),
-        commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-        tree_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
-        pr_id: pr_id.into(),
     }
 }
 

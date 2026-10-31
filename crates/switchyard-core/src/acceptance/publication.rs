@@ -1,4 +1,10 @@
-use super::*;
+use super::fixtures::{
+    admit, admit_expect, create, deliver, drive_to_publishing, fingerprint, ledger_text, notify,
+    open_world,
+};
+use crate::delivery::{publication_operation_id, publication_payload, publication_payload_hash};
+use crate::execution::RuntimeNotification;
+use crate::{CommandBody, Host, OperationState, Phase, PublicationProof};
 
 #[test]
 fn fake_runtime_drives_the_state_machine_without_credentials_or_git_writes() {
@@ -130,4 +136,13 @@ fn cancellation_during_publication_can_finish_or_discover_the_pr() {
         Phase::Published
     );
     let _ = publication_payload_hash(&proof).unwrap();
+}
+
+fn proof_for(digest: &str, pr_id: &str) -> PublicationProof {
+    PublicationProof {
+        content_digest: digest.into(),
+        commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        tree_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        pr_id: pr_id.into(),
+    }
 }

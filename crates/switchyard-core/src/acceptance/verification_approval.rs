@@ -1,4 +1,13 @@
-use super::*;
+use super::fixtures::{
+    World, admit, admit_expect, create, deliver, drive_to_publishing, notify, open_world,
+    pass_note, plan_note,
+};
+use crate::domain::AttentionReason;
+use crate::execution::RuntimeNotification;
+use crate::policy::plan_digest_for;
+use crate::{CommandBody, EffectProof, Host, Phase};
+use serde_json::json;
+use std::path::Path;
 
 #[test]
 fn content_drift_recovers_to_verifying_and_publication_stays_reconcile_only() {

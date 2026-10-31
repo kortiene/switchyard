@@ -4,7 +4,10 @@ Tests stay inside the core crate under `#[cfg(test)]`; no production API is expo
 `fixtures.rs` shares the existing world, admission, notification and publication helpers.
 Helpers used by one contract stay with that contract.
 
-## C2 relocation evidence
+## Historical C2 relocation evidence (2026-10-30)
+
+This section records the C2 move in [PR #117](https://github.com/kortiene/switchyard/pull/117),
+not the current size of the test suite. Later tests need not update these historical counts.
 
 Baseline: `b03313109fe16bd3031efdbc75d753ece28e5137`.
 Discovery before and after used `cargo test --workspace --locked -- --list` on Rust 1.99.1.
@@ -13,11 +16,14 @@ The 27 tests below move into contract modules; six recovery regressions keep the
 The other 16 core tests and all 3 CLI tests are unchanged.
 
 All existing scenario names, assertions, failure boundaries and operation ordering remain intact.
-The only test-source adjustment is `include_str!("../../Cargo.toml")` in `build_contract.rs`,
-which still reads the same core manifest after the move. Fixture visibility is limited to this
-test module. No production code, schema, default, workflow or public API changes.
+The initial relocation adjusted `include_str!("../../Cargo.toml")` in `build_contract.rs`
+to read the same core manifest. Review follow-up made imports explicit, moved `proof_for`
+into its only consumer (`publication.rs`), and removed a duplicate `reqwest` entry while
+preserving the same set of forbidden dependencies. The six recovery-regression bodies
+are unchanged; only their imports changed. Fixture visibility is limited to this test module.
+No production code, schema, default, workflow or public API changes.
 
-## Qualified-name mapping
+## Historical qualified-name mapping
 
 For each row, the old name is `acceptance::<scenario>` and the new name is
 `acceptance::<module>::<scenario>`.
@@ -70,3 +76,10 @@ cargo test --workspace --locked -- --list
 
 The Rust gate runs formatting, Clippy with warnings denied, and the complete workspace test suite.
 These checks use FakeRuntime. They do not grant S2 GO, confinement or live execution.
+
+## Future TypeScript retirement
+
+The build-contract test intentionally preserves the current legacy verify job.
+[Tracking issue #120](https://github.com/kortiene/switchyard/issues/120) requires its
+assertions to change together with the workflows and required checks when a reviewed
+TypeScript retirement is authorized. C2 does not authorize that retirement.
