@@ -231,7 +231,10 @@ fn create_slot(w: &WorkspaceRecord) -> Result<(WorkspaceLease, String, String)> 
     match finish_created_slot(w) {
         Ok(value) => Ok(value),
         Err(error) => {
-            remove_created_slot(&w.slot())?;
+            let error = match remove_created_slot(&w.slot()) {
+                Ok(()) => error,
+                Err(cleanup) => attach_cleanup(error, &cleanup),
+            };
             Err(error)
         }
     }
@@ -261,6 +264,25 @@ fn remove_created_slot(slot: &Path) -> Result<()> {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(Error::storage(error)),
+    }
+}
+
+/// Cleanup is secondary. The caller must still see the failure that aborted
+/// slot creation, with the cleanup problem attached when the variant can carry it.
+fn attach_cleanup(original: Error, cleanup: &Error) -> Error {
+    let note = |detail: String| format!("{detail}; slot cleanup failed: {cleanup}");
+    match original {
+        Error::Storage { detail } => Error::storage(note(detail)),
+        Error::GitFailed { detail, exit_code } => Error::git(note(detail), exit_code),
+        Error::GuardFailed { detail } => Error::guard(note(detail)),
+        Error::WorkspaceUncertain {
+            workspace_id,
+            detail,
+        } => Error::WorkspaceUncertain {
+            workspace_id,
+            detail: note(detail),
+        },
+        other => other,
     }
 }
 
@@ -492,12 +514,13 @@ fn creation_git(
         .map_err(Error::storage)?;
     log.sync_all().map_err(Error::storage)?;
     if !status.success() {
-        return Err(Error::GitFailed {
-            detail: format!(
+        return Err(Error::git(
+            format!(
                 "worktree creation failed ({status}); retained diagnostics in {}",
                 w.slot().join("git-create.log").display()
             ),
-        });
+            status.code(),
+        ));
     }
     Ok(())
 }
@@ -554,30 +577,35 @@ fn verify_binding(w: &WorkspaceRecord) -> Result<(String, PathBuf)> {
 fn evidence_path(result: Result<PathBuf>) -> Result<PathBuf> {
     match result {
         Ok(path) => Ok(path),
-        Err(Error::GitFailed { detail }) => Err(Error::guard(format!(
-            "workspace evidence rejected: {detail}"
-        ))),
-        Err(error) => Err(error),
+        Err(error) => Err(evidence_from_git(error)),
     }
 }
 
 fn evidence_git(path: &Path, args: &[&str]) -> Result<String> {
     match git(path, args) {
         Ok(text) => Ok(text),
-        Err(Error::GitFailed { detail }) => Err(Error::guard(format!(
-            "workspace evidence rejected: {detail}"
-        ))),
-        Err(error) => Err(error),
+        Err(error) => Err(evidence_from_git(error)),
     }
 }
 
 fn evidence_git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
     match git_bytes(path, args) {
         Ok(bytes) => Ok(bytes),
-        Err(Error::GitFailed { detail }) => Err(Error::guard(format!(
-            "workspace evidence rejected: {detail}"
-        ))),
-        Err(error) => Err(error),
+        Err(error) => Err(evidence_from_git(error)),
+    }
+}
+
+/// A completed non-zero Git exit is workspace evidence. A signal kill has no
+/// exit code and stays a retryable [`Error::GitFailed`].
+fn evidence_from_git(error: Error) -> Error {
+    match error {
+        Error::GitFailed {
+            exit_code: Some(code),
+            detail,
+        } => Error::guard(format!(
+            "workspace evidence rejected: {detail} (exit {code})"
+        )),
+        other => other,
     }
 }
 
@@ -600,12 +628,14 @@ fn require_head(w: &WorkspaceRecord, admin: &Path, tree: &Path) -> Result<()> {
     // exit 128 for a missing object.
     match git(tree, &["cat-file", "-e", &format!("{head}^{{commit}}")]) {
         Ok(_) => {}
-        Err(Error::GitFailed { .. }) => {
-            return Err(Error::guard(
-                "workspace HEAD is not a commit in this repository",
-            ));
+        Err(error) => {
+            return Err(match evidence_from_git(error) {
+                Error::GuardFailed { .. } => {
+                    Error::guard("workspace HEAD is not a commit in this repository")
+                }
+                error => error,
+            });
         }
-        Err(error) => return Err(error),
     }
     if base_is_ancestor(tree, &w.view.base_sha, head)? {
         Ok(())
@@ -628,9 +658,13 @@ fn base_is_ancestor(repo: &Path, base: &str, head: &str) -> Result<bool> {
     match status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
-        _ => Err(Error::guard(format!(
-            "workspace HEAD is not a commit in this repository ({status})"
+        Some(code) => Err(Error::guard(format!(
+            "workspace HEAD is not a commit in this repository (exit {code})"
         ))),
+        None => Err(Error::git(
+            format!("git merge-base --is-ancestor was killed by a signal ({status})"),
+            None,
+        )),
     }
 }
 
@@ -675,4 +709,35 @@ fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(Error::storage)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{attach_cleanup, evidence_from_git};
+    use crate::Error;
+
+    #[test]
+    fn signaled_git_stays_retryable_and_a_real_exit_is_evidence() {
+        let signaled = evidence_from_git(Error::git("killed by SIGTERM", None));
+        assert_eq!(signaled.category(), "git_failed");
+        assert_eq!(signaled.git_exit_code(), None);
+        assert!(signaled.is_transient());
+
+        let exited = evidence_from_git(Error::git("not a commit", Some(128)));
+        assert_eq!(exited.category(), "guard_failed");
+        assert!(!exited.is_transient());
+        assert!(exited.to_string().contains("exit 128"));
+    }
+
+    #[test]
+    fn slot_cleanup_failure_keeps_the_original_storage_error() {
+        let original = Error::storage("injected failure after creating the workspace slot");
+        let cleanup = Error::storage("directory not empty");
+        let kept = attach_cleanup(original, &cleanup);
+        assert_eq!(kept.category(), "storage_failed");
+        let message = kept.to_string();
+        assert!(message.contains("injected failure after creating the workspace slot"));
+        assert!(message.contains("slot cleanup failed"));
+        assert!(message.contains("directory not empty"));
+    }
 }

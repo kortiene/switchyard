@@ -63,8 +63,14 @@ pub enum Error {
     #[error("an active mission already exists")]
     ActiveMissionExists,
 
+    /// `exit_code` is `None` when Git was killed by a signal, or the failure
+    /// was not a completed process exit. Signal death stays retryable.
+    /// A real non-zero exit is evidence when a workspace check converts it.
     #[error("git inspection failed: {detail}")]
-    GitFailed { detail: String },
+    GitFailed {
+        detail: String,
+        exit_code: Option<i32>,
+    },
 
     #[error("canonical JSON rejected: {detail}")]
     Canonical { detail: String },
@@ -117,6 +123,22 @@ impl Error {
     pub fn storage(detail: impl fmt::Display) -> Self {
         Self::Storage {
             detail: detail.to_string(),
+        }
+    }
+
+    pub fn git(detail: impl Into<String>, exit_code: Option<i32>) -> Self {
+        Self::GitFailed {
+            detail: detail.into(),
+            exit_code,
+        }
+    }
+
+    /// Completed Git exit, as opposed to a signal kill. Evidence checks turn
+    /// only this case into a permanent workspace mismatch.
+    pub fn git_exit_code(&self) -> Option<i32> {
+        match self {
+            Self::GitFailed { exit_code, .. } => *exit_code,
+            _ => None,
         }
     }
 

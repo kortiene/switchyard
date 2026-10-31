@@ -1141,3 +1141,74 @@ fn recover_aborts_before_poll_when_the_owner_generation_is_stale() {
     assert_eq!(h.snapshot(&m.mission_id).unwrap().phase, Phase::Draft);
     assert_eq!(h.runtime_mut().unwrap().queued_notifications(), 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn signaled_git_worker() {
+    let Some(db) = std::env::var_os("SW_WORKSPACE_DB") else {
+        return;
+    };
+    let mission = std::env::var("SW_WORKSPACE_MISSION").unwrap();
+    let mut h = Host::open(Path::new(&db)).unwrap();
+    match h.recover_workspace(&mission) {
+        Ok(_) => panic!("signaled git was expected to fail"),
+        Err(error) => {
+            let state = h.snapshot(&mission).unwrap().workspace.unwrap().state;
+            println!("WORKSPACE-RESULT {} {state}", error.category());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn signaled_git_during_verify_stays_retryable() {
+    use std::os::unix::fs::PermissionsExt;
+    for needle in ["cat-file", "merge-base"] {
+        let w = world();
+        let mut h = Host::open(&w.db).unwrap();
+        let m = mission(&mut h, &w);
+        let view = prepare(&mut h, &m, &w);
+        git(
+            Path::new(&view.path),
+            &["commit", "--allow-empty", "-m", "agent"],
+        );
+        drop(h);
+        let tools = w._dir.path().join("tools");
+        fs::create_dir(&tools).unwrap();
+        let wrapper = tools.join("git");
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\ncase \" $* \" in\n*\" {needle} \"*)\n kill -TERM $$\n ;;\nesac\nexec /usr/bin/git \"$@\"\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", tools.display(), std::env::var("PATH").unwrap());
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "service::workspace::tests::signaled_git_worker",
+                "--nocapture",
+            ])
+            .env("SW_WORKSPACE_DB", &w.db)
+            .env("SW_WORKSPACE_MISSION", &m.mission_id)
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{needle} worker failed: {stdout}{stderr}"
+        );
+        assert!(
+            stdout.contains("WORKSPACE-RESULT git_failed ready"),
+            "{needle}: {stdout}{stderr}"
+        );
+        let mut h = Host::open(&w.db).unwrap();
+        let recovered = h.recover_workspace(&m.mission_id).unwrap().unwrap();
+        assert_eq!(recovered.state, "ready");
+        assert_eq!(recovered.id, view.id);
+    }
+}

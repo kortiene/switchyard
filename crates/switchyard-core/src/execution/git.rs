@@ -16,13 +16,17 @@ use crate::error::{Error, Result};
 pub fn inspect_repo(path: &Path) -> Result<RepoIdentity> {
     let inside = git(path, &["rev-parse", "--is-inside-work-tree"])?;
     if inside.trim() != "true" {
-        return Err(Error::GitFailed {
-            detail: format!("{} is not a git work tree", path.display()),
-        });
+        return Err(Error::git(
+            format!("{} is not a git work tree", path.display()),
+            None,
+        ));
     }
     let toplevel = git(path, &["rev-parse", "--show-toplevel"])?;
-    let head = git(path, &["rev-parse", "HEAD"]).map_err(|_| Error::GitFailed {
-        detail: "repository has no commits, so no base SHA can be frozen".into(),
+    let head = git(path, &["rev-parse", "HEAD"]).map_err(|_| {
+        Error::git(
+            "repository has no commits, so no base SHA can be frozen",
+            None,
+        )
     })?;
     let branch = git(path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     let porcelain = git_bytes(path, &["status", "--porcelain=v1", "-z"])?;
@@ -55,9 +59,8 @@ pub fn strip_userinfo(url: &str) -> String {
 
 pub(super) fn git(path: &Path, args: &[&str]) -> Result<String> {
     let bytes = git_bytes(path, args)?;
-    String::from_utf8(bytes).map_err(|error| Error::GitFailed {
-        detail: format!("git output was not utf-8: {error}"),
-    })
+    String::from_utf8(bytes)
+        .map_err(|error| Error::git(format!("git output was not utf-8: {error}"), None))
 }
 
 pub(super) fn git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
@@ -68,9 +71,12 @@ pub(super) fn git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
 pub(super) fn checked_output(args: &[&str], output: std::process::Output) -> Result<Vec<u8>> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::GitFailed {
-            detail: format!("git {} failed: {}", args.join(" "), stderr.trim()),
-        });
+        // `code()` is `None` when the child was killed by a signal. That stays
+        // a retryable GitFailed; only a completed non-zero exit is evidence.
+        return Err(Error::git(
+            format!("git {} failed: {}", args.join(" "), stderr.trim()),
+            output.status.code(),
+        ));
     }
     Ok(output.stdout)
 }

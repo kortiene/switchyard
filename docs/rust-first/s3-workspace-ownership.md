@@ -102,7 +102,10 @@ Git working files.
 owner generation before its readiness gate, so `mission command` can dispatch
 a workspace prepared by an earlier process. A second dispatch in that same
 invocation does not verify again. Admission is not gated by an uncertain,
-busy, or transient workspace failure; only dispatch is. `--persist-only`
+busy, or transient workspace failure; only dispatch is. When that happens,
+`mission command` prints `ok: true` with the admitted command and a
+`workspaceError` field, and exits 3. Exit 2 still means the command was not
+recorded. `--persist-only`
 records the command and does not reconcile, so it does not run
 `git worktree add`. `Host::recover` reconciles, then dispatches, polls, and
 snapshots. An uncertain, busy, storage, or Git failure skips dispatch and is

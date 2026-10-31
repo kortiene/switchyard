@@ -80,6 +80,8 @@ enum MissionCommand {
     },
     /// Admit a command. Dispatches pending runtime work unless `--persist-only`.
     /// `--persist-only` does not reconcile a workspace or run `git worktree add`.
+    /// If the command is recorded but the workspace blocks dispatch, the process
+    /// exits 3 and the JSON includes `workspaceError`. Exit 2 means it was not recorded.
     Command {
         #[arg(long)]
         db: PathBuf,
@@ -152,7 +154,13 @@ fn main() -> ExitCode {
     match run(cli) {
         Ok(value) => {
             println!("{value}");
-            ExitCode::SUCCESS
+            // Exit 3: recorded, not dispatched (`ok` with `workspaceError`).
+            // Exit 0 is full success. Exit 2 means the command was not recorded.
+            if value.get("workspaceError").is_some() {
+                ExitCode::from(3)
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(error) => {
             let body = json!({
@@ -283,7 +291,23 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     host.dispatch_reconciled(&mission)?;
                 }
                 if let Some(error) = workspace_error {
-                    return Err(error);
+                    let mission_json = host.snapshot(&mission)?.to_json();
+                    let revision = mission_json["revision"].clone();
+                    return Ok(json!({
+                        "ok": true,
+                        "dispatched": false,
+                        "idempotent": admitted.idempotent,
+                        "commandId": admitted.command_id,
+                        "requestId": admitted.request_id,
+                        "payloadHash": admitted.payload_hash,
+                        "commandState": admitted.state.as_str(),
+                        "revision": revision,
+                        "workspaceError": {
+                            "category": error.category(),
+                            "message": error.to_string(),
+                        },
+                        "mission": mission_json,
+                    }));
                 }
                 Ok(json!({
                     "ok": true,

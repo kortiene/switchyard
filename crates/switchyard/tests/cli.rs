@@ -343,6 +343,32 @@ fn uncertain_workspace_admits_pause_and_cancel_without_dispatch() {
     assert_eq!(paused["mission"]["workspace"]["state"], "ready");
     let paused_revision = paused["mission"]["revision"].as_u64().unwrap();
 
+    let (code, cancelled, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--kind",
+        "cancel",
+        "--expected-revision",
+        &paused_revision.to_string(),
+    ]);
+    assert_eq!(code, 3, "{cancelled} {error}");
+    assert!(error.is_null(), "{error}");
+    assert_eq!(cancelled["ok"], true);
+    assert_eq!(cancelled["dispatched"], false);
+    assert_eq!(cancelled["commandState"], "pending");
+    assert!(cancelled["commandId"].as_str().unwrap().starts_with("c-"));
+    assert!(cancelled["revision"].as_u64().unwrap() > paused_revision);
+    assert_eq!(
+        cancelled["workspaceError"]["category"],
+        "workspace_uncertain"
+    );
+    assert_eq!(cancelled["mission"]["phase"], "cancelling");
+    let recorded_revision = cancelled["revision"].as_u64().unwrap();
+
     let (code, _, error) = run(&[
         "mission",
         "command",
@@ -355,8 +381,12 @@ fn uncertain_workspace_admits_pause_and_cancel_without_dispatch() {
         "--expected-revision",
         &paused_revision.to_string(),
     ]);
-    assert_ne!(code, 0);
-    assert_eq!(error["error"]["category"], "workspace_uncertain");
+    assert_eq!(
+        code, 2,
+        "a retry must be a rejection, not another recorded cancel"
+    );
+    assert_eq!(error["error"]["category"], "stale_revision");
+    assert_eq!(error["ok"], false);
 
     let (code, status, error) = run(&[
         "mission",
@@ -369,6 +399,7 @@ fn uncertain_workspace_admits_pause_and_cancel_without_dispatch() {
     assert_eq!(code, 0, "{error}");
     let mission_status = &status["missions"][0];
     assert_eq!(mission_status["phase"], "cancelling");
+    assert_eq!(mission_status["revision"], recorded_revision);
     assert_eq!(mission_status["workspace"]["state"], "uncertain");
     let commands = mission_status["commands"].as_array().unwrap();
     assert!(
@@ -380,6 +411,13 @@ fn uncertain_workspace_admits_pause_and_cancel_without_dispatch() {
         commands
             .iter()
             .any(|command| command["kind"] == "cancel" && command["state"] == "pending")
+    );
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command["kind"] == "cancel")
+            .count(),
+        1
     );
 }
 
