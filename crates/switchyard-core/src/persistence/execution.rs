@@ -6,6 +6,7 @@ pub(crate) struct EffectRecord {
     pub attempt_id: String,
     pub session_id: String,
     pub payload_hash: String,
+    pub state: String,
     pub receipt: Option<ExecutionReceipt>,
 }
 impl Store {
@@ -42,16 +43,17 @@ impl Store {
             return Ok(None);
         }
         let row = self.conn.query_row(
-            "SELECT mission_id, attempt_id, session_id, payload_hash, receipt_json FROM execution_effects WHERE operation_id=?1",
-            [id], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,Option<String>>(4)?)))
+            "SELECT mission_id, attempt_id, session_id, payload_hash, receipt_json, state FROM execution_effects WHERE operation_id=?1",
+            [id], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,Option<String>>(4)?, r.get::<_,String>(5)?)))
             .optional().map_err(Error::storage)?;
         row.map(
-            |(mission_id, attempt_id, session_id, payload_hash, receipt)| {
+            |(mission_id, attempt_id, session_id, payload_hash, receipt, state)| {
                 Ok(EffectRecord {
                     mission_id,
                     attempt_id,
                     session_id,
                     payload_hash,
+                    state,
                     receipt: receipt
                         .map(|s| {
                             ExecutionReceipt::from_json(
@@ -114,6 +116,32 @@ impl Store {
         }
         tx.commit().map_err(Error::storage)
     }
+    /// Only the still-owning synchronous caller, before apply, can certify this.
+    pub(crate) fn execution_not_applied(&mut self, request: &ExecutionRequest) -> Result<()> {
+        self.require_execution_generation(request)?;
+        let tx = self.immediate()?;
+        let changed = tx
+            .execute(
+                "UPDATE execution_effects SET state='not_applied'
+            WHERE operation_id=?1 AND payload_hash=?2 AND started_generation=?3 AND state='prepared'
+            AND mission_id=?4 AND attempt_id=?5 AND session_id=?6",
+                params![
+                    request.operation_id()?,
+                    request.payload_hash()?,
+                    request.binding.generation,
+                    request.binding.mission_id,
+                    request.binding.attempt_id,
+                    request.binding.session_id
+                ],
+            )
+            .map_err(Error::storage)?;
+        if changed != 1 {
+            return Err(Error::guard(
+                "not-applied settlement requires the original prepared generation",
+            ));
+        }
+        tx.commit().map_err(Error::storage)
+    }
     pub(crate) fn quarantine_execution(&mut self, id: &str) -> Result<()> {
         let tx = self.immediate()?;
         tx.execute("UPDATE execution_effects SET state='uncertain' WHERE operation_id=?1 AND state='prepared'", [id]).map_err(Error::storage)?;
@@ -128,6 +156,6 @@ impl Store {
         if user_version(&self.conn)? < 4 {
             return Ok(false);
         }
-        self.conn.query_row("SELECT EXISTS(SELECT 1 FROM execution_effects WHERE mission_id=?1 AND state != 'completed')",[mission],|r| r.get(0)).map_err(Error::storage)
+        self.conn.query_row("SELECT EXISTS(SELECT 1 FROM execution_effects WHERE mission_id=?1 AND state IN ('prepared', 'uncertain'))",[mission],|r| r.get(0)).map_err(Error::storage)
     }
 }

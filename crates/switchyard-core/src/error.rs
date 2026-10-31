@@ -33,6 +33,12 @@ pub enum Error {
     #[error("command conflict for {command_id}")]
     CommandConflict { command_id: String },
 
+    #[error("execution deadline expired before applying {operation_id}")]
+    ExecutionDeadlineExceeded { operation_id: String },
+
+    #[error("new execution blocked for mission {mission_id}: {detail}")]
+    ExecutionBlocked { mission_id: String, detail: String },
+
     #[error("execution outcome is uncertain for {operation_id}")]
     ExecutionUncertain { operation_id: String },
 
@@ -95,6 +101,8 @@ impl Error {
             Self::CommandConflict { .. } => "command_conflict",
             Self::OperationConflict { .. } => "operation_conflict",
             Self::ExecutionUncertain { .. } => "execution_uncertain",
+            Self::ExecutionDeadlineExceeded { .. } => "execution_deadline_exceeded",
+            Self::ExecutionBlocked { .. } => "execution_blocked",
             Self::StaleGeneration { .. } => "stale_generation",
             Self::RepairLimitExhausted { .. } => "repair_limit_exhausted",
             Self::UsageLimitExhausted { .. } => "usage_limit_exhausted",

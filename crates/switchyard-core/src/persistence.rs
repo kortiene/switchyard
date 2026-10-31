@@ -94,7 +94,7 @@ impl Store {
                 detail: "database is not initialized".into(),
             });
         }
-        if version > 4 {
+        if version > 5 {
             return Err(Error::Storage {
                 detail: format!("database schema version {version} is newer than this host"),
             });
@@ -236,7 +236,7 @@ impl Store {
                 |row| row.get(0),
             )
             .map_err(Error::storage)?;
-        if current > 4 {
+        if current > 5 {
             return Err(Error::Storage {
                 detail: format!("database schema version {current} is newer than this host"),
             });
@@ -298,6 +298,19 @@ impl Store {
             )
             .map_err(Error::storage)?;
             tx.execute_batch("PRAGMA user_version = 4;")
+                .map_err(Error::storage)?;
+            tx.commit().map_err(Error::storage)?;
+        }
+        if current < 5 {
+            let tx = self.immediate()?;
+            tx.execute_batch(include_str!("migrations/005_execution_not_applied.sql"))
+                .map_err(Error::storage)?;
+            tx.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (5, ?1)",
+                [now_ms()],
+            )
+            .map_err(Error::storage)?;
+            tx.execute_batch("PRAGMA user_version = 5;")
                 .map_err(Error::storage)?;
             tx.commit().map_err(Error::storage)?;
         }
@@ -1714,7 +1727,7 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
             .unwrap();
         assert_eq!(foreign_keys, 1);
-        assert_eq!(user_version(&store.conn).unwrap(), 4);
+        assert_eq!(user_version(&store.conn).unwrap(), 5);
         let index: String = store
             .conn
             .query_row(

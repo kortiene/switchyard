@@ -286,7 +286,7 @@ fn v3_inspection_and_forward_upgrade_preserve_mission_and_workspace() {
     drop(host);
     let db = dir.path().join("mission.sqlite");
     let conn = Connection::open(&db).unwrap();
-    conn.execute_batch("DROP TABLE execution_effects; DELETE FROM schema_migrations WHERE version=4; PRAGMA user_version=3;").unwrap();
+    conn.execute_batch("DROP TABLE execution_effects; DELETE FROM schema_migrations WHERE version>=4; PRAGMA user_version=3;").unwrap();
     drop(conn);
     let inspected = Host::inspect(&db, Some(&request.binding.mission_id)).unwrap();
     assert_eq!(inspected[0].workspace, before.workspace);
@@ -302,7 +302,7 @@ fn v3_inspection_and_forward_upgrade_preserve_mission_and_workspace() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        4
+        5
     );
 }
 
@@ -435,4 +435,259 @@ fn prepared_effect_rejects_late_settlement_from_a_previous_owner() {
     let mut changed = request.clone();
     changed.binding.generation = host.generation();
     assert!(host.store.complete_execution(&changed, &receipt).is_err());
+}
+
+#[test]
+fn deadline_between_intent_and_apply_is_definite_and_nonblocking() {
+    let (dir, mut host, mut request) = setup();
+    let mut clock_calls = 0;
+    let error = host
+        .execute_fake_with_clock(
+            &request,
+            |_| Ok(()),
+            || {
+                clock_calls += 1;
+                request.deadline_ms - i64::from(clock_calls == 1)
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.category(), "execution_deadline_exceeded");
+    let id = request.operation_id().unwrap();
+    assert_eq!(
+        state(&dir.path().join("mission.sqlite"), &id),
+        "not_applied"
+    );
+    assert_eq!(
+        host.snapshot(&request.binding.mission_id).unwrap().phase,
+        Phase::Implementing
+    );
+    assert!(!host.store.ops_blocked(&request.binding.mission_id).unwrap());
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 0);
+    drop(host);
+    let mut host = Host::open(&dir.path().join("mission.sqlite")).unwrap();
+    request.binding.generation = host.generation();
+    assert_eq!(
+        host.execute_fake_operation(&request)
+            .unwrap_err()
+            .category(),
+        "execution_deadline_exceeded"
+    );
+    let mut changed = request.clone();
+    changed.deadline_ms += 1;
+    assert_eq!(
+        host.execute_fake_operation(&changed)
+            .unwrap_err()
+            .category(),
+        "operation_conflict"
+    );
+    changed = request.clone();
+    changed.effect_key = "next-effect".into();
+    host.execute_fake_operation(&changed).unwrap();
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 1);
+    assert_eq!(
+        host.recover(&request.binding.mission_id).unwrap().phase,
+        Phase::Implementing
+    );
+}
+
+#[test]
+fn apply_and_receipt_errors_immediately_quarantine_without_hiding_the_cause() {
+    for fail_apply in [true, false] {
+        let (dir, mut host, request) = setup();
+        if fail_apply {
+            host.runtime_mut().unwrap().fail_next_simulated_effect();
+        } else {
+            Connection::open(dir.path().join("mission.sqlite")).unwrap().execute_batch(
+                "CREATE TRIGGER fail_completion BEFORE UPDATE OF state ON execution_effects WHEN NEW.state='completed'
+                 BEGIN SELECT RAISE(ABORT, 'injected receipt failure'); END;"
+            ).unwrap();
+        }
+        let error = host.execute_fake_operation(&request).unwrap_err();
+        assert_eq!(error.category(), "storage_failed");
+        assert!(error.to_string().contains(if fail_apply {
+            "injected error after simulated effect"
+        } else {
+            "injected receipt failure"
+        }));
+        assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 1);
+        let snapshot = host.snapshot(&request.binding.mission_id).unwrap();
+        assert_eq!(snapshot.phase, Phase::NeedsAttention);
+        assert_eq!(snapshot.execution_effects[0].state, "uncertain");
+        assert_eq!(
+            host.execute_fake_operation(&request)
+                .unwrap_err()
+                .category(),
+            "execution_uncertain"
+        );
+        assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 1);
+    }
+}
+
+#[test]
+fn failed_uncertainty_persistence_stays_blocked_and_reports_both_errors() {
+    let (dir, mut host, request) = setup();
+    let conn = Connection::open(dir.path().join("mission.sqlite")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER fail_updates BEFORE UPDATE ON execution_effects
+        BEGIN SELECT RAISE(ABORT, 'injected ledger unavailable'); END;",
+    )
+    .unwrap();
+    host.runtime_mut().unwrap().fail_next_simulated_effect();
+    let error = host.execute_fake_operation(&request).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("injected error after simulated effect")
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("could not record execution uncertainty")
+    );
+    assert!(error.to_string().contains("injected ledger unavailable"));
+    assert!(host.store.ops_blocked(&request.binding.mission_id).unwrap());
+    assert_eq!(
+        state(
+            &dir.path().join("mission.sqlite"),
+            &request.operation_id().unwrap()
+        ),
+        "prepared"
+    );
+    conn.execute_batch("DROP TRIGGER fail_updates;").unwrap();
+    assert_eq!(
+        host.recover(&request.binding.mission_id).unwrap().phase,
+        Phase::NeedsAttention
+    );
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 1);
+}
+
+#[test]
+fn unattempted_request_names_the_existing_blocker_not_its_own_identity() {
+    let (_dir, mut host, request) = setup();
+    let payload = serde_json::json!({"old":"operation"});
+    host.record_operation(
+        &request.binding.mission_id,
+        "old-s1-op",
+        &payload,
+        crate::OperationState::Prepared,
+    )
+    .unwrap();
+    let error = host.execute_fake_operation(&request).unwrap_err();
+    assert_eq!(error.category(), "execution_blocked");
+    assert!(error.to_string().contains("generic S1"));
+    assert!(!error.to_string().contains(&request.operation_id().unwrap()));
+    assert!(
+        host.store
+            .execution_effect(&request.operation_id().unwrap())
+            .unwrap()
+            .is_none()
+    );
+    host.settle_operation("old-s1-op", &crate::payload_hash(&payload).unwrap())
+        .unwrap();
+    let mut prior = request.clone();
+    prior.effect_key = "pending-effect".into();
+    host.store.prepare_execution(&prior).unwrap();
+    let error = host.execute_fake_operation(&request).unwrap_err();
+    assert_eq!(error.category(), "execution_blocked");
+    assert!(error.to_string().contains("unresolved execution effects"));
+    assert!(
+        host.store
+            .execution_effect(&request.operation_id().unwrap())
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 0);
+}
+
+#[test]
+fn error_reconciliation_cannot_mutate_a_committed_result_or_a_new_owner() {
+    let (dir, mut host, request) = setup();
+    let receipt = host.execute_fake_operation(&request).unwrap();
+    let error = host.execution_failure(&request, Error::storage("lost completion response"));
+    assert!(error.to_string().contains("lost completion response"));
+    assert_eq!(
+        host.snapshot(&request.binding.mission_id).unwrap().phase,
+        Phase::Implementing
+    );
+    assert_eq!(host.execute_fake_operation(&request).unwrap(), receipt);
+    let mut pending = request.clone();
+    pending.effect_key = "pending".into();
+    host.store.prepare_execution(&pending).unwrap();
+    drop(host);
+    let mut host = Host::open(&dir.path().join("mission.sqlite")).unwrap();
+    let error = host.execution_failure(&pending, Error::storage("late failure"));
+    assert_eq!(error.category(), "stale_generation");
+    assert_eq!(
+        state(
+            &dir.path().join("mission.sqlite"),
+            &pending.operation_id().unwrap()
+        ),
+        "prepared"
+    );
+    assert_eq!(
+        host.snapshot(&request.binding.mission_id).unwrap().phase,
+        Phase::Implementing
+    );
+}
+
+#[test]
+fn v4_upgrade_preserves_completed_prepared_and_uncertain_effects() {
+    let (dir, mut host, request) = setup();
+    let receipt = host.execute_fake_operation(&request).unwrap();
+    let mut pending = request.clone();
+    pending.effect_key = "pending".into();
+    host.store.prepare_execution(&pending).unwrap();
+    let mut uncertain = request.clone();
+    uncertain.effect_key = "uncertain".into();
+    host.store.prepare_execution(&uncertain).unwrap();
+    host.store
+        .quarantine_execution(&uncertain.operation_id().unwrap())
+        .unwrap();
+    let before = host
+        .snapshot(&request.binding.mission_id)
+        .unwrap()
+        .execution_effects;
+    drop(host);
+    let db = dir.path().join("mission.sqlite");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch("BEGIN; ALTER TABLE execution_effects RENAME TO saved_effects; DROP INDEX execution_effects_mission;").unwrap();
+    conn.execute_batch(include_str!("../../migrations/004_execution_effects.sql"))
+        .unwrap();
+    conn.execute_batch(
+        "INSERT INTO execution_effects SELECT * FROM saved_effects; DROP TABLE saved_effects;
+        DELETE FROM schema_migrations WHERE version=5; PRAGMA user_version=4; COMMIT;",
+    )
+    .unwrap();
+    drop(conn);
+    assert_eq!(
+        Host::inspect(&db, Some(&request.binding.mission_id)).unwrap()[0].execution_effects,
+        before
+    );
+    let host = Host::open(&db).unwrap();
+    assert_eq!(
+        host.snapshot(&request.binding.mission_id)
+            .unwrap()
+            .execution_effects,
+        before
+    );
+    assert_eq!(
+        host.store
+            .execution_effect(&request.operation_id().unwrap())
+            .unwrap()
+            .unwrap()
+            .receipt
+            .unwrap(),
+        receipt
+    );
+    let conn = Connection::open(&db).unwrap();
+    assert_eq!(
+        conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        5
+    );
+    assert_eq!(
+        conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
 }

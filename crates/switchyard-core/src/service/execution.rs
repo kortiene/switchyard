@@ -27,10 +27,19 @@ impl Host {
     fn execute_fake_at(
         &mut self,
         request: &ExecutionRequest,
+        checkpoint: impl FnMut(&str) -> Result<()>,
+    ) -> Result<ExecutionReceipt> {
+        self.execute_fake_with_clock(request, checkpoint, crate::domain::now_ms)
+    }
+
+    fn execute_fake_with_clock(
+        &mut self,
+        request: &ExecutionRequest,
         mut checkpoint: impl FnMut(&str) -> Result<()>,
+        mut now: impl FnMut() -> i64,
     ) -> Result<ExecutionReceipt> {
         self.accept_runtime_binding(&request.binding, &request.binding.mission_id)?;
-        if self.runtime.name() != "fake" {
+        if self.runtime.fake_mut().is_none() {
             return Err(Error::guard("simulated execution requires FakeRuntime"));
         }
         let id = request.operation_id()?;
@@ -50,6 +59,9 @@ impl Host {
             if existing.payload_hash != hash {
                 return Err(Error::OperationConflict { operation_id: id });
             }
+            if existing.state == "not_applied" {
+                return Err(Error::ExecutionDeadlineExceeded { operation_id: id });
+            }
             if let Some(receipt) = existing.receipt {
                 return Ok(receipt);
             }
@@ -65,11 +77,20 @@ impl Host {
                 "new execution requires an implementing mission",
             ));
         }
-        if self.store.ops_blocked(&mission.id)? {
-            return Err(Error::ExecutionUncertain { operation_id: id });
+        if self.store.execution_blocked(&mission.id)? {
+            return Err(Error::ExecutionBlocked {
+                mission_id: mission.id,
+                detail: "unresolved execution effects; this request was not attempted".into(),
+            });
         }
-        if request.deadline_ms <= crate::domain::now_ms() {
-            return Err(Error::guard("execution deadline expired"));
+        if self.store.ops_blocked(&mission.id)? {
+            return Err(Error::ExecutionBlocked {
+                mission_id: mission.id,
+                detail: "unresolved generic S1 operations; this request was not attempted".into(),
+            });
+        }
+        if request.deadline_ms <= now() {
+            return Err(Error::ExecutionDeadlineExceeded { operation_id: id });
         }
         let workspace = self
             .recover_workspace(&mission.id)?
@@ -78,21 +99,57 @@ impl Host {
         self.store.prepare_execution(request)?;
         checkpoint("prepared")?;
         self.accept_runtime_binding(&request.binding, &mission.id)?;
-        if request.deadline_ms <= crate::domain::now_ms() {
-            self.store.quarantine_execution(&id)?;
-            self.uncertainty(&mission, AttentionReason::ExecutionUncertain)?;
-            return Err(Error::ExecutionUncertain { operation_id: id });
+        if request.deadline_ms <= now() {
+            // We have not called the backend: retain a definite, nonblocking outcome.
+            if let Err(error) = self.store.execution_not_applied(request) {
+                return Err(self.execution_failure(request, error));
+            }
+            return Err(Error::ExecutionDeadlineExceeded { operation_id: id });
         }
-        let receipt = self
+        // Reborrow after the Host/Store operations. Both checks use the typed
+        // adapter accessor; no adapter-name string or panic establishes authority.
+        let applied = self
             .runtime
             .fake_mut()
-            .expect("fake adapter checked")
-            .apply(request)?;
+            .ok_or_else(|| Error::guard("simulated execution requires FakeRuntime"))
+            .and_then(|runtime| runtime.apply(request));
+        let receipt = match applied {
+            Ok(receipt) => receipt,
+            Err(error) => return Err(self.execution_failure(request, error)),
+        };
         checkpoint("effect")?;
         self.accept_runtime_binding(&request.binding, &mission.id)?;
-        self.store.complete_execution(request, &receipt)?;
+        if let Err(error) = self.store.complete_execution(request, &receipt) {
+            return Err(self.execution_failure(request, error));
+        }
         checkpoint("completed")?;
         Ok(receipt)
+    }
+    /// Best-effort immediate reconciliation of an in-process failure. Preserve
+    /// the original error; if storage cannot record uncertainty, report that too.
+    /// Never let a stale owner mutate the mission, or quarantine a committed result.
+    fn execution_failure(&mut self, request: &ExecutionRequest, original: Error) -> Error {
+        let reconcile = (|| -> Result<()> {
+            self.accept_runtime_binding(&request.binding, &request.binding.mission_id)?;
+            let id = request.operation_id()?;
+            let existing = self.store.execution_effect(&id)?.ok_or(Error::NotFound)?;
+            if existing.receipt.is_some() || existing.state == "not_applied" {
+                return Ok(());
+            }
+            self.store.quarantine_execution(&id)?;
+            let mission = self.store.load_mission(&request.binding.mission_id)?;
+            if !mission.phase.is_terminal() {
+                self.uncertainty(&mission, AttentionReason::ExecutionUncertain)?;
+            }
+            Ok(())
+        })();
+        match reconcile {
+            Ok(()) => original,
+            Err(error @ Error::StaleGeneration { .. }) => error,
+            Err(error) => Error::storage(format!(
+                "{original}; could not record execution uncertainty: {error}"
+            )),
+        }
     }
 }
 

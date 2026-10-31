@@ -274,6 +274,8 @@ pub struct FakeRuntime {
     fail_next_persist: bool,
     simulated_files: BTreeMap<String, String>,
     simulated_effect_count: usize,
+    #[cfg(test)]
+    fail_simulated_effect: bool,
 }
 
 impl FakeRuntime {
@@ -291,6 +293,8 @@ impl FakeRuntime {
             fail_next_persist: false,
             simulated_files: BTreeMap::new(),
             simulated_effect_count: 0,
+            #[cfg(test)]
+            fail_simulated_effect: false,
         })
     }
 
@@ -481,6 +485,11 @@ fn load_journal(path: &Path) -> Result<BTreeMap<String, JournalEntry>> {
 }
 
 impl FakeRuntime {
+    #[cfg(test)]
+    pub(crate) fn fail_next_simulated_effect(&mut self) {
+        self.fail_simulated_effect = true;
+    }
+
     /// Effects applied during this process; completed replay does not increment it.
     pub fn simulated_effect_count(&self) -> usize {
         self.simulated_effect_count
@@ -498,6 +507,10 @@ impl crate::execution_env::ExecutionEnv for FakeRuntime {
         };
         self.simulated_files.insert(path.clone(), content.clone());
         self.simulated_effect_count += 1;
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_simulated_effect) {
+            return Err(Error::storage("injected error after simulated effect"));
+        }
         Ok(receipt)
     }
 }
