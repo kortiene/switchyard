@@ -31,6 +31,9 @@ enum Command {
 #[derive(Subcommand)]
 enum MissionCommand {
     /// Audit an uncertain effect without clearing its block or replaying it.
+    /// The mission stays blocked in needs_attention. You can request cancel,
+    /// but unresolved effects still prevent cancellation from completing.
+    /// Lifting the block requires a future evidence protocol (#125).
     /// Reuse command ID and all arguments after a lost response.
     AbandonExecution {
         #[arg(long)]
@@ -237,6 +240,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     })?;
                 Ok(
                     json!({"ok":true, "resolution":audit, "executionBlockRetained":true,
+                    "nextSteps":"The execution block remains. On abandonment the mission stays in needs_attention. You can request cancel, but unresolved effects prevent cancellation from completing. Lifting the block requires a future evidence protocol (#125).",
                     "mission":host.snapshot(&mission)?.to_json()}),
                 )
             }

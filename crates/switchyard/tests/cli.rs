@@ -658,6 +658,19 @@ fn abandon_execution_is_audited_idempotently_and_keeps_the_block() {
     let (code, first, err) = run(&args);
     assert_eq!(code, 0, "{err}");
     assert_eq!(first["executionBlockRetained"], true);
+    let guidance = first["nextSteps"].as_str().unwrap();
+    assert!(guidance.contains("needs_attention"));
+    assert!(guidance.contains("prevent cancellation from completing"));
+    assert!(guidance.contains("#125"));
+    let help = Command::new(bin())
+        .args(["mission", "abandon-execution", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("needs_attention"));
+    assert!(help.contains("prevent cancellation from completing"));
+    assert!(help.contains("#125"));
     let (code, replay, err) = run(&args);
     assert_eq!(code, 0, "{err}");
     assert_eq!(replay["resolution"], first["resolution"]);

@@ -33,7 +33,7 @@ pub struct Host {
     lock: OwnerLock,
     ledger_path: PathBuf,
     // Process-local, Host-observed proof; never reconstructed from operator claims.
-    execution_evidence: std::collections::BTreeMap<String, Option<crate::ExecutionReceipt>>,
+    execution_evidence: execution::ExecutionEvidence,
 }
 
 pub struct CreateMission {

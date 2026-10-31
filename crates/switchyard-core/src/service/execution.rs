@@ -1,7 +1,8 @@
 use super::*;
+mod evidence;
 mod resolution;
-use crate::execution_env::ExecutionEnv;
 use crate::{ExecutionReceipt, ExecutionRequest};
+pub(super) use evidence::ExecutionEvidence;
 
 impl Host {
     pub(super) fn reconcile_execution(&mut self, mission_id: &str) -> Result<()> {
@@ -100,8 +101,7 @@ impl Host {
             .recover_workspace(&mission.id)?
             .ok_or_else(|| Error::guard("execution requires an owned workspace"))?;
         self.store.require_workspace_ready(&workspace.attempt_id)?;
-        self.store.prepare_execution(request)?;
-        self.execution_evidence.insert(id.clone(), None);
+        self.execution_evidence.prepare(&mut self.store, request)?;
         checkpoint("prepared")?;
         self.accept_runtime_binding(&request.binding, &mission.id)?;
         if request.deadline_ms <= now() {
@@ -109,22 +109,13 @@ impl Host {
             if let Err(error) = self.store.execution_not_applied(request) {
                 return Err(self.execution_failure(request, error));
             }
+            self.execution_evidence.remove(&id);
             return Err(Error::ExecutionDeadlineExceeded { operation_id: id });
         }
-        // Reborrow after the Host/Store operations. Both checks use the typed
-        // adapter accessor; no adapter-name string or panic establishes authority.
-        self.execution_evidence.remove(&id);
-        let applied = self
-            .runtime
-            .fake_mut()
-            .ok_or_else(|| Error::guard("simulated execution requires FakeRuntime"))
-            .and_then(|runtime| runtime.apply(request));
-        let receipt = match applied {
+        let receipt = match self.execution_evidence.apply(&mut self.runtime, request) {
             Ok(receipt) => receipt,
             Err(error) => return Err(self.execution_failure(request, error)),
         };
-        self.execution_evidence
-            .insert(id.clone(), Some(receipt.clone()));
         checkpoint("effect")?;
         self.accept_runtime_binding(&request.binding, &mission.id)?;
         if let Err(error) = self.store.complete_execution(request, &receipt) {

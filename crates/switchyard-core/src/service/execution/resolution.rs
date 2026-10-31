@@ -80,7 +80,12 @@ impl Host {
                 Some(receipt.clone())
             }
             (ExecutionResolutionDecision::NotApplied, Some(None)) => None,
-            (ExecutionResolutionDecision::Abandon, _) => None,
+            (ExecutionResolutionDecision::Abandon, None) => None,
+            (ExecutionResolutionDecision::Abandon, Some(_)) => {
+                return Err(Error::guard(
+                    "Host-observed evidence is available; resolve the proven outcome instead of abandoning it",
+                ));
+            }
             _ => {
                 return Err(Error::guard(
                     "matching Host-observed evidence is unavailable; outcome remains uncertain",

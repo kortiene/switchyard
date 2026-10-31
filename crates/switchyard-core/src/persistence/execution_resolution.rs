@@ -6,9 +6,12 @@ impl Store {
         if user_version(&self.conn)? < 6 {
             return Ok(Vec::new());
         }
-        let mut stmt = self.conn.prepare(
-            "SELECT audit_json FROM execution_resolutions WHERE mission_id=?1 ORDER BY command_id",
-        ).map_err(Error::storage)?;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT audit_json FROM execution_resolutions WHERE mission_id=?1 ORDER BY rowid",
+            )
+            .map_err(Error::storage)?;
         stmt.query_map([mission], |r| r.get::<_, String>(0))
             .map_err(Error::storage)?
             .map(|r| serde_json::from_str(&r.map_err(Error::storage)?).map_err(Error::storage))

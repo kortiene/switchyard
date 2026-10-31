@@ -19,9 +19,12 @@ remote identity. There is no API for supplying a receipt or asserting quiescence
 | --- | --- | --- |
 | Completed | Host retained the exact receipt returned by this synchronous simulated invocation. | Commit that original receipt, make completed replay read-only. |
 | Not applied | Host committed intent but has not entered the backend for that invocation. | Commit `not_applied`; replay returns `execution_not_applied`. |
-| Abandon | Operator acknowledges that the outcome remains unresolved. | Record the decision, retain `uncertain` and the mission-wide execution block. |
+| Abandon | No Host-held proof is available; the operator acknowledges the unresolved outcome. | Record the decision, retain `uncertain` and the mission-wide execution block. |
 
-The evidence map is private to the Host, populated at the intent/apply boundaries
+Abandonment is rejected while Host-held proof exists; rejection preserves that
+proof for a subsequent completed/not-applied resolution.
+
+The evidence map is encapsulated with preparation and application in one helper, populated at the intent/apply boundaries
 and lost on restart. Before entering apply, absence evidence is removed. An apply
 error provides no proof of non-execution. Missing evidence is **unknown**, even
 when a new FakeRuntime has an empty file map. Completed proof describes a past
@@ -66,7 +69,8 @@ reviewed protocol; there is no SQL reset or generic settlement bypass.
 
 `mission status` includes `executionEffects` plus `executionResolutions` with
 request and evidence. Status is read-only, including on v1–v5 databases where
-resolutions appear as an empty array. Writer open migrates to v6.
+resolutions appear as an empty array. Decisions are ordered by journal insertion
+(rowid), not by operator-chosen command IDs. Writer open migrates to v6.
 
 The CLI opens a fresh Host, so it cannot claim vanished simulation proof. It
 exposes only the honest operation available after restart:
@@ -82,7 +86,10 @@ switchyard mission abandon-execution --db mission.sqlite \
 Copy exact binding, operation and hash values from status; the sample IDs are
 placeholders. If necessary run `mission recover` and re-inspect before choosing
 the revision. Successful abandonment returns `executionBlockRetained: true`;
-exit 0 means the audit committed, **not** that execution may resume. Reuse the
+exit 0 means the audit committed, **not** that execution may resume. The mission
+stays blocked in `needs_attention`. Cancel can be requested, but unresolved
+effects still prevent terminal cancellation; lifting the block requires the
+future evidence protocol in #125. Help and JSON `nextSteps` explain this. Reuse the
 same arguments after ambiguous failure. There is no CLI receipt injection,
 force-resume flag or real execution enabled by this command.
 

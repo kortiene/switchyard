@@ -414,8 +414,13 @@ fn sigkill_at_intent_effect_and_receipt_boundaries() {
 #[test]
 fn prepared_effect_rejects_late_settlement_from_a_previous_owner() {
     let (dir, mut host, request) = setup();
-    host.store.prepare_execution(&request).unwrap();
-    let receipt = host.runtime_mut().unwrap().apply(&request).unwrap();
+    host.execution_evidence
+        .prepare(&mut host.store, &request)
+        .unwrap();
+    let receipt = host
+        .execution_evidence
+        .apply(&mut host.runtime, &request)
+        .unwrap();
     drop(host);
     let mut host = Host::open(&dir.path().join("mission.sqlite")).unwrap();
     assert_eq!(
@@ -1030,4 +1035,124 @@ fn v5_read_only_inspection_and_upgrade_preserve_unresolved_effects() {
             .execution_blocked(&request.binding.mission_id)
             .unwrap()
     );
+}
+
+#[test]
+fn apply_consumes_stale_absence_proof_even_when_backend_returns_an_error() {
+    let (_dir, mut host, request) = setup();
+    // Emulate a future retry path reaching apply with an old absence marker.
+    host.execution_evidence
+        .prepare(&mut host.store, &request)
+        .unwrap();
+    let id = request.operation_id().unwrap();
+    assert!(matches!(host.execution_evidence.get(&id), Some(None)));
+    host.runtime_mut().unwrap().fail_next_simulated_effect();
+    let error = host
+        .execution_evidence
+        .apply(&mut host.runtime, &request)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("injected error after simulated effect")
+    );
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 1);
+    assert!(host.execution_evidence.get(&id).is_none());
+    host.reconcile_execution(&request.binding.mission_id)
+        .unwrap();
+    let resolve = resolution_request(
+        &host,
+        &request,
+        crate::ExecutionResolutionDecision::NotApplied,
+    );
+    assert!(
+        host.resolve_fake_execution(&resolve)
+            .unwrap_err()
+            .to_string()
+            .contains("evidence is unavailable")
+    );
+    assert!(
+        host.store
+            .execution_blocked(&request.binding.mission_id)
+            .unwrap()
+    );
+    assert!(
+        host.snapshot(&request.binding.mission_id)
+            .unwrap()
+            .execution_resolutions
+            .is_empty()
+    );
+}
+
+#[test]
+fn abandonment_rejects_known_outcomes_without_discarding_their_proof() {
+    use crate::ExecutionResolutionDecision::{Abandon, Completed, NotApplied};
+    for (at, outcome) in [("prepared", NotApplied), ("effect", Completed)] {
+        let (_dir, mut host, request) = setup();
+        interrupt_effect(&mut host, &request, at);
+        let mut resolve = resolution_request(&host, &request, Abandon);
+        let evidence = host.execution_evidence.get(&resolve.operation_id).cloned();
+        assert!(evidence.is_some());
+        let before = host.snapshot(&request.binding.mission_id).unwrap();
+        assert!(
+            host.resolve_fake_execution(&resolve)
+                .unwrap_err()
+                .to_string()
+                .contains("resolve the proven outcome")
+        );
+        assert_eq!(
+            host.execution_evidence.get(&resolve.operation_id).cloned(),
+            evidence
+        );
+        let after = host.snapshot(&request.binding.mission_id).unwrap();
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.execution_effects, before.execution_effects);
+        assert!(after.execution_resolutions.is_empty());
+        resolve.decision = outcome;
+        let audit = host.resolve_fake_execution(&resolve).unwrap();
+        assert_eq!(audit["request"]["decision"], outcome.as_str());
+        assert!(
+            !host
+                .store
+                .execution_blocked(&request.binding.mission_id)
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn resolution_status_uses_commit_order_not_operator_command_ids() {
+    let (dir, mut host, first) = setup();
+    let mut second = first.clone();
+    second.effect_key = "second-effect".into();
+    host.execution_evidence
+        .prepare(&mut host.store, &first)
+        .unwrap();
+    host.execution_evidence
+        .prepare(&mut host.store, &second)
+        .unwrap();
+    host.reconcile_execution(&first.binding.mission_id).unwrap();
+    let mut audits = Vec::new();
+    for (request, id) in [(&first, "z-first"), (&second, "a-second")] {
+        let mut resolve = resolution_request(
+            &host,
+            request,
+            crate::ExecutionResolutionDecision::NotApplied,
+        );
+        resolve.command_id = id.into();
+        audits.push(host.resolve_fake_execution(&resolve).unwrap());
+    }
+    assert_eq!(
+        host.snapshot(&first.binding.mission_id)
+            .unwrap()
+            .execution_resolutions,
+        audits
+    );
+    drop(host);
+    let inspected = Host::inspect(
+        &dir.path().join("mission.sqlite"),
+        Some(&first.binding.mission_id),
+    )
+    .unwrap();
+    assert_eq!(inspected[0].execution_resolutions, audits);
 }
