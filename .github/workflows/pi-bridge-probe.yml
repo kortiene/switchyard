@@ -1,0 +1,54 @@
+name: Pi bridge probe
+
+on:
+  pull_request:
+    paths:
+      - 'runtime/pi-source/**'
+      - 'crates/**'
+      - 'Cargo.*'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/pi-bridge-probe.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'runtime/pi-source/**'
+      - 'crates/**'
+      - 'Cargo.*'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/pi-bridge-probe.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi-bridge-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Partial S2 conformance. This is deliberately not pi-bridge-contract.
+  pi-bridge-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: runtime/pi-source/.node-version
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, resolved 2026-10-30
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+      - name: Verify and install pinned npm
+        run: node runtime/pi-source/install-npm.mjs
+      - name: Rebuild source and verify TypeScript probes
+        working-directory: runtime/pi-source
+        run: |
+          node build.mjs
+          npm ci
+          npm run verify
+      - name: Rust transport and replay probes
+        run: |
+          export SWITCHYARD_PI_NODE="$(command -v node)"
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --features pi-contract --locked -- -D warnings
+          cargo test -p switchyard-core --features pi-contract --locked --test pi_bridge

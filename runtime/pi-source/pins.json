@@ -6,7 +6,18 @@
   "catalogRevision": "sha256-7fe1b41feaf43a7aad4bc832e6b306c7ced56e6d41bbc724b74e91eeacff6edf",
   "node": "22.23.4",
   "npm": "11.9.0",
+  "npmTarball": "https://registry.npmjs.org/npm/-/npm-11.9.0.tgz",
+  "npmIntegrity": "sha512-BBZoU926FCypj4b7V7ElinxsWcy4Kss88UG3ejFYmKyq7Uc5XnT34Me2nEhgCOaL5qY4HvGu5aI92C4OYd7NaA==",
   "typescript": "7.0.2",
+  "bridge": {
+    "protocol": 0,
+    "maxFrame": 65536,
+    "maxPending": 16,
+    "deadlineMs": 5000,
+    "responseTimeoutMs": 8000,
+    "maxEffectsPerCall": 64,
+    "capabilities": ["durable-admission", "payload-conflicts", "snapshot-resync", "cooperative-abort", "forwarded-effects"]
+  },
   "packages": [
     { "directory": "telemetry", "name": "@earendil-works/pi-telemetry", "artifact": "earendil-works-pi-telemetry-1.4.0.tgz", "sha256": "f8d6f3f84e915c93150a9c684503c0ab1da7dd6cd8d7336b7abd3db3e38078e3" },
     { "directory": "chord", "name": "@earendil-works/chord", "artifact": "earendil-works-chord-1.4.0.tgz", "sha256": "e4a157c5ce9cde550c32d67c22d84dd84cb72f6ab3eb3f0bce88c7d9d0eb34fb" },

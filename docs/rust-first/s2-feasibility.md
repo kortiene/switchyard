@@ -125,8 +125,10 @@ already-reviewed commit `e65b3b88c08412bb8ffbd21fb5dc5756064a6e5a`. Pin the enti
 required workspace dependency closure, Node/build tools, upstream lockfile and
 source provenance; verify that emitted artifacts expose the reviewed APIs.
 Do not mix this source with similarly numbered published workspace packages
-without a documented compatibility check. This report proposes that candidate;
-it does not claim it is built or approved.
+without a documented compatibility check. The candidate has been built and
+tested and merged in PR #107; the full S2 bridge gate remains open. The
+separate [bridge probe](s2-bridge-probe.md) records partial conformance evidence
+without changing this package verdict.
 
 Then review the artifact/pin, implement the bridge against its public APIs, and
 rerun the **whole** S2 gate. A newer compatible published package with reviewed
