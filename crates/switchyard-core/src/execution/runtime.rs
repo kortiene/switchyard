@@ -272,6 +272,8 @@ pub struct FakeRuntime {
     admission_order: Vec<String>,
     notifications: VecDeque<RuntimeNotification>,
     fail_next_persist: bool,
+    simulated_files: BTreeMap<String, String>,
+    simulated_effect_count: usize,
 }
 
 impl FakeRuntime {
@@ -287,6 +289,8 @@ impl FakeRuntime {
             admission_order: Vec::new(),
             notifications: VecDeque::new(),
             fail_next_persist: false,
+            simulated_files: BTreeMap::new(),
+            simulated_effect_count: 0,
         })
     }
 
@@ -474,6 +478,28 @@ fn load_journal(path: &Path) -> Result<BTreeMap<String, JournalEntry>> {
         );
     }
     Ok(submissions)
+}
+
+impl FakeRuntime {
+    /// Effects applied during this process; completed replay does not increment it.
+    pub fn simulated_effect_count(&self) -> usize {
+        self.simulated_effect_count
+    }
+}
+impl crate::execution_env::ExecutionEnv for FakeRuntime {
+    fn apply(&mut self, request: &crate::ExecutionRequest) -> Result<crate::ExecutionReceipt> {
+        let crate::ExecutionOperation::WriteFile { path, content } = &request.operation;
+        let receipt = crate::ExecutionReceipt {
+            operation_id: request.operation_id()?,
+            payload_hash: request.payload_hash()?,
+            simulated: true,
+            bytes_written: content.len(),
+            content_hash: sha256_hex(content.as_bytes()),
+        };
+        self.simulated_files.insert(path.clone(), content.clone());
+        self.simulated_effect_count += 1;
+        Ok(receipt)
+    }
 }
 
 #[cfg(test)]

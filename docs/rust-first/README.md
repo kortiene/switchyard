@@ -30,7 +30,7 @@ This table is navigation as of 2026-10-31. See [#109](https://github.com/kortien
 | --- | --- |
 | S1 ([#95](https://github.com/kortiene/switchyard/issues/95), [#105](https://github.com/kortiene/switchyard/pull/105)) | Implemented. `crates/switchyard-core/` and `crates/switchyard/` persist missions and drive them with a fake runtime. No model calls, GitHub writes, state v1 resume, or confinement. |
 | S2 ([#96](https://github.com/kortiene/switchyard/issues/96)) | **NO-GO**. See [#96](https://github.com/kortiene/switchyard/issues/96) and [s2-feasibility.md](s2-feasibility.md). |
-| S3 ([#97](https://github.com/kortiene/switchyard/issues/97)) | S3-A1 adds explicit [worktree ownership/recovery](s3-workspace-ownership.md). Effects, confinement and process-tree supervision remain open. TypeScript managed-worktree work is stopped. |
+| S3 ([#97](https://github.com/kortiene/switchyard/issues/97)) | S3-A1 adds explicit [worktree ownership/recovery](s3-workspace-ownership.md). S3-A2 adds [simulated effect receipts](s3-execution-receipts.md). Real effects, confinement and process-tree supervision remain open. TypeScript managed-worktree work is stopped. |
 | S4–S8 ([#98](https://github.com/kortiene/switchyard/issues/98)–[#102](https://github.com/kortiene/switchyard/issues/102)) | Planned. Pi-dependent live work stays blocked while S2 is NO-GO. |
 | Native Rust agent runtime | Accepted long-term target (2026-10-29). Not implemented. A published-package NO-GO does not select the TypeScript engine instead. |
 

@@ -33,6 +33,9 @@ pub enum Error {
     #[error("command conflict for {command_id}")]
     CommandConflict { command_id: String },
 
+    #[error("execution outcome is uncertain for {operation_id}")]
+    ExecutionUncertain { operation_id: String },
+
     #[error("operation conflict for {operation_id}")]
     OperationConflict { operation_id: String },
 
@@ -91,6 +94,7 @@ impl Error {
             Self::WorkspaceUncertain { .. } => "workspace_uncertain",
             Self::CommandConflict { .. } => "command_conflict",
             Self::OperationConflict { .. } => "operation_conflict",
+            Self::ExecutionUncertain { .. } => "execution_uncertain",
             Self::StaleGeneration { .. } => "stale_generation",
             Self::RepairLimitExhausted { .. } => "repair_limit_exhausted",
             Self::UsageLimitExhausted { .. } => "usage_limit_exhausted",

@@ -19,6 +19,7 @@ use crate::policy::{self, Facts};
 use crate::transitions::target_spec;
 use crate::verification::NewVerification;
 
+mod execution;
 mod workspace;
 
 /// Open the host, take the single-host lock, and reuse the active attempt.
@@ -127,6 +128,7 @@ pub struct MissionSnapshot {
     pub verifier_json: String,
     pub delivery: Option<DeliveryView>,
     pub workspace: Option<crate::WorkspaceView>,
+    pub execution_effects: Vec<crate::ExecutionView>,
     pub quarantined: Vec<(i64, String, String, String)>,
 }
 
@@ -158,6 +160,7 @@ impl MissionSnapshot {
             "headSha": self.head_sha,
             "runtimeAdapter": self.runtime_adapter,
             "workspace": self.workspace.as_ref().map(crate::WorkspaceView::to_json),
+            "executionEffects": self.execution_effects.iter().map(crate::ExecutionView::to_json).collect::<Vec<_>>(),
             "verifier": serde_json::from_str::<Value>(&self.verifier_json).ok(),
             "pendingCommands": self.pending_commands.iter().map(command_json).collect::<Vec<_>>(),
             "commands": self.commands.iter().map(command_json).collect::<Vec<_>>(),
@@ -528,6 +531,7 @@ impl Host {
     /// Dispatch pending commands without verifying the workspace again.
     /// The caller must already have reconciled it in this owner generation.
     pub fn dispatch_reconciled(&mut self, mission_id: &str) -> Result<usize> {
+        self.reconcile_execution(mission_id)?;
         let mission = self.store.load_mission(mission_id)?;
         self.store.require_workspace_ready(&mission.attempt.id)?;
         let recorded = self.store.list_commands(mission_id)?;
@@ -763,6 +767,7 @@ impl Host {
     /// that failure is returned after those steps. Stale generation and other
     /// host-level failures abort before either runs.
     pub fn recover(&mut self, mission_id: &str) -> Result<MissionSnapshot> {
+        self.reconcile_execution(mission_id)?;
         let workspace_error = match self.recover_workspace(mission_id) {
             Ok(_) => None,
             Err(error) if error.is_isolated_workspace_failure() => Some(error),
@@ -1437,6 +1442,7 @@ fn snapshot_from(store: &Store, mission_id: &str, generation: u64) -> Result<Mis
         verifier_json: mission.attempt.verifier_json,
         delivery,
         workspace,
+        execution_effects: store.execution_views(mission_id)?,
         quarantined: store.list_quarantine(mission_id)?,
     })
 }

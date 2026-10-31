@@ -139,3 +139,10 @@ Use stable categories including incompatible_protocol, unsupported_capability, b
 Freeze protocol version, schemas, tool/configuration fingerprints, package lock, and runtime identity per attempt. Changing them needs compatibility tests; unsupported state is retained for inspection. The native Rust agent runtime is the long-term target and implements this public contract for new attempts. The Pi Durable bridge must not leak Pi's internal schema into that contract.
 
 S2 owns fake-runtime/faux-provider conformance: duplicate admission, restart, lost reply, incompatible versions, wrong binding/generation, corrupt/oversized frames, backpressure, event gaps, timeout and cancellation. S3 adds real process/filesystem confinement tests. S8 composes them into acceptance. Live-provider tests are recorded separately from credential-free CI.
+
+### S3-A2 simulation evidence
+
+The Rust-only [simulated ExecutionEnv receipt path](s3-execution-receipts.md)
+implements intent/result persistence and generation-fenced replay using FakeRuntime.
+It is not wired to the Pi bridge and does not prove Pi task identity propagation,
+real effects or confinement. S2 remains NO-GO.

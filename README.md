@@ -89,7 +89,7 @@ in the [package development guide](./adw_sdlc/README.md#development).
 | --- | --- |
 | **S1** [#95](https://github.com/kortiene/switchyard/issues/95) | Implemented. Mission ledger, command outbox, fake runtime. |
 | **S2** [#96](https://github.com/kortiene/switchyard/issues/96) | **NO-GO**. See [#96](https://github.com/kortiene/switchyard/issues/96) and the [S2 feasibility audit](./docs/rust-first/s2-feasibility.md). |
-| **S3** [#97](https://github.com/kortiene/switchyard/issues/97) | S3-A1 adds explicit [worktree ownership/recovery](./docs/rust-first/s3-workspace-ownership.md). Effects, confinement and process supervision remain open. |
+| **S3** [#97](https://github.com/kortiene/switchyard/issues/97) | S3-A1 adds explicit [worktree ownership/recovery](./docs/rust-first/s3-workspace-ownership.md). S3-A2 adds [simulated effect receipts](./docs/rust-first/s3-execution-receipts.md). Real effects, confinement and process supervision remain open. |
 | **S4–S8** [#98](https://github.com/kortiene/switchyard/issues/98)–[#102](https://github.com/kortiene/switchyard/issues/102) | Planned. Pi-dependent live work stays blocked while S2 is NO-GO. |
 | **Native Rust agent runtime** | Accepted long-term target (2026-10-29). Not implemented. Replacing the proof-of-concept adapter needs its own reviewed gate. |
 
