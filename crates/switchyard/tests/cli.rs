@@ -846,3 +846,231 @@ fn cancel_is_admitted_before_dispatching_earlier_work() {
         stopped["mission"]["commands"]
     );
 }
+
+#[test]
+fn supersede_execution_audits_the_simulated_journal_and_refuses_linux_rows() {
+    use switchyard_core::*;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    let root = tmp.path().join("workspaces");
+    init_repo(&repo);
+    std::fs::create_dir(&root).unwrap();
+    let mut host = Host::open(&db).unwrap();
+    let m = host
+        .create_mission(CreateMission {
+            repo,
+            issue_number: 133,
+            issue_title: "supersede".into(),
+            objective: "audit".into(),
+            acceptance: "unknown outcome".into(),
+            actor: "operator".into(),
+            max_repairs: 1,
+            max_plan_revisions: 1,
+        })
+        .unwrap();
+    host.prepare_workspace(&m.mission_id, &m.attempt_id, &root)
+        .unwrap();
+    let admit = |host: &mut Host, body| {
+        host.admit(AdmitRequest {
+            command_id: None,
+            mission_id: m.mission_id.clone(),
+            attempt_id: None,
+            expected_revision: host.snapshot(&m.mission_id).unwrap().revision,
+            actor: "operator".into(),
+            origin: CommandOrigin::Operator,
+            body,
+        })
+        .unwrap();
+    };
+    admit(&mut host, CommandBody::StartPlanning);
+    host.dispatch_pending(&m.mission_id).unwrap();
+    host.apply_notification(
+        &m.mission_id,
+        parse_notification(&serde_json::json!({
+            "kind":"plan_completed", "plan":"plan", "quiescent":true,
+            "digest": payload_hash(&serde_json::json!("plan")).unwrap()
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let snapshot = host.snapshot(&m.mission_id).unwrap();
+    admit(
+        &mut host,
+        CommandBody::ApprovePlan {
+            plan_digest: snapshot.plan_digest.unwrap(),
+        },
+    );
+    rusqlite::Connection::open(&db).unwrap().execute_batch(
+        "CREATE TRIGGER fail_completion BEFORE UPDATE OF state ON execution_effects WHEN NEW.state='completed'
+         BEGIN SELECT RAISE(ABORT, 'lost simulated receipt'); END;",
+    ).unwrap();
+    let request = ExecutionRequest {
+        binding: RuntimeBinding {
+            mission_id: m.mission_id.clone(),
+            attempt_id: m.attempt_id.clone(),
+            session_id: m.session_id.clone(),
+            generation: host.generation(),
+        },
+        tool_task_id: "task".into(),
+        effect_key: "write".into(),
+        capability_scope: FAKE_WRITE_SCOPE.into(),
+        deadline_ms: i64::MAX,
+        operation: ExecutionOperation::WriteFile {
+            path: "out.txt".into(),
+            content: "data".into(),
+        },
+    };
+    assert!(host.execute_fake_operation(&request).is_err());
+    drop(host);
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_completion;")
+        .unwrap();
+    let mut host = Host::open(&db).unwrap();
+    let effect = host.snapshot(&m.mission_id).unwrap().execution_effects[0].clone();
+    let revision = host.snapshot(&m.mission_id).unwrap().revision;
+    let abandon = host
+        .resolve_fake_execution(&ExecutionResolutionRequest {
+            command_id: "abandon-cli".into(),
+            binding: RuntimeBinding {
+                generation: host.generation(),
+                mission_id: m.mission_id.clone(),
+                attempt_id: m.attempt_id.clone(),
+                session_id: m.session_id.clone(),
+            },
+            operation_id: effect.operation_id.clone(),
+            payload_hash: effect.payload_hash.clone(),
+            expected_revision: revision,
+            actor: "operator".into(),
+            rationale: "outcome unknown after restart".into(),
+            decision: ExecutionResolutionDecision::Abandon,
+        })
+        .unwrap();
+    let revision = host.snapshot(&m.mission_id).unwrap().revision.to_string();
+    drop(host);
+    let args = [
+        "mission",
+        "supersede-execution",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        &m.mission_id,
+        "--attempt",
+        &m.attempt_id,
+        "--session",
+        &m.session_id,
+        "--operation-id",
+        &effect.operation_id,
+        "--payload-hash",
+        &effect.payload_hash,
+        "--abandonment-command-id",
+        abandon["commandId"].as_str().unwrap(),
+        "--abandonment-request-hash",
+        abandon["requestHash"].as_str().unwrap(),
+        "--expected-revision",
+        &revision,
+        "--command-id",
+        "supersede-cli-1",
+        "--actor",
+        "operator",
+        "--rationale",
+        "workspace verified; outcome stays unknown",
+    ];
+    let (code, first, err) = run(&args);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(first["outcomeKnown"], false);
+    assert_eq!(first["executionBlocked"], false);
+    assert_eq!(
+        first["mission"]["executionEffects"][0]["state"],
+        "uncertain"
+    );
+    assert_eq!(first["mission"]["executionEffects"][0]["superseded"], true);
+    assert!(
+        first["supersession"]["evidence"]["workspaceDigest"]
+            .as_str()
+            .unwrap()
+            .len()
+            >= 40
+    );
+    assert!(
+        first["nextSteps"]
+            .as_str()
+            .unwrap()
+            .contains("outcome stays unknown")
+    );
+    let (code, replay, err) = run(&args);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(replay["supersession"], first["supersession"]);
+    assert_eq!(replay["mission"]["revision"], first["mission"]["revision"]);
+    let help = Command::new(bin())
+        .args(["mission", "supersede-execution", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("outcome stays unknown"));
+    assert!(help.contains("Linux"));
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO linux_execution_effects(
+                operation_id, mission_id, attempt_id, session_id, payload_hash, request_json,
+                started_generation, state, cgroup_path, cgroup_dev, cgroup_ino, boot_id,
+                entered_at, created_at
+             ) VALUES (
+                'op-v1:cli-linux', ?1, ?2, ?3, 'sha256:cli', '{}', 1, 'uncertain',
+                '/sys/fs/cgroup/switchyard/sy-cli', 1, 2, 'boot', 1, 1
+             )",
+            rusqlite::params![&m.mission_id, &m.attempt_id, &m.session_id],
+        )
+        .unwrap();
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO linux_execution_resolutions(
+                command_id, operation_id, mission_id, request_hash, audit_json
+             ) VALUES (
+                'abandon-cli-linux', 'op-v1:cli-linux', ?1, 'sha256:cli-abandon',
+                '{\"request\":{\"decision\":\"abandoned\"}}'
+             )",
+            [&m.mission_id],
+        )
+        .unwrap();
+    let linux_revision = first["mission"]["revision"].as_u64().unwrap().to_string();
+    let (code, _body, error) = run(&[
+        "mission",
+        "supersede-execution",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        &m.mission_id,
+        "--attempt",
+        &m.attempt_id,
+        "--session",
+        &m.session_id,
+        "--operation-id",
+        "op-v1:cli-linux",
+        "--payload-hash",
+        "sha256:cli",
+        "--abandonment-command-id",
+        "abandon-cli-linux",
+        "--abandonment-request-hash",
+        "sha256:cli-abandon",
+        "--expected-revision",
+        &linux_revision,
+        "--command-id",
+        "supersede-cli-linux",
+        "--actor",
+        "operator",
+        "--rationale",
+        "default build cannot prove the cgroup",
+    ]);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("delegated cgroup backend"),
+        "{error}"
+    );
+}

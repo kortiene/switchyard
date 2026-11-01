@@ -287,7 +287,15 @@ fn v3_inspection_and_forward_upgrade_preserve_mission_and_workspace() {
     let db = dir.path().join("mission.sqlite");
     let conn = Connection::open(&db).unwrap();
     conn.execute_batch(
-        "DROP TRIGGER IF EXISTS linux_effect_identity_unique;
+        "DROP TRIGGER IF EXISTS supersession_command_unique;
+         DROP TRIGGER IF EXISTS execution_supersessions_no_update;
+         DROP TRIGGER IF EXISTS execution_supersessions_no_delete;
+         DROP TRIGGER IF EXISTS execution_resolutions_no_update;
+         DROP TRIGGER IF EXISTS execution_resolutions_no_delete;
+         DROP TRIGGER IF EXISTS linux_resolutions_no_update;
+         DROP TRIGGER IF EXISTS linux_resolutions_no_delete;
+         DROP TABLE IF EXISTS execution_supersessions;
+         DROP TRIGGER IF EXISTS linux_effect_identity_unique;
          DROP TRIGGER IF EXISTS simulated_effect_identity_unique;
          DROP TRIGGER IF EXISTS linux_resolution_command_unique;
          DROP TRIGGER IF EXISTS simulated_resolution_command_unique;
@@ -314,7 +322,7 @@ fn v3_inspection_and_forward_upgrade_preserve_mission_and_workspace() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        8
+        9
     );
 }
 
@@ -681,7 +689,15 @@ fn v4_upgrade_preserves_completed_prepared_and_uncertain_effects() {
     let db = dir.path().join("mission.sqlite");
     let conn = Connection::open(&db).unwrap();
     conn.execute_batch(
-        "DROP TRIGGER IF EXISTS linux_effect_identity_unique;
+        "DROP TRIGGER IF EXISTS supersession_command_unique;
+         DROP TRIGGER IF EXISTS execution_supersessions_no_update;
+         DROP TRIGGER IF EXISTS execution_supersessions_no_delete;
+         DROP TRIGGER IF EXISTS execution_resolutions_no_update;
+         DROP TRIGGER IF EXISTS execution_resolutions_no_delete;
+         DROP TRIGGER IF EXISTS linux_resolutions_no_update;
+         DROP TRIGGER IF EXISTS linux_resolutions_no_delete;
+         DROP TABLE IF EXISTS execution_supersessions;
+         DROP TRIGGER IF EXISTS linux_effect_identity_unique;
          DROP TRIGGER IF EXISTS simulated_effect_identity_unique;
          DROP TRIGGER IF EXISTS linux_resolution_command_unique;
          DROP TRIGGER IF EXISTS simulated_resolution_command_unique;
@@ -724,7 +740,7 @@ fn v4_upgrade_preserves_completed_prepared_and_uncertain_effects() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        8
+        9
     );
     assert_eq!(
         conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
@@ -1041,7 +1057,13 @@ fn v5_read_only_inspection_and_upgrade_preserve_unresolved_effects() {
     drop(host);
     let db = dir.path().join("mission.sqlite");
     Connection::open(&db).unwrap().execute_batch(
-        "DROP TABLE execution_resolutions; DELETE FROM schema_migrations WHERE version=6; PRAGMA user_version=5;",
+        "DROP TRIGGER IF EXISTS supersession_command_unique;
+         DROP TRIGGER IF EXISTS execution_supersessions_no_update;
+         DROP TRIGGER IF EXISTS execution_supersessions_no_delete;
+         DROP TRIGGER IF EXISTS execution_resolutions_no_update;
+         DROP TRIGGER IF EXISTS execution_resolutions_no_delete;
+         DROP TABLE IF EXISTS execution_supersessions;
+         DROP TABLE execution_resolutions; DELETE FROM schema_migrations WHERE version=6; PRAGMA user_version=5;",
     ).unwrap();
     let inspected = Host::inspect(&db, Some(&request.binding.mission_id)).unwrap();
     assert_eq!(inspected[0].execution_effects, before);
@@ -1399,7 +1421,9 @@ fn simulated_and_linux_journals_cannot_share_operation_or_resolution_identity() 
     Connection::open(&db)
         .unwrap()
         .execute_batch(
-            "DELETE FROM linux_execution_resolutions; DELETE FROM linux_execution_effects;",
+            "DROP TRIGGER IF EXISTS linux_resolutions_no_delete;
+             DELETE FROM linux_execution_resolutions;
+             DELETE FROM linux_execution_effects;",
         )
         .unwrap();
     host.execute_fake_operation(&request).unwrap();
@@ -1522,7 +1546,15 @@ fn v6_upgrade_preserves_effects_and_resolutions() {
     Connection::open(&db)
         .unwrap()
         .execute_batch(
-            "DROP TRIGGER IF EXISTS simulated_effect_identity_unique;
+            "DROP TRIGGER IF EXISTS supersession_command_unique;
+             DROP TRIGGER IF EXISTS execution_supersessions_no_update;
+             DROP TRIGGER IF EXISTS execution_supersessions_no_delete;
+             DROP TRIGGER IF EXISTS execution_resolutions_no_update;
+             DROP TRIGGER IF EXISTS execution_resolutions_no_delete;
+             DROP TRIGGER IF EXISTS linux_resolutions_no_update;
+             DROP TRIGGER IF EXISTS linux_resolutions_no_delete;
+             DROP TABLE IF EXISTS execution_supersessions;
+             DROP TRIGGER IF EXISTS simulated_effect_identity_unique;
              DROP TRIGGER IF EXISTS linux_effect_identity_unique;
              DROP TRIGGER IF EXISTS simulated_resolution_command_unique;
              DROP TRIGGER IF EXISTS linux_resolution_command_unique;
@@ -1545,7 +1577,7 @@ fn v6_upgrade_preserves_effects_and_resolutions() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
 }
 
 #[test]
@@ -1693,4 +1725,905 @@ fn v7_upgrade_preserves_receipts_and_treats_unresolved_release_as_unknown() {
             .released_at,
         unknown.released_at
     );
+}
+
+fn effect_blob(db: &Path, id: &str) -> String {
+    Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT operation_id||'|'||mission_id||'|'||attempt_id||'|'||session_id||'|'||payload_hash||'|'||request_json||'|'||started_generation||'|'||state||'|'||ifnull(receipt_json,'')||'|'||created_at FROM execution_effects WHERE operation_id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn resolution_blob(db: &Path, command_id: &str) -> String {
+    Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT command_id||'|'||operation_id||'|'||mission_id||'|'||request_hash||'|'||audit_json FROM execution_resolutions WHERE command_id=?1",
+            [command_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn count_rows(db: &Path, table: &str) -> i64 {
+    Connection::open(db)
+        .unwrap()
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+fn staged(path: &Path) -> Vec<u8> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["ls-files", "--stage"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+fn head_sha(path: &Path) -> Vec<u8> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+fn worktree_admin(tree: &Path) -> std::path::PathBuf {
+    let dot = std::fs::read_to_string(tree.join(".git")).unwrap();
+    std::path::PathBuf::from(dot.trim().strip_prefix("gitdir: ").unwrap())
+}
+
+fn abandoned_effect() -> (tempfile::TempDir, Host, ExecutionRequest, serde_json::Value) {
+    let (dir, mut host, request) = setup();
+    interrupt_effect(&mut host, &request, "effect");
+    host.execution_evidence
+        .remove(&request.operation_id().unwrap());
+    let resolve = resolution_request(&host, &request, crate::ExecutionResolutionDecision::Abandon);
+    let audit = host.resolve_fake_execution(&resolve).unwrap();
+    (dir, host, request, audit)
+}
+
+fn supersede_of(
+    host: &Host,
+    request: &ExecutionRequest,
+    abandon: &serde_json::Value,
+    command_id: &str,
+) -> crate::ExecutionSupersessionRequest {
+    crate::ExecutionSupersessionRequest {
+        command_id: command_id.into(),
+        binding: RuntimeBinding {
+            generation: host.generation(),
+            ..request.binding.clone()
+        },
+        operation_id: request.operation_id().unwrap(),
+        payload_hash: request.payload_hash().unwrap(),
+        abandonment_command_id: abandon["commandId"].as_str().unwrap().into(),
+        abandonment_request_hash: abandon["requestHash"].as_str().unwrap().into(),
+        expected_revision: host.snapshot(&request.binding.mission_id).unwrap().revision,
+        actor: "operator".into(),
+        rationale: "Fresh quiescence and workspace evidence; outcome stays unknown".into(),
+    }
+}
+
+#[test]
+fn supersede_refuses_nonempty_quiescence_document() {
+    use crate::persistence::linux_execution::fresh_quiescence_is_empty;
+    let empty = serde_json::json!({"proven": true, "populated": 0, "reason": "populated 0"});
+    assert!(fresh_quiescence_is_empty(&empty));
+    assert!(fresh_quiescence_is_empty(
+        &serde_json::json!({"proven": true, "populated": 0, "reason": "no_workload"})
+    ));
+    assert!(!fresh_quiescence_is_empty(
+        &serde_json::json!({"proven": false, "populated": 1, "reason": "nonempty"})
+    ));
+    assert!(!fresh_quiescence_is_empty(
+        &serde_json::json!({"proven": true, "populated": 1, "reason": "populated 0"})
+    ));
+    for reason in ["missing", "mismatched", "outside_root", "unproven"] {
+        assert!(
+            !fresh_quiescence_is_empty(&serde_json::json!({"proven": false, "reason": reason})),
+            "{reason}"
+        );
+    }
+}
+
+#[test]
+fn supersede_abandoned_simulated_effect_keeps_uncertainty_and_allows_recovery() {
+    let (dir, mut host, mut request, abandon) = abandoned_effect();
+    let mission = request.binding.mission_id.clone();
+    let db = dir.path().join("mission.sqlite");
+    let id = request.operation_id().unwrap();
+    let effect_before = effect_blob(&db, &id);
+    let resolution_before = resolution_blob(&db, abandon["commandId"].as_str().unwrap());
+    let workspace = host.snapshot(&mission).unwrap().workspace.unwrap();
+    let tree = Path::new(&workspace.path).to_path_buf();
+    let repo = dir.path().join("repo");
+    std::fs::write(tree.join(".sy-tmp-left"), "leftover-v1").unwrap();
+    std::fs::write(tree.join(".gitignore"), "*.hide\n").unwrap();
+    std::fs::write(tree.join("note.hide"), "hidden-v1").unwrap();
+    let source_stage = staged(&repo);
+    let source_head = head_sha(&repo);
+    let tree_stage = staged(&tree);
+    let tree_head = head_sha(&tree);
+    let admin = worktree_admin(&tree);
+    let verifications = count_rows(&db, "verifications");
+    let deliveries = count_rows(&db, "deliveries");
+    let commands = count_rows(&db, "commands");
+    let files_before = host.runtime_mut().unwrap().simulated_file_map();
+    let applied_before = host.runtime_mut().unwrap().simulated_effect_count();
+    let mut sup = supersede_of(&host, &request, &abandon, "supersede-1");
+    let audit = host.supersede_execution(&sup).unwrap();
+    assert_eq!(audit["evidence"]["outcomeKnown"], false);
+    assert_eq!(audit["evidence"]["effectBlockLifted"], true);
+    assert_eq!(audit["evidence"]["digestIncludesIgnored"], true);
+    assert_eq!(audit["evidence"]["journal"], "simulated");
+    let digest = audit["evidence"]["workspaceDigest"].as_str().unwrap();
+    assert_eq!(
+        digest,
+        crate::execution::workspace::content_digest(&tree).unwrap()
+    );
+    std::fs::write(tree.join("note.hide"), "hidden-v2").unwrap();
+    assert_ne!(
+        crate::execution::workspace::content_digest(&tree).unwrap(),
+        digest,
+        "ignored files are part of the temporary-index digest"
+    );
+    std::fs::write(tree.join("note.hide"), "hidden-v1").unwrap();
+    std::fs::write(tree.join(".sy-tmp-left"), "leftover-v2").unwrap();
+    assert_ne!(
+        crate::execution::workspace::content_digest(&tree).unwrap(),
+        digest,
+        ".sy-tmp leftovers are part of the digest"
+    );
+    assert_eq!(effect_blob(&db, &id), effect_before);
+    assert_eq!(
+        resolution_blob(&db, abandon["commandId"].as_str().unwrap()),
+        resolution_before
+    );
+    assert_eq!(staged(&repo), source_stage);
+    assert_eq!(head_sha(&repo), source_head);
+    assert_eq!(staged(&tree), tree_stage);
+    assert_eq!(head_sha(&tree), tree_head);
+    assert!(!admin.join("index.lock").exists());
+    let snapshot = host.snapshot(&mission).unwrap();
+    assert_eq!(snapshot.phase, Phase::NeedsAttention);
+    assert_eq!(snapshot.execution_effects[0].state, "uncertain");
+    assert!(snapshot.execution_effects[0].superseded);
+    assert!(!snapshot.execution_blocked);
+    assert_eq!(snapshot.execution_supersessions, vec![audit.clone()]);
+    let steps = snapshot.to_json()["nextSteps"].to_string();
+    assert!(steps.contains("unknown"), "{steps}");
+    assert!(
+        steps.contains("workspace digest") || steps.contains("digest"),
+        "{steps}"
+    );
+    assert_eq!(count_rows(&db, "verifications"), verifications);
+    assert_eq!(count_rows(&db, "deliveries"), deliveries);
+    assert_eq!(count_rows(&db, "commands"), commands);
+    request.binding.generation = host.generation();
+    assert_eq!(
+        host.execute_fake_operation(&request)
+            .unwrap_err()
+            .category(),
+        "execution_uncertain"
+    );
+    assert_eq!(
+        host.runtime_mut().unwrap().simulated_effect_count(),
+        applied_before
+    );
+    assert_eq!(
+        host.runtime_mut().unwrap().simulated_file_map(),
+        files_before
+    );
+    command(
+        &mut host,
+        &mission,
+        CommandBody::ExplicitRecovery {
+            expected_target: Phase::Implementing,
+            ownership_proven: true,
+            effects: crate::EffectProof::Reconciled,
+        },
+    );
+    assert_eq!(host.snapshot(&mission).unwrap().phase, Phase::Implementing);
+    assert_eq!(host.supersede_execution(&sup).unwrap(), audit);
+    let mut changed = sup.clone();
+    changed.rationale = "different payload".into();
+    changed.expected_revision = host.snapshot(&mission).unwrap().revision;
+    assert_eq!(
+        host.supersede_execution(&changed).unwrap_err().category(),
+        "command_conflict"
+    );
+    let mut second = supersede_of(&host, &request, &abandon, "supersede-2");
+    second.expected_revision = host.snapshot(&mission).unwrap().revision;
+    assert!(host.supersede_execution(&second).is_err());
+    assert_eq!(
+        host.snapshot(&mission)
+            .unwrap()
+            .execution_supersessions
+            .len(),
+        1
+    );
+    drop(host);
+    let mut host = Host::open(&db).unwrap();
+    assert_eq!(
+        host.supersede_execution(&sup).unwrap_err().category(),
+        "stale_generation"
+    );
+    sup.rationale = "Fresh quiescence and workspace evidence; outcome stays unknown".into();
+    sup.binding.generation = host.generation();
+    assert_eq!(host.supersede_execution(&sup).unwrap(), audit);
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 0);
+}
+
+#[test]
+fn supersede_refuses_unresolved_settled_mismatched_stale_and_terminal_requests() {
+    let (dir, mut host, request) = setup();
+    interrupt_effect(&mut host, &request, "effect");
+    let mission = request.binding.mission_id.clone();
+    let _db = dir.path().join("mission.sqlite");
+    let mut unresolved = supersede_of(
+        &host,
+        &request,
+        &serde_json::json!({"commandId": "missing", "requestHash": "sha256:missing"}),
+        "supersede-missing",
+    );
+    unresolved.abandonment_command_id = "missing".into();
+    unresolved.abandonment_request_hash = "sha256:missing".into();
+    assert!(
+        host.supersede_execution(&unresolved)
+            .unwrap_err()
+            .to_string()
+            .contains("committed abandonment")
+    );
+    assert!(host.snapshot(&mission).unwrap().execution_blocked);
+    assert!(
+        host.snapshot(&mission)
+            .unwrap()
+            .execution_supersessions
+            .is_empty()
+    );
+    let completed = resolution_request(
+        &host,
+        &request,
+        crate::ExecutionResolutionDecision::Completed,
+    );
+    let completed_audit = host.resolve_fake_execution(&completed).unwrap();
+    let mut settled = supersede_of(&host, &request, &completed_audit, "supersede-completed");
+    assert!(host.supersede_execution(&settled).is_err());
+    assert!(
+        host.snapshot(&mission)
+            .unwrap()
+            .execution_supersessions
+            .is_empty()
+    );
+    assert_eq!(
+        host.snapshot(&mission).unwrap().execution_effects[0].state,
+        "completed"
+    );
+    drop(host);
+
+    let (dir, mut host, request) = setup();
+    interrupt_effect(&mut host, &request, "prepared");
+    let not_applied = resolution_request(
+        &host,
+        &request,
+        crate::ExecutionResolutionDecision::NotApplied,
+    );
+    let audit = host.resolve_fake_execution(&not_applied).unwrap();
+    settled = supersede_of(&host, &request, &audit, "supersede-not-applied");
+    assert!(host.supersede_execution(&settled).is_err());
+    assert_eq!(
+        host.snapshot(&request.binding.mission_id)
+            .unwrap()
+            .execution_effects[0]
+            .state,
+        "not_applied"
+    );
+    drop((dir, host));
+
+    let (dir, mut host, request, abandon) = abandoned_effect();
+    let mission = request.binding.mission_id.clone();
+    let db = dir.path().join("mission.sqlite");
+    let revision = host.snapshot(&mission).unwrap().revision;
+    let mut bad = supersede_of(&host, &request, &abandon, "supersede-bad");
+    bad.expected_revision -= 1;
+    assert_eq!(
+        host.supersede_execution(&bad).unwrap_err().category(),
+        "stale_revision"
+    );
+    bad.expected_revision = revision;
+    bad.binding.session_id = "wrong-session".into();
+    assert_eq!(
+        host.supersede_execution(&bad).unwrap_err().category(),
+        "binding_mismatch"
+    );
+    bad.binding.session_id = request.binding.session_id.clone();
+    bad.payload_hash = "sha256:wrong".into();
+    assert_eq!(
+        host.supersede_execution(&bad).unwrap_err().category(),
+        "operation_conflict"
+    );
+    bad.payload_hash = request.payload_hash().unwrap();
+    bad.abandonment_command_id = "wrong-abandonment".into();
+    assert!(
+        host.supersede_execution(&bad)
+            .unwrap_err()
+            .to_string()
+            .contains("committed abandonment")
+    );
+    bad.abandonment_command_id = abandon["commandId"].as_str().unwrap().into();
+    bad.abandonment_request_hash = "sha256:wrong".into();
+    assert!(
+        host.supersede_execution(&bad)
+            .unwrap_err()
+            .to_string()
+            .contains("does not match")
+    );
+    bad.abandonment_request_hash = abandon["requestHash"].as_str().unwrap().into();
+    bad.rationale.clear();
+    assert!(host.supersede_execution(&bad).is_err());
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE missions SET phase='implementing' WHERE id=?1",
+            [&mission],
+        )
+        .unwrap();
+    bad.rationale = "Fresh quiescence and workspace evidence; outcome stays unknown".into();
+    assert!(
+        host.supersede_execution(&bad)
+            .unwrap_err()
+            .to_string()
+            .contains("needs_attention")
+    );
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE missions SET phase='cancelled' WHERE id=?1",
+            [&mission],
+        )
+        .unwrap();
+    assert_eq!(
+        host.supersede_execution(&bad).unwrap_err().category(),
+        "terminal_immutable"
+    );
+    assert!(host.snapshot(&mission).unwrap().execution_blocked);
+    assert!(
+        host.snapshot(&mission)
+            .unwrap()
+            .execution_supersessions
+            .is_empty()
+    );
+    assert_eq!(host.snapshot(&mission).unwrap().revision, revision);
+    drop(host);
+    let mut host = Host::open(&db).unwrap();
+    // Terminal missions stay terminal; reopen still refuses the old generation
+    // only after the phase is put back. Restore needs_attention for that check.
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE missions SET phase='needs_attention' WHERE id=?1",
+            [&mission],
+        )
+        .unwrap();
+    bad.binding.generation = host.generation().saturating_sub(1);
+    bad.expected_revision = host.snapshot(&mission).unwrap().revision;
+    assert_eq!(
+        host.supersede_execution(&bad).unwrap_err().category(),
+        "stale_generation"
+    );
+    assert!(
+        host.snapshot(&mission)
+            .unwrap()
+            .execution_supersessions
+            .is_empty()
+    );
+}
+
+#[test]
+fn supersede_workspace_failures_keep_the_block_and_leave_git_unchanged() {
+    for case in ["unready", "pointer", "lock", "head"] {
+        let (dir, mut host, request, abandon) = abandoned_effect();
+        let mission = request.binding.mission_id.clone();
+        let db = dir.path().join("mission.sqlite");
+        let repo = dir.path().join("repo");
+        let tree =
+            Path::new(&host.snapshot(&mission).unwrap().workspace.unwrap().path).to_path_buf();
+        let admin = worktree_admin(&tree);
+        let revision = host.snapshot(&mission).unwrap().revision;
+        match case {
+            "unready" => {
+                Connection::open(&db)
+                    .unwrap()
+                    .execute(
+                        "UPDATE workspaces SET state='uncertain' WHERE attempt_id=?1",
+                        [&request.binding.attempt_id],
+                    )
+                    .unwrap();
+            }
+            "pointer" => {
+                std::fs::write(tree.join(".git"), "gitdir: /tmp/not-the-worktree\n").unwrap();
+            }
+            "lock" => {
+                std::fs::write(admin.join("index.lock"), b"held").unwrap();
+            }
+            "head" => {
+                let tree_id = String::from_utf8(head_sha(&repo)).unwrap();
+                let tree_id = tree_id.trim().to_string();
+                let object = Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(["rev-parse", &format!("{tree_id}^{{tree}}")])
+                    .output()
+                    .unwrap();
+                assert!(object.status.success());
+                let object = String::from_utf8(object.stdout).unwrap();
+                let orphan = Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(["commit-tree", object.trim(), "-m", "unrelated"])
+                    .output()
+                    .unwrap();
+                assert!(
+                    orphan.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&orphan.stderr)
+                );
+                let orphan = String::from_utf8(orphan.stdout).unwrap();
+                std::fs::write(admin.join("HEAD"), format!("{}\n", orphan.trim())).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let source_stage = staged(&repo);
+        let source_head = head_sha(&repo);
+        let branch = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["branch", "--show-current"])
+            .output()
+            .unwrap()
+            .stdout;
+        let sup = supersede_of(&host, &request, &abandon, "supersede-workspace");
+        let error = host.supersede_execution(&sup).unwrap_err();
+        match case {
+            "unready" => assert!(error.to_string().contains("ready workspace"), "{error}"),
+            "pointer" => assert!(
+                error.to_string().contains("gitdir")
+                    || error.to_string().contains("backlink")
+                    || error.to_string().contains("Git")
+                    || error.to_string().contains("workspace evidence is missing"),
+                "{error}"
+            ),
+            "lock" => assert!(error.to_string().contains("index.lock"), "{error}"),
+            "head" => assert!(error.to_string().contains("does not descend"), "{error}"),
+            _ => unreachable!(),
+        }
+        assert!(host.snapshot(&mission).unwrap().execution_blocked);
+        assert!(
+            host.snapshot(&mission)
+                .unwrap()
+                .execution_supersessions
+                .is_empty()
+        );
+        assert_eq!(host.snapshot(&mission).unwrap().revision, revision);
+        assert_eq!(staged(&repo), source_stage);
+        assert_eq!(head_sha(&repo), source_head);
+        let branch_after = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["branch", "--show-current"])
+            .output()
+            .unwrap()
+            .stdout;
+        assert_eq!(branch_after, branch);
+        if case != "lock" {
+            assert!(!admin.join("index.lock").exists());
+        }
+    }
+}
+
+#[test]
+fn other_unresolved_effects_block_pause_and_cancel_until_superseded() {
+    let (dir, mut host, request, abandon) = abandoned_effect();
+    let mission = request.binding.mission_id.clone();
+    let mut second = request.clone();
+    second.effect_key = "second-effect".into();
+    second.binding.generation = host.generation();
+    host.store.prepare_execution(&second).unwrap();
+    let mut abandon_second =
+        resolution_request(&host, &second, crate::ExecutionResolutionDecision::Abandon);
+    abandon_second.command_id = "resolve-2".into();
+    let second_audit = host.resolve_fake_execution(&abandon_second).unwrap();
+    let first = supersede_of(&host, &request, &abandon, "supersede-first");
+    host.supersede_execution(&first).unwrap();
+    assert!(host.snapshot(&mission).unwrap().execution_blocked);
+    command(&mut host, &mission, CommandBody::Cancel);
+    assert_eq!(host.dispatch_stops(&mission).unwrap(), 1);
+    let snapshot = host.snapshot(&mission).unwrap();
+    assert_eq!(snapshot.phase, Phase::Cancelling);
+    assert!(
+        host.admit(AdmitRequest {
+            command_id: None,
+            mission_id: mission.clone(),
+            attempt_id: None,
+            expected_revision: snapshot.revision,
+            actor: "operator".into(),
+            origin: CommandOrigin::Operator,
+            body: CommandBody::ConfirmCancelled,
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("not quiescent")
+    );
+    let mut during_stop = supersede_of(&host, &second, &second_audit, "supersede-second");
+    assert!(
+        host.supersede_execution(&during_stop)
+            .unwrap_err()
+            .to_string()
+            .contains("needs_attention")
+    );
+    command(
+        &mut host,
+        &mission,
+        CommandBody::DetectUncertainty {
+            reason: AttentionReason::ExecutionUncertain,
+            content_digest: None,
+        },
+    );
+    assert_eq!(
+        host.snapshot(&mission).unwrap().phase,
+        Phase::NeedsAttention
+    );
+    during_stop.expected_revision = host.snapshot(&mission).unwrap().revision;
+    during_stop.binding.generation = host.generation();
+    host.supersede_execution(&during_stop).unwrap();
+    assert!(!host.snapshot(&mission).unwrap().execution_blocked);
+    command(
+        &mut host,
+        &mission,
+        CommandBody::ExplicitRecovery {
+            expected_target: Phase::Cancelling,
+            ownership_proven: true,
+            effects: crate::EffectProof::Reconciled,
+        },
+    );
+    command(&mut host, &mission, CommandBody::ConfirmCancelled);
+    assert_eq!(host.snapshot(&mission).unwrap().phase, Phase::Cancelled);
+    let _ = dir;
+}
+
+#[test]
+fn supersede_audit_failure_rolls_back_and_resolution_rows_are_append_only() {
+    let (dir, mut host, request, abandon) = abandoned_effect();
+    let mission = request.binding.mission_id.clone();
+    let db = dir.path().join("mission.sqlite");
+    let before = host.snapshot(&mission).unwrap();
+    let effect_before = effect_blob(&db, &request.operation_id().unwrap());
+    Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_supersession BEFORE INSERT ON execution_supersessions
+             BEGIN SELECT RAISE(ABORT, 'injected supersession failure'); END;",
+        )
+        .unwrap();
+    let sup = supersede_of(&host, &request, &abandon, "supersede-rollback");
+    assert!(
+        host.supersede_execution(&sup)
+            .unwrap_err()
+            .to_string()
+            .contains("injected supersession failure")
+    );
+    let after = host.snapshot(&mission).unwrap();
+    assert_eq!(after.revision, before.revision);
+    assert!(after.execution_blocked);
+    assert!(after.execution_supersessions.is_empty());
+    assert_eq!(
+        effect_blob(&db, &request.operation_id().unwrap()),
+        effect_before
+    );
+    Connection::open(&db)
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_supersession;")
+        .unwrap();
+    let audit = host.supersede_execution(&sup).unwrap();
+    let conn = Connection::open(&db).unwrap();
+    for statement in [
+        "UPDATE execution_supersessions SET request_hash='x'",
+        "DELETE FROM execution_supersessions",
+        "UPDATE execution_resolutions SET request_hash='x'",
+        "DELETE FROM execution_resolutions",
+    ] {
+        let error = conn.execute(statement, []).unwrap_err();
+        assert!(
+            error.to_string().contains("append-only"),
+            "{statement}: {error}"
+        );
+    }
+    let error = conn
+        .execute(
+            "INSERT INTO execution_resolutions(command_id, operation_id, mission_id, request_hash, audit_json)
+             VALUES (?1, 'op-v1:unused', ?2, 'sha256:x', '{}')",
+            rusqlite::params![sup.command_id, mission],
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("resolution command identity already used"),
+        "{error}"
+    );
+    let error = conn
+        .execute(
+            "INSERT INTO linux_execution_effects(
+                operation_id, mission_id, attempt_id, session_id, payload_hash, request_json,
+                started_generation, state, created_at
+             ) VALUES ('op-v1:linux-append', ?1, ?2, ?3, 'sha256:linux', '{}', 1, 'uncertain', 1)",
+            rusqlite::params![
+                mission,
+                request.binding.attempt_id,
+                request.binding.session_id
+            ],
+        )
+        .unwrap();
+    assert_eq!(error, 1);
+    let error = conn
+        .execute(
+            "INSERT INTO linux_execution_resolutions(
+                command_id, operation_id, mission_id, request_hash, audit_json
+             ) VALUES ('linux-append-resolution', 'op-v1:linux-append', ?1, 'sha256:linux', '{}')",
+            [&mission],
+        )
+        .unwrap();
+    assert_eq!(error, 1);
+    let error = conn
+        .execute(
+            "UPDATE linux_execution_resolutions SET request_hash='x'",
+            [],
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("append-only"), "{error}");
+    let error = conn
+        .execute("DELETE FROM linux_execution_resolutions", [])
+        .unwrap_err();
+    assert!(error.to_string().contains("append-only"), "{error}");
+    let error = conn
+        .execute(
+            "INSERT INTO execution_supersessions(
+                command_id, operation_id, journal, abandonment_command_id, request_hash, audit_json
+             ) VALUES ('linux-append-resolution', 'op-v1:linux-append', 'linux', 'other-abandon', 'sha256:x', '{}')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("supersession command identity already used"),
+        "{error}"
+    );
+    drop(conn);
+    assert_eq!(host.supersede_execution(&sup).unwrap(), audit);
+    let mut again = supersede_of(&host, &request, &abandon, "supersede-again");
+    again.expected_revision = host.snapshot(&mission).unwrap().revision;
+    assert!(
+        host.supersede_execution(&again)
+            .unwrap_err()
+            .to_string()
+            .contains("immutable supersession")
+    );
+}
+
+#[test]
+fn default_build_refuses_linux_supersession_with_guidance() {
+    let (dir, host, request) = setup();
+    let mission = request.binding.mission_id.clone();
+    let db = dir.path().join("mission.sqlite");
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE missions SET phase='needs_attention' WHERE id=?1",
+            [&mission],
+        )
+        .unwrap();
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO linux_execution_effects(
+                operation_id, mission_id, attempt_id, session_id, payload_hash, request_json,
+                started_generation, state, cgroup_path, cgroup_dev, cgroup_ino, boot_id,
+                entered_at, created_at
+             ) VALUES (
+                'op-v1:linuxrow', ?1, ?2, ?3, 'sha256:row', '{}', 1, 'uncertain',
+                '/sys/fs/cgroup/switchyard/sy-row', 1, 2, 'boot', 10, 10
+             )",
+            rusqlite::params![
+                mission,
+                request.binding.attempt_id,
+                request.binding.session_id
+            ],
+        )
+        .unwrap();
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO linux_execution_resolutions(
+                command_id, operation_id, mission_id, request_hash, audit_json
+             ) VALUES (
+                'abandon-linux-row', 'op-v1:linuxrow', ?1, 'sha256:abandon',
+                '{\"request\":{\"decision\":\"abandoned\"}}'
+             )",
+            [&mission],
+        )
+        .unwrap();
+    drop(host);
+    let mut host = Host::open(&db).unwrap();
+    let before = host.snapshot(&mission).unwrap();
+    assert!(before.execution_blocked);
+    let mut sup = crate::ExecutionSupersessionRequest {
+        command_id: "supersede-linux".into(),
+        binding: RuntimeBinding {
+            generation: host.generation(),
+            ..request.binding.clone()
+        },
+        operation_id: "op-v1:linuxrow".into(),
+        payload_hash: "sha256:row".into(),
+        abandonment_command_id: "abandon-linux-row".into(),
+        abandonment_request_hash: "sha256:abandon".into(),
+        expected_revision: before.revision,
+        actor: "operator".into(),
+        rationale: "cannot prove a cgroup from the default build".into(),
+    };
+    let error = host.supersede_execution(&sup).unwrap_err();
+    assert!(
+        error.to_string().contains("delegated cgroup backend"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("stays uncertain"), "{error}");
+    let after = host.snapshot(&mission).unwrap();
+    assert!(after.execution_blocked);
+    assert!(after.execution_supersessions.is_empty());
+    assert_eq!(after.linux_execution_effects[0].state, "uncertain");
+    assert!(!after.linux_execution_effects[0].superseded);
+    assert_eq!(after.revision, before.revision);
+    sup.command_id = "supersede-linux-2".into();
+    assert!(host.supersede_execution(&sup).is_err());
+}
+
+#[test]
+fn v8_upgrade_preserves_abandoned_simulated_and_linux_rows() {
+    let (dir, host, request, abandon) = abandoned_effect();
+    let mission = request.binding.mission_id.clone();
+    let db = dir.path().join("mission.sqlite");
+    let effect_before = effect_blob(&db, &request.operation_id().unwrap());
+    let resolution_before = resolution_blob(&db, abandon["commandId"].as_str().unwrap());
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO linux_execution_effects(
+                operation_id, mission_id, attempt_id, session_id, payload_hash, request_json,
+                started_generation, state, cgroup_path, cgroup_dev, cgroup_ino, boot_id,
+                entered_at, receipt_json, quiescence_json, created_at
+             ) VALUES (
+                'op-v1:v8linux', ?1, ?2, ?3, 'sha256:v8', '{\"intent\":true}', 1, 'uncertain',
+                '/old/leaf', 4, 5, 'boot-v8', 9, NULL, '{\"proven\":true,\"populated\":0}', 11
+             )",
+            rusqlite::params![
+                mission,
+                request.binding.attempt_id,
+                request.binding.session_id
+            ],
+        )
+        .unwrap();
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO linux_execution_resolutions(
+                command_id, operation_id, mission_id, request_hash, audit_json
+             ) VALUES (
+                'abandon-v8-linux', 'op-v1:v8linux', ?1, 'sha256:v8-abandon',
+                '{\"request\":{\"decision\":\"abandoned\"},\"kept\":true}'
+             )",
+            [&mission],
+        )
+        .unwrap();
+    let linux_effect: String = Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT operation_id||'|'||state||'|'||request_json||'|'||ifnull(receipt_json,'')||'|'||ifnull(quiescence_json,'')||'|'||ifnull(released_at,-1) FROM linux_execution_effects WHERE operation_id='op-v1:v8linux'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let linux_resolution: String = Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT command_id||'|'||request_hash||'|'||audit_json FROM linux_execution_resolutions WHERE command_id='abandon-v8-linux'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(host);
+    Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "DROP TABLE IF EXISTS execution_supersessions;
+             DELETE FROM schema_migrations WHERE version>=9;
+             PRAGMA user_version=8;",
+        )
+        .unwrap();
+    let inspected = Host::inspect(&db, Some(&mission)).unwrap();
+    assert!(inspected[0].execution_supersessions.is_empty());
+    assert!(
+        inspected[0]
+            .execution_effects
+            .iter()
+            .all(|effect| !effect.superseded)
+    );
+    assert!(
+        inspected[0]
+            .linux_execution_effects
+            .iter()
+            .all(|effect| !effect.superseded)
+    );
+    let version: i64 = Connection::open(&db)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 8);
+    let host = Host::open(&db).unwrap();
+    assert_eq!(
+        effect_blob(&db, &request.operation_id().unwrap()),
+        effect_before
+    );
+    assert_eq!(
+        resolution_blob(&db, abandon["commandId"].as_str().unwrap()),
+        resolution_before
+    );
+    let linux_after: String = Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT operation_id||'|'||state||'|'||request_json||'|'||ifnull(receipt_json,'')||'|'||ifnull(quiescence_json,'')||'|'||ifnull(released_at,-1) FROM linux_execution_effects WHERE operation_id='op-v1:v8linux'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let resolution_after: String = Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT command_id||'|'||request_hash||'|'||audit_json FROM linux_execution_resolutions WHERE command_id='abandon-v8-linux'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(linux_after, linux_effect);
+    assert_eq!(resolution_after, linux_resolution);
+    let version: i64 = Connection::open(&db)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 9);
+    let snapshot = host.snapshot(&mission).unwrap();
+    assert!(snapshot.execution_blocked);
+    assert!(snapshot.execution_supersessions.is_empty());
+    assert_eq!(snapshot.execution_effects[0].state, "uncertain");
+    assert!(!snapshot.execution_effects[0].superseded);
 }

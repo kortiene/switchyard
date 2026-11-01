@@ -107,7 +107,10 @@ range-read, and list results also settle with their error retained in the
 receipt: they cannot mutate the workspace. Other failed mutating helpers
 stay `uncertain` and are not completed. Release or entry without a receipt stays
 `uncertain` even after the cgroup is empty. Abandonment is an immutable
-resolution: a later cancel cannot turn that row `completed`. A known-live
+resolution: a later cancel cannot turn that row `completed`. A later
+supersession
+([s3-execution-supersede.md](s3-execution-supersede.md)) can lift that effect's
+block without changing the row or declaring the outcome known. A known-live
 effect in this process blocks new work and is not quarantined merely because
 it is running, and `dispatch_stops` kills it only when a Pause or Cancel is
 already admitted. A default build that sees v7 rows keeps the block and says
@@ -131,8 +134,9 @@ kills recorded leaves instead of only rejecting the next call.
 ## #125 policy reviewed for this backend
 
 This is the real-backend policy #125 asked to review before a Linux effect can
-be resolved. It does not close #125. Superseding an abandoned decision stays
-open there.
+be resolved. Superseding an abandoned decision is the S3-A5 contract in
+[s3-execution-supersede.md](s3-execution-supersede.md). It does not relabel the
+effect `completed` or `not_applied`.
 
 `Host::resolve_linux_execution` is an operator API. It takes the same request
 as the simulated resolver: stable command id, current binding, exact operation
@@ -157,8 +161,10 @@ mission revision commit in one transaction.
 Resolution does not change phase, dispatch work, reopen a terminal mission, or
 create verification or publication approval. After a proven outcome the
 operator uses the existing explicit recovery command. Abandonment cannot be
-recovered around and cannot start another writer. The simulated
-`abandon-execution` CLI does not resolve a Linux row; status says so.
+recovered around and cannot start another writer until a supersession records
+fresh mission-wide quiescence and a workspace digest. The simulated
+`abandon-execution` and `supersede-execution` commands do not resolve a Linux
+row; a default build refuses Linux supersession and status says so.
 
 `mission status` adds `linuxExecutionEffects` and `linuxExecutionResolutions`
 beside the simulated arrays. `executionBlocked` is true for either journal.
@@ -188,6 +194,8 @@ on future writes. Previously settled outcomes are retained as historical
 evidence, not re-certified by this upgrade. Read-only inspection does not
 migrate: `released` is null for v7, false for unreleased v8 intents, and true
 for recorded or conservatively assumed releases. A writer upgrades to v8.
+Forward migration v9 adds append-only `execution_supersessions` without
+rewriting v1–v8 rows. Read-only inspection does not migrate.
 
 ## Evidence and non-claims
 

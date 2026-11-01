@@ -121,10 +121,13 @@ pub struct ExecutionView {
     pub state: String,
     pub payload_hash: String,
     pub started_generation: u64,
+    /// An abandonment supersession exists. The state stays `uncertain`.
+    pub superseded: bool,
 }
 impl ExecutionView {
     pub fn to_json(&self) -> serde_json::Value {
         json!({"operationId":self.operation_id, "state":self.state,
-            "payloadHash":self.payload_hash, "startedGeneration":self.started_generation, "simulated":true})
+            "payloadHash":self.payload_hash, "startedGeneration":self.started_generation,
+            "superseded":self.superseded, "simulated":true})
     }
 }

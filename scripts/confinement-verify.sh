@@ -47,4 +47,6 @@ fi
 } | tee -a "$SWITCHYARD_CONFINEMENT_EVIDENCE/environment.txt"
 cargo build -p switchyard --bin switchyard-execution-helper --features linux-execution --locked
 cargo clippy -p switchyard-core -p switchyard --all-targets --features linux-execution --locked -- -D warnings
+# S3-A4 execution and S3-A5 supersede tests. Missing delegation fails above;
+# this suite does not skip or run unconfined.
 cargo test -p switchyard --test linux_execution --features linux-execution --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/linux-execution.log"

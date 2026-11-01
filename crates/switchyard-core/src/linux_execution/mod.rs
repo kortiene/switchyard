@@ -304,6 +304,8 @@ pub struct LinuxExecutionView {
     pub released: Option<bool>,
     pub receipt_retained: bool,
     pub quiescence: String,
+    /// An abandonment supersession exists. The state stays `uncertain`.
+    pub superseded: bool,
 }
 
 impl LinuxExecutionView {
@@ -319,6 +321,7 @@ impl LinuxExecutionView {
             "released": self.released,
             "receiptRetained": self.receipt_retained,
             "quiescence": self.quiescence,
+            "superseded": self.superseded,
             "simulated": false,
         })
     }

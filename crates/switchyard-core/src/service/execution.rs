@@ -1,6 +1,7 @@
 use super::*;
 mod evidence;
 mod resolution;
+mod supersede;
 use crate::{ExecutionReceipt, ExecutionRequest};
 pub(super) use evidence::ExecutionEvidence;
 
@@ -65,6 +66,9 @@ impl Host {
             }
             if existing.payload_hash != hash {
                 return Err(Error::OperationConflict { operation_id: id });
+            }
+            if self.store.operation_superseded(&id)? {
+                return Err(Error::ExecutionUncertain { operation_id: id });
             }
             if existing.state == "not_applied" {
                 if self.store.execution_resolution_for(&id)?.is_some() {

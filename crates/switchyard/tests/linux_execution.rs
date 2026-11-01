@@ -13,9 +13,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use switchyard_core::{
     AdmitRequest, AttentionReason, CommandBody, CommandOrigin, CreateMission, EffectProof,
-    ExecutionResolutionDecision, ExecutionResolutionRequest, Host, LINUX_EDIT_SCOPE,
-    LINUX_EXEC_CANCEL_SCOPE, LINUX_EXEC_START_SCOPE, LINUX_EXEC_STATUS_SCOPE, LINUX_LIST_SCOPE,
-    LINUX_RANGE_SCOPE, LINUX_READ_SCOPE, LINUX_WRITE_SCOPE, LinuxExecutionConfig,
+    ExecutionResolutionDecision, ExecutionResolutionRequest, ExecutionSupersessionRequest, Host,
+    LINUX_EDIT_SCOPE, LINUX_EXEC_CANCEL_SCOPE, LINUX_EXEC_START_SCOPE, LINUX_EXEC_STATUS_SCOPE,
+    LINUX_LIST_SCOPE, LINUX_RANGE_SCOPE, LINUX_READ_SCOPE, LINUX_WRITE_SCOPE, LinuxExecutionConfig,
     LinuxExecutionRequest, LinuxOperation, Phase, RuntimeBinding, parse_notification, payload_hash,
 };
 
@@ -1511,5 +1511,356 @@ fn rejected_traversal_does_not_allocate_an_effect() {
             .len(),
         before
     );
+    world.assert_origin();
+}
+
+fn effect_row(db: &Path, operation: &str) -> String {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT operation_id||'|'||mission_id||'|'||attempt_id||'|'||session_id||'|'||payload_hash||'|'||request_json||'|'||started_generation||'|'||state||'|'||ifnull(cgroup_path,'')||'|'||ifnull(cgroup_dev,-1)||'|'||ifnull(cgroup_ino,-1)||'|'||ifnull(boot_id,'')||'|'||ifnull(entered_at,-1)||'|'||ifnull(receipt_json,'')||'|'||ifnull(quiescence_json,'')||'|'||ifnull(released_at,-1)||'|'||created_at FROM linux_execution_effects WHERE operation_id=?1",
+            [operation],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn resolution_row(db: &Path, command_id: &str) -> String {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT command_id||'|'||operation_id||'|'||request_hash||'|'||audit_json FROM linux_execution_resolutions WHERE command_id=?1",
+            [command_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn sy_leaves(root: &Path) -> Vec<String> {
+    let mut names = fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("sy-"))
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+fn cgroup_path(db: &Path, operation: &str) -> String {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT cgroup_path FROM linux_execution_effects WHERE operation_id=?1",
+            [operation],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn set_text(db: &Path, operation: &str, column: &str, value: &str) {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .execute(
+            &format!("UPDATE linux_execution_effects SET {column}=?1 WHERE operation_id=?2"),
+            rusqlite::params![value, operation],
+        )
+        .unwrap();
+}
+
+fn abandoned_entered(world: &mut World) -> (Host, String, ExecutionResolutionRequest, Value) {
+    let (host, mission) = implementing(world);
+    drop(host);
+    let child = spawn_crash(world, &mission, "entered");
+    wait_kill(child, "AT-entered");
+    let mut host = Host::open(&world.db()).unwrap();
+    enable(&mut host);
+    assert_eq!(
+        host.recover(&mission).unwrap_err().category(),
+        "execution_blocked"
+    );
+    let view = host.snapshot(&mission).unwrap().linux_execution_effects[0].clone();
+    let resolve = ExecutionResolutionRequest {
+        command_id: "abandon-linux-supersede".into(),
+        binding: binding(&host, &mission),
+        operation_id: view.operation_id,
+        payload_hash: view.payload_hash,
+        expected_revision: host.snapshot(&mission).unwrap().revision,
+        actor: "operator".into(),
+        rationale: "entered without a receipt; keep the block until supersession".into(),
+        decision: ExecutionResolutionDecision::Abandon,
+    };
+    let audit = host.resolve_linux_execution(&resolve).unwrap();
+    assert_eq!(audit["evidence"]["blockRetained"], true);
+    (host, mission, resolve, audit)
+}
+
+fn supersede_linux(
+    host: &Host,
+    mission: &str,
+    resolve: &ExecutionResolutionRequest,
+    abandon: &Value,
+    command_id: &str,
+) -> ExecutionSupersessionRequest {
+    ExecutionSupersessionRequest {
+        command_id: command_id.into(),
+        binding: binding(host, mission),
+        operation_id: resolve.operation_id.clone(),
+        payload_hash: resolve.payload_hash.clone(),
+        abandonment_command_id: abandon["commandId"].as_str().unwrap().into(),
+        abandonment_request_hash: abandon["requestHash"].as_str().unwrap().into(),
+        expected_revision: host.snapshot(mission).unwrap().revision,
+        actor: "operator".into(),
+        rationale: "re-killed the leaf and verified the workspace; outcome stays unknown".into(),
+    }
+}
+
+#[test]
+fn supersede_abandoned_entered_effect_then_explicit_recovery() {
+    let mut world = World::new();
+    let (mut host, mission, resolve, abandon) = abandoned_entered(&mut world);
+    let db = world.db();
+    let id = resolve.operation_id.clone();
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE linux_execution_effects SET quiescence_json='{\"proven\":false,\"reason\":\"stale\"}' WHERE operation_id=?1",
+            [&id],
+        )
+        .unwrap();
+    let effect_before = effect_row(&db, &id);
+    let resolution_before = resolution_row(&db, abandon["commandId"].as_str().unwrap());
+    let workspace = tree(&host, &mission);
+    fs::write(workspace.join(".sy-tmp-left"), "leftover").unwrap();
+    fs::write(workspace.join(".gitignore"), "*.hide\n").unwrap();
+    fs::write(workspace.join("note.hide"), "hidden").unwrap();
+    let tree_head = git(&workspace, &["rev-parse", "HEAD"]);
+    let tree_stage = git(&workspace, &["ls-files", "--stage"]);
+    let root = PathBuf::from(require_env("SWITCHYARD_CGROUP_ROOT"));
+    let leaves_before = sy_leaves(&root);
+    let verifications: i64 = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM verifications", [], |row| row.get(0))
+        .unwrap();
+    let sup = supersede_linux(&host, &mission, &resolve, &abandon, "supersede-linux-1");
+    let audit = host.supersede_execution(&sup).unwrap();
+    assert_eq!(audit["evidence"]["outcomeKnown"], false);
+    assert_eq!(audit["evidence"]["journal"], "linux");
+    assert_eq!(audit["evidence"]["digestIncludesIgnored"], true);
+    assert_eq!(
+        audit["evidence"]["quiescence"]["reusedAbandonmentQuiescence"],
+        false
+    );
+    assert!(audit["evidence"]["workspaceDigest"].as_str().unwrap().len() >= 40);
+    assert_eq!(effect_row(&db, &id), effect_before);
+    assert_eq!(
+        resolution_row(&db, abandon["commandId"].as_str().unwrap()),
+        resolution_before
+    );
+    assert_eq!(git(&workspace, &["rev-parse", "HEAD"]), tree_head);
+    assert_eq!(git(&workspace, &["ls-files", "--stage"]), tree_stage);
+    let snapshot = host.snapshot(&mission).unwrap();
+    assert_eq!(snapshot.phase, Phase::NeedsAttention);
+    assert_eq!(snapshot.linux_execution_effects[0].state, "uncertain");
+    assert!(snapshot.linux_execution_effects[0].superseded);
+    assert!(!snapshot.execution_blocked);
+    assert_eq!(snapshot.execution_supersessions.len(), 1);
+    let steps = snapshot.to_json()["nextSteps"].to_string();
+    assert!(steps.contains("unknown"), "{steps}");
+    assert!(steps.contains("digest"), "{steps}");
+    let verifications_after: i64 = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM verifications", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(verifications_after, verifications);
+    let deliveries: i64 = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM deliveries", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(deliveries, 0);
+    let replay = request(
+        &host,
+        &mission,
+        "crash-write",
+        LINUX_WRITE_SCOPE,
+        LinuxOperation::WriteFile {
+            path: "crash.txt".into(),
+            content: "once".into(),
+        },
+    );
+    // The crash worker used effect key crash-write. Rebuild from the ledger so
+    // the payload matches, and refresh only the generation.
+    let mut replay = replay;
+    replay.operation = stored_operation(&db, &id);
+    replay.capability_scope = snapshot.linux_execution_effects[0].scope.clone();
+    replay.tool_task_id = "task-130".into();
+    replay.effect_key = "crash-write".into();
+    replay.deadline_ms = stored_deadline(&db, &id);
+    replay.binding = binding(&host, &mission);
+    assert_eq!(
+        host.execute_linux_operation(&replay)
+            .unwrap_err()
+            .category(),
+        "execution_uncertain"
+    );
+    assert_eq!(sy_leaves(&root), leaves_before);
+    assert_eq!(cgroup_path(&db, &id), cgroup_path_of_row(&effect_before));
+    host.admit(AdmitRequest {
+        command_id: None,
+        mission_id: mission.clone(),
+        attempt_id: None,
+        expected_revision: host.snapshot(&mission).unwrap().revision,
+        actor: "operator".into(),
+        origin: CommandOrigin::Operator,
+        body: CommandBody::ExplicitRecovery {
+            expected_target: Phase::Implementing,
+            ownership_proven: true,
+            effects: EffectProof::Reconciled,
+        },
+    })
+    .unwrap();
+    assert_eq!(host.snapshot(&mission).unwrap().phase, Phase::Implementing);
+    assert_eq!(host.supersede_execution(&sup).unwrap(), audit);
+    world.assert_origin();
+}
+
+fn cgroup_path_of_row(row: &str) -> String {
+    row.split('|').nth(8).unwrap().to_string()
+}
+
+#[test]
+fn supersede_refuses_live_supervisor_bad_leaf_and_unproven_sibling() {
+    let mut world = World::new();
+    let (mut host, mission) = implementing(&mut world);
+    enable(&mut host);
+    let sleep = request(
+        &host,
+        &mission,
+        "live-sleep",
+        LINUX_EXEC_START_SCOPE,
+        LinuxOperation::ExecStart {
+            argv: vec!["/bin/sleep".into(), "30".into()],
+        },
+    );
+    let started = host.execute_linux_operation(&sleep).unwrap();
+    assert_eq!(started.state, "running");
+    assert_eq!(
+        host.recover(&mission).unwrap_err().category(),
+        "execution_blocked"
+    );
+    assert_eq!(
+        host.snapshot(&mission).unwrap().phase,
+        Phase::NeedsAttention
+    );
+    let view = host.snapshot(&mission).unwrap().linux_execution_effects[0].clone();
+    let live = ExecutionSupersessionRequest {
+        command_id: "supersede-live".into(),
+        binding: binding(&host, &mission),
+        operation_id: view.operation_id.clone(),
+        payload_hash: view.payload_hash.clone(),
+        abandonment_command_id: "not-abandoned".into(),
+        abandonment_request_hash: "sha256:none".into(),
+        expected_revision: host.snapshot(&mission).unwrap().revision,
+        actor: "operator".into(),
+        rationale: "a live supervisor must keep the block".into(),
+    };
+    let error = host.supersede_execution(&live).unwrap_err();
+    assert!(error.to_string().contains("live supervisor"), "{error}");
+    assert!(host.snapshot(&mission).unwrap().execution_blocked);
+    assert!(
+        host.snapshot(&mission)
+            .unwrap()
+            .execution_supersessions
+            .is_empty()
+    );
+    drop(host);
+
+    let mut world = World::new();
+    let (mut host, mission, resolve, abandon) = abandoned_entered(&mut world);
+    let db = world.db();
+    let id = resolve.operation_id.clone();
+    let path = cgroup_path(&db, &id);
+    let boot = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT boot_id FROM linux_execution_effects WHERE operation_id=?1",
+            [&id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    let real_inode = inode_of(&db, &id);
+    set_text(&db, &id, "boot_id", "other-boot");
+    let mut sup = supersede_linux(&host, &mission, &resolve, &abandon, "supersede-boot");
+    let error = host.supersede_execution(&sup).unwrap_err();
+    assert!(error.to_string().contains("mismatched"), "{error}");
+    assert!(host.snapshot(&mission).unwrap().execution_blocked);
+    set_text(&db, &id, "boot_id", &boot);
+    set_inode(&db, &id, 1);
+    sup.command_id = "supersede-inode".into();
+    sup.expected_revision = host.snapshot(&mission).unwrap().revision;
+    let error = host.supersede_execution(&sup).unwrap_err();
+    assert!(error.to_string().contains("mismatched"), "{error}");
+    set_inode(&db, &id, real_inode);
+    let outside = world.tmp.path().join("outside-cgroup");
+    fs::create_dir_all(&outside).unwrap();
+    set_text(&db, &id, "cgroup_path", outside.to_str().unwrap());
+    sup.command_id = "supersede-outside".into();
+    let error = host.supersede_execution(&sup).unwrap_err();
+    assert!(
+        error.to_string().contains("outside the delegated root"),
+        "{error}"
+    );
+    set_text(&db, &id, "cgroup_path", &path);
+    let sibling = world.tmp.path().join("missing-sibling-leaf");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO linux_execution_effects(
+                operation_id, mission_id, attempt_id, session_id, payload_hash, request_json,
+                started_generation, state, cgroup_path, cgroup_dev, cgroup_ino, boot_id,
+                entered_at, created_at
+             ) VALUES (
+                'op-v1:sibling', ?1, ?2, ?3, 'sha256:sibling', '{}', 1, 'uncertain',
+                ?4, 1, 2, 'boot', 1, 1
+             )",
+            rusqlite::params![
+                mission,
+                resolve.binding.attempt_id,
+                resolve.binding.session_id,
+                sibling.display().to_string()
+            ],
+        )
+        .unwrap();
+    sup.command_id = "supersede-sibling".into();
+    sup.expected_revision = host.snapshot(&mission).unwrap().revision;
+    let error = host.supersede_execution(&sup).unwrap_err();
+    assert!(error.to_string().contains("op-v1:sibling"), "{error}");
+    assert!(error.to_string().contains("missing"), "{error}");
+    assert!(host.snapshot(&mission).unwrap().execution_blocked);
+    assert!(
+        host.snapshot(&mission)
+            .unwrap()
+            .execution_supersessions
+            .is_empty()
+    );
+    fs::remove_dir_all(&path).unwrap();
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "DELETE FROM linux_execution_effects WHERE operation_id='op-v1:sibling'",
+            [],
+        )
+        .unwrap();
+    sup.command_id = "supersede-missing".into();
+    sup.expected_revision = host.snapshot(&mission).unwrap().revision;
+    let error = host.supersede_execution(&sup).unwrap_err();
+    assert!(error.to_string().contains(&id), "{error}");
+    assert!(error.to_string().contains("missing"), "{error}");
+    assert!(host.snapshot(&mission).unwrap().execution_blocked);
+    assert_eq!(
+        host.snapshot(&mission).unwrap().linux_execution_effects[0].state,
+        "uncertain"
+    );
+    assert!(!host.snapshot(&mission).unwrap().linux_execution_effects[0].superseded);
+    let _ = host;
     world.assert_origin();
 }

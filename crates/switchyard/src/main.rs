@@ -33,8 +33,9 @@ enum MissionCommand {
     /// Audit an uncertain effect without clearing its block or replaying it.
     /// The mission stays blocked in needs_attention. You can request cancel,
     /// but unresolved effects still prevent cancellation from completing.
-    /// Lifting the block requires a future evidence protocol (#125).
-    /// Reuse command ID and all arguments after a lost response.
+    /// Lifting that effect's block requires `supersede-execution` (#125).
+    /// The outcome stays unknown. Reuse command ID and all arguments after a
+    /// lost response.
     AbandonExecution {
         #[arg(long)]
         db: PathBuf,
@@ -48,6 +49,36 @@ enum MissionCommand {
         operation_id: String,
         #[arg(long)]
         payload_hash: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        command_id: String,
+        #[arg(long)]
+        actor: String,
+        #[arg(long)]
+        rationale: String,
+    },
+    /// Supersede one abandoned simulated effect. The outcome stays unknown.
+    /// This command does not supersede a Linux row; a default build refuses
+    /// those with guidance because it cannot prove cgroup quiescence.
+    /// Reuse the command ID and every argument after a lost response.
+    SupersedeExecution {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        mission: String,
+        #[arg(long)]
+        attempt: String,
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        payload_hash: String,
+        #[arg(long)]
+        abandonment_command_id: String,
+        #[arg(long)]
+        abandonment_request_hash: String,
         #[arg(long)]
         expected_revision: u64,
         #[arg(long)]
@@ -240,9 +271,51 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     })?;
                 Ok(
                     json!({"ok":true, "resolution":audit, "executionBlockRetained":true,
-                    "nextSteps":"The execution block remains. On abandonment the mission stays in needs_attention. You can request cancel, but unresolved effects prevent cancellation from completing. Lifting the block requires a future evidence protocol (#125).",
+                    "nextSteps":"The execution block remains. On abandonment the mission stays in needs_attention. You can request cancel, but unresolved effects prevent cancellation from completing. Lifting this effect's block requires mission supersede-execution with fresh Host evidence (#125); the outcome stays unknown.",
                     "mission":host.snapshot(&mission)?.to_json()}),
                 )
+            }
+            MissionCommand::SupersedeExecution {
+                db,
+                mission,
+                attempt,
+                session,
+                operation_id,
+                payload_hash,
+                abandonment_command_id,
+                abandonment_request_hash,
+                expected_revision,
+                command_id,
+                actor,
+                rationale,
+            } => {
+                let mut host = Host::open(&db)?;
+                let audit =
+                    host.supersede_execution(&switchyard_core::ExecutionSupersessionRequest {
+                        command_id,
+                        binding: switchyard_core::RuntimeBinding {
+                            mission_id: mission.clone(),
+                            attempt_id: attempt,
+                            session_id: session,
+                            generation: host.generation(),
+                        },
+                        operation_id,
+                        payload_hash,
+                        abandonment_command_id,
+                        abandonment_request_hash,
+                        expected_revision,
+                        actor,
+                        rationale,
+                    })?;
+                let snapshot = host.snapshot(&mission)?;
+                Ok(json!({
+                    "ok": true,
+                    "supersession": audit,
+                    "outcomeKnown": false,
+                    "executionBlocked": snapshot.execution_blocked,
+                    "nextSteps": "The effect stays uncertain and the outcome stays unknown. The workspace digest is on the supersession. This command covers only the simulated journal; a Linux row stays blocked on a default build. Other unresolved effects still block pause, cancel, and recovery.",
+                    "mission": snapshot.to_json()
+                }))
             }
             MissionCommand::Workspace {
                 db,

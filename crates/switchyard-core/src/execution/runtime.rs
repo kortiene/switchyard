@@ -494,6 +494,15 @@ impl FakeRuntime {
     pub fn simulated_effect_count(&self) -> usize {
         self.simulated_effect_count
     }
+
+    /// In-memory simulated file map. Replay of an abandoned effect must not change it.
+    #[cfg(test)]
+    pub(crate) fn simulated_file_map(&self) -> Vec<(String, String)> {
+        self.simulated_files
+            .iter()
+            .map(|(path, content)| (path.clone(), content.clone()))
+            .collect()
+    }
 }
 impl crate::execution_env::ExecutionEnv for FakeRuntime {
     fn apply(&mut self, request: &crate::ExecutionRequest) -> Result<crate::ExecutionReceipt> {

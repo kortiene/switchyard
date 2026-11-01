@@ -73,8 +73,13 @@ After a matching #125 resolution, explicitly recover the recorded target:
 Resolution does not automatically resume a mission. Proof retained by the
 synchronous simulator can support a completed/not-applied library resolution;
 a fresh CLI process cannot reconstruct that proof and can only record blocking
-abandonment. Abandonment never authorizes recovery or completion. Real-backend
-evidence and termination remain #130/#125 work.
+abandonment. Abandonment by itself never authorizes recovery or completion.
+An evidence-backed supersession
+([s3-execution-supersede.md](s3-execution-supersede.md)) lifts that effect's
+block and leaves the outcome unknown; Pause/Cancel can then reach a terminal
+phase only once every effect is settled or superseded. Real-backend
+evidence and termination for the Linux journal are the #130/#132 contract plus
+that supersession.
 
 ## CLI and inspection
 

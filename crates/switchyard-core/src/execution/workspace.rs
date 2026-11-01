@@ -705,6 +705,53 @@ pub(crate) fn verify(w: &WorkspaceRecord) -> Result<(String, String)> {
     Ok((tree_identity, path_text(&admin)?))
 }
 
+/// Digest of the worktree as it exists on disk.
+///
+/// The digest is a Git tree id from a temporary index (`GIT_INDEX_FILE`). The
+/// real index is never the write target, and its lock is not `index.lock`.
+/// Ignored files are included (`git add --all --force`), so a leftover cannot
+/// hide by being listed in `.gitignore`. That includes untracked `.sy-tmp-*`
+/// files whether or not they are ignored. On-disk bytes win over a staged blob
+/// that differs from the worktree. The command writes content-addressed
+/// objects into the repository database and does not move HEAD, the branch, or
+/// the real index.
+pub(crate) fn content_digest(tree: &Path) -> Result<String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(Error::storage)?
+        .as_nanos();
+    let scratch =
+        std::env::temp_dir().join(format!("switchyard-index-{}-{}", std::process::id(), nanos));
+    std::fs::create_dir_all(&scratch).map_err(Error::storage)?;
+    let _cleanup = ScratchDir(scratch.clone());
+    let index = path_text(&scratch.join("index"))?;
+    git_with_index(tree, &index, &["read-tree", "HEAD"])?;
+    git_with_index(tree, &index, &["add", "--all", "--force"])?;
+    let oid = git_with_index(tree, &index, &["write-tree"])?;
+    let oid = oid.trim();
+    if ![40, 64].contains(&oid.len()) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::guard("workspace content digest was not a tree id"));
+    }
+    Ok(oid.to_string())
+}
+
+struct ScratchDir(PathBuf);
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn git_with_index(tree: &Path, index: &str, args: &[&str]) -> Result<String> {
+    let mut command = command(tree)?;
+    command.env("GIT_INDEX_FILE", index);
+    let output = command.args(args).output().map_err(Error::storage)?;
+    let bytes = super::git::checked_output(args, output)?;
+    String::from_utf8(bytes)
+        .map_err(|error| Error::git(format!("git output was not utf-8: {error}"), None))
+}
+
 fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
         .and_then(|file| file.sync_all())

@@ -15,11 +15,13 @@ mod error;
 mod execution;
 mod execution_env;
 mod execution_resolution;
+mod execution_supersession;
 mod linux_execution;
 pub use execution_env::{
     ExecutionOperation, ExecutionReceipt, ExecutionRequest, ExecutionView, FAKE_WRITE_SCOPE,
 };
 pub use execution_resolution::{ExecutionResolutionDecision, ExecutionResolutionRequest};
+pub use execution_supersession::ExecutionSupersessionRequest;
 #[cfg(all(feature = "linux-execution", target_os = "linux"))]
 pub use linux_execution::helper_main as linux_helper_main;
 pub use linux_execution::{

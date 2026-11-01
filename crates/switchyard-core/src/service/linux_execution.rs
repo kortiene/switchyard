@@ -34,7 +34,67 @@ impl Host {
         }
         Ok(())
     }
+
+    /// Mission-wide Linux quiescence for a supersession. Settled and already
+    /// superseded effects are not killed again. Every other Linux effect,
+    /// including the one being superseded, is re-proven empty. A default build
+    /// cannot do that and refuses.
+    pub(super) fn fresh_linux_quiescence(
+        &self,
+        mission_id: &str,
+        target_is_linux: bool,
+        target_id: &str,
+    ) -> Result<Value> {
+        let effects = self.store.linux_mission_effects(mission_id)?;
+        let mut pending = Vec::new();
+        for (id, effect) in effects {
+            let settled = matches!(effect.state.as_str(), "completed" | "not_applied");
+            let already = self.store.operation_superseded(&id)?;
+            let target = target_is_linux && id == target_id;
+            if target || (!settled && !already) {
+                pending.push((id, effect));
+            }
+        }
+        if pending.is_empty() {
+            return Ok(json!({
+                "source": "synchronous_in_process_no_workers",
+                "exclusiveHost": true,
+                "worktreeMutatedBySimulatedEffect": false,
+                "linux": []
+            }));
+        }
+        self.prove_pending_linux(mission_id, &pending)
+    }
+
+    pub(super) fn linux_supervisor_blocks(&self, mission_id: &str) -> Result<()> {
+        #[cfg(all(feature = "linux-execution", target_os = "linux"))]
+        if self.linux.is_some() && self.mission_supervisor_live(mission_id)? {
+            return Err(Error::guard(
+                "linux supersession refused: this host still has a live supervisor for the mission",
+            ));
+        }
+        let _ = mission_id;
+        Ok(())
+    }
+
+    fn prove_pending_linux(
+        &self,
+        mission_id: &str,
+        pending: &[(
+            String,
+            crate::persistence::linux_execution::LinuxEffectRecord,
+        )],
+    ) -> Result<Value> {
+        #[cfg(all(feature = "linux-execution", target_os = "linux"))]
+        if self.linux.is_some() {
+            return self.prove_effects_for_supersede(mission_id, pending);
+        }
+        let _ = (mission_id, pending);
+        Err(Error::guard(LINUX_SUPERSEDE_GUIDANCE))
+    }
 }
+
+pub(super) const LINUX_SUPERSEDE_GUIDANCE: &str = "linux supersession requires the delegated cgroup backend to prove fresh quiescence; the default FakeRuntime build and mission supersede-execution cannot supply that proof, so the linux effect stays uncertain and blocked";
 
 #[cfg(all(feature = "linux-execution", target_os = "linux"))]
 mod os {
@@ -343,6 +403,9 @@ mod os {
                 });
             }
             let id = request.operation_id()?;
+            if self.store.operation_superseded(&id)? {
+                return Err(Error::ExecutionUncertain { operation_id: id });
+            }
             if effect.state == "completed" {
                 return Ok(outcome(&id, &hash, &effect));
             }
@@ -443,11 +506,14 @@ mod os {
                 .store
                 .execution_views(mission)?
                 .into_iter()
-                .any(|view| matches!(view.state.as_str(), "prepared" | "uncertain"));
-            let linux =
-                self.store.linux_views(mission)?.into_iter().any(|view| {
-                    blocking(&view.state) && Some(view.operation_id.as_str()) != except
+                .any(|view| {
+                    matches!(view.state.as_str(), "prepared" | "uncertain") && !view.superseded
                 });
+            let linux = self.store.linux_views(mission)?.into_iter().any(|view| {
+                blocking(&view.state)
+                    && !view.superseded
+                    && Some(view.operation_id.as_str()) != except
+            });
             Ok(simulated || linux)
         }
 
@@ -1021,6 +1087,110 @@ mod os {
                     std::thread::sleep(Duration::from_secs(30));
                 }
             }
+        }
+
+        pub(super) fn prove_effects_for_supersede(
+            &self,
+            mission_id: &str,
+            pending: &[(
+                String,
+                crate::persistence::linux_execution::LinuxEffectRecord,
+            )],
+        ) -> Result<serde_json::Value> {
+            if self.mission_supervisor_live(mission_id)? {
+                return Err(Error::guard(
+                    "linux supersession refused: this host still has a live supervisor for the mission",
+                ));
+            }
+            let mut proofs = Vec::new();
+            for (id, effect) in pending {
+                let doc = self.fresh_leaf(effect)?;
+                if !crate::persistence::linux_execution::fresh_quiescence_is_empty(&doc) {
+                    let reason = doc
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unproven");
+                    if reason == "outside_root" {
+                        return Err(Error::guard(format!(
+                            "linux supersession refused: cgroup path for {id} is outside the delegated root"
+                        )));
+                    }
+                    return Err(Error::guard(format!(
+                        "linux supersession refused: cgroup for {id} is {reason} and not populated 0; stored abandonment quiescence is not reused"
+                    )));
+                }
+                proofs.push(json!({"operationId": id, "quiescence": doc}));
+            }
+            Ok(json!({
+                "source": "fresh_cgroup_kill",
+                "reusedAbandonmentQuiescence": false,
+                "effects": proofs
+            }))
+        }
+
+        pub(super) fn mission_supervisor_live(&self, mission_id: &str) -> Result<bool> {
+            let Some(session) = self.linux.as_ref() else {
+                return Ok(false);
+            };
+            for id in session.active.keys() {
+                match self.store.linux_effect(id)? {
+                    Some(effect) if effect.mission_id == mission_id => return Ok(true),
+                    Some(_) => {}
+                    None => return Ok(true),
+                }
+            }
+            Ok(false)
+        }
+
+        fn fresh_leaf(
+            &self,
+            effect: &crate::persistence::linux_execution::LinuxEffectRecord,
+        ) -> Result<serde_json::Value> {
+            let Some(path) = effect.cgroup_path.as_deref() else {
+                return Ok(quiescence_document(
+                    effect.entered_at.is_none(),
+                    if effect.entered_at.is_none() {
+                        "no_workload"
+                    } else {
+                        "missing"
+                    },
+                    if effect.entered_at.is_none() {
+                        Some(0)
+                    } else {
+                        None
+                    },
+                    "",
+                    None,
+                ));
+            };
+            let (dev, ino, boot) = match (
+                effect.cgroup_dev,
+                effect.cgroup_ino,
+                effect.boot_id.as_deref(),
+            ) {
+                (Some(dev), Some(ino), Some(boot)) => (dev, ino, boot),
+                _ => return Ok(quiescence_document(false, "missing", None, "", None)),
+            };
+            let root = self
+                .linux
+                .as_ref()
+                .ok_or_else(|| Error::guard("linux backend is not enabled"))?
+                .config
+                .cgroup_root
+                .clone();
+            let leaf = PathBuf::from(path);
+            if leaf.exists() && !cgroup::within_root(&root, &leaf) {
+                return Ok(quiescence_document(false, "outside_root", None, "", None));
+            }
+            let identity = CgroupIdentity {
+                path: leaf,
+                dev: u64::try_from(dev)
+                    .map_err(|_| Error::guard("cgroup device id is negative"))?,
+                ino: u64::try_from(ino).map_err(|_| Error::guard("cgroup inode is negative"))?,
+                boot_id: boot.to_string(),
+            };
+            let proved = cgroup::rekill_and_prove(&identity, Duration::from_secs(5))?;
+            Ok(quiescence_value(&proved, &identity))
         }
     }
 

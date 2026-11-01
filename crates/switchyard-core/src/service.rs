@@ -137,6 +137,7 @@ pub struct MissionSnapshot {
     pub execution_resolutions: Vec<Value>,
     pub linux_execution_effects: Vec<crate::LinuxExecutionView>,
     pub linux_execution_resolutions: Vec<Value>,
+    pub execution_supersessions: Vec<Value>,
     pub execution_blocked: bool,
     pub quarantined: Vec<(i64, String, String, String)>,
 }
@@ -200,6 +201,7 @@ impl MissionSnapshot {
         );
         value["executionResolutions"] = json!(self.execution_resolutions);
         value["linuxExecutionResolutions"] = json!(self.linux_execution_resolutions);
+        value["executionSupersessions"] = json!(self.execution_supersessions);
         value["executionBlocked"] = json!(self.execution_blocked);
         value["nextSteps"] = json!(self.next_steps());
         value
@@ -237,10 +239,21 @@ impl MissionSnapshot {
                 "prepared" | "entered" | "running" | "uncertain"
             )
         }) {
-            steps.push("Linux execution evidence is under linuxExecutionEffects. not_applied requires a committed intent that was never released (no GO marker), no backend-entered marker or receipt, and a matching empty cgroup (same path, device, inode and boot id, populated 0). completed requires the original Host-captured receipt plus that same quiescence. Anything else stays uncertain. Abandonment is final, keeps the block, and does not authorize another writer, workspace reuse, verification or publication. A superseded generation cannot start, settle or read the result. There is no CLI execution command and the simulated abandon-execution command cannot supply this proof. Missing, replaced or nonempty cgroups fail closed. Reboot recovery is out of scope.".into());
+            steps.push("Linux execution evidence is under linuxExecutionEffects. not_applied requires a committed intent that was never released (no GO marker), no backend-entered marker or receipt, and a matching empty cgroup (same path, device, inode and boot id, populated 0). completed requires the original Host-captured receipt plus that same quiescence. Anything else stays uncertain. Abandonment keeps that uncertainty and the block. Superseding it requires this host to have no live supervisor, a fresh kill, and populated 0 for every unsettled Linux effect of the mission, then a ready workspace whose verification passes. The audit records a workspace content digest and the outcome stays unknown. A superseded generation cannot start, settle or read the result. There is no Linux execution CLI; mission supersede-execution covers only the simulated journal and a default build refuses Linux rows. Missing, replaced, nonempty, outside-root, or other-boot cgroups fail closed. Reboot recovery is out of scope.".into());
+        }
+        if self
+            .execution_effects
+            .iter()
+            .any(|effect| effect.superseded)
+            || self
+                .linux_execution_effects
+                .iter()
+                .any(|effect| effect.superseded)
+        {
+            steps.push("Superseded effects stay uncertain with an unknown outcome. Their workspace digest is recorded on executionSupersessions. Supersession is not verification, review, or publication approval.".into());
         }
         if self.execution_blocked {
-            steps.push("Unresolved execution effects still block pause/cancel completion, recovery and workspace reuse. Inspect each block and its evidence protocol (#125 for execution effects); an abandoned effect remains blocking.".into());
+            steps.push("Unresolved execution effects still block pause/cancel completion, recovery and workspace reuse. Inspect each block and its evidence protocol (#125 for execution effects). An abandoned effect remains blocking until an evidence-backed supersession; the outcome stays unknown.".into());
             if self.runtime_adapter == "fake"
                 && matches!(self.phase, Phase::Pausing | Phase::Cancelling)
             {
@@ -1597,6 +1610,7 @@ fn snapshot_from(store: &Store, mission_id: &str, generation: u64) -> Result<Mis
         execution_resolutions: store.execution_resolutions(mission_id)?,
         linux_execution_effects: store.linux_views(mission_id)?,
         linux_execution_resolutions: store.linux_resolutions(mission_id)?,
+        execution_supersessions: store.execution_supersessions(mission_id)?,
         execution_blocked: store.ops_blocked(mission_id)?,
         quarantined: store.list_quarantine(mission_id)?,
     })
