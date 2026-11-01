@@ -10,7 +10,11 @@ export class Transport {
   private nextId = 0;
   private active = 0;
   private dead = false;
-  private pending = new Map<string, { resolve: (value: Json) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
+  // Effect-only. `request` rejects every other method, and `effectError` below
+  // validates every error waiting in this map. A future Pi-to-Rust call needs
+  // its own queue: feeding it through here would shut the transport down on
+  // an error shape this probe does not define.
+  private pendingEffects = new Map<string, { method: string; resolve: (value: Json) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   private binding: Binding;
   constructor(binding: Binding) { this.binding = binding; }
 
@@ -43,10 +47,14 @@ export class Transport {
     if (frame.kind === 'response') {
       checkBinding(frame.binding, this.binding);
       if (frame.protocol !== PROTOCOL) throw new Error('invalid protocol');
-      const waiting = this.pending.get(frame.id);
+      const waiting = this.pendingEffects.get(frame.id);
       if (!waiting || (frame.result === undefined) === (frame.error === undefined)) throw new Error('unknown response');
+      // Scoped to effect requests. `request` is the only writer, and it
+      // enqueues `execution.request` alone; this check keeps `effectError`
+      // from becoming a general response parser.
+      if (waiting.method !== 'execution.request') throw new Error('pending response is not an effect');
       const error = frame.error === undefined ? undefined : effectError(frame.error);
-      this.pending.delete(frame.id);
+      this.pendingEffects.delete(frame.id);
       clearTimeout(waiting.timer);
       if (error) waiting.reject(error);
       else waiting.resolve(frame.result!);
@@ -75,11 +83,14 @@ export class Transport {
   }
 
   request(method: string, params: Record<string, Json>): Promise<Json> {
-    if (this.dead || this.pending.size >= MAX_PENDING) return Promise.reject(new ProtocolError('execution_uncertain', 'uncertain'));
+    if (method !== 'execution.request') {
+      return Promise.reject(new Error('only execution.request may wait for an effect response'));
+    }
+    if (this.dead || this.pendingEffects.size >= MAX_PENDING) return Promise.reject(new ProtocolError('execution_uncertain', 'uncertain'));
     const id = `bridge:${++this.nextId}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.fail(); }, DEADLINE_MS);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pendingEffects.set(id, { method, resolve, reject, timer });
       this.send({ protocol: PROTOCOL, kind: 'request', id, binding: this.binding, method, params });
     });
   }
@@ -106,11 +117,11 @@ export class Transport {
   private fail() {
     if (this.dead) return;
     this.dead = true;
-    for (const wait of this.pending.values()) {
+    for (const wait of this.pendingEffects.values()) {
       clearTimeout(wait.timer);
       wait.reject(new ProtocolError('interrupted', 'uncertain'));
     }
-    this.pending.clear();
+    this.pendingEffects.clear();
     // The owner must reconcile after any framing, timeout, storage or peer failure.
     // Immediate exit also fences this fixture's in-process tools. S3 owns OS process trees.
     process.exit(1);

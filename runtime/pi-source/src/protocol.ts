@@ -25,9 +25,10 @@ export class ProtocolError extends Error {
   constructor(category: string, admission = 'unspecified') { super(category); this.category = category; this.admission = admission; }
 }
 
-// Only the Rust execution owner supplies these dispositions. Unknown or
-// contradictory evidence terminates the transport rather than becoming a
-// recoverable tool error (or success) inside Pi.
+// Only the Rust execution owner supplies these dispositions, and only as the
+// error body of an `execution.request` response. Do not reuse this for any
+// other Pi-to-Rust method: an unknown or contradictory body terminates the
+// transport rather than becoming a recoverable tool error (or success) inside Pi.
 export function effectError(value: unknown): ProtocolError {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid effect error');
   const fields = value as Record<string, unknown>;

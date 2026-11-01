@@ -59,6 +59,14 @@ impl Host {
             .unwrap_or(PiEffectOutcome::Uncertain)
     }
 
+    /// Classify a simulated [`Self::execute_fake_operation`] result.
+    ///
+    /// Do not reuse this for the Linux backend. The no-row arm maps a
+    /// non-transient error to [`crate::PiEffectOutcome::Rejected`] only
+    /// because the simulator commits intent before it applies anything.
+    /// Linux can apply work with no simulated row; copying that arm would
+    /// report a definite rejection for an outcome the simulated journal
+    /// never observed.
     #[cfg(feature = "pi-contract")]
     fn fake_effect_outcome(
         &self,
@@ -66,12 +74,21 @@ impl Host {
         result: Result<ExecutionReceipt>,
     ) -> Result<crate::PiEffectOutcome> {
         use crate::PiEffectOutcome;
+        debug_assert!(
+            matches!(&self.runtime, RuntimeAdapter::Fake(_)),
+            "fake_effect_outcome classifies the simulated journal only; do not reuse it for the Linux backend"
+        );
         // A stale owner cannot read receipts or turn a post-effect error into
         // a definite rejection. Failed evidence reads also remain uncertain.
         self.accept_runtime_binding(&request.binding, &request.binding.mission_id)?;
         let id = request.operation_id()?;
         let hash = request.payload_hash()?;
         if let Some(effect) = self.store.execution_effect(&id)? {
+            // Ownership mismatch stays Rejected. The execute path reports
+            // BindingMismatch, which this probe already maps to Rejected.
+            // Conflict is the same owner identity with a different payload
+            // hash. A Conflict response would also reveal that the operation
+            // ID exists on another mission, attempt, or session.
             if effect.mission_id != request.binding.mission_id
                 || effect.attempt_id != request.binding.attempt_id
                 || effect.session_id != request.binding.session_id
@@ -81,6 +98,13 @@ impl Host {
             if effect.payload_hash != hash {
                 return Ok(PiEffectOutcome::Conflict);
             }
+            // Supersession wins over a completed receipt. The supersede API
+            // refuses completed and not_applied rows, so a completed row that
+            // also has a supersession is not a normal transition. Replay still
+            // stays uncertain rather than reissuing the receipt: a supersession
+            // records that the outcome is unknown. This matches
+            // `execute_fake_operation`, which returns `ExecutionUncertain`
+            // before it would return a stored receipt.
             if self.store.operation_superseded(&id)? {
                 return Ok(PiEffectOutcome::Uncertain);
             }
@@ -102,6 +126,7 @@ impl Host {
         // The simulator cannot apply before its intent commits. Only absence
         // plus a completed semantic refusal establishes non-admission here;
         // storage/transport errors are deliberately still conservative.
+        // Linux replay must not copy this match.
         Ok(match result {
             Err(error) if !error.is_transient() => PiEffectOutcome::Rejected,
             _ => PiEffectOutcome::Uncertain,

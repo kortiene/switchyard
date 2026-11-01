@@ -3,7 +3,10 @@
 use super::*;
 use crate::{PiBridge, PiEffectOutcome};
 use std::path::PathBuf;
+use std::thread;
 use std::time::{Duration, Instant};
+
+const INSPECT_PAUSE: Duration = Duration::from_millis(20);
 
 fn spawn(db: &Path, binding: RuntimeBinding, fixture: &str) -> PiBridge {
     let node = std::env::var_os("SWITCHYARD_PI_NODE")
@@ -47,12 +50,15 @@ fn replay_after_sigkill(uncertain: bool) {
     let pid = bridge.process_id();
     let mut first_request = None;
     let mut original = None;
+    let mut written_paths = Vec::new();
     let mut effect = |value: &Value| {
         if first_request.is_some() {
             // Ignore already-buffered requests after the kill boundary.
+            written_paths.push(written_path(value));
             return PiEffectOutcome::Uncertain;
         }
         let request = request_for(&template, value);
+        written_paths.push(written_path(value));
         if uncertain {
             // Apply once, fail before the receipt commits. The Host records
             // uncertainty and retains its mission-wide execution block.
@@ -91,8 +97,10 @@ fn replay_after_sigkill(uncertain: bool) {
             {
                 break;
             }
+            thread::sleep(INSPECT_PAUSE);
         }
     }
+    drop(effect);
     let mut first_request = first_request.expect("effect must apply before Pi is killed");
     let original = original.unwrap();
     assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 1);
@@ -113,6 +121,7 @@ fn replay_after_sigkill(uncertain: bool) {
     let mut refused_new = 0;
     let mut effect = |value: &Value| {
         let request = request_for(&template, value);
+        written_paths.push(written_path(value));
         let outcome = host.execute_fake_operation_outcome(&request);
         if request.operation_id().unwrap() == first_request.operation_id().unwrap() {
             assert_eq!(
@@ -156,7 +165,9 @@ fn replay_after_sigkill(uncertain: bool) {
             idle = true;
             break;
         }
+        thread::sleep(INSPECT_PAUSE);
     }
+    drop(effect);
     assert!(
         idle,
         "recovered Pi must settle without granting Host authority"
@@ -198,7 +209,24 @@ fn replay_after_sigkill(uncertain: bool) {
     }
     // The fake backend never grants filesystem writes or execution quiescence.
     let worktree = PathBuf::from(snapshot.workspace.unwrap().path);
-    assert_eq!(std::fs::read_dir(worktree).unwrap().count(), 2); // README.md and .git
+    assert!(
+        !written_paths.is_empty(),
+        "the probe must observe the file.write paths it claims were not created"
+    );
+    for path in &written_paths {
+        assert!(
+            !worktree.join(path).exists(),
+            "fake file.write created {path} in {}",
+            worktree.display()
+        );
+    }
+}
+
+fn written_path(effect: &Value) -> String {
+    effect["payload"]["path"]
+        .as_str()
+        .expect("file.write path")
+        .to_string()
 }
 
 #[test]

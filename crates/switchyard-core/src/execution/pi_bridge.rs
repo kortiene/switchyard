@@ -23,9 +23,11 @@ const STDERR_LIMIT: usize = 4096;
 pub enum PiEffectOutcome {
     /// The original durable receipt, including on replay.
     Completed(Value),
-    /// The owner proved this invocation did not admit a new effect.
+    /// This invocation admitted no new effect. An operation ID already stored
+    /// for another mission, attempt, or session is also rejected, so the
+    /// response does not reveal that the identity exists elsewhere.
     Rejected,
-    /// The operation identity is already bound to different immutable input.
+    /// The same owner identity is already bound to a different payload hash.
     Conflict,
     /// Execution may have happened. Reconcile; never automatically reapply.
     Uncertain,

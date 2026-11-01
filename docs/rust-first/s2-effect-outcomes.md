@@ -15,7 +15,7 @@ execution owner. Pi's effect responses are limited to these four forms:
 | --- | --- | --- |
 | `Completed(receipt)` | `result: <original receipt>` | A durable result, reused unchanged on replay |
 | `Rejected` | `error: {category: execution_rejected, admission: rejected}` | This invocation admitted no new effect |
-| `Conflict` | `error: {category: operation_conflict, admission: rejected}` | The same operation identity is bound to different immutable input |
+| `Conflict` | `error: {category: operation_conflict, admission: rejected}` | The same owner identity is bound to a different payload hash |
 | `Uncertain` | `error: {category: execution_uncertain, admission: uncertain}` | Execution may have happened; reconcile or block |
 
 Rejection does not assert that an old operation never ran, clear a mission block,
@@ -29,11 +29,13 @@ An error category alone cannot prove the point at which execution stopped.
 Typed callbacks must obtain their evidence from the execution owner.
 
 The TypeScript transport accepts only the three exact error/category pairs in
-the table. Null, missing fields, contradictory admission, unknown categories,
-and extra error fields terminate the transport; they cannot become success or a
-recoverable tool refusal. Completed results still use the bounded canonical JSON
-transport. Command admission remains governed separately by
-[S2-A](s2-host-outbox.md); this change does not widen its refusal allowlist.
+the table, and only on responses to `execution.request`. The Pi child enqueues
+no other Pi-to-Rust method on that effect queue. Null, missing fields,
+contradictory admission, unknown categories, and extra error fields terminate
+the transport; they cannot become success or a recoverable tool refusal.
+Completed results still use the bounded canonical JSON transport. Command
+admission remains governed separately by [S2-A](s2-host-outbox.md); this change
+does not widen its refusal allowlist.
 
 ## Host evidence and replay
 
@@ -44,12 +46,23 @@ and again before reading evidence. A stale request is refused without exposing
 receipts. Failed evidence reads remain uncertain.
 
 The existing journal binds the operation ID to the Host's immutable request hash.
-A different hash conflicts. A completed row returns its original receipt even
-when a later error or lost reply obscured success. A proven `not_applied` row is
-rejected. Prepared, uncertain, abandoned or superseded effects stay uncertain;
-they are never automatically re-executed. A semantic refusal with no durable
-intent establishes non-admission because the simulator cannot apply before its
-intent commits. Storage/IO errors without evidence remain uncertain.
+A different hash for that same mission, attempt, and session conflicts. An
+operation ID already stored for a different mission, attempt, or session is
+Rejected, not Conflict: Conflict would reveal that the identity exists
+elsewhere, and the execute path reports that case as a binding mismatch. A
+completed row returns its original receipt even when a later error or lost
+reply obscured success, unless that operation has also been superseded.
+Supersession is checked first, so a completed-then-superseded row replays as
+uncertain and does not reissue the receipt. The supersede API refuses completed
+and `not_applied` rows, so that pairing is not a normal transition; replay
+still prefers uncertainty over treating the receipt as durable. A proven
+`not_applied` row is rejected. Prepared, uncertain, abandoned or superseded
+effects stay uncertain; they are never automatically re-executed. A semantic
+refusal with no durable intent establishes non-admission because the simulator
+cannot apply before its intent commits. That no-row rule belongs to the
+simulated classifier only. The Linux backend must not reuse it: Linux can apply
+work that the simulated journal has not recorded. Storage/IO errors without
+evidence remain uncertain.
 
 The test-only wire mapper validates the bundled `file.write` request and binds it
 to the simulated capability and one fixed deadline. PiBridge checks the wire
@@ -88,6 +101,11 @@ The feature-gated tests include:
 - Errors at prepared, applied and completed checkpoints, followed by Host restart;
   only the completed checkpoint can return a durable receipt. Abandoned effects,
   stale generations and unknown storage failures cannot cause automatic reapply.
+  A completed row that also has a supersession replays as uncertain. An operation
+  ID bound to another mission, attempt, or session is rejected, not a conflict.
+  `is_transient()` is pinned for every `Error` variant, including each one
+  `execute_fake_operation` can return, so a storage or IO error cannot become a
+  definite rejection when no simulated row exists.
 - Wire round trips for all four outcomes, conservative legacy callbacks, and
   actual child termination for malformed or contradictory effect errors.
 

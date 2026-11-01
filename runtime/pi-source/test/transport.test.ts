@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { ADAPTER, canonical, effectError, MAX_FRAME, SOURCE, type Binding, type Frame, type Json } from '../src/protocol.ts';
+import { Transport } from '../src/transport.ts';
 
 const binding: Binding = { missionId: 'm', attemptId: 'a', sessionId: 's', generation: 1 };
 const hello = { source: SOURCE, adapter: ADAPTER, maxFrame: MAX_FRAME, maxPending: 16, capabilities: ['durable-admission'] };
@@ -56,6 +57,14 @@ test('shared JSON subset rejects floats, unsafe integers and lone surrogates', (
   assert.equal(canonical({ '\uE000': 1, '\u{10000}': 2, text: 'é\n"\\' }), '{"text":"é\\n\\"\\\\","𐀀":2,"":1}');
   for (const value of [0.5, 1e21, 9_007_199_254_740_992, '\uD800']) assert.throws(() => canonical(value));
   assert.equal(canonical([-9_007_199_254_740_991, 9_007_199_254_740_991]), '[-9007199254740991,9007199254740991]');
+});
+
+test('the effect queue rejects a non-effect Pi-to-Rust method before any write', async () => {
+  const transport = new Transport(binding);
+  await assert.rejects(
+    () => transport.request('runtime.hello', {}),
+    /only execution\.request may wait for an effect response/,
+  );
 });
 
 test('effect errors retain only the three owner-defined dispositions', () => {
