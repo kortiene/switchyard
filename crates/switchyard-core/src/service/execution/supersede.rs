@@ -54,7 +54,7 @@ impl Host {
         // ready and pass S3-A1 verify, and the revision is read again so a
         // stale caller never reaches rekill. The transaction repeats the
         // revision check. A refusal after a kill reports that proof.
-        self.precheck_workspace(&request.binding.attempt_id)?;
+        let _workspace_lease = self.precheck_workspace(&request.binding.attempt_id)?;
         self.recheck_revision_before_kill(request)?;
         let evidence_quiescence = self.fresh_linux_quiescence(
             &request.binding.mission_id,
@@ -225,11 +225,17 @@ impl Host {
         Ok(workspace)
     }
 
-    fn precheck_workspace(&self, attempt_id: &str) -> Result<()> {
+    fn precheck_workspace(&self, attempt_id: &str) -> Result<fs_workspace::WorkspaceLease> {
         let workspace = self.load_ready_workspace(attempt_id)?;
+        // The ledger lock does not replace the workspace ownership protocol.
+        // Validate its marker and filesystem identities, then retain the lease
+        // through rekill, digest generation and the supersession transaction.
+        let lease = fs_workspace::acquire(&workspace)?.ok_or_else(|| Error::WorkspaceBusy {
+            workspace_id: workspace.view.id.clone(),
+        })?;
         let _filters = fs_workspace::FilterCacheScope::enter();
         fs_workspace::verify(&workspace)?;
-        Ok(())
+        Ok(lease)
     }
 
     fn reverify_and_digest(&self, attempt_id: &str) -> Result<(String, String)> {

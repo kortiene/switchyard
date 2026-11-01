@@ -1826,6 +1826,228 @@ fn supersede_of(
 }
 
 #[test]
+fn worktree_digest_distinguishes_raw_line_endings() {
+    let (_dir, host, request) = setup();
+    let workspace = host
+        .snapshot(&request.binding.mission_id)
+        .unwrap()
+        .workspace
+        .unwrap();
+    let tree = Path::new(&workspace.path);
+    std::fs::write(tree.join(".gitattributes"), "data.txt text\n").unwrap();
+    std::fs::write(tree.join("data.txt"), b"hello\n").unwrap();
+    let lf = crate::execution::workspace::content_digest(tree).unwrap();
+    std::fs::write(tree.join("data.txt"), b"hello\r\n").unwrap();
+    let crlf = crate::execution::workspace::content_digest(tree).unwrap();
+    assert_ne!(
+        lf, crlf,
+        "different on-disk bytes must have different evidence digests"
+    );
+}
+
+#[test]
+fn worktree_digest_bypasses_ident_and_encoding_attributes() {
+    let (_dir, host, request) = setup();
+    let workspace = host
+        .snapshot(&request.binding.mission_id)
+        .unwrap()
+        .workspace
+        .unwrap();
+    let tree = Path::new(&workspace.path);
+    std::fs::write(
+        tree.join(".gitattributes"),
+        "data.txt ident\nraw.bin working-tree-encoding=UTF-16LE\n",
+    )
+    .unwrap();
+    // Invalid UTF-16 is still valid raw content evidence; Git add would reject it.
+    std::fs::write(tree.join("raw.bin"), [0xff, 0x00, 0x80]).unwrap();
+    std::fs::write(tree.join("data.txt"), "$Id: first $\n").unwrap();
+    let first = crate::execution::workspace::content_digest(tree).unwrap();
+    std::fs::write(tree.join("data.txt"), "$Id: second $\n").unwrap();
+    let second = crate::execution::workspace::content_digest(tree).unwrap();
+    assert_ne!(first, second, "ident expansion must not be collapsed");
+}
+
+#[cfg(unix)]
+#[test]
+fn worktree_digest_matches_git_for_raw_files_modes_and_symlinks() {
+    use std::os::unix::{
+        ffi::OsStringExt,
+        fs::{PermissionsExt, symlink},
+    };
+    let (dir, host, request) = setup();
+    let workspace = host
+        .snapshot(&request.binding.mission_id)
+        .unwrap()
+        .workspace
+        .unwrap();
+    let tree = Path::new(&workspace.path);
+    let repo = dir.path().join("repo");
+    let outside = dir.path().join("outside");
+    std::fs::write(&outside, "not workspace content").unwrap();
+    // More than two hash batches, including link targets that must not be read.
+    for i in 0..70 {
+        if i % 3 == 0 {
+            symlink(&outside, tree.join(format!("link-{i}"))).unwrap();
+        } else {
+            std::fs::write(tree.join(format!("file-{i}")), [0, i, 0xff]).unwrap();
+        }
+    }
+    let odd = std::ffi::OsString::from_vec(b"odd\tname\n-\xff".to_vec());
+    std::fs::write(tree.join(odd), b"raw\0bytes").unwrap();
+    std::fs::write(tree.join("run"), "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(tree.join("run"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::remove_file(tree.join("README.md")).unwrap();
+    git(tree, &["add", "--all", "--force"]);
+    let expected = Command::new("git")
+        .arg("-C")
+        .arg(tree)
+        .arg("write-tree")
+        .output()
+        .unwrap();
+    assert!(expected.status.success());
+    let expected = String::from_utf8(expected.stdout).unwrap();
+    let index_before = staged(tree);
+    let objects_before = loose_object_count(&repo);
+    let digest = crate::execution::workspace::content_digest(tree).unwrap();
+    assert_eq!(digest, expected.trim());
+    std::fs::write(&outside, "changed outside the workspace").unwrap();
+    assert_eq!(
+        crate::execution::workspace::content_digest(tree).unwrap(),
+        digest
+    );
+    std::fs::set_permissions(tree.join("run"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_ne!(
+        crate::execution::workspace::content_digest(tree).unwrap(),
+        digest
+    );
+    assert_eq!(staged(tree), index_before);
+    assert_eq!(loose_object_count(&repo), objects_before);
+}
+
+#[cfg(unix)]
+#[test]
+fn worktree_digest_refuses_unrepresentable_content_and_cleans_scratch() {
+    for nested in [false, true] {
+        let (_dir, host, request) = setup();
+        let workspace = host
+            .snapshot(&request.binding.mission_id)
+            .unwrap()
+            .workspace
+            .unwrap();
+        let tree = Path::new(&workspace.path);
+        if nested {
+            std::fs::create_dir(tree.join("nested")).unwrap();
+            git(&tree.join("nested"), &["init"]);
+        } else {
+            assert!(
+                Command::new("mkfifo")
+                    .arg(tree.join("fifo"))
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let error = crate::execution::workspace::content_digest(tree).unwrap_err();
+        assert!(
+            error.to_string().contains(if nested {
+                "nested Git"
+            } else {
+                "special files"
+            }),
+            "{error}"
+        );
+        assert!(
+            !std::fs::read_dir(tree.parent().unwrap())
+                .unwrap()
+                .any(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("switchyard-digest-")
+                })
+        );
+    }
+}
+
+#[test]
+fn supersede_refuses_missing_owner_marker() {
+    let (_dir, mut host, request, abandon) = abandoned_effect();
+    let workspace = host
+        .store
+        .load_workspace(&request.binding.attempt_id)
+        .unwrap()
+        .unwrap();
+    std::fs::remove_file(workspace.slot().join("owner.json")).unwrap();
+    assert!(crate::execution::workspace::acquire(&workspace).is_err());
+    let sup = supersede_of(&host, &request, &abandon, "review-missing-marker");
+    let result = host.supersede_execution(&sup);
+    let after = host.snapshot(&request.binding.mission_id).unwrap();
+    assert!(
+        result.is_err() && after.execution_blocked && after.execution_supersessions.is_empty(),
+        "missing marker: accepted={}, blocked={}, supersessions={}",
+        result.is_ok(),
+        after.execution_blocked,
+        after.execution_supersessions.len()
+    );
+}
+
+#[test]
+fn supersede_refuses_changed_owner_marker() {
+    let (_dir, mut host, request, abandon) = abandoned_effect();
+    let workspace = host
+        .store
+        .load_workspace(&request.binding.attempt_id)
+        .unwrap()
+        .unwrap();
+    std::fs::write(workspace.slot().join("owner.json"), "{}").unwrap();
+    assert!(crate::execution::workspace::acquire(&workspace).is_err());
+    let sup = supersede_of(&host, &request, &abandon, "review-changed-marker");
+    let result = host.supersede_execution(&sup);
+    let after = host.snapshot(&request.binding.mission_id).unwrap();
+    assert!(
+        result.is_err() && after.execution_blocked && after.execution_supersessions.is_empty(),
+        "changed marker: accepted={}, blocked={}, supersessions={}",
+        result.is_ok(),
+        after.execution_blocked,
+        after.execution_supersessions.len()
+    );
+}
+
+#[test]
+fn supersede_refuses_held_workspace_lease() {
+    let (_dir, mut host, request, abandon) = abandoned_effect();
+    let workspace = host
+        .store
+        .load_workspace(&request.binding.attempt_id)
+        .unwrap()
+        .unwrap();
+    let lease = crate::execution::workspace::acquire(&workspace)
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::execution::workspace::acquire(&workspace)
+            .unwrap()
+            .is_none()
+    );
+    let sup = supersede_of(&host, &request, &abandon, "review-held-lease");
+    let result = host.supersede_execution(&sup);
+    assert_eq!(result.as_ref().unwrap_err().category(), "workspace_busy");
+    let after = host.snapshot(&request.binding.mission_id).unwrap();
+    assert!(
+        result.is_err() && after.execution_blocked && after.execution_supersessions.is_empty(),
+        "held lease: accepted={}, blocked={}, supersessions={}",
+        result.is_ok(),
+        after.execution_blocked,
+        after.execution_supersessions.len()
+    );
+    assert_eq!(after.revision, sup.expected_revision);
+    drop(lease);
+    host.supersede_execution(&sup).unwrap();
+}
+
+#[test]
 fn supersede_refuses_nonempty_quiescence_document() {
     use crate::persistence::linux_execution::fresh_quiescence_is_empty;
     let empty = serde_json::json!({"proven": true, "populated": 0, "reason": "populated 0"});

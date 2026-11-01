@@ -1869,51 +1869,82 @@ fn supersede_refuses_live_supervisor_bad_leaf_and_unproven_sibling() {
 }
 
 #[test]
-fn supersede_refuses_an_unready_workspace_before_killing_the_leaf() {
-    let mut world = World::new();
-    let (mut host, mission, resolve, abandon) = abandoned_entered(&mut world);
-    let db = world.db();
-    let path = cgroup_path(&db, &resolve.operation_id);
-    let effect_before = effect_row(&db, &resolve.operation_id);
-    let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
-    let pid = child.id();
-    fs::write(Path::new(&path).join("cgroup.procs"), format!("{pid}\n")).unwrap_or_else(|error| {
+fn supersede_refuses_an_unready_or_unowned_workspace_before_killing_the_leaf() {
+    for case in ["unready", "missing_marker", "changed_marker", "held_lease"] {
+        let mut world = World::new();
+        let (mut host, mission, resolve, abandon) = abandoned_entered(&mut world);
+        let db = world.db();
+        let path = cgroup_path(&db, &resolve.operation_id);
+        let effect_before = effect_row(&db, &resolve.operation_id);
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let move_result = fs::write(Path::new(&path).join("cgroup.procs"), format!("{pid}\n"));
+        if let Err(error) = move_result {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "could not place a sleeper in the leaf ({error}); refusing to skip the kill-order check"
+            );
+        }
+        let workspace = host.snapshot(&mission).unwrap().workspace.unwrap();
+        let slot = Path::new(&workspace.path).parent().unwrap();
+        let mut held_lease = None;
+        match case {
+            "unready" => {
+                rusqlite::Connection::open(&db)
+                    .unwrap()
+                    .execute(
+                        "UPDATE workspaces SET state='uncertain' WHERE attempt_id=?1",
+                        [&resolve.binding.attempt_id],
+                    )
+                    .unwrap();
+            }
+            "missing_marker" => fs::remove_file(slot.join("owner.json")).unwrap(),
+            "changed_marker" => fs::write(slot.join("owner.json"), "{}").unwrap(),
+            "held_lease" => {
+                let file = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(slot.join("owner.lock"))
+                    .unwrap();
+                file.try_lock().unwrap();
+                held_lease = Some(file);
+            }
+            _ => unreachable!(),
+        }
+        let sup = supersede_linux(&host, &mission, &resolve, &abandon, "supersede-before-kill");
+        let error = host.supersede_execution(&sup).unwrap_err();
+        let text = error.to_string();
+        let expected = match case {
+            "unready" => "ready workspace",
+            "held_lease" => "workspace_busy",
+            _ => "ownership marker",
+        };
+        assert!(
+            text.contains(expected) || error.category() == expected,
+            "{case}: {text}"
+        );
+        assert!(
+            !text.contains("quiescence was proved") && !text.contains("fresh_cgroup_kill"),
+            "{text}"
+        );
+        // A killed child stays in /proc as a zombie until this parent reaps it.
+        // try_wait reaps that zombie, so None means the sleeper is still running.
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the leaf was killed before the workspace check"
+        );
+        assert_eq!(effect_row(&db, &resolve.operation_id), effect_before);
+        assert!(host.snapshot(&mission).unwrap().execution_blocked);
+        assert!(
+            host.snapshot(&mission)
+                .unwrap()
+                .execution_supersessions
+                .is_empty()
+        );
         let _ = child.kill();
         let _ = child.wait();
-        panic!(
-            "could not place a sleeper in the leaf ({error}); refusing to skip the kill-order check"
-        );
-    });
-    rusqlite::Connection::open(&db)
-        .unwrap()
-        .execute(
-            "UPDATE workspaces SET state='uncertain' WHERE attempt_id=?1",
-            [&resolve.binding.attempt_id],
-        )
-        .unwrap();
-    let sup = supersede_linux(&host, &mission, &resolve, &abandon, "supersede-before-kill");
-    let error = host.supersede_execution(&sup).unwrap_err();
-    let text = error.to_string();
-    assert!(text.contains("ready workspace"), "{text}");
-    assert!(
-        !text.contains("quiescence was proved") && !text.contains("fresh_cgroup_kill"),
-        "{text}"
-    );
-    // A killed child stays in /proc as a zombie until this parent reaps it.
-    // try_wait reaps that zombie, so None means the sleeper is still running.
-    assert!(
-        child.try_wait().unwrap().is_none(),
-        "the leaf was killed before the workspace check"
-    );
-    assert_eq!(effect_row(&db, &resolve.operation_id), effect_before);
-    assert!(host.snapshot(&mission).unwrap().execution_blocked);
-    assert!(
-        host.snapshot(&mission)
-            .unwrap()
-            .execution_supersessions
-            .is_empty()
-    );
-    let _ = child.kill();
-    let _ = child.wait();
-    world.assert_origin();
+        drop(held_lease);
+        world.assert_origin();
+    }
 }

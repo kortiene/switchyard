@@ -69,12 +69,16 @@ retire one, and it does not add an S5 verification gate.
 
 The audit records a content digest of what is on disk. It is a Git tree id
 built in a temporary index (`GIT_INDEX_FILE`), never the real index and never
-`index.lock`. The index is seeded with `read-tree HEAD` and then
-`git add --all --force`. **Ignored files are included**, so a leftover cannot
-hide by being listed in `.gitignore`. That covers tracked files at their
-on-disk bytes, untracked files, and `.sy-tmp-*` leftovers whether or not they
-are ignored. On-disk bytes win when the real index holds a different staged
-blob. New blobs and the tree are written only to a scratch
+`index.lock`. An empty temporary index is populated with raw blobs using
+`git hash-object --no-filters` and `git update-index -z --index-info`.
+Files are enumerated from disk, so **ignored files are included**, along with
+untracked files and `.sy-tmp-*` leftovers. On-disk bytes win when the real
+index holds a different staged blob. Text normalization, ident expansion,
+encoding attributes and filter drivers cannot transform the hashed bytes.
+Regular files retain their executable bit; symlinks hash their target bytes
+without following them. As with Git trees, empty directories are omitted.
+Nested Git repositories and special files are refused rather than omitted
+from the evidence. New blobs and the tree are written only to a scratch
 `GIT_OBJECT_DIRECTORY` beside the worktree, created mode `0700` and refused if
 that path already exists. The repository object store is only an alternate.
 The scratch directory is not the shared temp directory. Drop deletes it. A
@@ -88,9 +92,12 @@ gets its own lock, so supersession compares the workspace's recorded ledger
 path with this Host's path, the same check workspace preparation uses, before
 any cgroup kill.
 
-The workspace `ready` check and S3-A1 verify run before any cgroup kill, and
-again after quiescence together with the digest. A refusal after a kill keeps
-the block and includes that kill evidence in the error. Sibling leaves are
+Before any cgroup kill, the Host checks `ready`, acquires the workspace lease
+(validating `owner.json`, slot identity and lease identity), and runs S3-A1
+verify. A held lease returns `workspace_busy`. The lease stays held through
+quiescence, the second verification, digest generation and the audit commit.
+A refusal after a kill keeps the block and includes that kill evidence in
+the error. Sibling leaves are
 re-killed only while this Host holds the exclusive owner flock
 (`execution/owner.rs`); a second live Host cannot open the ledger.
 
