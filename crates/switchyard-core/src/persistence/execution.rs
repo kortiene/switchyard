@@ -1,6 +1,32 @@
 use super::*;
 use crate::{ExecutionReceipt, ExecutionRequest};
 
+pub(crate) fn identity_conflict(operation_id: &str, error: rusqlite::Error) -> Error {
+    if error
+        .to_string()
+        .contains("operation identity already used")
+    {
+        Error::OperationConflict {
+            operation_id: operation_id.to_string(),
+        }
+    } else {
+        Error::storage(error)
+    }
+}
+
+pub(crate) fn resolution_command_conflict(command_id: &str, error: rusqlite::Error) -> Error {
+    if error
+        .to_string()
+        .contains("resolution command identity already used")
+    {
+        Error::CommandConflict {
+            command_id: command_id.to_string(),
+        }
+    } else {
+        Error::storage(error)
+    }
+}
+
 pub(crate) struct EffectRecord {
     pub mission_id: String,
     pub attempt_id: String,
@@ -77,7 +103,7 @@ impl Store {
         let tx = self.immediate()?;
         tx.execute("INSERT INTO execution_effects(operation_id,mission_id,attempt_id,session_id,payload_hash,request_json,started_generation,state,created_at)
             VALUES (?1,?2,?3,?4,?5,?6,?7,'prepared',?8)",
-            params![id, request.binding.mission_id, request.binding.attempt_id, request.binding.session_id, hash, payload, request.binding.generation, now_ms()]).map_err(Error::storage)?;
+            params![id, request.binding.mission_id, request.binding.attempt_id, request.binding.session_id, hash, payload, request.binding.generation, now_ms()]).map_err(|error| identity_conflict(&id, error))?;
         tx.commit().map_err(Error::storage)
     }
     pub(crate) fn complete_execution(
@@ -156,6 +182,7 @@ impl Store {
         if user_version(&self.conn)? < 4 {
             return Ok(false);
         }
-        self.conn.query_row("SELECT EXISTS(SELECT 1 FROM execution_effects WHERE mission_id=?1 AND state IN ('prepared', 'uncertain'))",[mission],|r| r.get(0)).map_err(Error::storage)
+        let simulated: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM execution_effects WHERE mission_id=?1 AND state IN ('prepared', 'uncertain'))",[mission],|r| r.get(0)).map_err(Error::storage)?;
+        Ok(simulated || self.linux_execution_blocked(mission)?)
     }
 }

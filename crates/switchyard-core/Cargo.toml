@@ -9,9 +9,11 @@ description = "Switchyard mission authority: transitions, ledger, and fake runti
 
 [features]
 pi-contract = []
+linux-execution = ["dep:rustix"]
 
 [dependencies]
 rusqlite = { version = "0.37", features = ["bundled"] }
+rustix = { version = "1", optional = true, default-features = false, features = ["std", "fs", "process"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"

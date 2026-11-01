@@ -20,6 +20,7 @@ use crate::transitions::target_spec;
 use crate::verification::NewVerification;
 
 mod execution;
+mod linux_execution;
 mod workspace;
 
 /// Open the host, take the single-host lock, and reuse the active attempt.
@@ -34,6 +35,8 @@ pub struct Host {
     ledger_path: PathBuf,
     // Process-local, Host-observed proof; never reconstructed from operator claims.
     execution_evidence: execution::ExecutionEvidence,
+    #[cfg(all(feature = "linux-execution", target_os = "linux"))]
+    linux: Option<linux_execution::LinuxSession>,
 }
 
 pub struct CreateMission {
@@ -132,6 +135,8 @@ pub struct MissionSnapshot {
     pub workspace: Option<crate::WorkspaceView>,
     pub execution_effects: Vec<crate::ExecutionView>,
     pub execution_resolutions: Vec<Value>,
+    pub linux_execution_effects: Vec<crate::LinuxExecutionView>,
+    pub linux_execution_resolutions: Vec<Value>,
     pub execution_blocked: bool,
     pub quarantined: Vec<(i64, String, String, String)>,
 }
@@ -187,7 +192,14 @@ impl MissionSnapshot {
                 "frame": frame,
             })).collect::<Vec<_>>(),
         });
+        value["linuxExecutionEffects"] = json!(
+            self.linux_execution_effects
+                .iter()
+                .map(crate::LinuxExecutionView::to_json)
+                .collect::<Vec<_>>()
+        );
         value["executionResolutions"] = json!(self.execution_resolutions);
+        value["linuxExecutionResolutions"] = json!(self.linux_execution_resolutions);
         value["executionBlocked"] = json!(self.execution_blocked);
         value["nextSteps"] = json!(self.next_steps());
         value
@@ -218,6 +230,14 @@ impl MissionSnapshot {
                 steps.push("Workspace is not verified for the current owner. Explicit recovery is required before work dispatch.".into());
             }
             steps.push("Status is read-only and does not probe the workspace lease or Git; recorded readiness is not a current filesystem or quiescence check.".into());
+        }
+        if self.linux_execution_effects.iter().any(|effect| {
+            matches!(
+                effect.state.as_str(),
+                "prepared" | "entered" | "running" | "uncertain"
+            )
+        }) {
+            steps.push("Linux execution evidence is under linuxExecutionEffects. not_applied requires a committed intent that was never released (no GO marker), no backend-entered marker or receipt, and a matching empty cgroup (same path, device, inode and boot id, populated 0). completed requires the original Host-captured receipt plus that same quiescence. Anything else stays uncertain. Abandonment is final, keeps the block, and does not authorize another writer, workspace reuse, verification or publication. A superseded generation cannot start, settle or read the result. There is no CLI execution command and the simulated abandon-execution command cannot supply this proof. Missing, replaced or nonempty cgroups fail closed. Reboot recovery is out of scope.".into());
         }
         if self.execution_blocked {
             steps.push("Unresolved execution effects still block pause/cancel completion, recovery and workspace reuse. Inspect each block and its evidence protocol (#125 for execution effects); an abandoned effect remains blocking.".into());
@@ -324,6 +344,8 @@ impl Host {
             lock,
             ledger_path: db_path.to_path_buf(),
             execution_evidence: Default::default(),
+            #[cfg(all(feature = "linux-execution", target_os = "linux"))]
+            linux: None,
         })
     }
 
@@ -571,6 +593,16 @@ impl Host {
     /// workspace is not verified again.
     pub fn dispatch_pending(&mut self, mission_id: &str) -> Result<usize> {
         self.reconcile_execution(mission_id)?;
+        if self.store.linux_execution_blocked(mission_id)? {
+            // Stop delivery still runs. Git verification waits until the
+            // recorded cgroup is empty and the effect is settled or abandoned.
+            self.dispatch_stops(mission_id)?;
+            return Err(Error::ExecutionBlocked {
+                mission_id: mission_id.to_string(),
+                detail: "unresolved linux execution effects; workspace was not verified or reused"
+                    .into(),
+            });
+        }
         match self.recover_workspace(mission_id) {
             Ok(_) => self.dispatch_reconciled(mission_id),
             Err(error) if error.is_isolated_workspace_failure() => {
@@ -588,6 +620,16 @@ impl Host {
     /// does not inspect or mutate a workspace, apply effects, or complete a stop.
     /// Pi stop delivery remains behind its existing S2/Track B contract.
     pub fn dispatch_stops(&mut self, mission_id: &str) -> Result<usize> {
+        let pending = self.store.list_commands(mission_id)?;
+        let stop_admitted = pending.iter().any(|command| {
+            command.state == CommandState::Pending
+                && matches!(command.kind, CommandKind::Pause | CommandKind::Cancel)
+        });
+        // A live Linux exec stays running until it finishes, its deadline, or
+        // an admitted Pause/Cancel. Ordinary dispatch must not kill it.
+        if stop_admitted {
+            self.terminate_linux_writers(mission_id)?;
+        }
         self.reconcile_execution(mission_id)?;
         if !matches!(self.runtime, RuntimeAdapter::Fake(_)) {
             return Ok(0);
@@ -864,6 +906,15 @@ impl Host {
     /// host-level failures abort before either runs.
     pub fn recover(&mut self, mission_id: &str) -> Result<MissionSnapshot> {
         self.reconcile_execution(mission_id)?;
+        if self.store.linux_execution_blocked(mission_id)? {
+            self.dispatch_stops(mission_id)?;
+            self.poll_runtime(mission_id)?;
+            return Err(Error::ExecutionBlocked {
+                mission_id: mission_id.to_string(),
+                detail: "unresolved linux execution effects; workspace was not verified or reused"
+                    .into(),
+            });
+        }
         let workspace_error = match self.recover_workspace(mission_id) {
             Ok(_) => None,
             Err(error) if error.is_isolated_workspace_failure() => Some(error),
@@ -1544,6 +1595,8 @@ fn snapshot_from(store: &Store, mission_id: &str, generation: u64) -> Result<Mis
         workspace,
         execution_effects: store.execution_views(mission_id)?,
         execution_resolutions: store.execution_resolutions(mission_id)?,
+        linux_execution_effects: store.linux_views(mission_id)?,
+        linux_execution_resolutions: store.linux_resolutions(mission_id)?,
         execution_blocked: store.ops_blocked(mission_id)?,
         quarantined: store.list_quarantine(mission_id)?,
     })

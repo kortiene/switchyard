@@ -102,3 +102,8 @@ operations, terminal immutability, rollback on audit failure and v5 upgrade.
 Existing SIGKILL boundary tests remain in the execution suite. The new lost-reply
 tests discard the response and reopen the Host; they do not claim power-loss
 or OS process-quiescence coverage.
+
+Real Linux effects use a separate journal and the policy in
+[s3-linux-execution-contract.md](s3-linux-execution-contract.md). The simulated
+abandonment command cannot supply that proof. Superseding an abandoned decision
+stays open.

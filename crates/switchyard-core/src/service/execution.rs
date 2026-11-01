@@ -18,6 +18,7 @@ impl Host {
                 self.uncertainty(&mission, AttentionReason::ExecutionUncertain)?;
             }
         }
+        self.reconcile_linux(mission_id)?;
         Ok(())
     }
 
