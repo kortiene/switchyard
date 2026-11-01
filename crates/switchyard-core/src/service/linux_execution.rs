@@ -74,7 +74,14 @@ mod os {
             let _ = cgroup::kill_and_prove(&self.cgroup, Duration::from_secs(2));
             self.stdin.take();
             let _ = self.child.kill();
-            let _ = self.child.wait();
+            let started = std::time::Instant::now();
+            loop {
+                match self.child.try_wait() {
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) if started.elapsed() > Duration::from_secs(2) => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                }
+            }
         }
     }
 

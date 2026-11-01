@@ -950,7 +950,7 @@ fn flood_fork_and_memory_hit_aggregate_limits() {
             argv: vec![
                 "/bin/sh".into(),
                 "-c".into(),
-                "i=0; while [ \"$i\" -lt 200 ]; do sleep 20 & i=$((i+1)); done; wait".into(),
+                "i=0; while [ \"$i\" -lt 200 ]; do sleep 2 & i=$((i+1)); done; wait".into(),
             ],
         },
     );

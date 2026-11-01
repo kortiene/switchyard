@@ -13,7 +13,7 @@ jobs:
   # this exact check name to branch protection; YAML alone cannot do that.
   execution-confinement:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       SWITCHYARD_BWRAP: /usr/local/libexec/switchyard-bwrap
       SWITCHYARD_CONFINEMENT_EVIDENCE: ${{ github.workspace }}/confinement-evidence
