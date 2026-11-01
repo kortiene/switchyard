@@ -84,3 +84,7 @@ Its extra tests are partial S2 evidence; the regular mission CLI is unchanged.
 The [S2-A Host/outbox probe](../../docs/rust-first/s2-host-outbox.md) uses the same
 pinned faux child with the real Rust ledger. It adds deterministic admission-gap
 crashes and recovery tests; S2 remains NO-GO.
+
+The [S2-B effect probe](../../docs/rust-first/s2-effect-outcomes.md) adds typed
+effect outcomes and tests lost replies and uncertain effects against the real
+Host simulated journal. It keeps the same product and S2 restrictions.

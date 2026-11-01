@@ -48,12 +48,12 @@ pub use domain::{
     validated_recovery_target,
 };
 pub use error::{Error, Result};
-#[cfg(feature = "pi-contract")]
-pub use execution::PiBridge;
 pub use execution::{
     FakeRuntime, RuntimeBinding, RuntimeNotification, inspect_repo, lock_path, operation_id,
     parse_notification,
 };
+#[cfg(feature = "pi-contract")]
+pub use execution::{PiBridge, PiEffectOutcome};
 pub use service::{
     AdmitRequest, AdmitResult, CommandView, CreateMission, DeliveryView, Host, MissionSnapshot,
     NotifyOutcome, journal_path,

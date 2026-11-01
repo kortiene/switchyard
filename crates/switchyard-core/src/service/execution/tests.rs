@@ -4,6 +4,9 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::process::Command;
 
+#[cfg(feature = "pi-contract")]
+mod pi_effects;
+
 fn git(repo: &Path, args: &[&str]) {
     let out = Command::new("git")
         .arg("-C")
@@ -482,6 +485,11 @@ fn deadline_between_intent_and_apply_is_definite_and_nonblocking() {
         state(&dir.path().join("mission.sqlite"), &id),
         "not_applied"
     );
+    #[cfg(feature = "pi-contract")]
+    assert_eq!(
+        host.execute_fake_operation_outcome(&request),
+        crate::PiEffectOutcome::Rejected
+    );
     assert_eq!(
         host.snapshot(&request.binding.mission_id).unwrap().phase,
         Phase::Implementing
@@ -839,6 +847,15 @@ fn resolution_proofs_settle_once_and_replay_after_restart_without_execution() {
         } else {
             assert_eq!(replay.unwrap_err().category(), "execution_not_applied");
         }
+        #[cfg(feature = "pi-contract")]
+        assert_eq!(
+            host.execute_fake_operation_outcome(&request),
+            if decision == Completed {
+                crate::PiEffectOutcome::Completed(audit["evidence"]["receipt"].clone())
+            } else {
+                crate::PiEffectOutcome::Rejected
+            }
+        );
         let mut changed = resolve.clone();
         changed.rationale = "changed decision".into();
         assert_eq!(
@@ -1791,6 +1808,394 @@ fn head_sha(path: &Path) -> Vec<u8> {
 fn worktree_admin(tree: &Path) -> std::path::PathBuf {
     let dot = std::fs::read_to_string(tree.join(".git")).unwrap();
     std::path::PathBuf::from(dot.trim().strip_prefix("gitdir: ").unwrap())
+}
+
+/// `fake_effect_outcome` maps a non-transient error with no simulated row to
+/// Rejected. That is sound only because the simulator commits intent before
+/// apply. Storage, git, and a busy workspace must stay transient; otherwise an
+/// error returned before a simulated row is visible would become a definite
+/// rejection. The match is exhaustive so a new error cannot skip this decision.
+/// `execute_fake_operation` returns the storage, git, workspace, guard, binding,
+/// deadline, conflict, and settlement variants below, directly or wrapped in
+/// `WithContext`.
+fn simulated_no_row_error_is_transient(error: &Error) -> bool {
+    match error {
+        Error::WithContext { source, .. } => simulated_no_row_error_is_transient(source),
+        Error::Storage { .. } | Error::GitFailed { .. } | Error::WorkspaceBusy { .. } => true,
+        Error::IllegalTransition { .. }
+        | Error::TerminalImmutable { .. }
+        | Error::StaleRevision { .. }
+        | Error::BindingMismatch { .. }
+        | Error::SecondActiveOwner
+        | Error::WorkspaceUncertain { .. }
+        | Error::CommandConflict { .. }
+        | Error::ExecutionDeadlineExceeded { .. }
+        | Error::ExecutionBlocked { .. }
+        | Error::ExecutionNotApplied { .. }
+        | Error::ExecutionUncertain { .. }
+        | Error::OperationConflict { .. }
+        | Error::StaleGeneration { .. }
+        | Error::RepairLimitExhausted { .. }
+        | Error::UsageLimitExhausted { .. }
+        | Error::AdmissionRejected { .. }
+        | Error::GuardFailed { .. }
+        | Error::UnknownNotification { .. }
+        | Error::NotFound
+        | Error::ActiveMissionExists
+        | Error::Canonical { .. } => false,
+    }
+}
+
+#[test]
+fn execute_fake_operation_pins_is_transient_for_every_error_it_can_return() {
+    let errors = [
+        Error::storage("disk"),
+        Error::git("inspect", None),
+        Error::git("status", Some(1)),
+        Error::WorkspaceBusy {
+            workspace_id: "ws".into(),
+        },
+        Error::storage("disk").with_context("could not record execution uncertainty"),
+        Error::guard("simulated execution requires FakeRuntime"),
+        Error::guard("invalid or oversized simulated write")
+            .with_context("could not record execution uncertainty"),
+        Error::BindingMismatch {
+            detail: "effect binding mismatch".into(),
+        },
+        Error::StaleGeneration {
+            expected: 2,
+            actual: 1,
+        },
+        Error::ExecutionDeadlineExceeded {
+            operation_id: "op".into(),
+        },
+        Error::ExecutionBlocked {
+            mission_id: "m".into(),
+            detail: "unresolved execution effects".into(),
+        },
+        Error::ExecutionNotApplied {
+            operation_id: "op".into(),
+        },
+        Error::ExecutionUncertain {
+            operation_id: "op".into(),
+        },
+        Error::OperationConflict {
+            operation_id: "op".into(),
+        },
+        Error::NotFound,
+        Error::Canonical {
+            detail: "rejected".into(),
+        },
+        Error::WorkspaceUncertain {
+            workspace_id: "ws".into(),
+            detail: "verify".into(),
+        },
+        Error::SecondActiveOwner,
+        Error::IllegalTransition {
+            from: "implementing".into(),
+            command: "detect_uncertainty".into(),
+        },
+        Error::TerminalImmutable {
+            phase: "cancelled".into(),
+        },
+        Error::StaleRevision {
+            expected: 1,
+            actual: 2,
+        },
+        Error::CommandConflict {
+            command_id: "c".into(),
+        },
+        Error::ActiveMissionExists,
+        Error::RepairLimitExhausted { count: 1, max: 1 },
+        Error::UsageLimitExhausted { count: 1, max: 1 },
+        Error::AdmissionRejected {
+            category: "busy".into(),
+        },
+        Error::UnknownNotification {
+            kind: "nope".into(),
+        },
+    ];
+    for error in &errors {
+        assert_eq!(
+            error.is_transient(),
+            simulated_no_row_error_is_transient(error),
+            "{error:?}"
+        );
+    }
+
+    let (_dir, mut host, request) = setup();
+    let mut stale = request.clone();
+    stale.binding.generation = 0;
+    let mut escaped = request.clone();
+    escaped.operation = ExecutionOperation::WriteFile {
+        path: "../escape".into(),
+        content: "no".into(),
+    };
+    let mut other_attempt = request.clone();
+    other_attempt.binding.attempt_id = "other-attempt".into();
+    let mut expired = request.clone();
+    expired.deadline_ms = 0;
+    let returned = [
+        host.execute_fake_operation(&stale).unwrap_err(),
+        host.execute_fake_operation(&escaped).unwrap_err(),
+        host.execute_fake_operation(&other_attempt).unwrap_err(),
+        host.execute_fake_operation(&expired).unwrap_err(),
+    ];
+    for error in &returned {
+        assert!(
+            !error.is_transient(),
+            "semantic refusal became transient: {error:?}"
+        );
+        assert_eq!(
+            error.is_transient(),
+            simulated_no_row_error_is_transient(error),
+            "{error:?}"
+        );
+    }
+    let completed = host.execute_fake_operation(&request).unwrap();
+    let mut changed = request.clone();
+    changed.operation = ExecutionOperation::WriteFile {
+        path: "out.txt".into(),
+        content: "different".into(),
+    };
+    let conflict = host.execute_fake_operation(&changed).unwrap_err();
+    assert_eq!(conflict.category(), "operation_conflict");
+    assert!(!conflict.is_transient());
+    assert_eq!(host.execute_fake_operation(&request).unwrap(), completed);
+}
+
+#[cfg(feature = "pi-contract")]
+#[test]
+fn typed_effect_outcomes_use_ledger_evidence_and_preserve_conflicts() {
+    use crate::PiEffectOutcome;
+    let (_dir, mut host, request) = setup();
+    let mut invalid = request.clone();
+    invalid.operation = ExecutionOperation::WriteFile {
+        path: "../escape".into(),
+        content: "no".into(),
+    };
+    assert_eq!(
+        host.execute_fake_operation_outcome(&invalid),
+        PiEffectOutcome::Rejected
+    );
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 0);
+    assert!(
+        host.snapshot(&request.binding.mission_id)
+            .unwrap()
+            .execution_effects
+            .is_empty()
+    );
+
+    let first = host.execute_fake_operation_outcome(&request);
+    assert!(matches!(first, PiEffectOutcome::Completed(_)));
+    assert_eq!(host.execute_fake_operation_outcome(&request), first);
+    let before = host
+        .snapshot(&request.binding.mission_id)
+        .unwrap()
+        .to_json();
+    let mut changed = request.clone();
+    changed.operation = ExecutionOperation::WriteFile {
+        path: "out.txt".into(),
+        content: "different".into(),
+    };
+    assert_eq!(
+        host.execute_fake_operation_outcome(&changed),
+        PiEffectOutcome::Conflict
+    );
+    assert_eq!(host.execute_fake_operation_outcome(&request), first);
+    let mut stale = request.clone();
+    stale.binding.generation = 0;
+    assert_eq!(
+        host.execute_fake_operation_outcome(&stale),
+        PiEffectOutcome::Rejected
+    );
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 1);
+    assert_eq!(
+        host.snapshot(&request.binding.mission_id)
+            .unwrap()
+            .to_json(),
+        before
+    );
+}
+
+#[cfg(feature = "pi-contract")]
+#[test]
+fn typed_effect_outcomes_keep_post_effect_errors_uncertain_until_durable_receipt() {
+    use crate::PiEffectOutcome;
+    for at in ["prepared", "effect", "completed"] {
+        for storage_error in [false, true] {
+            let (dir, mut host, mut request) = setup();
+            let result = host.execute_fake_at(&request, |checkpoint| {
+                if checkpoint != at {
+                    return Ok(());
+                }
+                Err(if storage_error {
+                    Error::storage("injected loss")
+                } else {
+                    Error::guard("injected loss")
+                })
+            });
+            let observed = host.fake_effect_outcome(&request, result).unwrap();
+            if at == "completed" {
+                assert!(matches!(observed, PiEffectOutcome::Completed(_)));
+            } else {
+                assert_eq!(observed, PiEffectOutcome::Uncertain);
+            }
+            assert_eq!(
+                host.runtime_mut().unwrap().simulated_effect_count(),
+                usize::from(at != "prepared")
+            );
+            drop(host);
+            let mut recovered = Host::open(&dir.path().join("mission.sqlite")).unwrap();
+            request.binding.generation = recovered.generation();
+            assert_eq!(recovered.execute_fake_operation_outcome(&request), observed);
+            assert_eq!(recovered.runtime_mut().unwrap().simulated_effect_count(), 0);
+            assert_eq!(
+                recovered
+                    .snapshot(&request.binding.mission_id)
+                    .unwrap()
+                    .execution_blocked,
+                at != "completed"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "pi-contract")]
+#[test]
+fn typed_effect_outcomes_preserve_abandonment_and_unknown_storage_failures() {
+    use crate::PiEffectOutcome;
+    let (dir, mut host, mut request, _abandon) = abandoned_effect();
+    assert_eq!(
+        host.execute_fake_operation_outcome(&request),
+        PiEffectOutcome::Uncertain
+    );
+    assert!(
+        host.snapshot(&request.binding.mission_id)
+            .unwrap()
+            .execution_blocked
+    );
+    let mut fresh = request.clone();
+    fresh.effect_key = "new-effect".into();
+    assert_eq!(
+        host.execute_fake_operation_outcome(&fresh),
+        PiEffectOutcome::Rejected
+    );
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 1);
+    assert_eq!(
+        host.fake_effect_outcome(&fresh, Err(Error::storage("unknown storage state")))
+            .unwrap(),
+        PiEffectOutcome::Uncertain
+    );
+    drop(host);
+    let mut host = Host::open(&dir.path().join("mission.sqlite")).unwrap();
+    request.binding.generation = host.generation();
+    assert_eq!(
+        host.execute_fake_operation_outcome(&request),
+        PiEffectOutcome::Uncertain
+    );
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 0);
+    assert!(
+        host.snapshot(&request.binding.mission_id)
+            .unwrap()
+            .execution_blocked
+    );
+}
+
+#[cfg(feature = "pi-contract")]
+#[test]
+fn completed_row_with_a_supersession_replays_as_uncertain() {
+    use crate::PiEffectOutcome;
+    let (dir, mut host, request) = setup();
+    let completed = host.execute_fake_operation_outcome(&request);
+    assert!(matches!(completed, PiEffectOutcome::Completed(_)));
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 1);
+    // The supersede API refuses a completed row. Insert the pairing the replay
+    // rule still has to classify: supersession wins, and the receipt is not reissued.
+    let inserted = Connection::open(dir.path().join("mission.sqlite"))
+        .unwrap()
+        .execute(
+            "INSERT INTO execution_supersessions(
+                command_id, operation_id, journal, abandonment_command_id, request_hash, audit_json
+             ) VALUES ('completed-supersede', ?1, 'simulated', 'completed-abandon', 'sha256:forced', '{}')",
+            [request.operation_id().unwrap()],
+        )
+        .unwrap();
+    assert_eq!(inserted, 1);
+    assert_eq!(
+        host.execute_fake_operation(&request)
+            .unwrap_err()
+            .category(),
+        "execution_uncertain"
+    );
+    assert_eq!(
+        host.execute_fake_operation_outcome(&request),
+        PiEffectOutcome::Uncertain
+    );
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 1);
+}
+
+#[cfg(feature = "pi-contract")]
+#[test]
+fn operation_owned_by_another_binding_is_rejected_not_conflict() {
+    use crate::PiEffectOutcome;
+    let (dir, mut host, request) = setup();
+    let completed = host.execute_fake_operation_outcome(&request);
+    assert!(matches!(completed, PiEffectOutcome::Completed(_)));
+    let db = dir.path().join("mission.sqlite");
+    let id = request.operation_id().unwrap();
+    let owners = [
+        (
+            "mission_id",
+            request.binding.mission_id.as_str(),
+            "other-mission",
+        ),
+        (
+            "attempt_id",
+            request.binding.attempt_id.as_str(),
+            "other-attempt",
+        ),
+        (
+            "session_id",
+            request.binding.session_id.as_str(),
+            "other-session",
+        ),
+    ];
+    for (column, original, foreign) in owners {
+        retarget_effect_owner(&db, &id, column, foreign);
+        assert_eq!(
+            host.execute_fake_operation(&request)
+                .unwrap_err()
+                .category(),
+            "binding_mismatch"
+        );
+        assert_eq!(
+            host.execute_fake_operation_outcome(&request),
+            PiEffectOutcome::Rejected
+        );
+        assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 1);
+        retarget_effect_owner(&db, &id, column, original);
+    }
+    assert_eq!(host.execute_fake_operation_outcome(&request), completed);
+}
+
+#[cfg(feature = "pi-contract")]
+fn retarget_effect_owner(db: &Path, id: &str, column: &str, value: &str) {
+    let sql = match column {
+        "mission_id" => "UPDATE execution_effects SET mission_id=?1 WHERE operation_id=?2",
+        "attempt_id" => "UPDATE execution_effects SET attempt_id=?1 WHERE operation_id=?2",
+        "session_id" => "UPDATE execution_effects SET session_id=?1 WHERE operation_id=?2",
+        _ => panic!("unexpected effect owner column"),
+    };
+    // The stored owner is not a second live mission. Foreign keys stay on for
+    // the Host connection; this test connection only rewrites the row the
+    // classifier reads back.
+    let connection = Connection::open(db).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys=OFF;")
+        .unwrap();
+    let changed = connection.execute(sql, [value, id]).unwrap();
+    assert_eq!(changed, 1);
 }
 
 fn abandoned_effect() -> (tempfile::TempDir, Host, ExecutionRequest, serde_json::Value) {

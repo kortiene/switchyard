@@ -1,12 +1,10 @@
 #![cfg(feature = "pi-contract")]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use rusqlite::{Connection, params};
 use serde_json::{Value, json};
-use switchyard_core::{PiBridge, RuntimeBinding, operation_id, payload_hash};
+use switchyard_core::{PiBridge, PiEffectOutcome, RuntimeBinding, operation_id, payload_hash};
 
 fn binding(generation: u64) -> RuntimeBinding {
     RuntimeBinding {
@@ -84,7 +82,7 @@ fn effect_peer(directory: &Path, count: usize) -> PiBridge {
         createInterface({{input:process.stdin}}).on('line',line=>{{
             const frame=JSON.parse(line);
             if(frame.kind==='request') host=frame;
-            else receipts.push(frame.result);
+            else receipts.push(frame.error ? {{error:frame.error}} : frame.result);
             if(next<effects.length) send(effects[next++]);
             else setTimeout(()=>send({{protocol:0,kind:'response',id:host.id,binding:host.binding,result:{{receipts}}}}),125);
         }});
@@ -128,6 +126,57 @@ fn effect_flood_cannot_extend_a_call_indefinitely() {
         .unwrap_err();
     assert_eq!(calls, limit);
     assert!(error.to_string().contains("effect limit exceeded"));
+}
+
+#[test]
+fn typed_effect_responses_preserve_all_four_dispositions() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut peer = effect_peer(directory.path(), 4);
+    let mut outcomes = [
+        PiEffectOutcome::Completed(json!({"receipt":"original"})),
+        PiEffectOutcome::Rejected,
+        PiEffectOutcome::Conflict,
+        PiEffectOutcome::Uncertain,
+    ]
+    .into_iter();
+    let result = peer
+        .call_with_effects("runtime.inspect", None, json!({}), &mut |_| {
+            outcomes.next().unwrap()
+        })
+        .unwrap();
+    assert_eq!(
+        result["receipts"],
+        json!([
+            {"receipt":"original"},
+            {"error":{"category":"execution_rejected","admission":"rejected"}},
+            {"error":{"category":"operation_conflict","admission":"rejected"}},
+            {"error":{"category":"execution_uncertain","admission":"uncertain"}}
+        ])
+    );
+}
+
+#[test]
+fn legacy_callback_errors_never_establish_non_admission() {
+    for error in [
+        switchyard_core::Error::guard("after effect"),
+        switchyard_core::Error::OperationConflict {
+            operation_id: "same".into(),
+        },
+        switchyard_core::Error::storage("after effect"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut peer = effect_peer(directory.path(), 1);
+        let mut error = Some(error);
+        let result = peer
+            .call("runtime.inspect", None, json!({}), &mut |_| {
+                Err(error.take().unwrap())
+            })
+            .unwrap();
+        assert_eq!(
+            result["receipts"],
+            json!([{"error":{"category":"execution_uncertain","admission":"uncertain"}}])
+        );
+    }
 }
 
 #[test]
@@ -362,115 +411,4 @@ fn malformed_peer_output_and_forged_authority_are_rejected_by_rust() {
             "must reject {mutation}"
         );
     }
-}
-
-#[test]
-fn multi_effect_and_nested_tool_replay_reuse_rust_receipts_after_sigkill() {
-    let directory = tempfile::tempdir().unwrap();
-    let db = directory.path().join("session.sqlite");
-    // This is the S2 simulated execution boundary, not S3 workspace execution.
-    let receipts = Connection::open(directory.path().join("receipts.sqlite")).unwrap();
-    receipts.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-        CREATE TABLE receipts(id TEXT PRIMARY KEY, hash TEXT NOT NULL, result TEXT NOT NULL, calls INTEGER NOT NULL);").unwrap();
-    let mut bridge = spawn(&db, 1, "tools");
-    call(
-        &mut bridge,
-        "runtime.submit",
-        Some("tools"),
-        json!({"type":"input","content":"write"}),
-    )
-    .unwrap();
-    let pid = bridge.process_id();
-    let mut killed = false;
-    let mut first_id = String::new();
-    let until = Instant::now() + Duration::from_secs(5);
-    while !killed && Instant::now() < until {
-        let _ = bridge.call("runtime.inspect", None, json!({}), &mut |effect| {
-            let id = effect["operationId"].as_str().unwrap();
-            first_id = id.to_string();
-            receipts
-                .execute(
-                    "INSERT INTO receipts VALUES (?1,?2,?3,1)",
-                    params![
-                        id,
-                        effect["payloadHash"].as_str().unwrap(),
-                        json!({"receipt":"original"}).to_string()
-                    ],
-                )
-                .unwrap();
-            assert!(
-                Command::new("kill")
-                    .args(["-KILL", &pid.to_string()])
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-            killed = true;
-            Ok(json!({"receipt":"original"}))
-        });
-    }
-    assert!(killed, "the simulated effect must commit before killing Pi");
-    drop(bridge);
-    let mut recovered = spawn(&db, 2, "recover");
-    call(
-        &mut recovered,
-        "runtime.submit",
-        Some("tools"),
-        json!({"type":"input","content":"write"}),
-    )
-    .unwrap();
-    let until = Instant::now() + Duration::from_secs(5);
-    let mut idle = false;
-    while Instant::now() < until {
-        let snapshot = recovered
-            .call(
-                "runtime.inspect",
-                None,
-                json!({"commandIds":["tools"]}),
-                &mut |effect| {
-                    let id = effect["operationId"].as_str().unwrap();
-                    let hash = effect["payloadHash"].as_str().unwrap();
-                    let existing = receipts.query_row(
-                        "SELECT hash,result FROM receipts WHERE id=?1",
-                        [id],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                    );
-                    if let Ok((previous_hash, result)) = existing {
-                        assert_eq!(hash, previous_hash);
-                        receipts
-                            .execute("UPDATE receipts SET calls=calls+1 WHERE id=?1", [id])
-                            .unwrap();
-                        return Ok(serde_json::from_str(&result).unwrap());
-                    }
-                    let result = json!({"receipt":id});
-                    receipts
-                        .execute(
-                            "INSERT INTO receipts VALUES (?1,?2,?3,1)",
-                            params![id, hash, result.to_string()],
-                        )
-                        .unwrap();
-                    Ok(result)
-                },
-            )
-            .unwrap();
-        if snapshot["runtimeIdle"] == true {
-            assert_eq!(snapshot["commands"][0]["status"], "done");
-            idle = true;
-            break;
-        }
-    }
-    assert!(idle, "recovered runtime must settle");
-    let count: i64 = receipts
-        .query_row("SELECT count(*) FROM receipts", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(count, 3, "two distinct pair slots and one nested task");
-    let repeats: i64 = receipts
-        .query_row("SELECT calls FROM receipts WHERE id=?1", [first_id], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(
-        repeats, 2,
-        "replayed effect returns its original Rust receipt"
-    );
 }

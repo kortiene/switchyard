@@ -71,10 +71,10 @@ provider selection or model-credential loading is exposed by the fixture.
   controls escaped and a bounded wait for drain completion. These diagnostics
   are untrusted text from the credential-free fixture; a live credential-bearing
   runtime still needs the S3 diagnostic/redaction policy.
-- Callback errors conservatively remain `execution_uncertain`. The code has an
-  explicit #96 TODO for typed definite rejection/conflict versus uncertain
-  admission, tied to the durable operation-policy work below. Generic S1 errors
-  do not yet establish whether a simulated effect was admitted.
+- [S2-B typed effect outcomes](s2-effect-outcomes.md) distinguish completed,
+  rejected, conflict and uncertain using the existing Host journal. Legacy
+  callback errors conservatively remain `execution_uncertain`; a generic S1
+  error does not establish whether an effect was admitted.
 
 ## Evidence
 
@@ -89,14 +89,17 @@ cargo test -p switchyard-core --features pi-contract --locked --test pi_bridge
 ```
 
 The explicit Rust gate fails if its Node path/dependencies are missing; it does
-not skip. Ten Node tests cover source/admission compatibility, invalid JSON
+not skip. Node tests cover source/admission compatibility, invalid JSON
 values, protocol/capability/binding/generation rejection, malformed/oversized
 frames, unknown replies, and cooperative abort while remote effects remain
-unacknowledged. Ten Rust tests cover submission receipt recovery/conflicts,
+unacknowledged, plus strict effect-error validation. Rust tests cover submission receipt recovery/conflicts,
 idle steering, competing ownership/stale reopen, and a SIGKILL between a
-simulated Rust effect receipt and Pi's tool result. The latter reopens under a
+simulated Host effect receipt and Pi's tool result. The latter reopens under a
 new generation and proves three distinct effects with the original receipt
-reused for the interrupted effect, including nested task identity. Attempt and
+reused for the interrupted effect, including nested task identity. A separate
+post-effect/pre-receipt failure remains uncertain and blocks new effects across
+restart. Both now use the real Host journal rather than a private receipt table.
+Attempt and
 session identifiers include Unicode and delimiter characters. Corrupt storage
 is retained rather than replaced. An independently hostile peer verifies Rust's
 rejection of invalid envelopes, oversized frames and nested forged mission
@@ -117,8 +120,8 @@ The `pi-bridge-probe` CI job is deliberately separate from the future full
 
 - extending the [S2-A Host/outbox evidence](s2-host-outbox.md) into the full
   contract, including remaining scheduling and cancellation races;
-- durable Rust operation receipts for conflicts and uncertain-effect
-  reconciliation rather than the probe's simulated receipt table;
+- composing the [S2-B durable effect evidence](s2-effect-outcomes.md) with the
+  complete Host scheduling and cancellation contract;
 - non-cooperative cancellation, sustained backpressure, corrupt storage and
   additional close/abort/reopen races;
 - final review of the transport refinements and a complete S2 evidence matrix.

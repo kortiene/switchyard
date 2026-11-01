@@ -25,6 +25,21 @@ export class ProtocolError extends Error {
   constructor(category: string, admission = 'unspecified') { super(category); this.category = category; this.admission = admission; }
 }
 
+// Only the Rust execution owner supplies these dispositions, and only as the
+// error body of an `execution.request` response. Do not reuse this for any
+// other Pi-to-Rust method: an unknown or contradictory body terminates the
+// transport rather than becoming a recoverable tool error (or success) inside Pi.
+export function effectError(value: unknown): ProtocolError {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid effect error');
+  const fields = value as Record<string, unknown>;
+  if (Object.keys(fields).sort().join(',') !== 'admission,category') throw new Error('invalid effect error');
+  const valid = (fields.category === 'execution_rejected' && fields.admission === 'rejected')
+    || (fields.category === 'operation_conflict' && fields.admission === 'rejected')
+    || (fields.category === 'execution_uncertain' && fields.admission === 'uncertain');
+  if (!valid) throw new Error('invalid effect disposition');
+  return new ProtocolError(fields.category as string, fields.admission as string);
+}
+
 export function canonical(value: unknown): string {
   if (value === null || typeof value === 'boolean') return JSON.stringify(value);
   if (typeof value === 'number') {

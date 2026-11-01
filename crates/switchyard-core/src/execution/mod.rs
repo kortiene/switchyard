@@ -11,7 +11,7 @@ pub(crate) mod workspace;
 pub use git::inspect_repo;
 pub use owner::{OwnerLock, lock_path, try_acquire};
 #[cfg(feature = "pi-contract")]
-pub use pi_bridge::PiBridge;
+pub use pi_bridge::{PiBridge, PiEffectOutcome};
 pub use runtime::{
     FakeRuntime, RuntimeBinding, RuntimeNotification, RuntimeReceipt, RuntimeRequest, operation_id,
     parse_notification,

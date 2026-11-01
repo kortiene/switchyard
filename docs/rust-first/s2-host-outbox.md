@@ -106,9 +106,10 @@ that races a running turn still goes through once that turn ends. Every other
 category (`host_command_mismatch`, `session_unavailable`, `handshake_required`,
 `binding_mismatch`, `stale_generation`, `invalid_*`, `command_conflict`, and
 anything unknown) is a guard error and the row stays pending. Transport loss
-stays pending as well. This is command-admission settlement only. Effect
-callbacks still return `execution_uncertain`; typed effect rejection versus
-uncertain admission remains [#96](https://github.com/kortiene/switchyard/issues/96).
+stays pending as well. This is command-admission settlement only. Generic effect
+callback errors still return `execution_uncertain`; the separate
+[S2-B probe](s2-effect-outcomes.md) adds typed outcomes backed by the Host's
+simulated execution journal without changing this command policy.
 
 Durable command refusal adds a forward migration of the Rust S1 ledger from v1
 to v2, widening the command-state constraint to include `rejected`. The migration
