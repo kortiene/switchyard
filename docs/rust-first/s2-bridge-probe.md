@@ -32,11 +32,13 @@ Opening a session is inert: interrupted tools remain paused until an explicitly
 replayed authorized submission or abort enables scheduling. The host must first
 reconcile its outbox and stop intent. The bridge does not decide mission status.
 
-Only three bundled forwarding tools are registered: a single write, two ordered
+The normal fixture registers three bundled forwarding tools: a single write, two ordered
 write slots, and a nested write. The Rust callback in these tests records
 **simulated effects**, not workspace writes. All effects carry the durable Pi
 tool task ID and a stable slot key. No code-mode, dynamic extension, MCP, shell,
 provider selection or model-credential loading is exposed by the fixture.
+The explicit [S2-C cancellation fixtures](s2-cancellation.md) additionally
+register a waiting tool to test cooperative and non-cooperative cancellation.
 
 ## Protocol refinements for this probe
 
@@ -58,7 +60,9 @@ provider selection or model-credential loading is exposed by the fixture.
   resync surface; it does not claim event replay or a continuous subscription.
 - `runtime.abort` records stop intent before requesting cancellation. While that
   intent is pending, new input is rejected. A settled abort replays its receipt
-  without aborting later work. `runtimeSettled` describes Pi only; Rust must
+  without aborting later work. Concurrent copies of an unfinished abort share
+  one in-flight cancellation, so a delayed duplicate cannot cancel newer work.
+  `runtimeSettled` describes Pi only; Rust must
   separately reconcile external effects and prove execution quiescence.
 - `runtime.close` is connection-local and accepted only while Pi is idle. A lost
   close reply means the caller kills/reaps the peer and reopens with a new
@@ -75,6 +79,9 @@ provider selection or model-credential loading is exposed by the fixture.
   rejected, conflict and uncertain using the existing Host journal. Legacy
   callback errors conservatively remain `execution_uncertain`; a generic S1
   error does not establish whether an effect was admitted.
+- [S2-C cancellation evidence](s2-cancellation.md) covers duplicate aborts,
+  stop-intent/settlement crashes, cooperative and uncooperative tools,
+  sustained busy retries, bounded request bursts and overflow recovery.
 
 ## Evidence
 
@@ -122,8 +129,8 @@ The `pi-bridge-probe` CI job is deliberately separate from the future full
   contract, including remaining scheduling and cancellation races;
 - composing the [S2-B durable effect evidence](s2-effect-outcomes.md) with the
   complete Host scheduling and cancellation contract;
-- non-cooperative cancellation, sustained backpressure, corrupt storage and
-  additional close/abort/reopen races;
+- additional storage-failure and close/abort/reopen races beyond the focused
+  [S2-C probes](s2-cancellation.md);
 - final review of the transport refinements and a complete S2 evidence matrix.
 
 S3 must separately prove OS confinement, process-tree termination and safe

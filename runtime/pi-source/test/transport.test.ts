@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { ADAPTER, canonical, effectError, MAX_FRAME, SOURCE, type Binding, type Frame, type Json } from '../src/protocol.ts';
+import { ADAPTER, canonical, effectError, MAX_FRAME, MAX_PENDING, SOURCE, type Binding, type Frame, type Json } from '../src/protocol.ts';
 import { Transport } from '../src/transport.ts';
 
 const binding: Binding = { missionId: 'm', attemptId: 'a', sessionId: 's', generation: 1 };
@@ -18,7 +18,8 @@ async function peer(mode = 'answer', options: { directory?: string; generation?:
   const child: ChildProcessWithoutNullStreams = spawn(process.execPath, ['--experimental-strip-types',
     fileURLToPath(new URL('./bridge-child.ts', import.meta.url)), join(directory, 'pi.sqlite'), JSON.stringify(session), mode],
     { env: {}, stdio: ['pipe', 'pipe', 'pipe'] });
-  child.stderr.resume();
+  let diagnostics = '';
+  child.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk.toString()).slice(-4096); });
   let buffer = '';
   let id = 0;
   const effects: Frame[] = [];
@@ -48,10 +49,67 @@ async function peer(mode = 'answer', options: { directory?: string; generation?:
       child.stdin.write(`${JSON.stringify({ protocol: 0, kind: 'request', id: wireId, method, binding: session, params, ...extra })}\n`);
     });
   };
-  return { child, exited, request, effects, directory, async close() {
+  return { child, exited, request, effects, directory, diagnostics: () => diagnostics, async close() {
     child.kill('SIGKILL'); await exited; if (cleanup) await rm(directory, { recursive: true, force: true });
   } };
 }
+
+test('sustained bounded request bursts leave abort and inspection responsive', { timeout: 15_000 }, async () => {
+  const p = await peer('cooperative-wait');
+  try {
+    assert.equal((await p.request('runtime.hello', hello)).error, undefined);
+    assert.equal((await p.request('runtime.open', {})).error, undefined);
+    assert.equal((await p.request('runtime.submit', { type: 'input', content: 'wait' }, { commandId: 'work' })).error, undefined);
+    const limit = Date.now() + 3_000;
+    while (!p.diagnostics().includes('waiting tool entered') && Date.now() < limit) await new Promise(resolve => setTimeout(resolve, 5));
+    assert(p.diagnostics().includes('waiting tool entered'));
+    for (let round = 0; round < 8; round++) {
+      const responses = await Promise.all(Array.from({ length: MAX_PENDING }, (_, i) => i === 0
+        ? p.request('runtime.abort', {}, { commandId: 'stop' })
+        : p.request('runtime.inspect', { commandIds: ['work', 'stop'] })));
+      for (const response of responses) assert.equal(response.error, undefined);
+      assert.deepEqual(responses[0].result, { commandId: 'stop', accepted: true, runtimeSettled: true });
+    }
+    const snapshot = (await p.request('runtime.inspect', { commandIds: ['work', 'stop'] })).result as {
+      commands: { reason: string | null; receipt: { settled: boolean } }[]; runtimeIdle: boolean;
+    };
+    assert.equal(snapshot.commands[0].reason, 'aborted');
+    assert.equal(snapshot.commands[1].receipt.settled, true);
+    assert.equal(snapshot.runtimeIdle, true);
+    assert.equal(p.child.exitCode, null);
+  } finally { await p.close(); }
+});
+
+test('pending request overflow exits and an interrupted abort recovers from its durable intent', { timeout: 15_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'switchyard-overflow-'));
+  const p = await peer('hold-abort', { directory, cleanup: false });
+  try {
+    await p.request('runtime.hello', hello);
+    await p.request('runtime.open', {});
+    const held = [p.request('runtime.abort', {}, { commandId: 'stop' }).catch(() => null)];
+    const limit = Date.now() + 3_000;
+    while (!p.diagnostics().includes('abort recorded') && Date.now() < limit) await new Promise(resolve => setTimeout(resolve, 5));
+    assert(p.diagnostics().includes('abort recorded'), 'stop must be durably recorded before overflow');
+    for (let i = 0; i < MAX_PENDING; i++) held.push(p.request('runtime.abort', {}, { commandId: 'stop' }).catch(() => null));
+    assert.equal(await p.exited, 1);
+    assert((await Promise.all(held)).every(frame => frame === null), 'no stop acknowledgement may escape');
+  } finally { await p.close(); }
+  const resumed = await peer('recover', { directory, generation: 2, cleanup: false });
+  try {
+    await resumed.request('runtime.hello', hello);
+    await resumed.request('runtime.open', { requireExisting: true });
+    const before = (await resumed.request('runtime.inspect', { commandIds: ['stop'] })).result as {
+      stopping: boolean; scheduling: string; commands: { receipt: { receipt: string; settled: boolean } }[];
+    };
+    assert.equal(before.scheduling, 'paused');
+    assert.equal(before.stopping, true);
+    assert.equal(before.commands[0].receipt.settled, false);
+    assert.equal(before.commands[0].receipt.receipt, 'stop');
+    const result = await resumed.request('runtime.abort', {}, { commandId: 'stop' });
+    assert.equal(result.error, undefined);
+    assert.deepEqual(result.result, { commandId: 'stop', accepted: true, runtimeSettled: true });
+  } finally { await resumed.close(); await rm(directory, { recursive: true, force: true }); }
+});
 
 test('shared JSON subset rejects floats, unsafe integers and lone surrogates', () => {
   assert.equal(canonical({ '\uE000': 1, '\u{10000}': 2, text: 'é\n"\\' }), '{"text":"é\\n\\"\\\\","𐀀":2,"":1}');

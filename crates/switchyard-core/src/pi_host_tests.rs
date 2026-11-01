@@ -4,6 +4,9 @@ use crate::execution::PiRuntime;
 use rusqlite::{Connection, params};
 use std::process::Command;
 
+#[path = "pi_host_tests/cancellation.rs"]
+mod cancellation;
+
 struct World {
     _tmp: tempfile::TempDir,
     db: PathBuf,
@@ -613,7 +616,14 @@ fn wait_until_terminal(host: &mut Host, req: &RuntimeRequest) -> Value {
 }
 
 fn process_alive(pid: u32) -> bool {
-    std::path::Path::new(&format!("/proc/{pid}")).exists()
+    // /proc may belong to an outer PID namespace in a container. Signal 0
+    // checks the same namespace as Child::id without delivering a signal.
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .unwrap()
+        .status
+        .success()
 }
 
 #[test]

@@ -1,16 +1,24 @@
 // Credential-free conformance launcher. No live provider or product CLI exposes this bridge yet.
 import { createModels } from '@earendil-works/pi-ai/models';
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai/providers/faux';
+import { Type } from '@earendil-works/pi-ai';
+import { defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
+import { awaitWithContext } from '@earendil-works/chord/context';
+import { writeSync } from 'node:fs';
 import { forwarders } from '../src/forwarders.ts';
 import { ProtocolError, type Binding } from '../src/protocol.ts';
 import { Runtime } from '../src/runtime.ts';
 import { Transport } from '../src/transport.ts';
 
 const [database, bindingJson, mode] = process.argv.slice(2);
-if (!database || !bindingJson || !['answer', 'tools', 'recover', 'crash-before-admission', 'crash-after-admission', 'busy-once', 'stopping-once', 'mismatch'].includes(mode)) throw new Error('Invalid launcher arguments');
+if (!database || !bindingJson || !['answer', 'tools', 'recover', 'crash-before-admission', 'crash-after-admission',
+  'crash-after-abort-recorded', 'crash-after-abort-settled', 'hold-abort', 'ignore-abort', 'cooperative-wait',
+  'busy-once', 'stopping-once', 'mismatch'].includes(mode)) throw new Error('Invalid launcher arguments');
 const binding = JSON.parse(bindingJson) as Binding;
 const faux = fauxProvider();
-faux.setResponses(mode === 'tools' ? [
+faux.setResponses(['ignore-abort', 'cooperative-wait'].includes(mode) ? [
+  fauxAssistantMessage([fauxToolCall('uncooperative', {})], { stopReason: 'toolUse' }),
+] : mode === 'tools' ? [
   fauxAssistantMessage([fauxToolCall('write_pair', { prefix: 'pair' }, { id: 'parent-pair' }),
     fauxToolCall('nested_write', { path: 'nested', content: 'child' }, { id: 'parent-nested' })], { stopReason: 'toolUse' }),
   fauxAssistantMessage('done'),
@@ -18,8 +26,28 @@ faux.setResponses(mode === 'tools' ? [
 const models = createModels();
 models.setProvider(faux.provider);
 const transport = new Transport(binding);
-const runtime = new Runtime(database, binding, models, forwarders(binding, transport),
-  mode === 'crash-after-admission' ? () => { process.kill(process.pid, 'SIGKILL'); } : undefined);
+const tools: ToolRegistration[] = forwarders(binding, transport);
+// Only the explicit conformance fixture can select this deliberately hung tool.
+if (['ignore-abort', 'cooperative-wait'].includes(mode)) tools.push(defineTool({ name: 'uncooperative', description: 'Cancellation fixture.',
+  replay: 'safe', parameters: Type.Object({}), execute: async (_args, _api, context) => {
+    writeSync(process.stderr.fd, 'fixture: waiting tool entered\n');
+    const waiting = new Promise<void>(() => {});
+    // One variant cooperates; the other deliberately ignores the tool context.
+    await (mode === 'cooperative-wait' ? awaitWithContext(waiting, context) : waiting);
+    return { output: [] };
+  } }));
+const kill = () => { process.kill(process.pid, 'SIGKILL'); };
+const runtime = new Runtime(database, binding, models, tools, {
+  afterAdmission: mode === 'crash-after-admission' ? kill : undefined,
+  afterAbortRecorded: async fresh => {
+    if (mode === 'crash-after-abort-recorded' && fresh) kill();
+    if (mode === 'hold-abort') {
+      writeSync(process.stderr.fd, 'fixture: abort recorded\n');
+      await new Promise<void>(() => {});
+    }
+  },
+  afterAbortSettled: mode === 'crash-after-abort-settled' ? kill : undefined,
+});
 let busyContinue = mode === 'busy-once';
 let stoppingOnce = mode === 'stopping-once';
 transport.start(frame => {
