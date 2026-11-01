@@ -300,6 +300,8 @@ pub struct LinuxExecutionView {
     pub scope: String,
     pub method: String,
     pub entered: bool,
+    /// None when inspecting a pre-v8 ledger that has no release evidence.
+    pub released: Option<bool>,
     pub receipt_retained: bool,
     pub quiescence: String,
 }
@@ -314,6 +316,7 @@ impl LinuxExecutionView {
             "scope": self.scope,
             "method": self.method,
             "entered": self.entered,
+            "released": self.released,
             "receiptRetained": self.receipt_retained,
             "quiescence": self.quiescence,
             "simulated": false,

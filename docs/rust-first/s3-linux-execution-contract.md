@@ -79,7 +79,9 @@ Before any workload starts the Host creates a fresh cgroup leaf and commits its
 canonical path, device, inode, and boot id with the intent. It then spawns
 `switchyard-execution-helper supervise`, takes a pidfd while that pid cannot be
 reused, and waits for READY. READY is not entry. The workload is released only
-when the Host writes GO. The supervisor places the launcher in the leaf and
+after the Host commits `released_at` and the supervisor identity, then writes GO.
+A crash after that commit, even before GO or before the ENTERED acknowledgement,
+retains uncertainty unless the live Host captures a conclusive result. The supervisor places the launcher in the leaf and
 does not let the launcher migrate itself. The backend-entered marker is
 committed only after Bubblewrap's `--json-status-fd` record contains
 `child-pid`. The supervisor stays outside the leaf, so it can still record the
@@ -93,11 +95,17 @@ recorded identity, kills that same leaf, and requires `cgroup.events` to say
 `populated 0`. A missing, replaced, or nonempty leaf fails closed. The Host
 does not relaunch.
 
-No `child-pid` plus that matching empty leaf is `not_applied`, including when
-`join`, `prlimit`, Bubblewrap, or `spawn` fails before the sandbox starts.
+An unreleased intent plus that matching empty leaf is `not_applied` on restart.
+After release, only the live supervisor's explicit `workloadEntered: false`
+result plus matching quiescence can settle a launch failure as `not_applied`
+(including `join`, `prlimit`, Bubblewrap, or `spawn` failure). The absence of a
+Host entry marker alone is never proof of non-execution after GO. Restart does
+not reconstruct results from temporary supervisor files.
 `completed` is the original Host-captured receipt plus the same proof. A clean
-denial or edit conflict is that kind of receipt. Any other helper `ok: false`
-stays `uncertain` and is not completed. Entry without a receipt stays
+denial or edit conflict is that kind of receipt. Failed or truncated read,
+range-read, and list results also settle with their error retained in the
+receipt: they cannot mutate the workspace. Other failed mutating helpers
+stay `uncertain` and are not completed. Release or entry without a receipt stays
 `uncertain` even after the cgroup is empty. Abandonment is an immutable
 resolution: a later cancel cannot turn that row `completed`. A known-live
 effect in this process blocks new work and is not quarantined merely because
@@ -108,7 +116,11 @@ the quiescence is unproven; it does not settle them.
 Writes and edits do not truncate the target in place. The helper opens the
 parent with the same `openat2` resolve flags, writes a temporary file in that
 directory, `fsync`s it, and `renameat`s it over the target, preserving the
-existing mode.
+existing mode. This intentionally permits replacement of a read-only (0444)
+target when its parent directory is writable. A kill during writing can leave
+an untracked `.sy-tmp-*` file. No automatic sweep is performed: retain it as
+evidence with the uncertain effect and inspect it only after quiescence;
+cleanup does not resolve the effect or authorize workspace reuse.
 
 Workspace Git verification does not run while a Linux effect is unresolved.
 Stop delivery still does: Pause/Cancel abort FakeRuntime, then the Host returns
@@ -130,7 +142,7 @@ label, not a remote identity.
 
 | Decision | Required durable proof | Result |
 | --- | --- | --- |
-| Not applied | Intent, no entered marker, no receipt, and the recorded cgroup still matches and is `populated 0` | `not_applied`. Replay returns `execution_not_applied`. |
+| Not applied | Unreleased intent (no GO marker), no entered marker, no receipt, and the recorded cgroup still matches and is `populated 0` | `not_applied`. Replay returns `execution_not_applied`. |
 | Completed | The original Host receipt, same identity match, and `populated 0` | Store that receipt. Replay returns it and does not run the workload again. |
 | Abandon | No conclusive proof (entered, or otherwise unknown), and the cgroup is nevertheless empty and matching | The effect stays `uncertain`. The mission stays blocked. |
 
@@ -168,17 +180,29 @@ Forward migration v7 adds `linux_execution_effects` and
 `linux_execution_resolutions` without rewriting v1–v6 rows. Simulated
 `ExecutionReceipt::from_json` still accepts only simulated receipts. Triggers
 reject one op-v1 identity or one resolution command id in both journals.
-Read-only inspection of older ledgers does not migrate. A writer upgrades to v7.
+Forward migration v8 adds durable release evidence without rewriting retained
+receipts or operator audits. Existing unresolved v7 workloads are conservatively
+marked as possibly released using their creation time; it is not a recovered
+GO timestamp. Older v7 databases also gain triggers enforcing entry evidence
+on future writes. Previously settled outcomes are retained as historical
+evidence, not re-certified by this upgrade. Read-only inspection does not
+migrate: `released` is null for v7, false for unreleased v8 intents, and true
+for recorded or conservatively assumed releases. A writer upgrades to v8.
 
 ## Evidence and non-claims
 
 `execution-confinement` runs the #128 probe and
 `cargo test -p switchyard --test linux_execution --features linux-execution`.
 The default `rust-core` job does not enable the feature and does not require a
-delegated cgroup. It does prove v7 migration, cross-journal identity, and that
+delegated cgroup. It does prove v1–v8 migration, cross-journal identity, and that
 a default host keeps a Linux row blocked and unexplained only in the sense that
 it refuses to settle it.
 
 Not claimed: power loss, host reboot, a privileged-host adversary, seccomp,
 egress allowlists, arbitrary agent execution by default, S2 GO, Track B, or
 full S3. Pi stop delivery is unchanged.
+
+Crash coverage includes READY (no release), released-before-GO, GO-before-ENTERED
+with an actual completed file write, entered, receipt, and completed barriers.
+The GO case verifies repeated replay never executes again, NotApplied and
+Completed resolution are refused without evidence, and new writers stay blocked.

@@ -23,7 +23,7 @@ mod execution_resolution;
 pub(crate) mod linux_execution;
 mod workspace;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 const VERIFIER_JSON: &str = r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}"#;
 const ENVIRONMENT_JSON: &str = r#"{"confinement":"deferred_to_s3","host":"single"}"#;
@@ -341,6 +341,19 @@ impl Store {
             )
             .map_err(Error::storage)?;
             tx.execute_batch("PRAGMA user_version = 7;")
+                .map_err(Error::storage)?;
+            tx.commit().map_err(Error::storage)?;
+        }
+        if current < 8 {
+            let tx = self.immediate()?;
+            tx.execute_batch(include_str!("migrations/008_linux_release.sql"))
+                .map_err(Error::storage)?;
+            tx.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (8, ?1)",
+                [now_ms()],
+            )
+            .map_err(Error::storage)?;
+            tx.execute_batch("PRAGMA user_version = 8;")
                 .map_err(Error::storage)?;
             tx.commit().map_err(Error::storage)?;
         }
@@ -1761,7 +1774,7 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
             .unwrap();
         assert_eq!(foreign_keys, 1);
-        assert_eq!(user_version(&store.conn).unwrap(), 7);
+        assert_eq!(user_version(&store.conn).unwrap(), 8);
         let index: String = store
             .conn
             .query_row(

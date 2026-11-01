@@ -672,13 +672,28 @@ fn deadline_stops_a_detached_writer() {
 
 #[test]
 fn sigkill_boundaries_do_not_rerun_and_record_quiescence() {
-    for stage in ["prepared", "entered", "receipt", "completed"] {
+    for stage in [
+        "prepared",
+        "ready",
+        "released",
+        "go",
+        "entered",
+        "receipt",
+        "completed",
+    ] {
         let mut world = World::new();
         let (host, mission) = implementing(&mut world);
         let generation_before = host.generation();
+        let file = tree(&host, &mission).join("crash.txt");
         drop(host);
         let child = spawn_crash(&world, &mission, stage);
-        wait_kill(child, &format!("AT-{stage}"));
+        // Hold the Host before reading ENTERED, let the actual write land,
+        // then SIGKILL. This deterministically covers the review's race.
+        wait_kill_after(
+            child,
+            &format!("AT-{stage}"),
+            (stage == "go").then_some(file.as_path()),
+        );
         let mut host = Host::open(&world.db()).unwrap();
         enable(&mut host);
         let mut replay = LinuxExecutionRequest {
@@ -706,12 +721,21 @@ fn sigkill_boundaries_do_not_rerun_and_record_quiescence() {
         let workspace = tree(&host, &mission);
         let file = workspace.join("crash.txt");
         match stage {
-            "prepared" => {
+            "prepared" | "ready" => {
+                assert_eq!(view.released, Some(false), "{stage}");
                 let error = host.execute_linux_operation(&replay).unwrap_err();
                 assert_eq!(error.category(), "execution_not_applied", "{stage}");
                 assert!(!file.exists(), "{stage}");
             }
-            "entered" => {
+            "released" | "go" | "entered" => {
+                assert_eq!(view.released, Some(true), "{stage}");
+                assert_eq!(view.entered, stage == "entered", "{stage}");
+                if stage == "go" {
+                    assert_eq!(fs::read(&file).unwrap(), b"once");
+                    fs::write(&file, "changed after execution").unwrap();
+                } else if stage == "released" {
+                    assert!(!file.exists());
+                }
                 let error = host.execute_linux_operation(&replay).unwrap_err();
                 assert_eq!(error.category(), "execution_uncertain", "{stage}");
                 assert_eq!(
@@ -720,8 +744,51 @@ fn sigkill_boundaries_do_not_rerun_and_record_quiescence() {
                 );
                 // Entry is the sandbox child-pid, so the write may have landed
                 // before the host was killed. Replay must not run it again.
-                if file.exists() {
+                if stage != "go" && file.exists() {
                     assert_eq!(fs::read(&file).unwrap(), b"once", "{stage}");
+                }
+                for decision in [
+                    ExecutionResolutionDecision::NotApplied,
+                    ExecutionResolutionDecision::Completed,
+                ] {
+                    let resolve = ExecutionResolutionRequest {
+                        command_id: format!("reject-{stage}-{decision:?}"),
+                        binding: binding(&host, &mission),
+                        operation_id: view.operation_id.clone(),
+                        payload_hash: view.payload_hash.clone(),
+                        expected_revision: host.snapshot(&mission).unwrap().revision,
+                        actor: "operator".into(),
+                        rationale: "missing entry acknowledgement is not absence proof".into(),
+                        decision,
+                    };
+                    assert!(host.resolve_linux_execution(&resolve).is_err(), "{stage}");
+                }
+                let fresh = request(
+                    &host,
+                    &mission,
+                    "another-writer",
+                    LINUX_WRITE_SCOPE,
+                    LinuxOperation::WriteFile {
+                        path: "another.txt".into(),
+                        content: "no".into(),
+                    },
+                );
+                assert_eq!(
+                    host.execute_linux_operation(&fresh).unwrap_err().category(),
+                    "execution_blocked"
+                );
+                drop(host);
+                host = Host::open(&world.db()).unwrap();
+                enable(&mut host);
+                replay.binding.generation = host.generation();
+                assert_eq!(
+                    host.execute_linux_operation(&replay)
+                        .unwrap_err()
+                        .category(),
+                    "execution_uncertain"
+                );
+                if stage == "go" {
+                    assert_eq!(fs::read(&file).unwrap(), b"changed after execution");
                 }
                 let stale = LinuxExecutionRequest {
                     binding: RuntimeBinding {
@@ -1008,6 +1075,61 @@ fn launch_failure_before_child_pid_is_not_applied() {
 }
 
 #[test]
+fn truncated_read_only_output_retains_error_without_blocking_new_work() {
+    let mut world = World::new();
+    let (mut host, mission) = implementing(&mut world);
+    enable(&mut host);
+    let workspace = tree(&host, &mission);
+    let directory = workspace.join("large-list");
+    fs::create_dir(&directory).unwrap();
+    // Valid filenames whose JSON escaping exceeds the protocol output cap.
+    // This exercises a truncated response, not an ordinary denied read.
+    for index in 0..800 {
+        fs::write(
+            directory.join(format!("{index:04}{}", "\u{1}".repeat(240))),
+            "",
+        )
+        .unwrap();
+    }
+    let list = request(
+        &host,
+        &mission,
+        "truncated-list",
+        LINUX_LIST_SCOPE,
+        LinuxOperation::ListDirectory {
+            path: "large-list".into(),
+        },
+    );
+    let result = host.execute_linux_operation(&list).unwrap();
+    assert_eq!(result.state, "completed");
+    assert_eq!(result.receipt.as_ref().unwrap()["disposition"], "truncated");
+    assert_eq!(
+        result.receipt.as_ref().unwrap()["result"]["stdoutTruncated"],
+        true
+    );
+    assert_eq!(
+        host.execute_linux_operation(&list).unwrap().receipt,
+        result.receipt
+    );
+    assert!(!host.snapshot(&mission).unwrap().execution_blocked);
+    let write = request(
+        &host,
+        &mission,
+        "after-read-error",
+        LINUX_WRITE_SCOPE,
+        LinuxOperation::WriteFile {
+            path: "after-error.txt".into(),
+            content: "allowed".into(),
+        },
+    );
+    assert_eq!(
+        host.execute_linux_operation(&write).unwrap().state,
+        "completed"
+    );
+    world.assert_origin();
+}
+
+#[test]
 fn file_helper_round_trips_a_max_size_nul_payload() {
     let mut world = World::new();
     let (mut host, mission) = implementing(&mut world);
@@ -1166,7 +1288,11 @@ fn spawn_crash(world: &World, mission: &str, stage: &str) -> std::process::Child
         .unwrap()
 }
 
-fn wait_kill(mut child: std::process::Child, marker: &str) {
+fn wait_kill(child: std::process::Child, marker: &str) {
+    wait_kill_after(child, marker, None);
+}
+
+fn wait_kill_after(mut child: std::process::Child, marker: &str, written: Option<&Path>) {
     let stdout = child.stdout.take().unwrap();
     let marker = marker.to_string();
     let waiting_for = marker.clone();
@@ -1186,6 +1312,9 @@ fn wait_kill(mut child: std::process::Child, marker: &str) {
             panic!("crash worker did not reach {waiting_for}");
         });
     assert!(line.contains(&waiting_for), "{line}");
+    if let Some(path) = written {
+        wait_for(path);
+    }
     child.kill().unwrap();
     child.wait().unwrap();
     thread::sleep(Duration::from_millis(200));

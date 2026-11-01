@@ -229,7 +229,8 @@ mod os {
                 .receipt_json
                 .as_ref()
                 .and_then(|text| serde_json::from_str(text).ok());
-            let no_entry = effect.entered_at.is_none() && receipt.is_none();
+            let no_entry =
+                effect.released_at.is_none() && effect.entered_at.is_none() && receipt.is_none();
             match request.decision {
                 ExecutionResolutionDecision::NotApplied if no_entry && proven => {}
                 ExecutionResolutionDecision::Completed
@@ -285,7 +286,9 @@ mod os {
                     self.store
                         .save_linux_quiescence(&view.operation_id, &quiescence)?;
                 }
-                if effect.entered_at.is_some() && effect.receipt_json.is_none() {
+                if (effect.released_at.is_some() || effect.entered_at.is_some())
+                    && effect.receipt_json.is_none()
+                {
                     self.store.quarantine_linux(&view.operation_id)?;
                 }
             }
@@ -366,7 +369,11 @@ mod os {
                 .get("proven")
                 .and_then(serde_json::Value::as_bool)
                 == Some(true);
-            if effect.entered_at.is_none() && effect.receipt_json.is_none() && proven {
+            if effect.released_at.is_none()
+                && effect.entered_at.is_none()
+                && effect.receipt_json.is_none()
+                && proven
+            {
                 self.store.linux_not_applied(request, &quiescence)?;
                 return Err(Error::ExecutionNotApplied { operation_id: id });
             }
@@ -612,12 +619,17 @@ mod os {
             }
             self.barrier("ready");
             self.accept_runtime_binding(&request.binding, &request.binding.mission_id)?;
+            let start = start_time(active.child.id())?;
+            self.store
+                .mark_linux_released(request, active.child.id(), &start)?;
+            self.barrier("released");
             let stdin = active
                 .stdin
                 .as_mut()
                 .ok_or_else(|| Error::guard("missing supervisor stdin"))?;
             writeln!(stdin, "GO").map_err(Error::storage)?;
             stdin.flush().map_err(Error::storage)?;
+            self.barrier("go");
             let exec = matches!(request.operation, LinuxOperation::ExecStart { .. });
             let mut saw_entered = false;
             loop {
@@ -689,11 +701,11 @@ mod os {
             let workload_entered = result
                 .get("workloadEntered")
                 .and_then(serde_json::Value::as_bool)
-                == Some(true);
+                .ok_or_else(|| Error::guard("linux result is missing explicit entry evidence"))?;
             // No Bubblewrap child-pid and an empty leaf: the workload never started.
             if effect.entered_at.is_none() && !workload_entered {
                 if proved.proven && effect.receipt_json.is_none() {
-                    self.store.linux_not_applied(request, &quiescence)?;
+                    self.store.linux_launch_not_applied(request, &quiescence)?;
                     return Err(Error::ExecutionNotApplied { operation_id: id });
                 }
                 self.store.quarantine_linux(&id)?;
@@ -711,7 +723,17 @@ mod os {
                     "linux workload entered but the entry marker was not recorded",
                 ));
             }
-            let settle = result.get("settle").and_then(serde_json::Value::as_bool) != Some(false);
+            // A failed read/list still has a conclusive, non-mutating outcome.
+            // Keep its error/truncation in the receipt without quarantining
+            // the mission. Missing results still fail closed above.
+            let read_only = matches!(
+                request.operation,
+                LinuxOperation::ReadFile { .. }
+                    | LinuxOperation::ReadFileRange { .. }
+                    | LinuxOperation::ListDirectory { .. }
+            );
+            let settle = read_only
+                || result.get("settle").and_then(serde_json::Value::as_bool) == Some(true);
             if !settle {
                 self.store.quarantine_linux(&id)?;
                 let mission = self.store.load_mission(&request.binding.mission_id)?;
@@ -960,7 +982,8 @@ mod os {
                 if effect.state == "completed" || effect.state == "not_applied" {
                     return Ok(());
                 }
-                if effect.entered_at.is_none()
+                if effect.released_at.is_none()
+                    && effect.entered_at.is_none()
                     && let Ok(quiescence) = self.prove_effect(&effect)
                     && quiescence
                         .get("proven")

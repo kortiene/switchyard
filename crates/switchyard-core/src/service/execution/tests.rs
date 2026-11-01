@@ -314,7 +314,7 @@ fn v3_inspection_and_forward_upgrade_preserve_mission_and_workspace() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        7
+        8
     );
 }
 
@@ -724,7 +724,7 @@ fn v4_upgrade_preserves_completed_prepared_and_uncertain_effects() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        7
+        8
     );
     assert_eq!(
         conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
@@ -1545,5 +1545,152 @@ fn v6_upgrade_preserves_effects_and_resolutions() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
+}
+
+#[test]
+fn released_linux_intent_cannot_be_settled_as_unreleased_after_restart() {
+    let (dir, mut host, fake) = setup();
+    let mut request = crate::LinuxExecutionRequest {
+        binding: fake.binding,
+        tool_task_id: "release-test".into(),
+        effect_key: "write".into(),
+        capability_scope: crate::LINUX_WRITE_SCOPE.into(),
+        deadline_ms: fake.deadline_ms,
+        operation: crate::LinuxOperation::WriteFile {
+            path: "out.txt".into(),
+            content: "once".into(),
+        },
+    };
+    host.store.prepare_linux(&request, None).unwrap();
+    host.store
+        .mark_linux_released(&request, 123, "start")
+        .unwrap();
+    let id = request.operation_id().unwrap();
+    let released = host.store.linux_effect(&id).unwrap().unwrap().released_at;
+    assert!(released.is_some());
+    assert!(
+        host.store
+            .mark_linux_released(&request, 123, "start")
+            .is_err()
+    );
+    drop(host);
+    let mut host = Host::open(&dir.path().join("mission.sqlite")).unwrap();
+    request.binding.generation = host.generation();
+    let proof = crate::persistence::linux_execution::quiescence_document(
+        true,
+        "populated 0",
+        Some(0),
+        "",
+        None,
+    );
+    assert!(host.store.linux_not_applied(&request, &proof).is_err());
+    let row = host.store.linux_effect(&id).unwrap().unwrap();
+    assert_eq!(row.released_at, released);
+    assert!(row.entered_at.is_none());
+    assert!(row.receipt_json.is_none());
+    assert!(
+        host.snapshot(&request.binding.mission_id)
+            .unwrap()
+            .execution_blocked
+    );
+}
+
+#[test]
+fn v7_upgrade_preserves_receipts_and_treats_unresolved_release_as_unknown() {
+    let (dir, mut host, fake) = setup();
+    let receipt = host.execute_fake_operation(&fake).unwrap();
+    let mission = fake.binding.mission_id.clone();
+    let db = dir.path().join("mission.sqlite");
+    drop(host);
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER simulated_effect_identity_unique;
+         DROP TRIGGER simulated_resolution_command_unique;
+         DROP TABLE linux_execution_resolutions;
+         DROP TABLE linux_execution_effects;
+         DELETE FROM schema_migrations WHERE version>=7;
+         PRAGMA user_version=7;",
+    )
+    .unwrap();
+    // Exercise the earlier v7 shape that lacked the entered CHECK as well.
+    let v7 = include_str!("../../migrations/007_linux_execution.sql").replace(
+        "    CHECK (state != 'entered' OR entered_at IS NOT NULL),\n",
+        "",
+    );
+    conn.execute_batch(&v7).unwrap();
+    conn.execute(
+        "INSERT INTO schema_migrations(version, applied_at) VALUES (7, 1)",
+        [],
+    )
+    .unwrap();
+    for (id, state, receipt, quiescence) in [
+        ("linux-unknown", "prepared", None, None),
+        (
+            "linux-completed",
+            "completed",
+            Some("{\"original\":true}"),
+            Some("{\"proven\":true}"),
+        ),
+    ] {
+        conn.execute(
+            "INSERT INTO linux_execution_effects(operation_id,mission_id,attempt_id,session_id,
+             payload_hash,request_json,started_generation,state,cgroup_path,cgroup_dev,cgroup_ino,
+             boot_id,receipt_json,quiescence_json,created_at)
+             VALUES (?1,?2,?3,?4,'hash','{}',1,?5,'/old/leaf',1,2,'boot',?6,?7,10)",
+            rusqlite::params![
+                id,
+                mission,
+                fake.binding.attempt_id,
+                fake.binding.session_id,
+                state,
+                receipt,
+                quiescence
+            ],
+        )
+        .unwrap();
+    }
+    let inspected = Host::inspect(&db, Some(&mission)).unwrap();
+    assert!(
+        inspected[0]
+            .linux_execution_effects
+            .iter()
+            .all(|row| row.released.is_none())
+    );
+    assert_eq!(
+        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        7
+    );
+    let mut host = Host::open(&db).unwrap();
+    let unknown = host.store.linux_effect("linux-unknown").unwrap().unwrap();
+    assert!(unknown.released_at.is_some());
+    assert!(unknown.entered_at.is_none());
+    let completed = host.store.linux_effect("linux-completed").unwrap().unwrap();
+    assert_eq!(completed.state, "completed");
+    assert_eq!(
+        completed.receipt_json.as_deref(),
+        Some("{\"original\":true}")
+    );
+    assert!(
+        conn.execute(
+            "UPDATE linux_execution_effects SET state='entered' WHERE operation_id='linux-unknown'",
+            []
+        )
+        .is_err()
+    );
+    let mut fake = fake;
+    fake.binding.generation = host.generation();
+    assert_eq!(host.execute_fake_operation(&fake).unwrap(), receipt);
+    assert!(host.snapshot(&mission).unwrap().execution_blocked);
+    drop(host);
+    let host = Host::open(&db).unwrap();
+    assert_eq!(
+        host.store
+            .linux_effect("linux-unknown")
+            .unwrap()
+            .unwrap()
+            .released_at,
+        unknown.released_at
+    );
 }

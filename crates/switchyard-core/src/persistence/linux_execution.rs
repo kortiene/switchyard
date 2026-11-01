@@ -18,6 +18,7 @@ pub(crate) struct LinuxEffectRecord {
     pub cgroup_dev: Option<i64>,
     pub cgroup_ino: Option<i64>,
     pub boot_id: Option<String>,
+    pub released_at: Option<i64>,
     pub entered_at: Option<i64>,
     pub receipt_json: Option<String>,
     pub quiescence_json: Option<String>,
@@ -52,9 +53,14 @@ impl Store {
         if user_version(&self.conn)? < 7 {
             return Ok(Vec::new());
         }
+        let released = if user_version(&self.conn)? >= 8 {
+            "released_at IS NOT NULL"
+        } else {
+            "NULL"
+        };
         let mut stmt = self.conn.prepare(
-            "SELECT operation_id, state, payload_hash, started_generation, request_json, entered_at, receipt_json, quiescence_json
-             FROM linux_execution_effects WHERE mission_id=?1 ORDER BY created_at, operation_id",
+            &format!("SELECT operation_id, state, payload_hash, started_generation, request_json, entered_at, receipt_json, quiescence_json, {released}
+             FROM linux_execution_effects WHERE mission_id=?1 ORDER BY created_at, operation_id"),
         ).map_err(Error::storage)?;
         let rows = stmt
             .query_map([mission], |row| {
@@ -67,6 +73,7 @@ impl Store {
                     row.get::<_, Option<i64>>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<bool>>(8)?,
                 ))
             })
             .map_err(Error::storage)?;
@@ -80,6 +87,7 @@ impl Store {
                 entered,
                 receipt,
                 quiescence,
+                released,
             ) = row.map_err(Error::storage)?;
             let request: Value = serde_json::from_str(&request).unwrap_or(Value::Null);
             Ok(LinuxExecutionView {
@@ -98,6 +106,7 @@ impl Store {
                     .unwrap_or("unknown")
                     .to_string(),
                 entered: entered.is_some(),
+                released,
                 receipt_retained: receipt.is_some(),
                 quiescence: quiescence_summary(quiescence.as_deref()),
             })
@@ -128,7 +137,7 @@ impl Store {
         self.conn
             .query_row(
                 "SELECT mission_id, attempt_id, session_id, payload_hash, state, started_generation,
-                        cgroup_path, cgroup_dev, cgroup_ino, boot_id, entered_at, receipt_json, quiescence_json
+                        cgroup_path, cgroup_dev, cgroup_ino, boot_id, entered_at, receipt_json, quiescence_json, released_at
                  FROM linux_execution_effects WHERE operation_id=?1",
                 [id],
                 |row| {
@@ -146,6 +155,7 @@ impl Store {
                         entered_at: row.get(10)?,
                         receipt_json: row.get(11)?,
                         quiescence_json: row.get(12)?,
+                        released_at: row.get(13)?,
                     })
                 },
             )
@@ -193,6 +203,44 @@ impl Store {
         tx.commit().map_err(Error::storage)
     }
 
+    /// Commit before writing GO. A release without a later receipt remains
+    /// uncertain even when no ENTERED acknowledgement reached the Host.
+    pub(crate) fn mark_linux_released(
+        &mut self,
+        request: &LinuxExecutionRequest,
+        launcher_pid: u32,
+        launcher_start: &str,
+    ) -> Result<()> {
+        self.require_linux_generation(request)?;
+        let tx = self.immediate()?;
+        let changed = tx
+            .execute(
+                "UPDATE linux_execution_effects
+             SET released_at=?1, launcher_pid=?2, launcher_start=?3
+             WHERE operation_id=?4 AND payload_hash=?5 AND started_generation=?6
+               AND state='prepared' AND released_at IS NULL AND entered_at IS NULL
+               AND mission_id=?7 AND attempt_id=?8 AND session_id=?9",
+                params![
+                    now_ms(),
+                    launcher_pid,
+                    launcher_start,
+                    request.operation_id()?,
+                    request.payload_hash()?,
+                    request.binding.generation,
+                    request.binding.mission_id,
+                    request.binding.attempt_id,
+                    request.binding.session_id
+                ],
+            )
+            .map_err(Error::storage)?;
+        if changed != 1 {
+            return Err(Error::guard(
+                "linux release requires the original unreleased intent",
+            ));
+        }
+        tx.commit().map_err(Error::storage)
+    }
+
     pub(crate) fn mark_linux_entered(
         &mut self,
         request: &LinuxExecutionRequest,
@@ -206,7 +254,7 @@ impl Store {
                 "UPDATE linux_execution_effects
                  SET state='entered', entered_at=?1, launcher_pid=?2, launcher_start=?3
                  WHERE operation_id=?4 AND payload_hash=?5 AND started_generation=?6
-                   AND state='prepared' AND entered_at IS NULL
+                   AND state='prepared' AND entered_at IS NULL AND released_at IS NOT NULL
                    AND mission_id=?7 AND attempt_id=?8 AND session_id=?9",
                 params![
                     now_ms(),
@@ -422,6 +470,25 @@ impl Store {
         request: &LinuxExecutionRequest,
         quiescence: &Value,
     ) -> Result<()> {
+        self.settle_linux_not_applied(request, quiescence, false)
+    }
+
+    /// Only the live supervisor's explicit no-entry result, after teardown,
+    /// permits settling a released intent without a receipt.
+    pub(crate) fn linux_launch_not_applied(
+        &mut self,
+        request: &LinuxExecutionRequest,
+        quiescence: &Value,
+    ) -> Result<()> {
+        self.settle_linux_not_applied(request, quiescence, true)
+    }
+
+    fn settle_linux_not_applied(
+        &mut self,
+        request: &LinuxExecutionRequest,
+        quiescence: &Value,
+        launch_failure_proven: bool,
+    ) -> Result<()> {
         self.require_linux_generation(request)?;
         let tx = self.immediate()?;
         let changed = tx
@@ -431,6 +498,7 @@ impl Store {
                  WHERE operation_id=?2 AND payload_hash=?3
                    AND state IN ('prepared','uncertain') AND entered_at IS NULL
                    AND receipt_json IS NULL
+                   AND (released_at IS NULL OR ?7)
                    AND mission_id=?4 AND attempt_id=?5 AND session_id=?6",
                 params![
                     serde_json::to_string(quiescence).map_err(Error::storage)?,
@@ -438,7 +506,8 @@ impl Store {
                     request.payload_hash()?,
                     request.binding.mission_id,
                     request.binding.attempt_id,
-                    request.binding.session_id
+                    request.binding.session_id,
+                    launch_failure_proven
                 ],
             )
             .map_err(Error::storage)?;
@@ -566,7 +635,7 @@ impl Store {
             .map(|value| serde_json::to_string(value).map_err(Error::storage))
             .transpose()?;
         let extra = if request.decision == ExecutionResolutionDecision::NotApplied {
-            "AND entered_at IS NULL AND receipt_json IS NULL"
+            "AND released_at IS NULL AND entered_at IS NULL AND receipt_json IS NULL"
         } else if request.decision == ExecutionResolutionDecision::Completed {
             "AND receipt_json IS NOT NULL"
         } else {
