@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,7 +41,14 @@ pub(crate) fn validate_delegation(root: &Path) -> Result<PathBuf> {
             "cgroup delegation root is not a cgroup v2 directory",
         ));
     }
-    let name = format!("probe-{}-{}", std::process::id(), crate::domain::now_ms());
+    // Same-process callers (parallel tests) must not share a leaf name.
+    static PROBE_SEQ: AtomicU64 = AtomicU64::new(0);
+    let name = format!(
+        "probe-{}-{}-{}",
+        std::process::id(),
+        crate::domain::now_ms(),
+        PROBE_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
     let leaf = create_leaf(&root, &name)?;
     let proved = kill_and_prove(&leaf, Duration::from_secs(2))?;
     let _ = fs::remove_dir(&leaf.path);

@@ -921,8 +921,20 @@ fn abandonment_stays_final_and_cannot_authorize_another_writer() {
     world.assert_origin();
 }
 
+fn limit_summary(receipt: &Value) -> String {
+    let result = &receipt["result"];
+    format!(
+        "disposition={} trunc={} stdout_len={} pids={} oom={}",
+        receipt["disposition"],
+        result["stdoutTruncated"],
+        result["stdout"].as_str().map(str::len).unwrap_or(0),
+        result["pidsMaxEvents"],
+        result["oomKills"]
+    )
+}
+
 #[test]
-fn flood_fork_and_memory_hit_aggregate_limits() {
+fn output_flood_hits_the_stream_cap() {
     let mut world = World::new();
     let (mut host, mission) = implementing(&mut world);
     enable(&mut host);
@@ -935,16 +947,28 @@ fn flood_fork_and_memory_hit_aggregate_limits() {
             argv: vec![
                 "/bin/sh".into(),
                 "-c".into(),
-                "dd if=/dev/zero bs=1024 count=200 status=none".into(),
+                "i=0; while [ \"$i\" -lt 4000 ]; do echo yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy; i=$((i+1)); done".into(),
             ],
         },
     );
     let flood = settle(&mut host, &mission, flood, "flood");
-    let body = flood.receipt.unwrap();
-    assert_eq!(body["disposition"], "truncated", "{body}");
-    assert_eq!(body["result"]["stdoutTruncated"], true);
-    assert_eq!(body["result"]["stdout"].as_str().unwrap().len(), 64 * 1024);
+    let body = flood.receipt.expect("flood receipt");
+    let summary = limit_summary(&body);
+    assert_eq!(body["disposition"], "truncated", "{summary}");
+    assert_eq!(body["result"]["stdoutTruncated"], true, "{summary}");
+    assert_eq!(
+        body["result"]["stdout"].as_str().map(str::len).unwrap_or(0),
+        64 * 1024,
+        "{summary}"
+    );
+    world.assert_origin();
+}
 
+#[test]
+fn fork_burst_hits_pids_max() {
+    let mut world = World::new();
+    let (mut host, mission) = implementing(&mut world);
+    enable(&mut host);
     let fork = request(
         &host,
         &mission,
@@ -959,15 +983,21 @@ fn flood_fork_and_memory_hit_aggregate_limits() {
         },
     );
     let fork = settle(&mut host, &mission, fork, "fork");
-    let events = fork.receipt.as_ref().unwrap()["result"]["pidsMaxEvents"]
-        .as_u64()
-        .unwrap_or(0);
+    let body = fork.receipt.expect("fork receipt");
+    let events = body["result"]["pidsMaxEvents"].as_u64().unwrap_or(0);
     assert!(
         events > 0,
-        "fork bomb did not hit pids.max: {}",
-        fork.receipt.as_ref().unwrap()
+        "fork burst did not hit pids.max: {}",
+        limit_summary(&body)
     );
+    world.assert_origin();
+}
 
+#[test]
+fn memory_fixture_hits_memory_max() {
+    let mut world = World::new();
+    let (mut host, mission) = implementing(&mut world);
+    enable(&mut host);
     let memory = request(
         &host,
         &mission,
@@ -977,18 +1007,17 @@ fn flood_fork_and_memory_hit_aggregate_limits() {
             argv: vec![
                 "/usr/bin/python3".into(),
                 "-c".into(),
-                "chunks=[]\nfor _ in range(128):\n chunks.append(bytearray(1024*1024))\n".into(),
+                "chunks=[]\nfor _ in range(80):\n chunks.append(bytearray(1024*1024))\n".into(),
             ],
         },
     );
     let memory = settle(&mut host, &mission, memory, "memory");
-    let oom = memory.receipt.as_ref().unwrap()["result"]["oomKills"]
-        .as_u64()
-        .unwrap_or(0);
+    let body = memory.receipt.expect("memory receipt");
+    let oom = body["result"]["oomKills"].as_u64().unwrap_or(0);
     assert!(
         oom > 0,
         "memory fixture did not hit memory.max: {}",
-        memory.receipt.as_ref().unwrap()
+        limit_summary(&body)
     );
     world.assert_origin();
 }

@@ -35,6 +35,35 @@ if [[ -z "$owner" || "$owner" == root ]]; then
 fi
 group="$(id -gn "$owner")"
 
+# memory.events is hierarchical: a leaf OOM increments this unit's counter.
+# systemd's default OOMPolicy=stop then SIGTERMs the whole service, which is
+# the CI runner. Keep the kill inside the leaf (memory.oom.group) and tell
+# systemd to continue. systemd-oomd is also told not to act on this unit.
+unit="$(basename "$parent")"
+oom_policy_before="n/a"
+oom_policy_after="n/a"
+oom_pressure="n/a"
+if [[ -d /run/systemd/system ]]; then
+  case "$unit" in
+    *.service|*.scope) ;;
+    *)
+      echo "runner cgroup $parent is not a systemd service or scope; a leaf OOM would be attributed to an unknown unit" >&2
+      exit 1
+      ;;
+  esac
+  oom_policy_before="$(systemctl show -p OOMPolicy --value "$unit" 2>/dev/null || true)"
+  systemctl set-property --runtime "$unit" \
+    OOMPolicy=continue \
+    ManagedOOMMemoryPressure=auto \
+    ManagedOOMSwap=auto
+  oom_policy_after="$(systemctl show -p OOMPolicy --value "$unit")"
+  oom_pressure="$(systemctl show -p ManagedOOMMemoryPressure --value "$unit")"
+  if [[ "$oom_policy_after" != "continue" ]]; then
+    echo "could not set $unit OOMPolicy=continue (was ${oom_policy_before:-unknown}, now ${oom_policy_after:-unknown})" >&2
+    exit 1
+  fi
+fi
+
 # A cgroup with processes cannot enable subtree_control. Park the job in a
 # child, then delegate a sibling the runner owns.
 if grep -Eq '[0-9]' "$parent/cgroup.procs"; then
@@ -108,6 +137,10 @@ if [[ -n "$evidence" ]]; then
     echo "cgroup_owner=$(stat -c '%U:%G' "$delegate")"
     echo "ancestor_procs_owner=$(stat -c '%U:%G' "$parent/cgroup.procs")"
     echo "boot_id=$(cat /proc/sys/kernel/random/boot_id)"
+    echo "oom_policy_unit=$unit"
+    echo "oom_policy_before=$oom_policy_before"
+    echo "oom_policy_after=$oom_policy_after"
+    echo "oom_pressure=$oom_pressure"
   } | tee "$evidence/cgroup-delegation.txt"
   printf '%s\n' "$delegate" >"$evidence/cgroup-root.txt"
   chown -R "$owner:$group" "$evidence" || true

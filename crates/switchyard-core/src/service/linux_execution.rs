@@ -46,7 +46,7 @@ mod os {
     };
     use crate::persistence::linux_execution::{StoredCgroup, quiescence_document};
     use crate::{ExecutionResolutionDecision, ExecutionResolutionRequest};
-    use rustix::process::{Pid, PidfdFlags, pidfd_open};
+    use rustix::process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal};
     use std::fs;
     use std::io::{BufRead, BufReader, Write};
     use std::os::fd::OwnedFd;
@@ -64,7 +64,7 @@ mod os {
         child: Child,
         stdin: Option<ChildStdin>,
         lines: Receiver<String>,
-        _pidfd: OwnedFd,
+        pidfd: OwnedFd,
         scratch: PathBuf,
         cgroup: CgroupIdentity,
     }
@@ -73,7 +73,10 @@ mod os {
         fn drop(&mut self) {
             let _ = cgroup::kill_and_prove(&self.cgroup, Duration::from_secs(2));
             self.stdin.take();
-            let _ = self.child.kill();
+            // The pidfd was opened before the pid could be recycled. Signaling
+            // through it cannot hit a later process that reused the number,
+            // which on a busy runner can be the service itself.
+            let _ = pidfd_send_signal(&self.pidfd, Signal::KILL);
             let started = std::time::Instant::now();
             loop {
                 match self.child.try_wait() {
@@ -1175,7 +1178,7 @@ mod os {
             child,
             stdin,
             lines,
-            _pidfd: pidfd,
+            pidfd,
             scratch: scratch.to_path_buf(),
             cgroup: CgroupIdentity {
                 path: leaf.path.clone(),
