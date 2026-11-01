@@ -183,7 +183,7 @@ fn main() -> ExitCode {
     match run(cli) {
         Ok(value) => {
             println!("{value}");
-            // Exit 3: recorded, not dispatched (`ok` with `workspaceError`).
+            // Exit 3: workspace remains blocked; inspect `dispatched` and the receipt.
             // Exit 0 is success (including persist-only). Exit 2 is rejection
             // or failure and does not prove that admission did not occur.
             if value.get("workspaceError").is_some() {
@@ -321,10 +321,16 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 persist_only,
             } => {
                 let mut host = Host::open(&db)?;
+                let body = command_body(
+                    &kind,
+                    &serde_json::from_str(&payload)
+                        .map_err(|error| Error::guard(format!("payload is not JSON: {error}")))?,
+                )?;
+                let is_stop = matches!(body, CommandBody::Pause | CommandBody::Cancel);
                 // Reconcile once per invocation. `--persist-only` skips that
                 // and both dispatches, so it cannot create a worktree.
-                // Isolated workspace failures still allow admission; only
-                // dispatch is gated.
+                // Isolated workspace failures still allow admission and stop
+                // delivery. Never drain earlier work before admitting a stop.
                 let workspace_error = if persist_only {
                     None
                 } else {
@@ -334,15 +340,10 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                         Err(error) => return Err(error),
                     }
                 };
-                if !persist_only && workspace_error.is_none() {
+                if !persist_only && !is_stop && workspace_error.is_none() {
                     host.dispatch_reconciled(&mission)?;
                 }
                 let current = host.snapshot(&mission)?;
-                let body = command_body(
-                    &kind,
-                    &serde_json::from_str(&payload)
-                        .map_err(|error| Error::guard(format!("payload is not JSON: {error}")))?,
-                )?;
                 let admitted = host.admit(AdmitRequest {
                     command_id,
                     mission_id: mission.clone(),
@@ -352,20 +353,40 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     origin: CommandOrigin::Operator,
                     body,
                 })?;
-                if !persist_only && workspace_error.is_none() {
-                    host.dispatch_reconciled(&mission)?;
+                if !persist_only {
+                    if is_stop || workspace_error.is_some() {
+                        host.dispatch_stops(&mission).map_err(|stop_error| {
+                            if let Some(error) = &workspace_error {
+                                stop_error.with_context(format!(
+                                    "workspace reconciliation also failed: {error}"
+                                ))
+                            } else {
+                                stop_error
+                            }
+                        })?;
+                    } else {
+                        host.dispatch_reconciled(&mission)?;
+                    }
                 }
+                let snapshot = host.snapshot(&mission)?;
+                let command = snapshot
+                    .commands
+                    .iter()
+                    .find(|c| c.id == admitted.command_id)
+                    .ok_or(Error::NotFound)?;
+                let command_state = command.state.clone();
+                let dispatched = command.receipt_id.is_some();
                 if let Some(error) = workspace_error {
-                    let mission_json = host.snapshot(&mission)?.to_json();
+                    let mission_json = snapshot.to_json();
                     let revision = mission_json["revision"].clone();
                     return Ok(json!({
                         "ok": true,
-                        "dispatched": false,
+                        "dispatched": dispatched,
                         "idempotent": admitted.idempotent,
                         "commandId": admitted.command_id,
                         "requestId": admitted.request_id,
                         "payloadHash": admitted.payload_hash,
-                        "commandState": admitted.state.as_str(),
+                        "commandState": command_state,
                         "revision": revision,
                         "workspaceError": {
                             "category": error.category(),
@@ -376,11 +397,12 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 }
                 Ok(json!({
                     "ok": true,
+                    "dispatched": dispatched,
                     "idempotent": admitted.idempotent,
                     "commandId": admitted.command_id,
                     "requestId": admitted.request_id,
                     "payloadHash": admitted.payload_hash,
-                    "commandState": admitted.state.as_str(),
+                    "commandState": command_state,
                     "mission": host.snapshot(&mission)?.to_json(),
                 }))
             }

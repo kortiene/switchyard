@@ -1156,3 +1156,148 @@ fn resolution_status_uses_commit_order_not_operator_command_ids() {
     .unwrap();
     assert_eq!(inspected[0].execution_resolutions, audits);
 }
+
+#[test]
+fn delivered_stops_preserve_execution_uncertainty_and_completion_guards() {
+    for abandon in [false, true] {
+        let (_dir, mut host, request) = setup();
+        let mission = &request.binding.mission_id;
+        interrupt_effect(&mut host, &request, "prepared");
+        if abandon {
+            host.execution_evidence
+                .remove(&request.operation_id().unwrap());
+            let resolution =
+                resolution_request(&host, &request, crate::ExecutionResolutionDecision::Abandon);
+            host.resolve_fake_execution(&resolution).unwrap();
+        }
+        command(&mut host, mission, CommandBody::Cancel);
+        let before = host.snapshot(mission).unwrap().to_json();
+        assert_eq!(host.dispatch_stops(mission).unwrap(), 1);
+        let snapshot = host.snapshot(mission).unwrap();
+        assert_eq!(snapshot.phase, Phase::Cancelling);
+        assert!(snapshot.execution_blocked);
+        let after = snapshot.to_json();
+        assert_eq!(before["executionEffects"], after["executionEffects"]);
+        assert_eq!(
+            before["executionResolutions"],
+            after["executionResolutions"]
+        );
+        assert_eq!(before["workspace"], after["workspace"]);
+        assert!(
+            after["nextSteps"]
+                .to_string()
+                .contains("Unresolved execution effects")
+        );
+        assert!(
+            after["nextSteps"]
+                .to_string()
+                .contains("detect_uncertainty")
+        );
+        let result = host.admit(AdmitRequest {
+            command_id: None,
+            mission_id: mission.clone(),
+            attempt_id: None,
+            expected_revision: snapshot.revision,
+            actor: "operator".into(),
+            origin: CommandOrigin::Operator,
+            body: CommandBody::ConfirmCancelled,
+        });
+        assert!(result.unwrap_err().to_string().contains("not quiescent"));
+        if !abandon {
+            // #125 still requires an explicit attention/recovery cycle.
+            command(
+                &mut host,
+                mission,
+                CommandBody::DetectUncertainty {
+                    reason: AttentionReason::ExecutionUncertain,
+                    content_digest: None,
+                },
+            );
+            let attention = host.snapshot(mission).unwrap();
+            assert_eq!(attention.phase, Phase::NeedsAttention);
+            assert_eq!(attention.prior_phase, Some(Phase::Cancelling));
+            assert_eq!(attention.commands.last().unwrap().origin, "operator");
+            let resolution = resolution_request(
+                &host,
+                &request,
+                crate::ExecutionResolutionDecision::NotApplied,
+            );
+            host.resolve_fake_execution(&resolution).unwrap();
+            command(
+                &mut host,
+                mission,
+                CommandBody::ExplicitRecovery {
+                    expected_target: Phase::Cancelling,
+                    ownership_proven: true,
+                    effects: crate::domain::EffectProof::Reconciled,
+                },
+            );
+            command(&mut host, mission, CommandBody::ConfirmCancelled);
+            assert_eq!(host.snapshot(mission).unwrap().phase, Phase::Cancelled);
+        }
+    }
+}
+
+#[test]
+fn pause_abort_is_delivered_even_when_reconciliation_discovers_a_prepared_effect() {
+    let (_dir, mut host, request) = setup();
+    let mission = &request.binding.mission_id;
+    assert!(
+        host.execute_fake_at(&request, |at| {
+            if at == "prepared" {
+                Err(Error::storage("crash before apply"))
+            } else {
+                Ok(())
+            }
+        })
+        .is_err()
+    );
+    command(&mut host, mission, CommandBody::Pause);
+    assert_eq!(host.dispatch_stops(mission).unwrap(), 1);
+    let snapshot = host.snapshot(mission).unwrap();
+    assert_eq!(snapshot.phase, Phase::Pausing);
+    assert_eq!(snapshot.execution_effects[0].state, "uncertain");
+    assert!(
+        host.admit(AdmitRequest {
+            command_id: None,
+            mission_id: mission.clone(),
+            attempt_id: None,
+            expected_revision: snapshot.revision,
+            actor: "operator".into(),
+            origin: CommandOrigin::Operator,
+            body: CommandBody::ConfirmStopped,
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("not quiescent")
+    );
+
+    command(
+        &mut host,
+        mission,
+        CommandBody::DetectUncertainty {
+            reason: AttentionReason::ExecutionUncertain,
+            content_digest: None,
+        },
+    );
+    let attention = host.snapshot(mission).unwrap();
+    assert_eq!(attention.phase, Phase::NeedsAttention);
+    assert_eq!(attention.prior_phase, Some(Phase::Pausing));
+    assert_eq!(attention.commands.last().unwrap().origin, "operator");
+    let resolution = resolution_request(
+        &host,
+        &request,
+        crate::ExecutionResolutionDecision::NotApplied,
+    );
+    host.resolve_fake_execution(&resolution).unwrap();
+    command(
+        &mut host,
+        mission,
+        CommandBody::ExplicitRecovery {
+            expected_target: Phase::Paused,
+            ownership_proven: true,
+            effects: crate::domain::EffectProof::Reconciled,
+        },
+    );
+    assert_eq!(host.snapshot(mission).unwrap().phase, Phase::Paused);
+}

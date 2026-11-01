@@ -128,7 +128,8 @@ impl Error {
         }
     }
 
-    pub(crate) fn with_context(self, detail: impl Into<String>) -> Self {
+    /// Attach diagnostics while preserving the primary category and retry semantics.
+    pub fn with_context(self, detail: impl Into<String>) -> Self {
         Self::WithContext {
             source: Box::new(self),
             detail: detail.into(),
@@ -186,7 +187,8 @@ impl Error {
     }
 
     /// Workspace problems that must not block command admission or observation
-    /// polling. Dispatch stays gated until the workspace is ready again.
+    /// polling or FakeRuntime stop delivery. Work dispatch stays gated until
+    /// the workspace is ready again.
     /// Stale generation and other host-level failures are not included.
     pub fn is_isolated_workspace_failure(&self) -> bool {
         if let Self::WithContext { source, .. } = self {

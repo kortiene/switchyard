@@ -146,3 +146,65 @@ fn proof_for(digest: &str, pr_id: &str) -> PublicationProof {
         pr_id: pr_id.into(),
     }
 }
+
+#[test]
+fn predecessor_pending_stop_cannot_enter_a_successors_outbox() {
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let source = create(&mut host, &world.repo, 2);
+    let digest = drive_to_publishing(&mut host, &source.mission_id);
+    let stop = admit(&mut host, &source.mission_id, CommandBody::Cancel);
+    // A publication acknowledgement may win the race with a still-pending cancel.
+    assert_eq!(
+        notify(
+            &mut host,
+            &source.mission_id,
+            RuntimeNotification::PublicationObserved {
+                content_digest: digest,
+                commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                tree_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                pr_id: "129".into(),
+            }
+        ),
+        Phase::Published
+    );
+    let source_before = host.snapshot(&source.mission_id).unwrap().to_json();
+    assert!(
+        source_before["pendingCommands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == stop.command_id)
+    );
+    let successor = host
+        .create_successor(&source.mission_id, "operator")
+        .unwrap();
+    assert_ne!(source.mission_id, successor.mission_id);
+    assert_ne!(source.attempt_id, successor.attempt_id);
+    let work = admit(&mut host, &successor.mission_id, CommandBody::StartPlanning);
+    drop(host);
+    let mut host = Host::open(&world.db).unwrap();
+    assert_eq!(host.dispatch_reconciled(&successor.mission_id).unwrap(), 1);
+    let next = host.snapshot(&successor.mission_id).unwrap();
+    assert!(
+        next.commands
+            .iter()
+            .all(|c| c.attempt_id == successor.attempt_id)
+    );
+    assert!(
+        host.runtime_mut()
+            .unwrap()
+            .stored_receipt(&work.request_id)
+            .is_some()
+    );
+    assert!(
+        host.runtime_mut()
+            .unwrap()
+            .stored_receipt(&stop.request_id)
+            .is_none()
+    );
+    let source_after = host.snapshot(&source.mission_id).unwrap().to_json();
+    assert_eq!(source_after["commands"], source_before["commands"]);
+    assert_eq!(source_after["revision"], source_before["revision"]);
+    assert_eq!(source_after["phase"], "published");
+}
