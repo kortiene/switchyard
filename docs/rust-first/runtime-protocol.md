@@ -140,9 +140,11 @@ Freeze protocol version, schemas, tool/configuration fingerprints, package lock,
 
 S2 owns fake-runtime/faux-provider conformance: duplicate admission, restart, lost reply, incompatible versions, wrong binding/generation, corrupt/oversized frames, backpressure, event gaps, timeout and cancellation. S3 adds real process/filesystem confinement tests. S8 composes them into acceptance. Live-provider tests are recorded separately from credential-free CI.
 
-### S3-A2 simulation evidence
+### Simulated execution evidence
 
 The Rust-only [simulated ExecutionEnv receipt path](s3-execution-receipts.md)
 implements intent/result persistence and generation-fenced replay using FakeRuntime.
-It is not wired to the Pi bridge and does not prove Pi task identity propagation,
-real effects or confinement. S2 remains NO-GO.
+The [S2-B effect probe](s2-effect-outcomes.md) exercises that journal through Pi's
+durable tool identities, typed effect responses and restart tests. The default
+Host and CLI have no Pi execution wiring. Simulated evidence does not prove real
+effects or confinement. S2 remains NO-GO.

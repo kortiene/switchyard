@@ -4,6 +4,9 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::process::Command;
 
+#[cfg(feature = "pi-contract")]
+mod pi_effects;
+
 fn git(repo: &Path, args: &[&str]) {
     let out = Command::new("git")
         .arg("-C")
@@ -482,6 +485,11 @@ fn deadline_between_intent_and_apply_is_definite_and_nonblocking() {
         state(&dir.path().join("mission.sqlite"), &id),
         "not_applied"
     );
+    #[cfg(feature = "pi-contract")]
+    assert_eq!(
+        host.execute_fake_operation_outcome(&request),
+        crate::PiEffectOutcome::Rejected
+    );
     assert_eq!(
         host.snapshot(&request.binding.mission_id).unwrap().phase,
         Phase::Implementing
@@ -839,6 +847,15 @@ fn resolution_proofs_settle_once_and_replay_after_restart_without_execution() {
         } else {
             assert_eq!(replay.unwrap_err().category(), "execution_not_applied");
         }
+        #[cfg(feature = "pi-contract")]
+        assert_eq!(
+            host.execute_fake_operation_outcome(&request),
+            if decision == Completed {
+                crate::PiEffectOutcome::Completed(audit["evidence"]["receipt"].clone())
+            } else {
+                crate::PiEffectOutcome::Rejected
+            }
+        );
         let mut changed = resolve.clone();
         changed.rationale = "changed decision".into();
         assert_eq!(
@@ -1791,6 +1808,144 @@ fn head_sha(path: &Path) -> Vec<u8> {
 fn worktree_admin(tree: &Path) -> std::path::PathBuf {
     let dot = std::fs::read_to_string(tree.join(".git")).unwrap();
     std::path::PathBuf::from(dot.trim().strip_prefix("gitdir: ").unwrap())
+}
+
+#[cfg(feature = "pi-contract")]
+#[test]
+fn typed_effect_outcomes_use_ledger_evidence_and_preserve_conflicts() {
+    use crate::PiEffectOutcome;
+    let (_dir, mut host, request) = setup();
+    let mut invalid = request.clone();
+    invalid.operation = ExecutionOperation::WriteFile {
+        path: "../escape".into(),
+        content: "no".into(),
+    };
+    assert_eq!(
+        host.execute_fake_operation_outcome(&invalid),
+        PiEffectOutcome::Rejected
+    );
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 0);
+    assert!(
+        host.snapshot(&request.binding.mission_id)
+            .unwrap()
+            .execution_effects
+            .is_empty()
+    );
+
+    let first = host.execute_fake_operation_outcome(&request);
+    assert!(matches!(first, PiEffectOutcome::Completed(_)));
+    assert_eq!(host.execute_fake_operation_outcome(&request), first);
+    let before = host
+        .snapshot(&request.binding.mission_id)
+        .unwrap()
+        .to_json();
+    let mut changed = request.clone();
+    changed.operation = ExecutionOperation::WriteFile {
+        path: "out.txt".into(),
+        content: "different".into(),
+    };
+    assert_eq!(
+        host.execute_fake_operation_outcome(&changed),
+        PiEffectOutcome::Conflict
+    );
+    assert_eq!(host.execute_fake_operation_outcome(&request), first);
+    let mut stale = request.clone();
+    stale.binding.generation = 0;
+    assert_eq!(
+        host.execute_fake_operation_outcome(&stale),
+        PiEffectOutcome::Rejected
+    );
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 1);
+    assert_eq!(
+        host.snapshot(&request.binding.mission_id)
+            .unwrap()
+            .to_json(),
+        before
+    );
+}
+
+#[cfg(feature = "pi-contract")]
+#[test]
+fn typed_effect_outcomes_keep_post_effect_errors_uncertain_until_durable_receipt() {
+    use crate::PiEffectOutcome;
+    for at in ["prepared", "effect", "completed"] {
+        for storage_error in [false, true] {
+            let (dir, mut host, mut request) = setup();
+            let result = host.execute_fake_at(&request, |checkpoint| {
+                if checkpoint != at {
+                    return Ok(());
+                }
+                Err(if storage_error {
+                    Error::storage("injected loss")
+                } else {
+                    Error::guard("injected loss")
+                })
+            });
+            let observed = host.fake_effect_outcome(&request, result).unwrap();
+            if at == "completed" {
+                assert!(matches!(observed, PiEffectOutcome::Completed(_)));
+            } else {
+                assert_eq!(observed, PiEffectOutcome::Uncertain);
+            }
+            assert_eq!(
+                host.runtime_mut().unwrap().simulated_effect_count(),
+                usize::from(at != "prepared")
+            );
+            drop(host);
+            let mut recovered = Host::open(&dir.path().join("mission.sqlite")).unwrap();
+            request.binding.generation = recovered.generation();
+            assert_eq!(recovered.execute_fake_operation_outcome(&request), observed);
+            assert_eq!(recovered.runtime_mut().unwrap().simulated_effect_count(), 0);
+            assert_eq!(
+                recovered
+                    .snapshot(&request.binding.mission_id)
+                    .unwrap()
+                    .execution_blocked,
+                at != "completed"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "pi-contract")]
+#[test]
+fn typed_effect_outcomes_preserve_abandonment_and_unknown_storage_failures() {
+    use crate::PiEffectOutcome;
+    let (dir, mut host, mut request, _abandon) = abandoned_effect();
+    assert_eq!(
+        host.execute_fake_operation_outcome(&request),
+        PiEffectOutcome::Uncertain
+    );
+    assert!(
+        host.snapshot(&request.binding.mission_id)
+            .unwrap()
+            .execution_blocked
+    );
+    let mut fresh = request.clone();
+    fresh.effect_key = "new-effect".into();
+    assert_eq!(
+        host.execute_fake_operation_outcome(&fresh),
+        PiEffectOutcome::Rejected
+    );
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 1);
+    assert_eq!(
+        host.fake_effect_outcome(&fresh, Err(Error::storage("unknown storage state")))
+            .unwrap(),
+        PiEffectOutcome::Uncertain
+    );
+    drop(host);
+    let mut host = Host::open(&dir.path().join("mission.sqlite")).unwrap();
+    request.binding.generation = host.generation();
+    assert_eq!(
+        host.execute_fake_operation_outcome(&request),
+        PiEffectOutcome::Uncertain
+    );
+    assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 0);
+    assert!(
+        host.snapshot(&request.binding.mission_id)
+            .unwrap()
+            .execution_blocked
+    );
 }
 
 fn abandoned_effect() -> (tempfile::TempDir, Host, ExecutionRequest, serde_json::Value) {

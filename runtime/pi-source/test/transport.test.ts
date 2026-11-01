@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { ADAPTER, canonical, MAX_FRAME, SOURCE, type Binding, type Frame, type Json } from '../src/protocol.ts';
+import { ADAPTER, canonical, effectError, MAX_FRAME, SOURCE, type Binding, type Frame, type Json } from '../src/protocol.ts';
 
 const binding: Binding = { missionId: 'm', attemptId: 'a', sessionId: 's', generation: 1 };
 const hello = { source: SOURCE, adapter: ADAPTER, maxFrame: MAX_FRAME, maxPending: 16, capabilities: ['durable-admission'] };
@@ -57,6 +57,34 @@ test('shared JSON subset rejects floats, unsafe integers and lone surrogates', (
   for (const value of [0.5, 1e21, 9_007_199_254_740_992, '\uD800']) assert.throws(() => canonical(value));
   assert.equal(canonical([-9_007_199_254_740_991, 9_007_199_254_740_991]), '[-9007199254740991,9007199254740991]');
 });
+
+test('effect errors retain only the three owner-defined dispositions', () => {
+  for (const [category, admission] of [['execution_rejected', 'rejected'],
+    ['operation_conflict', 'rejected'], ['execution_uncertain', 'uncertain']]) {
+    const error = effectError({ category, admission });
+    assert.equal(error.category, category);
+    assert.equal(error.admission, admission);
+  }
+});
+
+for (const error of [null, {}, { category: 'future_error', admission: 'rejected' },
+  { category: 'execution_uncertain', admission: 'rejected' },
+  { category: 'operation_conflict', admission: 'uncertain' },
+  { category: 'execution_rejected', admission: 'rejected', receipt: 'forged' }]) {
+  test(`invalid effect error fails closed: ${JSON.stringify(error)}`, { timeout: 10_000 }, async () => {
+    const p = await peer('tools');
+    try {
+      await p.request('runtime.hello', hello);
+      await p.request('runtime.open', {});
+      await p.request('runtime.submit', { type: 'input', content: 'write' }, { commandId: 'write' });
+      const limit = Date.now() + 2_000;
+      while (p.effects.length === 0 && Date.now() < limit) await new Promise(resolve => setTimeout(resolve, 5));
+      assert(p.effects.length > 0, 'effect must be pending');
+      p.child.stdin.write(`${JSON.stringify({ protocol: 0, kind: 'response', id: p.effects[0].id, binding, error })}\n`);
+      assert.equal(await p.exited, 1);
+    } finally { await p.close(); }
+  });
+}
 
 test('abort settles Pi without claiming that unacknowledged execution has stopped', { timeout: 10_000 }, async () => {
   const p = await peer('tools');

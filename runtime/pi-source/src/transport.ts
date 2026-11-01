@@ -1,7 +1,7 @@
 // Bounded bidirectional JSON Lines. The reader continues while a runtime call awaits a tool receipt.
 import { writeSync } from 'node:fs';
 import { TextDecoder } from 'node:util';
-import { checkBinding, DEADLINE_MS, MAX_FRAME, MAX_PENDING, PROTOCOL, ProtocolError,
+import { checkBinding, effectError, DEADLINE_MS, MAX_FRAME, MAX_PENDING, PROTOCOL, ProtocolError,
   type Binding, type Frame, type Json } from './protocol.ts';
 
 export class Transport {
@@ -45,9 +45,10 @@ export class Transport {
       if (frame.protocol !== PROTOCOL) throw new Error('invalid protocol');
       const waiting = this.pending.get(frame.id);
       if (!waiting || (frame.result === undefined) === (frame.error === undefined)) throw new Error('unknown response');
+      const error = frame.error === undefined ? undefined : effectError(frame.error);
       this.pending.delete(frame.id);
       clearTimeout(waiting.timer);
-      if (frame.error) waiting.reject(new ProtocolError(frame.error.category, frame.error.admission));
+      if (error) waiting.reject(error);
       else waiting.resolve(frame.result!);
       return;
     }

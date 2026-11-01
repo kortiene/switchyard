@@ -65,7 +65,8 @@ pub enum Error {
 
     /// Pi refused to admit the command and the protocol marks that refusal as
     /// definite. Transport loss and `admission: uncertain` stay [`Self::GuardFailed`]
-    /// or [`Self::Storage`]. Effect-level rejection is still #96.
+    /// or [`Self::Storage`]. Effect outcomes use `PiEffectOutcome` separately
+    /// under the `pi-contract` feature; they do not settle command admission.
     #[error("admission rejected: {category}")]
     AdmissionRejected { category: String },
 

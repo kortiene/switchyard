@@ -16,6 +16,41 @@ use crate::error::{Error, Result};
 
 const STDERR_LIMIT: usize = 4096;
 
+/// Evidence supplied by the trusted Rust execution owner, not inferred from a
+/// generic error or a Pi assertion. Rejection describes this invocation only;
+/// it never rewrites the history of an existing operation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PiEffectOutcome {
+    /// The original durable receipt, including on replay.
+    Completed(Value),
+    /// The owner proved this invocation did not admit a new effect.
+    Rejected,
+    /// The operation identity is already bound to different immutable input.
+    Conflict,
+    /// Execution may have happened. Reconcile; never automatically reapply.
+    Uncertain,
+}
+
+impl PiEffectOutcome {
+    fn response(self) -> Result<Value> {
+        Ok(match self {
+            Self::Completed(receipt) => {
+                safe_json(&receipt)?;
+                json!({"result": receipt})
+            }
+            Self::Rejected => {
+                json!({"error": {"category": "execution_rejected", "admission": "rejected"}})
+            }
+            Self::Conflict => {
+                json!({"error": {"category": "operation_conflict", "admission": "rejected"}})
+            }
+            Self::Uncertain => {
+                json!({"error": {"category": "execution_uncertain", "admission": "uncertain"}})
+            }
+        })
+    }
+}
+
 struct Pins {
     commit: String,
     node: String,
@@ -252,6 +287,29 @@ impl PiBridge {
         params: Value,
         effect: &mut dyn FnMut(&Value) -> Result<Value>,
     ) -> Result<Value> {
+        // Legacy callbacks do not carry admission evidence. Even a guard or
+        // conflict error can arrive after an effect, so every error stays unknown.
+        self.call_with_effects(
+            method,
+            command_id,
+            params,
+            &mut |params| match effect(params) {
+                Ok(receipt) => PiEffectOutcome::Completed(receipt),
+                Err(_) => PiEffectOutcome::Uncertain,
+            },
+        )
+    }
+
+    /// Typed effect exchange. Only the trusted execution owner may assert
+    /// non-admission or conflict. This transport does not settle an effect or
+    /// authorize a retry; receipts and uncertainty remain owned by its ledger.
+    pub fn call_with_effects(
+        &mut self,
+        method: &str,
+        command_id: Option<&str>,
+        params: Value,
+        effect: &mut dyn FnMut(&Value) -> PiEffectOutcome,
+    ) -> Result<Value> {
         match self.call_inner(method, command_id, params, effect) {
             Ok(value) => Ok(value),
             // idle/stopping and busy are complete responses. Killing the peer
@@ -266,7 +324,7 @@ impl PiBridge {
         method: &str,
         command_id: Option<&str>,
         params: Value,
-        effect: &mut dyn FnMut(&Value) -> Result<Value>,
+        effect: &mut dyn FnMut(&Value) -> PiEffectOutcome,
     ) -> Result<Value> {
         safe_json(&params)?;
         self.next_id += 1;
@@ -320,16 +378,7 @@ impl PiBridge {
                 {
                     return Err(Error::guard("invalid effect identity"));
                 }
-                let reply = match effect(params) {
-                    Ok(result) => json!({"result": result}),
-                    Err(_) => {
-                        // TODO(#96, s2-bridge-probe.md "Remaining S2 acceptance"):
-                        // replace this generic callback result with typed definite
-                        // rejection/conflict vs uncertain execution receipts. An S1
-                        // Error alone does not prove whether an effect was admitted.
-                        json!({"error": {"category": "execution_uncertain", "admission": "uncertain"}})
-                    }
-                };
+                let reply = effect(params).response()?;
                 let mut response = json!({"protocol": pins().bridge.protocol, "kind": "response", "id": wire_id,
                     "binding": binding_json(&self.binding)});
                 response

@@ -32,6 +32,82 @@ impl Host {
         self.execute_fake_at(request, |_| Ok(()))
     }
 
+    /// S2 probe adapter for the existing simulated execution journal. The
+    /// product runtime and Linux backend are not wired to Pi by this method.
+    /// A generic error is never by itself evidence of non-admission.
+    #[cfg(feature = "pi-contract")]
+    pub fn execute_fake_operation_outcome(
+        &mut self,
+        request: &ExecutionRequest,
+    ) -> crate::PiEffectOutcome {
+        use crate::PiEffectOutcome;
+        if let Err(error) =
+            self.accept_runtime_binding(&request.binding, &request.binding.mission_id)
+        {
+            return match error {
+                Error::BindingMismatch { .. } | Error::StaleGeneration { .. } => {
+                    PiEffectOutcome::Rejected
+                }
+                _ => PiEffectOutcome::Uncertain,
+            };
+        }
+        if self.runtime.fake_mut().is_none() {
+            return PiEffectOutcome::Rejected;
+        }
+        let result = self.execute_fake_operation(request);
+        self.fake_effect_outcome(request, result)
+            .unwrap_or(PiEffectOutcome::Uncertain)
+    }
+
+    #[cfg(feature = "pi-contract")]
+    fn fake_effect_outcome(
+        &self,
+        request: &ExecutionRequest,
+        result: Result<ExecutionReceipt>,
+    ) -> Result<crate::PiEffectOutcome> {
+        use crate::PiEffectOutcome;
+        // A stale owner cannot read receipts or turn a post-effect error into
+        // a definite rejection. Failed evidence reads also remain uncertain.
+        self.accept_runtime_binding(&request.binding, &request.binding.mission_id)?;
+        let id = request.operation_id()?;
+        let hash = request.payload_hash()?;
+        if let Some(effect) = self.store.execution_effect(&id)? {
+            if effect.mission_id != request.binding.mission_id
+                || effect.attempt_id != request.binding.attempt_id
+                || effect.session_id != request.binding.session_id
+            {
+                return Ok(PiEffectOutcome::Rejected);
+            }
+            if effect.payload_hash != hash {
+                return Ok(PiEffectOutcome::Conflict);
+            }
+            if self.store.operation_superseded(&id)? {
+                return Ok(PiEffectOutcome::Uncertain);
+            }
+            if effect.state == "completed" {
+                return Ok(effect
+                    .receipt
+                    .map(|r| PiEffectOutcome::Completed(r.to_json()))
+                    .unwrap_or(PiEffectOutcome::Uncertain));
+            }
+            return Ok(if effect.state == "not_applied" {
+                PiEffectOutcome::Rejected
+            } else {
+                PiEffectOutcome::Uncertain
+            });
+        }
+        if self.store.linux_effect(&id)?.is_some() {
+            return Ok(PiEffectOutcome::Conflict);
+        }
+        // The simulator cannot apply before its intent commits. Only absence
+        // plus a completed semantic refusal establishes non-admission here;
+        // storage/transport errors are deliberately still conservative.
+        Ok(match result {
+            Err(error) if !error.is_transient() => PiEffectOutcome::Rejected,
+            _ => PiEffectOutcome::Uncertain,
+        })
+    }
+
     fn execute_fake_at(
         &mut self,
         request: &ExecutionRequest,
