@@ -76,7 +76,7 @@ impl Host {
         use crate::PiEffectOutcome;
         debug_assert!(
             matches!(&self.runtime, RuntimeAdapter::Fake(_)),
-            "fake_effect_outcome classifies the simulated journal only; do not reuse it for the Linux backend"
+            "runtime is RuntimeAdapter::Fake"
         );
         // A stale owner cannot read receipts or turn a post-effect error into
         // a definite rejection. Failed evidence reads also remain uncertain.

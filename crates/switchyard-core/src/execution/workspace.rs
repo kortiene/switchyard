@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -712,7 +713,10 @@ pub(crate) fn verify(w: &WorkspaceRecord) -> Result<(String, String)> {
 /// Files are enumerated from disk, including ignored and untracked `.sy-tmp-*`
 /// files. Raw blobs (`hash-object --no-filters`) bypass all Git attribute
 /// conversions. Symlinks contribute their target bytes without being followed;
-/// regular files retain their executable bit. New blobs and the tree are written
+/// regular files retain their executable bit. Paths that Git's `verify_path`
+/// rejects are a guard error: `update-index` can ignore them and still exit 0,
+/// so the temporary index is compared with every enumerated path before the
+/// tree id is accepted. New blobs and the tree are written
 /// only under `GIT_OBJECT_DIRECTORY` in a private scratch directory beside the
 /// worktree, with the repository object store as
 /// `GIT_ALTERNATE_OBJECT_DIRECTORIES`. The directory is created mode `0700`
@@ -781,6 +785,10 @@ pub(crate) fn content_digest(tree: &Path) -> Result<String> {
         .output()
         .map_err(Error::storage)?;
     super::git::checked_output(&args, output)?;
+    // `update-index` prints "Ignoring path" and still exits 0 when `verify_path`
+    // rejects an entry. Exit status alone would omit that path from the evidence.
+    let indexed = temporary_index_entries(tree, &index, &object_dir, &alternates)?;
+    temporary_index_matches(&files, &indexed)?;
     let oid = git_isolated(tree, &index, &object_dir, &alternates, &["write-tree"])?;
     let oid = oid.trim();
     if ![40, 64].contains(&oid.len()) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -790,16 +798,17 @@ pub(crate) fn content_digest(tree: &Path) -> Result<String> {
 }
 
 /// Enumerate disk contents independently of the real index and Git attributes.
-/// Git trees cannot represent special files or nested Git administration; refuse
-/// those rather than silently recording incomplete evidence. Empty directories
-/// are omitted, as with ordinary Git trees.
+/// Git trees cannot represent special files, nested Git administration, or
+/// paths `verify_path` rejects. Refuse those rather than recording incomplete
+/// evidence. Empty directories are omitted, as with ordinary Git trees.
 fn digest_files(tree: &Path) -> Result<Vec<(PathBuf, &'static str)>> {
     let mut pending = vec![tree.to_path_buf()];
     let mut files = Vec::new();
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(&directory).map_err(Error::storage)? {
             let entry = entry.map_err(Error::storage)?;
-            if entry.file_name() == ".git" {
+            let name = entry.file_name();
+            if name == ".git" {
                 if directory == tree {
                     continue;
                 }
@@ -808,7 +817,16 @@ fn digest_files(tree: &Path) -> Result<Vec<(PathBuf, &'static str)>> {
                 ));
             }
             let path = entry.path();
+            let name_bytes = name.as_encoded_bytes();
+            if is_dotgit_alias(name_bytes) {
+                let relative = path.strip_prefix(tree).map_err(Error::storage)?;
+                return Err(refuse_unindexable_dotgit(relative, name_bytes));
+            }
             let metadata = fs::symlink_metadata(&path).map_err(Error::storage)?;
+            if metadata.file_type().is_symlink() && is_dotgitmodules_alias(name_bytes) {
+                let relative = path.strip_prefix(tree).map_err(Error::storage)?;
+                return Err(refuse_unindexable_gitmodules(relative, name_bytes));
+            }
             if metadata.is_dir() {
                 pending.push(path);
                 continue;
@@ -839,6 +857,167 @@ fn digest_files(tree: &Path) -> Result<Vec<(PathBuf, &'static str)>> {
         }
     }
     Ok(files)
+}
+
+/// Case variants of `.git`, the NTFS short name `git~1`, and `.git` names with
+/// a trailing dot or space. Git's `verify_path` drops these and still exits 0.
+fn is_dotgit_alias(name: &[u8]) -> bool {
+    if let Some(rest) = strip_ascii_case_prefix(name, b".git") {
+        return rest_is_only_dots_or_spaces(rest);
+    }
+    if let Some(rest) = strip_ascii_case_prefix(name, b"git~1") {
+        return rest_is_only_dots_or_spaces(rest);
+    }
+    false
+}
+
+/// Symlink names Git treats as `.gitmodules`, including ASCII case and a
+/// trailing dot or space. A regular file of the same name is representable.
+fn is_dotgitmodules_alias(name: &[u8]) -> bool {
+    strip_ascii_case_prefix(name, b".gitmodules").is_some_and(rest_is_only_dots_or_spaces)
+}
+
+fn rest_is_only_dots_or_spaces(rest: &[u8]) -> bool {
+    rest.iter().all(|byte| matches!(*byte, b'.' | b' '))
+}
+
+fn strip_ascii_case_prefix<'a>(name: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+    let (head, tail) = name.split_at_checked(prefix.len())?;
+    head.eq_ignore_ascii_case(prefix).then_some(tail)
+}
+
+fn refuse_unindexable_dotgit(relative: &Path, name: &[u8]) -> Error {
+    Error::guard(format!(
+        "workspace digest cannot include {}: Git refuses to index path component {} (case variants of .git, the NTFS short name git~1, and .git names with a trailing dot or space are omitted from the tree)",
+        quote_path(relative),
+        quote_path_bytes(name),
+    ))
+}
+
+fn refuse_unindexable_gitmodules(relative: &Path, name: &[u8]) -> Error {
+    Error::guard(format!(
+        "workspace digest cannot include {}: Git refuses to index a symlink named {} and would omit it from the evidence",
+        quote_path(relative),
+        quote_path_bytes(name),
+    ))
+}
+
+fn temporary_index_entries(
+    tree: &Path,
+    index: &str,
+    object_dir: &str,
+    alternates: &str,
+) -> Result<Vec<(Vec<u8>, String)>> {
+    let args = ["ls-files", "-z", "--stage"];
+    let output = isolated_command(tree, index, object_dir, alternates)?
+        .args(args)
+        .output()
+        .map_err(Error::storage)?;
+    let bytes = super::git::checked_output(&args, output)?;
+    parse_index_stage(&bytes)
+}
+
+/// `ls-files -z --stage` records are `mode SP object SP stage TAB path NUL`.
+/// The path is raw and may itself contain tabs or newlines.
+fn parse_index_stage(bytes: &[u8]) -> Result<Vec<(Vec<u8>, String)>> {
+    let mut entries = Vec::new();
+    for record in bytes.split(|byte| *byte == 0) {
+        if record.is_empty() {
+            continue;
+        }
+        let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+            return Err(Error::guard(
+                "workspace digest index entry was not git ls-files --stage output",
+            ));
+        };
+        let meta = std::str::from_utf8(&record[..tab]).map_err(|_| {
+            Error::guard("workspace digest index entry was not git ls-files --stage output")
+        })?;
+        let mut parts = meta.split(' ');
+        let mode = parts.next().unwrap_or("");
+        let hash = parts.next().unwrap_or("");
+        let stage = parts.next().unwrap_or("");
+        if parts.next().is_some()
+            || !matches!(mode, "100644" | "100755" | "120000")
+            || !is_commit_sha(hash)
+            || stage != "0"
+        {
+            return Err(Error::guard(
+                "workspace digest index entry was not a regular file or symlink at stage 0",
+            ));
+        }
+        entries.push((record[tab + 1..].to_vec(), mode.to_string()));
+    }
+    Ok(entries)
+}
+
+/// Path-for-path check that the temporary index kept every enumerated entry.
+fn temporary_index_matches(
+    files: &[(PathBuf, &'static str)],
+    indexed: &[(Vec<u8>, String)],
+) -> Result<()> {
+    let mut expected: BTreeMap<Vec<u8>, &str> = BTreeMap::new();
+    for (path, mode) in files {
+        let bytes = path.as_os_str().as_encoded_bytes().to_vec();
+        if expected.insert(bytes, *mode).is_some() {
+            return Err(Error::guard(format!(
+                "workspace digest enumerated {} more than once",
+                quote_path(path),
+            )));
+        }
+    }
+    let mut actual: BTreeMap<Vec<u8>, &str> = BTreeMap::new();
+    for (path, mode) in indexed {
+        if actual.insert(path.clone(), mode.as_str()).is_some() {
+            return Err(Error::guard(format!(
+                "workspace digest index contains duplicate path {}",
+                quote_path_bytes(path),
+            )));
+        }
+    }
+    if expected == actual {
+        return Ok(());
+    }
+    let missing: Vec<_> = expected
+        .keys()
+        .filter(|path| !actual.contains_key(*path))
+        .map(|path| quote_path_bytes(path))
+        .collect();
+    let unexpected: Vec<_> = actual
+        .keys()
+        .filter(|path| !expected.contains_key(*path))
+        .map(|path| quote_path_bytes(path))
+        .collect();
+    let modes: Vec<_> = expected
+        .iter()
+        .filter_map(|(path, mode)| {
+            let got = actual.get(path)?;
+            (*got != *mode).then(|| {
+                format!(
+                    "{} (index {got}, enumerated {mode})",
+                    quote_path_bytes(path)
+                )
+            })
+        })
+        .collect();
+    let detail = format!(
+        "missing [{}], unexpected [{}], mode mismatch [{}]",
+        missing.join(", "),
+        unexpected.join(", "),
+        modes.join(", ")
+    );
+    Err(Error::guard(format!(
+        "workspace digest failed closed: the temporary index does not contain exactly the enumerated paths ({detail}); Git update-index can drop a path and still exit 0"
+    )))
+}
+
+fn quote_path(path: &Path) -> String {
+    quote_path_bytes(path.as_os_str().as_encoded_bytes())
+}
+
+fn quote_path_bytes(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    format!("'{text}'")
 }
 
 /// Scratch lives in the attempt slot, next to the worktree, not in the shared
@@ -988,5 +1167,92 @@ mod tests {
         assert!(message.contains("injected failure after creating the workspace slot"));
         assert!(message.contains("slot cleanup failed"));
         assert!(message.contains("directory not empty"));
+    }
+
+    #[test]
+    fn git_refuses_dotgit_aliases_and_keeps_ordinary_names() {
+        for name in [
+            ".GIT", ".Git", ".git", "git~1", "GIT~1", ".git.", ".git ", ".git...", "git~1.",
+            "Git~1",
+        ] {
+            assert!(super::is_dotgit_alias(name.as_bytes()), "{name:?}");
+        }
+        for name in [
+            ".gitignore",
+            ".gitattributes",
+            ".github",
+            "git~2",
+            "GIT~2",
+            "git~10",
+            "README.md",
+            "gitmodules",
+        ] {
+            assert!(!super::is_dotgit_alias(name.as_bytes()), "{name:?}");
+        }
+        for name in [".gitmodules", ".Gitmodules", ".gitmodules ", ".gitmodules."] {
+            assert!(super::is_dotgitmodules_alias(name.as_bytes()), "{name:?}");
+        }
+        for name in [".gitmodules-ok", "gitmodules", ".GITIGNORE"] {
+            assert!(!super::is_dotgitmodules_alias(name.as_bytes()), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn digest_index_mismatch_fails_closed() {
+        let files = vec![
+            (std::path::PathBuf::from("README.md"), "100644"),
+            (std::path::PathBuf::from(".GIT/x"), "100644"),
+        ];
+        let indexed = vec![
+            (b"README.md".to_vec(), "100644".to_string()),
+            (b"extra".to_vec(), "100644".to_string()),
+        ];
+        let error = super::temporary_index_matches(&files, &indexed).unwrap_err();
+        assert_eq!(error.category(), "guard_failed", "{error}");
+        let text = error.to_string();
+        assert!(text.contains("temporary index"), "{text}");
+        assert!(text.contains(".GIT/x"), "{text}");
+        assert!(text.contains("extra"), "{text}");
+        assert!(!text.contains("README.md"), "{text}");
+    }
+
+    #[test]
+    fn digest_index_mode_mismatch_fails_closed() {
+        let files = vec![(std::path::PathBuf::from("run"), "100755")];
+        let indexed = vec![(b"run".to_vec(), "100644".to_string())];
+        let error = super::temporary_index_matches(&files, &indexed).unwrap_err();
+        assert_eq!(error.category(), "guard_failed", "{error}");
+        let text = error.to_string();
+        assert!(text.contains("mode mismatch"), "{text}");
+        assert!(text.contains("run"), "{text}");
+    }
+
+    #[test]
+    fn digest_index_accepts_an_exact_listing() {
+        let files = vec![(std::path::PathBuf::from("a.txt"), "100644")];
+        let indexed = vec![(b"a.txt".to_vec(), "100644".to_string())];
+        super::temporary_index_matches(&files, &indexed).unwrap();
+    }
+
+    #[test]
+    fn malformed_index_stage_fails_closed() {
+        let error = super::parse_index_stage(b"not-an-entry\0").unwrap_err();
+        assert_eq!(error.category(), "guard_failed", "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_listing_keeps_tabs_newlines_and_non_utf8_in_the_path() {
+        use std::os::unix::ffi::OsStrExt;
+        let raw = b"100755 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 0\todd\tname\n-\xff\x00120000 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 0\tlink\x00";
+        let indexed = super::parse_index_stage(raw).unwrap();
+        let files = vec![
+            (
+                std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"odd\tname\n-\xff")),
+                "100755",
+            ),
+            (std::path::PathBuf::from("link"), "120000"),
+        ];
+        super::temporary_index_matches(&files, &indexed).unwrap();
     }
 }
