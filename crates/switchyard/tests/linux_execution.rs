@@ -932,7 +932,11 @@ fn flood_fork_and_memory_hit_aggregate_limits() {
         "flood",
         LINUX_EXEC_START_SCOPE,
         LinuxOperation::ExecStart {
-            argv: vec!["/usr/bin/yes".into()],
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "dd if=/dev/zero bs=1024 count=200 status=none".into(),
+            ],
         },
     );
     let flood = settle(&mut host, &mission, flood, "flood");
@@ -950,7 +954,7 @@ fn flood_fork_and_memory_hit_aggregate_limits() {
             argv: vec![
                 "/bin/sh".into(),
                 "-c".into(),
-                "i=0; while [ \"$i\" -lt 200 ]; do sleep 2 & i=$((i+1)); done; wait".into(),
+                "i=0; while [ \"$i\" -lt 80 ]; do sleep 0.2 & i=$((i+1)); done; wait".into(),
             ],
         },
     );
@@ -973,7 +977,7 @@ fn flood_fork_and_memory_hit_aggregate_limits() {
             argv: vec![
                 "/usr/bin/python3".into(),
                 "-c".into(),
-                "chunks=[]\nwhile True:\n chunks.append(bytearray(1024*1024))\n".into(),
+                "chunks=[]\nfor _ in range(128):\n chunks.append(bytearray(1024*1024))\n".into(),
             ],
         },
     );

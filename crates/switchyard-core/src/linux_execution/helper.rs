@@ -213,7 +213,9 @@ fn supervise() -> Result<(), String> {
     } else {
         serde_json::from_str(&stdout).unwrap_or(Value::Null)
     };
-    if helper.get("disposition").and_then(Value::as_str) == Some("denied") {
+    if stdout_truncated.load(Ordering::Relaxed) || stderr_truncated.load(Ordering::Relaxed) {
+        disposition = "truncated";
+    } else if helper.get("disposition").and_then(Value::as_str) == Some("denied") {
         disposition = "denied";
     } else if helper.get("disposition").and_then(Value::as_str) == Some("conflict") {
         disposition = "conflict";
