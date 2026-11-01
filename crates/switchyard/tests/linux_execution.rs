@@ -948,9 +948,9 @@ fn flood_fork_and_memory_hit_aggregate_limits() {
         LINUX_EXEC_START_SCOPE,
         LinuxOperation::ExecStart {
             argv: vec![
-                "/usr/bin/python3".into(),
+                "/bin/sh".into(),
                 "-c".into(),
-                "import os,time\nfor _ in range(400):\n try:\n  pid=os.fork()\n except OSError:\n  break\n if pid==0:\n  time.sleep(30)\n  os._exit(0)\n".into(),
+                "i=0; while [ \"$i\" -lt 200 ]; do sleep 20 & i=$((i+1)); done; wait".into(),
             ],
         },
     );
@@ -973,7 +973,7 @@ fn flood_fork_and_memory_hit_aggregate_limits() {
             argv: vec![
                 "/usr/bin/python3".into(),
                 "-c".into(),
-                "chunks=[]\nwhile True:\n chunks.append(bytearray(8*1024*1024))\n".into(),
+                "chunks=[]\nwhile True:\n chunks.append(bytearray(1024*1024))\n".into(),
             ],
         },
     );

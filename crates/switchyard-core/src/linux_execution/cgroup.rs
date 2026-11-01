@@ -22,7 +22,9 @@ pub(crate) struct Quiescence {
     pub oom_kill: u64,
 }
 
-const MEMORY_MAX: &str = "268435456";
+// 64 MiB is enough to prove memory.oom.group and stays inside the CI job's
+// service budget. A 256 MiB spike on the hosted runner was killed with SIGTERM.
+const MEMORY_MAX: &str = "67108864";
 const PIDS_MAX: &str = "64";
 const CPU_MAX: &str = "50000 100000";
 

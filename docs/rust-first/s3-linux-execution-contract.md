@@ -132,7 +132,7 @@ beside the simulated arrays. `executionBlocked` is true for either journal.
 
 ## Limits
 
-Each leaf gets `memory.max` 256 MiB, `memory.swap.max` 0, `memory.oom.group` 1,
+Each leaf gets `memory.max` 64 MiB, `memory.swap.max` 0, `memory.oom.group` 1,
 `pids.max` 64, and `cpu.max` 50000 100000. Bubblewrap is wrapped in `prlimit`
 with a 512 MiB address space, 10 CPU seconds, 1 MiB file size, 128 descriptors,
 and no core file. Output past 64 KiB is truncated and the cgroup is killed.
