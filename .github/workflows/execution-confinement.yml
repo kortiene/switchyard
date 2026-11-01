@@ -34,7 +34,8 @@ jobs:
       - name: Delegate a cgroup v2 subtree to the unprivileged runner
         run: |
           mkdir -p confinement-evidence
-          sudo -E ./scripts/cgroup-delegate.sh
+          rel="$(awk -F: '$1=="0" {print $3}' /proc/self/cgroup)"
+          sudo -E ./scripts/cgroup-delegate.sh "/sys/fs/cgroup${rel}"
           echo "SWITCHYARD_CGROUP_ROOT=$(cat confinement-evidence/cgroup-root.txt)" >> "$GITHUB_ENV"
       - name: Prove boundaries, process-tree termination, and Linux execution
         run: ./scripts/confinement-verify.sh

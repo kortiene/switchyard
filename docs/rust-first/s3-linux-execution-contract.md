@@ -14,9 +14,13 @@ recovery.
 
 Ubuntu 24.04 x86_64, Bubblewrap **0.9.0** / package **0.9.0-1ubuntu0.3**, Rust
 1.99.1, and a **delegated cgroup v2 subtree**. A CI setup step, run as root the
-same way #128 installs its AppArmor profile, creates `/sys/fs/cgroup/switchyard`,
-enables `cpu`, `memory`, and `pids`, and chowns it to the runner. The Host,
-Bubblewrap, and workloads never use sudo.
+same way #128 installs its AppArmor profile, nests the job under its current
+cgroup, enables `cpu`, `memory`, and `pids`, and chowns a `switchyard` child of
+that job cgroup to the runner. The subtree is not a sibling of the job: the
+runner must be able to write the common ancestor's `cgroup.procs` or it cannot
+join a leaf. The setup probe joins a leaf as the runner and requires
+`populated 0` after `cgroup.kill`. The Host, Bubblewrap, and workloads never
+use sudo.
 
 If cgroup v2, a controller, `memory.swap.max`, or writability is missing,
 `execution-confinement` fails. There is no rlimit-only or unconfined fallback.
