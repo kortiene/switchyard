@@ -713,20 +713,19 @@ pub(crate) fn verify(w: &WorkspaceRecord) -> Result<(String, String)> {
 /// hide by being listed in `.gitignore`. That includes untracked `.sy-tmp-*`
 /// files whether or not they are ignored. On-disk bytes win over a staged blob
 /// that differs from the worktree. New blobs and the tree object are written
-/// only under `GIT_OBJECT_DIRECTORY` in the scratch directory, with the
-/// repository object store as `GIT_ALTERNATE_OBJECT_DIRECTORIES`. Scratch is
-/// removed afterward, so ignored files and secrets never become loose objects
-/// in the shared database. The command does not move HEAD, the branch, or the
-/// real index.
+/// only under `GIT_OBJECT_DIRECTORY` in a private scratch directory beside the
+/// worktree, with the repository object store as
+/// `GIT_ALTERNATE_OBJECT_DIRECTORIES`. The directory is created mode `0700`
+/// and is refused if that path already exists. It is not the shared temp
+/// directory. A killed Host can leave it behind; the next digest on this
+/// attempt slot removes stale `switchyard-digest-*` directories before
+/// creating a new one. Drop removes it on the normal path, so ignored files
+/// never become loose objects in the shared database. The command does not
+/// move HEAD, the branch, or the real index.
 pub(crate) fn content_digest(tree: &Path) -> Result<String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(Error::storage)?
-        .as_nanos();
-    let scratch =
-        std::env::temp_dir().join(format!("switchyard-index-{}-{}", std::process::id(), nanos));
+    let scratch = private_digest_scratch(tree)?;
     let objects = scratch.join("objects");
-    std::fs::create_dir_all(&objects).map_err(Error::storage)?;
+    create_private_dir(&objects)?;
     let _cleanup = ScratchDir(scratch.clone());
     let index = path_text(&scratch.join("index"))?;
     let object_dir = path_text(&objects)?;
@@ -751,6 +750,48 @@ pub(crate) fn content_digest(tree: &Path) -> Result<String> {
         return Err(Error::guard("workspace content digest was not a tree id"));
     }
     Ok(oid.to_string())
+}
+
+/// Scratch lives in the attempt slot, next to the worktree, not in the shared
+/// temp directory. Only this Host can be digesting that slot: the owner flock
+/// excludes a second writer. Stale directories are leftovers from a Host that
+/// was killed before `Drop` ran; they are mode `0700` and are removed here.
+pub(crate) fn private_digest_scratch(tree: &Path) -> Result<PathBuf> {
+    let parent = tree
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| Error::guard("workspace has no parent directory for the digest scratch"))?;
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("switchyard-digest-") {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    let scratch = parent.join(format!("switchyard-digest-{}", uuid::Uuid::new_v4()));
+    create_private_dir(&scratch)?;
+    Ok(scratch)
+}
+
+pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
+    if path.exists() {
+        return Err(Error::guard("digest scratch path already exists"));
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(Error::guard("digest scratch path already exists"))
+        }
+        Err(error) => Err(Error::storage(error)),
+    }
 }
 
 fn common_objects(tree: &Path) -> Result<PathBuf> {
@@ -815,6 +856,19 @@ mod tests {
         assert_eq!(exited.category(), "guard_failed");
         assert!(!exited.is_transient());
         assert!(exited.to_string().contains("exit 128"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn digest_scratch_is_mode_0700_and_refuses_an_existing_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("switchyard-digest-one");
+        super::create_private_dir(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        let error = super::create_private_dir(&path).unwrap_err();
+        assert!(error.to_string().contains("already exists"), "{error}");
     }
 
     #[test]

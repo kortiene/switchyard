@@ -214,6 +214,14 @@ impl Host {
         if workspace.view.state != "ready" {
             return Err(Error::guard("supersession requires a ready workspace"));
         }
+        // The owner flock is per canonical database path. A copied or hardlinked
+        // ledger gets its own lock, so compare the recorded ledger path the same
+        // way workspace preparation does, before any cgroup kill.
+        if Path::new(&workspace.ledger_path) != self.ledger_path {
+            return Err(Error::guard(
+                "workspace identity/path conflicts with its reservation",
+            ));
+        }
         Ok(workspace)
     }
 

@@ -1843,7 +1843,9 @@ fn supersede_refuses_live_supervisor_bad_leaf_and_unproven_sibling() {
             .execution_supersessions
             .is_empty()
     );
-    fs::remove_dir_all(&path).unwrap();
+    // cgroupfs refuses unlink of control files, so remove_dir_all returns EPERM.
+    // rmdir removes an empty leaf without walking those files.
+    fs::remove_dir(&path).unwrap();
     rusqlite::Connection::open(&db)
         .unwrap()
         .execute(
@@ -1897,8 +1899,10 @@ fn supersede_refuses_an_unready_workspace_before_killing_the_leaf() {
         !text.contains("quiescence was proved") && !text.contains("fresh_cgroup_kill"),
         "{text}"
     );
+    // A killed child stays in /proc as a zombie until this parent reaps it.
+    // try_wait reaps that zombie, so None means the sleeper is still running.
     assert!(
-        Path::new(&format!("/proc/{pid}")).exists(),
+        child.try_wait().unwrap().is_none(),
         "the leaf was killed before the workspace check"
     );
     assert_eq!(effect_row(&db, &resolve.operation_id), effect_before);

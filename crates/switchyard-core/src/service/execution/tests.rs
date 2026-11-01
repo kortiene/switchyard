@@ -2692,7 +2692,58 @@ fn worktree_digest_keeps_ignored_blobs_out_of_the_repository() {
     let again = crate::execution::workspace::content_digest(&tree).unwrap();
     assert_ne!(again, digest);
     assert_eq!(loose_object_count(&repo), before);
+    let slot = tree.parent().unwrap();
+    let stale = slot.join("switchyard-digest-stale");
+    std::fs::create_dir(&stale).unwrap();
+    std::fs::write(stale.join("secret.env"), "TOKEN=left-by-a-killed-host\n").unwrap();
+    let _ = crate::execution::workspace::content_digest(&tree).unwrap();
+    assert!(!stale.exists(), "stale digest scratch must be removed");
+    let leftovers = std::fs::read_dir(slot).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("switchyard-digest-")
+    });
+    assert!(!leftovers, "digest scratch must not outlive the call");
     let _ = host;
+}
+
+#[test]
+fn supersede_refuses_a_copied_ledger_before_any_kill() {
+    let (dir, host, request, abandon) = abandoned_effect();
+    let mission = request.binding.mission_id.clone();
+    let db = dir.path().join("mission.sqlite");
+    drop(host);
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+    }
+    let copy = dir.path().join("copy.sqlite");
+    std::fs::copy(&db, &copy).unwrap();
+    let mut original = Host::open(&db).unwrap();
+    let mut copied = Host::open(&copy).unwrap();
+    let revision = copied.snapshot(&mission).unwrap().revision;
+    let sup = supersede_of(&copied, &request, &abandon, "supersede-copied-ledger");
+    let error = copied.supersede_execution(&sup).unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("conflicts with its reservation"), "{text}");
+    assert!(
+        !text.contains("quiescence was proved"),
+        "copied ledger must be refused before any kill: {text}"
+    );
+    assert_eq!(copied.snapshot(&mission).unwrap().revision, revision);
+    assert!(
+        copied
+            .snapshot(&mission)
+            .unwrap()
+            .execution_supersessions
+            .is_empty()
+    );
+    drop(copied);
+    let real = supersede_of(&original, &request, &abandon, "supersede-original-ledger");
+    original.supersede_execution(&real).unwrap();
 }
 
 #[test]

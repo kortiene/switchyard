@@ -75,10 +75,18 @@ hide by being listed in `.gitignore`. That covers tracked files at their
 on-disk bytes, untracked files, and `.sy-tmp-*` leftovers whether or not they
 are ignored. On-disk bytes win when the real index holds a different staged
 blob. New blobs and the tree are written only to a scratch
-`GIT_OBJECT_DIRECTORY`, with the repository object store as an alternate.
-Scratch is deleted with the temporary index, so ignored files do not become
-loose objects in the shared database. The command does not move HEAD, the
-branch, or the real index.
+`GIT_OBJECT_DIRECTORY` beside the worktree, created mode `0700` and refused if
+that path already exists. The repository object store is only an alternate.
+The scratch directory is not the shared temp directory. Drop deletes it. A
+killed Host can leave a `0700` `switchyard-digest-*` directory in the attempt
+slot; the next digest on that slot removes those leftovers before creating a
+new one. Ignored files do not become loose objects in the shared database.
+The command does not move HEAD, the branch, or the real index.
+
+The owner flock is per canonical database path. A copied or hardlinked ledger
+gets its own lock, so supersession compares the workspace's recorded ledger
+path with this Host's path, the same check workspace preparation uses, before
+any cgroup kill.
 
 The workspace `ready` check and S3-A1 verify run before any cgroup kill, and
 again after quiescence together with the digest. A refusal after a kill keeps
