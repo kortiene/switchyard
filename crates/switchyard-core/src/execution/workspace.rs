@@ -787,6 +787,9 @@ pub(crate) fn content_digest(tree: &Path) -> Result<String> {
     super::git::checked_output(&args, output)?;
     // `update-index` prints "Ignoring path" and still exits 0 when `verify_path`
     // rejects an entry. Exit status alone would omit that path from the evidence.
+    // Paths are compared as raw bytes. Git's index uses `/` separators, which
+    // match `Path` on Unix. Windows is not a target: `\` separators and WTF-8
+    // would never match, so this check would always fail closed.
     let indexed = temporary_index_entries(tree, &index, &object_dir, &alternates)?;
     temporary_index_matches(&files, &indexed)?;
     let oid = git_isolated(tree, &index, &object_dir, &alternates, &["write-tree"])?;
@@ -859,8 +862,15 @@ fn digest_files(tree: &Path) -> Result<Vec<(PathBuf, &'static str)>> {
     Ok(files)
 }
 
-/// Case variants of `.git`, the NTFS short name `git~1`, and `.git` names with
-/// a trailing dot or space. Git's `verify_path` drops these and still exits 0.
+/// Best-effort names refused up front so the error can name the component.
+///
+/// This covers ASCII case variants of `.git`, the NTFS short name `git~1`,
+/// and `.git` names with a trailing dot or space. The `.gitmodules` symlink
+/// check is the same kind of hint. Git's `core.protectNTFS` and
+/// `core.protectHFS` rules drop more than this list, including
+/// `.git::$INDEX_ALLOCATION` and HFS ignorable-character variants of `.git`.
+/// The temporary-index comparison is the guarantee that a path Git omitted
+/// cannot become a digest.
 fn is_dotgit_alias(name: &[u8]) -> bool {
     if let Some(rest) = strip_ascii_case_prefix(name, b".git") {
         return rest_is_only_dots_or_spaces(rest);
@@ -951,6 +961,9 @@ fn parse_index_stage(bytes: &[u8]) -> Result<Vec<(Vec<u8>, String)>> {
     Ok(entries)
 }
 
+/// How many paths of each kind a mismatch error quotes before summarizing.
+const MISMATCH_PATHS_SHOWN: usize = 8;
+
 /// Path-for-path check that the temporary index kept every enumerated entry.
 fn temporary_index_matches(
     files: &[(PathBuf, &'static str)],
@@ -1001,14 +1014,26 @@ fn temporary_index_matches(
         })
         .collect();
     let detail = format!(
-        "missing [{}], unexpected [{}], mode mismatch [{}]",
-        missing.join(", "),
-        unexpected.join(", "),
-        modes.join(", ")
+        "{}, {}, {}",
+        summarize_mismatch_paths("missing", &missing),
+        summarize_mismatch_paths("unexpected", &unexpected),
+        summarize_mismatch_paths("mode mismatch", &modes),
     );
     Err(Error::guard(format!(
         "workspace digest failed closed: the temporary index does not contain exactly the enumerated paths ({detail}); Git update-index can drop a path and still exit 0"
     )))
+}
+
+fn summarize_mismatch_paths(label: &str, paths: &[String]) -> String {
+    let shown = paths.len().min(MISMATCH_PATHS_SHOWN);
+    let listed = paths[..shown].join(", ");
+    let count = paths.len();
+    if count > MISMATCH_PATHS_SHOWN {
+        let rest = count - MISMATCH_PATHS_SHOWN;
+        format!("{label} {count} [{listed}, and {rest} more]")
+    } else {
+        format!("{label} {count} [{listed}]")
+    }
 }
 
 fn quote_path(path: &Path) -> String {
@@ -1186,6 +1211,8 @@ mod tests {
             "git~10",
             "README.md",
             "gitmodules",
+            // NTFS alternate-data-stream form. Left for the index comparison.
+            ".git::$INDEX_ALLOCATION",
         ] {
             assert!(!super::is_dotgit_alias(name.as_bytes()), "{name:?}");
         }
@@ -1225,6 +1252,44 @@ mod tests {
         let text = error.to_string();
         assert!(text.contains("mode mismatch"), "{text}");
         assert!(text.contains("run"), "{text}");
+    }
+
+    #[test]
+    fn digest_index_mismatch_lists_only_the_first_paths_of_each_kind() {
+        let shown = super::MISMATCH_PATHS_SHOWN;
+        let total = shown + 4;
+        let mut files = Vec::new();
+        let mut indexed = Vec::new();
+        for i in 0..total {
+            files.push((
+                std::path::PathBuf::from(format!("missing-{i:02}")),
+                "100644",
+            ));
+            indexed.push((format!("extra-{i:02}").into_bytes(), "100644".to_string()));
+            let mode = format!("mode-{i:02}");
+            files.push((std::path::PathBuf::from(&mode), "100755"));
+            indexed.push((mode.into_bytes(), "100644".to_string()));
+        }
+        let text = super::temporary_index_matches(&files, &indexed)
+            .unwrap_err()
+            .to_string();
+        let last_shown = shown - 1;
+        for prefix in ["missing", "extra", "mode"] {
+            assert!(text.contains(&format!("{prefix}-00")), "{text}");
+            assert!(
+                text.contains(&format!("{prefix}-{last_shown:02}")),
+                "{text}"
+            );
+            let hidden = format!("{prefix}-{shown:02}");
+            assert!(
+                !text.contains(&hidden),
+                "listed past the cap ({hidden}): {text}"
+            );
+        }
+        assert!(text.contains(&format!("missing {total}")), "{text}");
+        assert!(text.contains(&format!("unexpected {total}")), "{text}");
+        assert!(text.contains(&format!("mode mismatch {total}")), "{text}");
+        assert!(text.contains("and 4 more"), "{text}");
     }
 
     #[test]
