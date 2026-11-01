@@ -71,20 +71,24 @@ mod os {
 
     impl Drop for ActiveExec {
         fn drop(&mut self) {
-            let _ = cgroup::kill_and_prove(&self.cgroup, Duration::from_secs(2));
+            // EOF makes the supervisor reap the launcher before it proves the
+            // leaf empty. Proving first would accept `populated 0` while the
+            // launcher can still join.
             self.stdin.take();
-            // The pidfd was opened before the pid could be recycled. Signaling
-            // through it cannot hit a later process that reused the number,
-            // which on a busy runner can be the service itself.
-            let _ = pidfd_send_signal(&self.pidfd, Signal::KILL);
             let started = std::time::Instant::now();
             loop {
                 match self.child.try_wait() {
                     Ok(Some(_)) | Err(_) => break,
-                    Ok(None) if started.elapsed() > Duration::from_secs(2) => break,
+                    Ok(None) if started.elapsed() > Duration::from_secs(2) => {
+                        // The pidfd was opened before the pid could be recycled.
+                        let _ = pidfd_send_signal(&self.pidfd, Signal::KILL);
+                        let _ = self.child.try_wait();
+                        break;
+                    }
                     Ok(None) => std::thread::sleep(Duration::from_millis(20)),
                 }
             }
+            let _ = cgroup::kill_and_prove(&self.cgroup, Duration::from_secs(2));
         }
     }
 
@@ -483,6 +487,11 @@ mod os {
             start_hash: &str,
         ) -> Result<()> {
             let start = self.matching_start(request, start_id, start_hash)?;
+            if self.store.linux_resolution_for(start_id)?.is_some() {
+                return Err(Error::guard(
+                    "abandoned linux effect is final; cancel cannot complete it",
+                ));
+            }
             self.store.prepare_linux(request, None)?;
             self.barrier("prepared");
             if let Some(session) = self.linux.as_mut() {
@@ -504,7 +513,7 @@ mod os {
                     "operationId": start_id,
                     "payloadHash": start_hash,
                     "simulated": false,
-                    "backend": "linux-bubblewrap-0.9.0",
+                    "backend": crate::linux_execution::BUBBLEWRAP_BACKEND,
                     "disposition": "cancelled",
                     "result": {"disposition": "cancelled"}
                 });
@@ -516,7 +525,7 @@ mod os {
                 "operationId": request.operation_id()?,
                 "payloadHash": request.payload_hash()?,
                 "simulated": false,
-                "backend": "linux-bubblewrap-0.9.0",
+                "backend": crate::linux_execution::BUBBLEWRAP_BACKEND,
                 "disposition": "cancelled",
                 "startOperationId": start_id,
             });
@@ -565,7 +574,7 @@ mod os {
             let workspace = self.ready_workspace_path(&request.binding.mission_id)?;
             cgroup::git_file_is_regular(&workspace)?;
             let id = request.operation_id()?;
-            let leaf = cgroup::create_leaf(&config.cgroup_root, &cgroup::leaf_name(&id))?;
+            let leaf = cgroup::create_leaf(&config.cgroup_root, &cgroup::leaf_name(&id)?)?;
             if !cgroup::within_root(&config.cgroup_root, &leaf.path) {
                 return Err(Error::guard("cgroup leaf escaped the delegated root"));
             }
@@ -602,11 +611,7 @@ mod os {
                 )));
             }
             self.barrier("ready");
-            let start = start_time(active.child.id())?;
             self.accept_runtime_binding(&request.binding, &request.binding.mission_id)?;
-            self.store
-                .mark_linux_entered(request, active.child.id(), &start)?;
-            self.barrier("entered");
             let stdin = active
                 .stdin
                 .as_mut()
@@ -614,45 +619,57 @@ mod os {
             writeln!(stdin, "GO").map_err(Error::storage)?;
             stdin.flush().map_err(Error::storage)?;
             let exec = matches!(request.operation, LinuxOperation::ExecStart { .. });
-            if exec {
+            let mut saw_entered = false;
+            loop {
                 let line = wait_line(&active.lines, remaining(request)?)?;
-                if line == "DONE" {
-                    drop(active);
-                    self.finish_sync(request, &leaf, &scratch)?;
-                    return Ok(());
+                match line.as_str() {
+                    "ENTERED" if !saw_entered => {
+                        let start = start_time(active.child.id())?;
+                        self.accept_runtime_binding(&request.binding, &request.binding.mission_id)?;
+                        self.store
+                            .mark_linux_entered(request, active.child.id(), &start)?;
+                        self.barrier("entered");
+                        saw_entered = true;
+                    }
+                    "STARTED" if exec => {
+                        if !saw_entered {
+                            return Err(Error::guard(
+                                "linux workload reported STARTED before entry",
+                            ));
+                        }
+                        // A fast command can finish in the same breath as STARTED.
+                        if active
+                            .lines
+                            .recv_timeout(Duration::from_millis(500))
+                            .ok()
+                            .as_deref()
+                            == Some("DONE")
+                        {
+                            self.note_late_entry(request, &active, &scratch, saw_entered)?;
+                            drop(active);
+                            self.finish_sync(request, &leaf, &scratch)?;
+                            return Ok(());
+                        }
+                        self.store.mark_linux_running(request)?;
+                        self.barrier("running");
+                        self.linux
+                            .as_mut()
+                            .ok_or_else(|| Error::guard("linux backend disappeared"))?
+                            .active
+                            .insert(id, active);
+                        return Ok(());
+                    }
+                    "DONE" => {
+                        self.note_late_entry(request, &active, &scratch, saw_entered)?;
+                        drop(active);
+                        self.finish_sync(request, &leaf, &scratch)?;
+                        return Ok(());
+                    }
+                    other => {
+                        return Err(Error::guard(format!("linux supervisor reported {other}")));
+                    }
                 }
-                if line != "STARTED" {
-                    return Err(Error::guard(format!("linux supervisor reported {line}")));
-                }
-                // A fast command can finish in the same breath as STARTED.
-                // Wait briefly so its receipt is returned instead of a running handle.
-                if active
-                    .lines
-                    .recv_timeout(Duration::from_millis(500))
-                    .ok()
-                    .as_deref()
-                    == Some("DONE")
-                {
-                    drop(active);
-                    self.finish_sync(request, &leaf, &scratch)?;
-                    return Ok(());
-                }
-                self.store.mark_linux_running(request)?;
-                self.barrier("running");
-                self.linux
-                    .as_mut()
-                    .ok_or_else(|| Error::guard("linux backend disappeared"))?
-                    .active
-                    .insert(id, active);
-                return Ok(());
             }
-            let line = wait_line(&active.lines, remaining(request)?)?;
-            if line != "DONE" {
-                return Err(Error::guard(format!("linux supervisor reported {line}")));
-            }
-            drop(active);
-            self.finish_sync(request, &leaf, &scratch)?;
-            Ok(())
         }
 
         fn finish_sync(
@@ -665,15 +682,52 @@ mod os {
                 &fs::read_to_string(scratch.join("result.json")).map_err(Error::storage)?,
             )
             .map_err(Error::storage)?;
+            let proved = cgroup::kill_and_prove(leaf, Duration::from_secs(5))?;
+            let quiescence = quiescence_value(&proved, leaf);
+            let id = request.operation_id()?;
+            let effect = self.store.linux_effect(&id)?.ok_or(Error::NotFound)?;
+            let workload_entered = result
+                .get("workloadEntered")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            // No Bubblewrap child-pid and an empty leaf: the workload never started.
+            if effect.entered_at.is_none() && !workload_entered {
+                if proved.proven && effect.receipt_json.is_none() {
+                    self.store.linux_not_applied(request, &quiescence)?;
+                    return Err(Error::ExecutionNotApplied { operation_id: id });
+                }
+                self.store.quarantine_linux(&id)?;
+                let mission = self.store.load_mission(&request.binding.mission_id)?;
+                if !mission.phase.is_terminal() {
+                    self.uncertainty(&mission, crate::domain::AttentionReason::ExecutionUncertain)?;
+                }
+                return Err(Error::guard(
+                    "linux launch failed without an empty-cgroup proof; outcome remains uncertain",
+                ));
+            }
+            if effect.entered_at.is_none() && workload_entered {
+                self.store.quarantine_linux(&id)?;
+                return Err(Error::guard(
+                    "linux workload entered but the entry marker was not recorded",
+                ));
+            }
+            let settle = result.get("settle").and_then(serde_json::Value::as_bool) != Some(false);
+            if !settle {
+                self.store.quarantine_linux(&id)?;
+                let mission = self.store.load_mission(&request.binding.mission_id)?;
+                if !mission.phase.is_terminal() {
+                    self.uncertainty(&mission, crate::domain::AttentionReason::ExecutionUncertain)?;
+                }
+                return Err(Error::guard(
+                    "linux helper reported failure; the effect stays uncertain and was not completed",
+                ));
+            }
             let receipt = host_receipt(request, &result, leaf);
             self.accept_runtime_binding(&request.binding, &request.binding.mission_id)?;
             self.store.save_linux_receipt(request, &receipt)?;
             self.barrier("receipt");
-            let proved = cgroup::kill_and_prove(leaf, Duration::from_secs(5))?;
-            let quiescence = quiescence_value(&proved, leaf);
             if !proved.proven {
-                self.store
-                    .save_linux_quiescence(&request.operation_id()?, &quiescence)?;
+                self.store.save_linux_quiescence(&id, &quiescence)?;
                 return Err(Error::guard(format!(
                     "workload result was captured but cgroup quiescence is {}",
                     proved.reason
@@ -683,6 +737,31 @@ mod os {
             self.store.complete_linux(request, &receipt, &quiescence)?;
             let _ = fs::remove_dir_all(scratch);
             self.barrier("completed");
+            Ok(())
+        }
+
+        fn note_late_entry(
+            &mut self,
+            request: &LinuxExecutionRequest,
+            active: &ActiveExec,
+            scratch: &Path,
+            saw_entered: bool,
+        ) -> Result<()> {
+            if saw_entered {
+                return Ok(());
+            }
+            let entered = fs::read_to_string(scratch.join("result.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .and_then(|value| value.get("workloadEntered").and_then(|bit| bit.as_bool()))
+                == Some(true);
+            if !entered {
+                return Ok(());
+            }
+            let start = start_time(active.child.id())?;
+            self.store
+                .mark_linux_entered(request, active.child.id(), &start)?;
+            self.barrier("entered");
             Ok(())
         }
 
@@ -998,7 +1077,7 @@ mod os {
             "operationId": request.operation_id().ok(),
             "payloadHash": request.payload_hash().ok(),
             "simulated": false,
-            "backend": "linux-bubblewrap-0.9.0",
+            "backend": crate::linux_execution::BUBBLEWRAP_BACKEND,
             "disposition": result.get("disposition").and_then(serde_json::Value::as_str).unwrap_or("runtime_failure"),
             "result": result,
             "cgroup": {
@@ -1019,7 +1098,7 @@ mod os {
             "operationId": request.operation_id().ok(),
             "payloadHash": request.payload_hash().ok(),
             "simulated": false,
-            "backend": "linux-bubblewrap-0.9.0",
+            "backend": crate::linux_execution::BUBBLEWRAP_BACKEND,
             "disposition": "observation",
             "startOperationId": match &request.operation {
                 LinuxOperation::ExecStatus { start_operation_id, .. }
@@ -1043,7 +1122,7 @@ mod os {
             "operationId": id,
             "payloadHash": hash,
             "simulated": false,
-            "backend": "linux-bubblewrap-0.9.0",
+            "backend": crate::linux_execution::BUBBLEWRAP_BACKEND,
             "disposition": result.get("disposition").and_then(serde_json::Value::as_str).unwrap_or("runtime_failure"),
             "result": result,
             "cgroup": {
@@ -1139,6 +1218,9 @@ mod os {
             .arg(scratch.join("request.json"))
             .arg("--result")
             .arg(scratch.join("result.json"));
+        if config.fail_launch {
+            command.arg("--fail-launch").arg("1");
+        }
         if let LinuxOperation::ExecStart { argv } = &request.operation
             && mode == "exec"
         {
@@ -1223,10 +1305,13 @@ mod os {
             .env_clear()
             .output()
             .map_err(|error| Error::guard(format!("bubblewrap is unavailable: {error}")))?;
-        if !output.status.success() || output.stdout != b"bubblewrap 0.9.0\n" {
-            return Err(Error::guard(
-                "reviewed linux backend requires bubblewrap 0.9.0; refusing a different supervisor",
-            ));
+        if !output.status.success()
+            || output.stdout != crate::linux_execution::bubblewrap_version_line().as_bytes()
+        {
+            return Err(Error::guard(format!(
+                "reviewed linux backend requires bubblewrap {}; refusing a different supervisor",
+                crate::linux_execution::BUBBLEWRAP_VERSION
+            )));
         }
         Ok(())
     }

@@ -38,6 +38,9 @@ fn dispatch() -> Result<(), String> {
 }
 
 fn join() -> Result<(), String> {
+    // The supervisor places this pid in the leaf. This process must not migrate
+    // itself: a late self-join could enter after an empty-cgroup proof.
+    let _ = rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL));
     let mut args = std::env::args().skip(2);
     let cgroup = match (args.next().as_deref(), args.next()) {
         (Some("--cgroup"), Some(path)) => PathBuf::from(path),
@@ -50,19 +53,59 @@ fn join() -> Result<(), String> {
     if argv.is_empty() {
         return Err("join command is empty".into());
     }
-    fs::write(cgroup.join("cgroup.procs"), std::process::id().to_string())
-        .map_err(|error| format!("cannot join cgroup: {error}"))?;
-    let procs = fs::read_to_string(cgroup.join("cgroup.procs"))
-        .map_err(|error| format!("cannot read cgroup.procs: {error}"))?;
-    if !procs
-        .split_whitespace()
-        .any(|pid| pid == std::process::id().to_string())
-    {
-        return Err("process did not land in the recorded cgroup".into());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let inside = process_in_cgroup(&cgroup)?;
+        if inside {
+            break;
+        }
+        if parent_is_gone() {
+            return Err("supervisor exited before the launcher entered the leaf".into());
+        }
+        if Instant::now() >= deadline {
+            return Err("launcher was not placed in the recorded cgroup".into());
+        }
+        thread::sleep(Duration::from_millis(5));
     }
     use std::os::unix::process::CommandExt;
     let error = Command::new(&argv[0]).args(&argv[1..]).exec();
     Err(format!("exec {} failed: {error}", argv[0]))
+}
+
+fn parent_is_gone() -> bool {
+    rustix::process::getppid()
+        .map(|pid| pid.as_raw_nonzero().get() == 1)
+        .unwrap_or(true)
+}
+
+fn process_in_cgroup(cgroup: &Path) -> Result<bool, String> {
+    let procs = fs::read_to_string(cgroup.join("cgroup.procs"))
+        .map_err(|error| format!("cannot read cgroup.procs: {error}"))?;
+    let pid = std::process::id().to_string();
+    Ok(procs.split_whitespace().any(|entry| entry == pid))
+}
+
+fn place_launcher(child: &std::process::Child, cgroup: &Path) -> Result<(), String> {
+    let pid = child.id().to_string();
+    fs::write(cgroup.join("cgroup.procs"), &pid)
+        .map_err(|error| format!("cannot place launcher in cgroup: {error}"))?;
+    let procs = fs::read_to_string(cgroup.join("cgroup.procs"))
+        .map_err(|error| format!("cannot read cgroup.procs: {error}"))?;
+    if !procs.split_whitespace().any(|entry| entry == pid) {
+        return Err("launcher did not land in the recorded cgroup".into());
+    }
+    Ok(())
+}
+
+/// Kill and reap the launcher before anyone trusts `populated 0`. A dead
+/// launcher cannot join afterwards, and one already in the leaf is then
+/// covered by `cgroup.kill`.
+fn reap_launcher(child: &mut std::process::Child) -> Result<std::process::ExitStatus, String> {
+    if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+        return Ok(status);
+    }
+    let _ = child.kill();
+    child.wait().map_err(|error| error.to_string())
 }
 
 struct SuperviseOpts {
@@ -77,6 +120,7 @@ struct SuperviseOpts {
     request: PathBuf,
     result: PathBuf,
     argv: Vec<String>,
+    fail_launch: bool,
 }
 
 fn supervise() -> Result<(), String> {
@@ -93,7 +137,30 @@ fn supervise() -> Result<(), String> {
         println!("DONE");
         return Ok(());
     }
-    let mut child = spawn_sandbox(&opts)?;
+    let mut child = match spawn_sandbox(&opts) {
+        Ok(child) => child,
+        Err(error) => {
+            let quiescence = cgroup::kill_and_prove(&identity, Duration::from_secs(2))
+                .map_err(|error| error.to_string())?;
+            write_result(
+                &opts.result,
+                &launch_result("not_applied", false, false, &error, &quiescence),
+            )?;
+            println!("DONE");
+            return Ok(());
+        }
+    };
+    if let Err(error) = place_launcher(&child, &opts.cgroup) {
+        let _ = reap_launcher(&mut child);
+        let quiescence = cgroup::kill_and_prove(&identity, Duration::from_secs(2))
+            .map_err(|error| error.to_string())?;
+        write_result(
+            &opts.result,
+            &launch_result("not_applied", false, false, &error, &quiescence),
+        )?;
+        println!("DONE");
+        return Ok(());
+    }
     let stdout = child.stdout.take().ok_or("missing stdout pipe")?;
     let stderr = child.stderr.take().ok_or("missing stderr pipe")?;
     let stdout_truncated = Arc::new(AtomicBool::new(false));
@@ -103,7 +170,8 @@ fn supervise() -> Result<(), String> {
     let cap = if opts.mode == "exec" {
         EXEC_OUTPUT_CAP
     } else {
-        MAX_FILE_BYTES * 4
+        // serde_json turns one byte into `\u00XX` (6 bytes), plus the envelope.
+        MAX_FILE_BYTES * 6 + 8 * 1024
     };
     let stdout_flag = Arc::clone(&stdout_truncated);
     let stdout_out = Arc::clone(&stdout_buf);
@@ -126,82 +194,71 @@ fn supervise() -> Result<(), String> {
             }
         }
     });
-    let mut disposition = "exited";
+    let mut disposition = "exited".to_string();
     let deadline = deadline_instant(opts.deadline_ms)?;
+    let mut announced_entry = false;
+    let mut reaped = None;
     loop {
+        if !announced_entry && child_pid_present(&opts.status) {
+            println!("ENTERED");
+            let _ = std::io::stdout().flush();
+            announced_entry = true;
+        }
         if stdout_truncated.load(Ordering::Relaxed) || stderr_truncated.load(Ordering::Relaxed) {
-            disposition = "truncated";
-            let _ = cgroup::kill_and_prove(&identity, Duration::from_secs(2));
+            disposition = "truncated".into();
+        } else if limit_reason(&opts.cgroup).is_some() {
+            disposition = "limit".into();
+        } else if parent_dead.load(Ordering::Relaxed) {
+            disposition = "cancelled".into();
+        } else if Instant::now() >= deadline {
+            disposition = "deadline".into();
         }
-        if limit_reason(&opts.cgroup).is_some() {
-            disposition = "limit";
-            let _ = cgroup::kill_and_prove(&identity, Duration::from_secs(2));
-        }
-        if parent_dead.load(Ordering::Relaxed) {
-            disposition = "cancelled";
-            let _ = cgroup::kill_and_prove(&identity, Duration::from_secs(2));
-        }
-        if Instant::now() >= deadline {
-            disposition = "deadline";
-            let _ = cgroup::kill_and_prove(&identity, Duration::from_secs(2));
-        }
-        if child
-            .try_wait()
-            .map_err(|error| error.to_string())?
-            .is_some()
-        {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            reaped = Some(status);
             break;
         }
-        if matches!(
-            disposition,
-            "truncated" | "cancelled" | "deadline" | "limit"
-        ) {
-            let _ = child.kill();
+        if stopping(&disposition) {
+            // Reap before cgroup.kill so a launcher that has not joined yet
+            // cannot enter after the empty proof.
+            reaped = Some(reap_launcher(&mut child)?);
             break;
         }
-        // Publish STARTED once the leaf contains the launcher. Exec callers
-        // return a running handle only after this line.
-        if opts.mode == "exec" && cgroup_populated(&opts.cgroup) {
+        // STARTED means Bubblewrap has forked the sandbox (child-pid), not
+        // merely that the launcher pid sits in the leaf.
+        if opts.mode == "exec" && announced_entry {
             println!("STARTED");
             let _ = std::io::stdout().flush();
-            // Only announce once.
             break;
         }
         thread::sleep(Duration::from_millis(10));
     }
-    if opts.mode == "exec" && disposition == "exited" {
-        // Either STARTED was printed and we broke while the child still runs,
-        // or the child already exited. Continue until it exits or a stop hits.
-        while child
-            .try_wait()
-            .map_err(|error| error.to_string())?
-            .is_none()
-        {
+    if opts.mode == "exec" && disposition == "exited" && reaped.is_none() {
+        while reaped.is_none() {
             if stdout_truncated.load(Ordering::Relaxed) || stderr_truncated.load(Ordering::Relaxed)
             {
-                disposition = "truncated";
-                let _ = cgroup::kill_and_prove(&identity, Duration::from_secs(2));
-                let _ = child.kill();
+                disposition = "truncated".into();
+            } else if limit_reason(&opts.cgroup).is_some() {
+                disposition = "limit".into();
+            } else if parent_dead.load(Ordering::Relaxed) {
+                disposition = "cancelled".into();
+            } else if Instant::now() >= deadline {
+                disposition = "deadline".into();
             }
-            if limit_reason(&opts.cgroup).is_some() {
-                disposition = "limit";
-                let _ = cgroup::kill_and_prove(&identity, Duration::from_secs(2));
-                let _ = child.kill();
+            if stopping(&disposition) {
+                reaped = Some(reap_launcher(&mut child)?);
+                break;
             }
-            if parent_dead.load(Ordering::Relaxed) {
-                disposition = "cancelled";
-                let _ = cgroup::kill_and_prove(&identity, Duration::from_secs(2));
-                let _ = child.kill();
-            }
-            if Instant::now() >= deadline {
-                disposition = "deadline";
-                let _ = cgroup::kill_and_prove(&identity, Duration::from_secs(2));
-                let _ = child.kill();
+            if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+                reaped = Some(status);
+                break;
             }
             thread::sleep(Duration::from_millis(10));
         }
     }
-    let status = child.wait().map_err(|error| error.to_string())?;
+    let status = match reaped {
+        Some(status) => status,
+        None => reap_launcher(&mut child)?,
+    };
     stdout_thread.join().map_err(|_| "stdout reader failed")?;
     stderr_thread.join().map_err(|_| "stderr reader failed")?;
     let quiescence = cgroup::kill_and_prove(&identity, Duration::from_secs(5))
@@ -213,15 +270,30 @@ fn supervise() -> Result<(), String> {
     } else {
         serde_json::from_str(&stdout).unwrap_or(Value::Null)
     };
+    let workload_entered = child_pid_present(&opts.status);
     if stdout_truncated.load(Ordering::Relaxed) || stderr_truncated.load(Ordering::Relaxed) {
-        disposition = "truncated";
-    } else if helper.get("disposition").and_then(Value::as_str) == Some("denied") {
-        disposition = "denied";
-    } else if helper.get("disposition").and_then(Value::as_str) == Some("conflict") {
-        disposition = "conflict";
+        disposition = "truncated".into();
+    } else if let Some(kind) = helper.get("disposition").and_then(Value::as_str) {
+        if helper.get("ok").and_then(Value::as_bool) == Some(false) {
+            disposition = match kind {
+                "denied" => "denied",
+                "conflict" => "conflict",
+                _ => "runtime_failure",
+            }
+            .to_string();
+        }
     } else if disposition == "exited" && !status.success() {
-        disposition = "runtime_failure";
+        disposition = "runtime_failure".into();
     }
+    let settle = if opts.mode == "exec" {
+        true
+    } else {
+        match helper.get("ok").and_then(Value::as_bool) {
+            Some(true) => true,
+            Some(false) => matches!(disposition.as_str(), "denied" | "conflict"),
+            None => false,
+        }
+    };
     let result = json!({
         "disposition": disposition,
         "exitCode": status.code(),
@@ -230,6 +302,8 @@ fn supervise() -> Result<(), String> {
         "stdoutTruncated": stdout_truncated.load(Ordering::Relaxed),
         "stderrTruncated": stderr_truncated.load(Ordering::Relaxed),
         "helper": helper,
+        "workloadEntered": workload_entered,
+        "settle": settle,
         "pidsMaxEvents": quiescence.pids_max,
         "oomKills": quiescence.oom_kill,
         "quiescenceProven": quiescence.proven,
@@ -239,6 +313,51 @@ fn supervise() -> Result<(), String> {
     println!("DONE");
     let _ = std::io::stdout().flush();
     Ok(())
+}
+
+fn stopping(disposition: &str) -> bool {
+    matches!(
+        disposition,
+        "truncated" | "cancelled" | "deadline" | "limit"
+    )
+}
+
+fn child_pid_present(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    // Bubblewrap appends a second object, `{ "exit-code": N }`, after the
+    // child-pid record. Parse each line.
+    text.lines().any(|line| {
+        serde_json::from_str::<Value>(line.trim())
+            .ok()
+            .and_then(|value| value.get("child-pid").and_then(Value::as_u64))
+            .is_some_and(|pid| pid > 0)
+    })
+}
+
+fn launch_result(
+    disposition: &str,
+    workload_entered: bool,
+    settle: bool,
+    detail: &str,
+    quiescence: &cgroup::Quiescence,
+) -> Value {
+    json!({
+        "disposition": disposition,
+        "exitCode": null,
+        "stdout": "",
+        "stderr": detail,
+        "stdoutTruncated": false,
+        "stderrTruncated": false,
+        "helper": Value::Null,
+        "workloadEntered": workload_entered,
+        "settle": settle,
+        "pidsMaxEvents": quiescence.pids_max,
+        "oomKills": quiescence.oom_kill,
+        "quiescenceProven": quiescence.proven,
+        "quiescenceReason": quiescence.reason,
+    })
 }
 
 fn spawn_sandbox(opts: &SuperviseOpts) -> Result<std::process::Child, String> {
@@ -265,6 +384,10 @@ fn spawn_sandbox(opts: &SuperviseOpts) -> Result<std::process::Child, String> {
         "--",
     ]);
     command.arg(&opts.bwrap);
+    if opts.fail_launch {
+        // Unknown flags make Bubblewrap exit before it writes child-pid.
+        command.arg("--switchyard-fail-launch");
+    }
     command.args([
         "--unshare-user",
         "--disable-userns",
@@ -510,23 +633,75 @@ fn read_regular(workspace: &std::os::fd::OwnedFd, path: &str, range: Option<(u64
 }
 
 fn write_regular(workspace: &std::os::fd::OwnedFd, path: &str, content: &str) -> Value {
-    use rustix::fs::OFlags;
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+    use std::os::fd::AsFd;
     if content.len() > MAX_FILE_BYTES {
         return json!({"ok": false, "disposition": "denied", "reason": "too-large"});
     }
-    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC;
-    // openat2 mode is applied only when creating. 0644 via the mode argument.
-    let mut file = match open_relative_mode(workspace, path, flags, mode_644()) {
-        Ok(file) => file,
+    let (parent, name) = parent_and_name(path);
+    let directory = match open_relative(workspace, parent, OFlags::RDONLY, true) {
+        Ok(directory) => directory,
         Err(denied) => return denied,
     };
-    if let Err(denied) = require_regular(&file) {
-        return denied;
-    }
+    let mode = match rustix::fs::statat(directory.as_fd(), name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => {
+            if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+                return json!({"ok": false, "disposition": "denied", "reason": "not-regular"});
+            }
+            Mode::from_bits_truncate(stat.st_mode & 0o777)
+        }
+        Err(error) if error == rustix::io::Errno::NOENT => mode_644(),
+        Err(error) => {
+            return json!({"ok": false, "disposition": "denied", "reason": "stat", "detail": error.to_string()});
+        }
+    };
+    let temp = format!(
+        ".sy-tmp-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    );
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    let mut file = match rustix::fs::openat2(directory.as_fd(), &temp, flags, mode, resolve_flags())
+    {
+        Ok(fd) => File::from(fd),
+        Err(error) => {
+            return json!({"ok": false, "disposition": "runtime_failure", "reason": "temp", "detail": error.to_string()});
+        }
+    };
+    let cleanup = |directory: &File, temp: &str| {
+        let _ = rustix::fs::unlinkat(directory.as_fd(), temp, AtFlags::empty());
+    };
     if let Err(error) = file.write_all(content.as_bytes()) {
+        cleanup(&directory, &temp);
         return json!({"ok": false, "disposition": "runtime_failure", "detail": error.to_string()});
     }
+    if let Err(error) = rustix::fs::fchmod(file.as_fd(), mode) {
+        cleanup(&directory, &temp);
+        return json!({"ok": false, "disposition": "runtime_failure", "reason": "fchmod", "detail": error.to_string()});
+    }
+    if let Err(error) = rustix::fs::fsync(file.as_fd()) {
+        cleanup(&directory, &temp);
+        return json!({"ok": false, "disposition": "runtime_failure", "reason": "fsync", "detail": error.to_string()});
+    }
+    drop(file);
+    if let Err(error) = rustix::fs::renameat(directory.as_fd(), &temp, directory.as_fd(), name) {
+        cleanup(&directory, &temp);
+        return json!({"ok": false, "disposition": "runtime_failure", "reason": "rename", "detail": error.to_string()});
+    }
+    if let Err(error) = rustix::fs::fsync(directory.as_fd()) {
+        return json!({"ok": false, "disposition": "runtime_failure", "reason": "dirsync", "detail": error.to_string()});
+    }
     json!({"ok": true, "disposition": "completed", "bytes": content.len(), "contentHash": hash(content.as_bytes())})
+}
+
+fn parent_and_name(path: &str) -> (&str, &str) {
+    match path.rfind('/') {
+        Some(index) => (&path[..index], &path[index + 1..]),
+        None => (".", path),
+    }
 }
 
 fn edit_regular(workspace: &std::os::fd::OwnedFd, path: &str, old: &str, new: &str) -> Value {
@@ -572,27 +747,6 @@ fn list_directory(workspace: &std::os::fd::OwnedFd, path: &str) -> Value {
     }
     names.sort();
     json!({"ok": true, "disposition": "completed", "entries": names})
-}
-
-fn open_relative_mode(
-    workspace: &std::os::fd::OwnedFd,
-    path: &str,
-    flags: rustix::fs::OFlags,
-    mode: rustix::fs::Mode,
-) -> Result<File, Value> {
-    use rustix::fs::OFlags;
-    if let Err(error) = super::validate_workspace_path(path, false) {
-        return Err(
-            json!({"ok": false, "disposition": "denied", "reason": "path", "detail": error.to_string()}),
-        );
-    }
-    let flags = flags | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
-    match rustix::fs::openat2(workspace, path, flags, mode, resolve_flags()) {
-        Ok(fd) => Ok(File::from(fd)),
-        Err(error) => Err(json!({
-            "ok": false, "disposition": "denied", "reason": "openat2", "detail": error.to_string()
-        })),
-    }
 }
 
 fn mode_644() -> rustix::fs::Mode {
@@ -652,6 +806,7 @@ fn parse_supervise() -> Result<SuperviseOpts, String> {
     let mut helper = None;
     let mut request = None;
     let mut result = None;
+    let mut fail_launch = false;
     while let Some(flag) = args.next() {
         if flag == "--" {
             break;
@@ -676,6 +831,9 @@ fn parse_supervise() -> Result<SuperviseOpts, String> {
             "--helper" => helper = Some(PathBuf::from(value)),
             "--request" => request = Some(PathBuf::from(value)),
             "--result" => result = Some(PathBuf::from(value)),
+            "--fail-launch" => {
+                fail_launch = value == "1" || value == "true";
+            }
             _ => return Err(format!("unknown supervise flag {flag}")),
         }
     }
@@ -691,6 +849,7 @@ fn parse_supervise() -> Result<SuperviseOpts, String> {
         request: request.ok_or("missing --request")?,
         result: result.ok_or("missing --result")?,
         argv: args.collect(),
+        fail_launch,
     })
 }
 
@@ -700,8 +859,11 @@ fn require_bwrap(path: &Path) -> Result<(), String> {
         .env_clear()
         .output()
         .map_err(|error| format!("bubblewrap: {error}"))?;
-    if !output.status.success() || output.stdout != b"bubblewrap 0.9.0\n" {
-        return Err("reviewed backend requires bubblewrap 0.9.0".into());
+    if !output.status.success() || output.stdout != super::bubblewrap_version_line().as_bytes() {
+        return Err(format!(
+            "reviewed backend requires bubblewrap {}",
+            super::BUBBLEWRAP_VERSION
+        ));
     }
     Ok(())
 }
@@ -743,12 +905,6 @@ fn event_value(path: &Path, key: &str) -> u64 {
             })
         })
         .unwrap_or(0)
-}
-
-fn cgroup_populated(path: &Path) -> bool {
-    fs::read_to_string(path.join("cgroup.procs"))
-        .map(|text| text.split_whitespace().any(|pid| pid != "0"))
-        .unwrap_or(false)
 }
 
 fn read_control(deadline: Instant) -> Result<String, String> {

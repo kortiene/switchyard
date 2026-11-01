@@ -56,6 +56,7 @@ fn config(crash_at: Option<&str>, probe_request: Option<Value>) -> LinuxExecutio
         helper,
         crash_at: crash_at.map(str::to_string),
         probe_request,
+        fail_launch: false,
     }
 }
 
@@ -371,8 +372,17 @@ fn positive_file_ops_and_confinement_denials_leave_git_authority_unchanged() {
             new: "world".into(),
         },
     );
+    use std::os::unix::fs::PermissionsExt;
+    let note = workspace.join("note.txt");
+    let mut permissions = fs::metadata(&note).unwrap().permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(&note, permissions).unwrap();
     host.execute_linux_operation(&edit).unwrap();
-    assert_eq!(fs::read(workspace.join("note.txt")).unwrap(), b"world");
+    assert_eq!(fs::read(&note).unwrap(), b"world");
+    assert_eq!(
+        fs::metadata(&note).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 
     for (key, path) in [("symlink", "escape"), ("magic", "proc-escape")] {
         let denied = request(
@@ -506,6 +516,14 @@ fn detached_descendants_stop_before_reuse_and_workspace_is_not_verified_while_li
     let started = host.execute_linux_operation(&start).unwrap();
     assert_eq!(started.state, "running");
     wait_for(&workspace.join("leaf.heartbeat"));
+    let before = fs::read(workspace.join("leaf.heartbeat")).unwrap();
+    let blocked_dispatch = host.dispatch_pending(&mission).unwrap_err();
+    assert_eq!(blocked_dispatch.category(), "execution_blocked");
+    thread::sleep(Duration::from_millis(200));
+    assert!(
+        fs::read(workspace.join("leaf.heartbeat")).unwrap().len() > before.len(),
+        "dispatch_pending stopped a live writer without an admitted stop"
+    );
     let blocked = host.recover_workspace(&mission).unwrap_err();
     assert_eq!(
         blocked.category(),
@@ -514,19 +532,21 @@ fn detached_descendants_stop_before_reuse_and_workspace_is_not_verified_while_li
     );
     world.assert_origin();
     let snapshot = host.snapshot(&mission).unwrap();
-    host.admit(AdmitRequest {
-        command_id: None,
-        mission_id: mission.clone(),
-        attempt_id: None,
-        expected_revision: snapshot.revision,
-        actor: "operator".into(),
-        origin: CommandOrigin::Operator,
-        body: CommandBody::DetectUncertainty {
-            reason: AttentionReason::ExecutionUncertain,
-            content_digest: None,
-        },
-    })
-    .unwrap();
+    if snapshot.phase != Phase::NeedsAttention {
+        host.admit(AdmitRequest {
+            command_id: None,
+            mission_id: mission.clone(),
+            attempt_id: None,
+            expected_revision: snapshot.revision,
+            actor: "operator".into(),
+            origin: CommandOrigin::Operator,
+            body: CommandBody::DetectUncertainty {
+                reason: AttentionReason::ExecutionUncertain,
+                content_digest: None,
+            },
+        })
+        .unwrap();
+    }
     let resolve = ExecutionResolutionRequest {
         command_id: "too-soon".into(),
         binding: binding(&host, &mission),
@@ -698,7 +718,11 @@ fn sigkill_boundaries_do_not_rerun_and_record_quiescence() {
                     host.snapshot(&mission).unwrap().phase,
                     Phase::NeedsAttention
                 );
-                assert!(!file.exists(), "{stage}");
+                // Entry is the sandbox child-pid, so the write may have landed
+                // before the host was killed. Replay must not run it again.
+                if file.exists() {
+                    assert_eq!(fs::read(&file).unwrap(), b"once", "{stage}");
+                }
                 let stale = LinuxExecutionRequest {
                     binding: RuntimeBinding {
                         generation: generation_before,
@@ -862,7 +886,7 @@ fn abandonment_stays_final_and_cannot_authorize_another_writer() {
         command_id: "abandon-linux-1".into(),
         binding: binding(&host, &mission),
         operation_id: view.operation_id.clone(),
-        payload_hash: view.payload_hash,
+        payload_hash: view.payload_hash.clone(),
         expected_revision: host.snapshot(&mission).unwrap().revision,
         actor: "operator".into(),
         rationale: "entered without a receipt; keep the block".into(),
@@ -918,6 +942,108 @@ fn abandonment_stays_final_and_cannot_authorize_another_writer() {
     enable(&mut host);
     resolve.binding.generation = host.generation();
     assert_eq!(host.resolve_linux_execution(&resolve).unwrap(), audit);
+    let cancel = request(
+        &host,
+        &mission,
+        "cancel-abandoned",
+        LINUX_EXEC_CANCEL_SCOPE,
+        LinuxOperation::ExecCancel {
+            start_operation_id: view.operation_id.clone(),
+            start_payload_hash: view.payload_hash.clone(),
+        },
+    );
+    assert_eq!(
+        host.execute_linux_operation(&cancel)
+            .unwrap_err()
+            .category(),
+        "guard_failed"
+    );
+    let still = host
+        .snapshot(&mission)
+        .unwrap()
+        .linux_execution_effects
+        .into_iter()
+        .find(|effect| effect.operation_id == view.operation_id)
+        .unwrap();
+    assert_eq!(still.state, "uncertain");
+    assert!(host.snapshot(&mission).unwrap().execution_blocked);
+    world.assert_origin();
+}
+
+#[test]
+fn launch_failure_before_child_pid_is_not_applied() {
+    let mut world = World::new();
+    let (mut host, mission) = implementing(&mut world);
+    let mut config = config(None, None);
+    config.fail_launch = true;
+    host.enable_linux_execution(config).unwrap();
+    let workspace = tree(&host, &mission);
+    let write = request(
+        &host,
+        &mission,
+        "fail-launch",
+        LINUX_WRITE_SCOPE,
+        LinuxOperation::WriteFile {
+            path: "never.txt".into(),
+            content: "no".into(),
+        },
+    );
+    let error = host.execute_linux_operation(&write).unwrap_err();
+    assert_eq!(error.category(), "execution_not_applied");
+    assert!(!workspace.join("never.txt").exists());
+    let effect = host.snapshot(&mission).unwrap().linux_execution_effects;
+    assert_eq!(effect.len(), 1);
+    assert_eq!(effect[0].state, "not_applied");
+    assert!(!effect[0].entered);
+    let again = host.execute_linux_operation(&write).unwrap_err();
+    assert_eq!(again.category(), "execution_not_applied");
+    assert_eq!(
+        host.snapshot(&mission)
+            .unwrap()
+            .linux_execution_effects
+            .len(),
+        1
+    );
+    world.assert_origin();
+}
+
+#[test]
+fn file_helper_round_trips_a_max_size_nul_payload() {
+    let mut world = World::new();
+    let (mut host, mission) = implementing(&mut world);
+    enable(&mut host);
+    let body = "\0".repeat(64 * 1024);
+    let write = request(
+        &host,
+        &mission,
+        "nul-write",
+        LINUX_WRITE_SCOPE,
+        LinuxOperation::WriteFile {
+            path: "nuls.txt".into(),
+            content: body.clone(),
+        },
+    );
+    assert_eq!(
+        host.execute_linux_operation(&write).unwrap().state,
+        "completed"
+    );
+    let read = request(
+        &host,
+        &mission,
+        "nul-read",
+        LINUX_READ_SCOPE,
+        LinuxOperation::ReadFile {
+            path: "nuls.txt".into(),
+        },
+    );
+    let read = host.execute_linux_operation(&read).unwrap();
+    assert_eq!(read.state, "completed");
+    assert_eq!(
+        read.receipt.unwrap()["result"]["helper"]["content"]
+            .as_str()
+            .map(str::len),
+        Some(body.len())
+    );
     world.assert_origin();
 }
 

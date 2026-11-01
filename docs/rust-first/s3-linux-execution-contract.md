@@ -25,7 +25,8 @@ use sudo.
 A leaf OOM increments the ancestor's hierarchical `memory.events`. systemd's
 default `OOMPolicy=stop` would then SIGTERM the runner service. `OOMPolicy` is
 not a runtime `set-property`. When systemd is PID 1, the setup step installs a
-drop-in and runs `daemon-reload` so the unit's policy is `continue`. The leaf
+drop-in under `/run/systemd/system` (runtime-only) and runs `daemon-reload` so
+the unit's policy is `continue`. The leaf
 still has `memory.oom.group` 1, so the workload is what the kernel kills. If
 the policy does not read back as `continue`, the job fails before any workload
 runs.
@@ -77,24 +78,37 @@ in-sandbox mask is read-only, so a live workload cannot replace it either.
 Before any workload starts the Host creates a fresh cgroup leaf and commits its
 canonical path, device, inode, and boot id with the intent. It then spawns
 `switchyard-execution-helper supervise`, takes a pidfd while that pid cannot be
-reused, and commits the backend-entered marker only after the supervisor
-reports READY. The workload is released only when the Host writes GO. The
-supervisor joins the leaf and `exec`s Bubblewrap; it does not stay inside the
-leaf, so it can still record the result after `cgroup.kill`.
+reused, and waits for READY. READY is not entry. The workload is released only
+when the Host writes GO. The supervisor places the launcher in the leaf and
+does not let the launcher migrate itself. The backend-entered marker is
+committed only after Bubblewrap's `--json-status-fd` record contains
+`child-pid`. The supervisor stays outside the leaf, so it can still record the
+result after `cgroup.kill`.
 
-Leaves are retained so a later effect cannot reuse the inode. The pid-namespace
-inode is not an identity. On host SIGKILL the supervisor sees control-pipe EOF
-and writes `cgroup.kill` without depending on Rust `Drop`. A deadline does the
-same. Restart reads the recorded identity, kills that same leaf, and requires
-`cgroup.events` to say `populated 0`. A missing, replaced, or nonempty leaf
-fails closed. The Host does not relaunch.
+`populated 0` is read only after the launcher has been reaped. An empty leaf
+while the launcher can still join is not quiescence. On host SIGKILL the
+supervisor sees control-pipe EOF, reaps the launcher, then writes `cgroup.kill`,
+without depending on Rust `Drop`. A deadline does the same. Restart reads the
+recorded identity, kills that same leaf, and requires `cgroup.events` to say
+`populated 0`. A missing, replaced, or nonempty leaf fails closed. The Host
+does not relaunch.
 
-`not_applied` is only a committed intent with no entered marker plus that
-matching empty leaf. `completed` is the original Host-captured receipt plus the
-same proof. Entry without a receipt stays `uncertain` even after the cgroup is
-empty. A known-live effect in this process blocks new work and is not
-quarantined merely because it is running. A default build that sees v7 rows
-keeps the block and says the quiescence is unproven; it does not settle them.
+No `child-pid` plus that matching empty leaf is `not_applied`, including when
+`join`, `prlimit`, Bubblewrap, or `spawn` fails before the sandbox starts.
+`completed` is the original Host-captured receipt plus the same proof. A clean
+denial or edit conflict is that kind of receipt. Any other helper `ok: false`
+stays `uncertain` and is not completed. Entry without a receipt stays
+`uncertain` even after the cgroup is empty. Abandonment is an immutable
+resolution: a later cancel cannot turn that row `completed`. A known-live
+effect in this process blocks new work and is not quarantined merely because
+it is running, and `dispatch_stops` kills it only when a Pause or Cancel is
+already admitted. A default build that sees v7 rows keeps the block and says
+the quiescence is unproven; it does not settle them.
+
+Writes and edits do not truncate the target in place. The helper opens the
+parent with the same `openat2` resolve flags, writes a temporary file in that
+directory, `fsync`s it, and `renameat`s it over the target, preserving the
+existing mode.
 
 Workspace Git verification does not run while a Linux effect is unresolved.
 Stop delivery still does: Pause/Cancel abort FakeRuntime, then the Host returns

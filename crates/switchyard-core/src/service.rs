@@ -620,7 +620,16 @@ impl Host {
     /// does not inspect or mutate a workspace, apply effects, or complete a stop.
     /// Pi stop delivery remains behind its existing S2/Track B contract.
     pub fn dispatch_stops(&mut self, mission_id: &str) -> Result<usize> {
-        self.terminate_linux_writers(mission_id)?;
+        let pending = self.store.list_commands(mission_id)?;
+        let stop_admitted = pending.iter().any(|command| {
+            command.state == CommandState::Pending
+                && matches!(command.kind, CommandKind::Pause | CommandKind::Cancel)
+        });
+        // A live Linux exec stays running until it finishes, its deadline, or
+        // an admitted Pause/Cancel. Ordinary dispatch must not kill it.
+        if stop_admitted {
+            self.terminate_linux_writers(mission_id)?;
+        }
         self.reconcile_execution(mission_id)?;
         if !matches!(self.runtime, RuntimeAdapter::Fake(_)) {
             return Ok(0);

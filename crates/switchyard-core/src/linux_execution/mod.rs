@@ -19,6 +19,13 @@ pub const EXEC_CANCEL_SCOPE: &str = "linux.exec.cancel.v1";
 pub const MAX_FILE_BYTES: usize = 64 * 1024;
 pub const EXEC_OUTPUT_CAP: usize = 64 * 1024;
 pub const MAX_DEADLINE_MS: i64 = 60_000;
+/// Reviewed Bubblewrap package. The helper, the host, and receipts share this pin.
+pub const BUBBLEWRAP_VERSION: &str = "0.9.0";
+pub const BUBBLEWRAP_BACKEND: &str = "linux-bubblewrap-0.9.0";
+
+pub fn bubblewrap_version_line() -> String {
+    format!("bubblewrap {BUBBLEWRAP_VERSION}\n")
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinuxOperation {
@@ -269,6 +276,9 @@ pub struct LinuxExecutionConfig {
     pub crash_at: Option<String>,
     /// JSON body for the acceptance workload `["/helper", "probe"]`.
     pub probe_request: Option<serde_json::Value>,
+    /// Test-only. Bubblewrap is invoked with an unknown flag and exits before
+    /// it writes `child-pid`. Production leaves this false.
+    pub fail_launch: bool,
 }
 
 #[derive(Clone, Debug)]

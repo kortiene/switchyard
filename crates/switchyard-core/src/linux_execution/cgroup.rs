@@ -85,12 +85,18 @@ pub(crate) fn create_leaf(root: &Path, name: &str) -> Result<CgroupIdentity> {
     identity_of(&path)
 }
 
-pub(crate) fn leaf_name(operation_id: &str) -> String {
-    let hex: String = operation_id
-        .chars()
-        .filter(|c| c.is_ascii_hexdigit())
-        .collect();
-    format!("sy-{}", &hex[..32.min(hex.len())])
+pub(crate) fn leaf_name(operation_id: &str) -> Result<String> {
+    let Some(hash) = operation_id.strip_prefix("op-v1:") else {
+        return Err(Error::guard(
+            "cgroup leaf name requires an op-v1 operation id",
+        ));
+    };
+    if hash.len() < 32 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(Error::guard(
+            "cgroup leaf name requires 32 hex digits after op-v1:",
+        ));
+    }
+    Ok(format!("sy-{}", &hash[..32]))
 }
 
 pub(crate) fn observe(expected: &CgroupIdentity) -> Result<Quiescence> {
@@ -266,4 +272,17 @@ pub(crate) fn within_root(root: &Path, leaf: &Path) -> bool {
         return false;
     };
     leaf.starts_with(&root) && leaf != root
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn leaf_name_uses_the_op_v1_hash_only() {
+        let name = super::leaf_name("op-v1:0123456789abcdef0123456789abcdefaaaaaaaa").unwrap();
+        assert_eq!(name, "sy-0123456789abcdef0123456789abcdef");
+        assert!(super::leaf_name("op-v2:0123456789abcdef0123456789abcdef").is_err());
+        assert!(super::leaf_name("0123456789abcdef0123456789abcdef").is_err());
+        assert!(super::leaf_name("op-v1:short").is_err());
+        assert!(super::leaf_name("op-v1:").is_err());
+    }
 }

@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS linux_execution_effects (
     CHECK (state != 'completed' OR (receipt_json IS NOT NULL AND quiescence_json IS NOT NULL)),
     CHECK (state != 'not_applied' OR (entered_at IS NULL AND receipt_json IS NULL AND quiescence_json IS NOT NULL)),
     CHECK (state != 'prepared' OR entered_at IS NULL),
+    CHECK (state != 'entered' OR entered_at IS NOT NULL),
     CHECK (state != 'running' OR entered_at IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS linux_execution_effects_mission ON linux_execution_effects(mission_id, state);

@@ -38,7 +38,8 @@ group="$(id -gn "$owner")"
 # memory.events is hierarchical: a leaf OOM increments this unit's counter.
 # systemd's default OOMPolicy=stop then SIGTERMs the whole service, which is
 # the CI runner. OOMPolicy is not a runtime set-property (systemd rejects it),
-# so install a drop-in and reload. The leaf still uses memory.oom.group.
+# so install a drop-in under /run (gone on reboot) and reload. The leaf still
+# uses memory.oom.group.
 unit="$(basename "$parent")"
 oom_policy_before="n/a"
 oom_policy_after="n/a"
@@ -53,8 +54,8 @@ if [[ -d /run/systemd/system ]]; then
       ;;
   esac
   oom_policy_before="$(systemctl show -p OOMPolicy --value "$unit" 2>/dev/null || true)"
-  install -d "/etc/systemd/system/${unit}.d"
-  cat >"/etc/systemd/system/${unit}.d/switchyard-oom-policy.conf" <<EOF
+  install -d "/run/systemd/system/${unit}.d"
+  cat >"/run/systemd/system/${unit}.d/switchyard-oom-policy.conf" <<EOF
 [${section}]
 OOMPolicy=continue
 EOF
