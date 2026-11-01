@@ -2376,6 +2376,127 @@ fn worktree_digest_refuses_unrepresentable_content_and_cleans_scratch() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn worktree_digest_refuses_paths_git_will_not_index_and_cleans_scratch() {
+    use std::os::unix::fs::symlink;
+    // Up-front refusals. The reported path is the bad component, so `.GIT/x`
+    // is named `.GIT`. `.git ` keeps its trailing space.
+    let planted = [
+        (".GIT/x", ".GIT", ".GIT"),
+        (".Git/x", ".Git", ".Git"),
+        ("git~1/x", "git~1", "git~1"),
+        ("GIT~1/x", "GIT~1", "GIT~1"),
+        ("sub/.git./x", "sub/.git.", ".git."),
+        ("nested/.git /x", "nested/.git ", ".git "),
+    ];
+    for (rel, reported, component) in planted {
+        let (_dir, host, request) = setup();
+        let tree = workspace_tree(&host, &request);
+        let path = tree.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"payload").unwrap();
+        let expected = format!(
+            "guard failed: workspace digest cannot include '{reported}': Git refuses to index path component '{component}' (case variants of .git, the NTFS short name git~1, and .git names with a trailing dot or space are omitted from the tree)"
+        );
+        assert_digest_message(&tree, &expected);
+    }
+    let (_dir, host, request) = setup();
+    let tree = workspace_tree(&host, &request);
+    symlink("omitted-target", tree.join(".gitmodules")).unwrap();
+    assert_digest_message(
+        &tree,
+        "guard failed: workspace digest cannot include '.gitmodules': Git refuses to index a symlink named '.gitmodules' and would omit it from the evidence",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn worktree_digest_index_comparison_rejects_ntfs_ads_git_and_cleans_scratch() {
+    // Not an up-front name. `core.protectNTFS` treats `.git::$INDEX_ALLOCATION`
+    // as `.git`, and `update-index` prints `Ignoring path` while exiting 0.
+    // Only the temporary-index comparison can fail this digest.
+    let (_dir, host, request) = setup();
+    let tree = workspace_tree(&host, &request);
+    let directory = tree.join(".git::$INDEX_ALLOCATION");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("x"), b"payload").unwrap();
+    let error = crate::execution::workspace::content_digest(&tree).unwrap_err();
+    assert_eq!(error.category(), "guard_failed", "{error}");
+    let text = error.to_string();
+    assert!(
+        text.contains("temporary index") && text.contains(".git::$INDEX_ALLOCATION/x"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("refuses to index"),
+        "ADS name must reach the index comparison: {text}"
+    );
+    assert_no_digest_scratch(&tree);
+}
+
+#[test]
+fn worktree_digest_includes_regular_gitmodules_and_git_short_name_neighbor() {
+    let (dir, host, request) = setup();
+    let tree = workspace_tree(&host, &request);
+    let repo = dir.path().join("repo");
+    std::fs::write(tree.join(".gitmodules"), "not a symlink\n").unwrap();
+    std::fs::write(tree.join("git~2"), b"kept").unwrap();
+    let index_before = staged(&tree);
+    let objects_before = loose_object_count(&repo);
+    let digest = crate::execution::workspace::content_digest(&tree).unwrap();
+    assert_eq!(staged(&tree), index_before);
+    assert_eq!(loose_object_count(&repo), objects_before);
+    git(&tree, &["add", "--all", "--force"]);
+    let expected = Command::new("git")
+        .arg("-C")
+        .arg(&tree)
+        .arg("write-tree")
+        .output()
+        .unwrap();
+    assert!(
+        expected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+    let expected = String::from_utf8(expected.stdout).unwrap();
+    assert_eq!(digest, expected.trim());
+}
+
+fn workspace_tree(host: &Host, request: &ExecutionRequest) -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        host.snapshot(&request.binding.mission_id)
+            .unwrap()
+            .workspace
+            .unwrap()
+            .path,
+    )
+}
+
+#[cfg(unix)]
+fn assert_digest_message(tree: &Path, expected: &str) {
+    let error = crate::execution::workspace::content_digest(tree).unwrap_err();
+    assert_eq!(error.category(), "guard_failed", "{error}");
+    assert_eq!(error.to_string(), expected);
+    assert_no_digest_scratch(tree);
+}
+
+#[cfg(unix)]
+fn assert_no_digest_scratch(tree: &Path) {
+    assert!(
+        !std::fs::read_dir(tree.parent().unwrap())
+            .unwrap()
+            .any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("switchyard-digest-")
+            }),
+        "scratch left behind"
+    );
+}
+
 #[test]
 fn supersede_refuses_missing_owner_marker() {
     let (_dir, mut host, request, abandon) = abandoned_effect();

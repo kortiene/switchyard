@@ -77,8 +77,15 @@ index holds a different staged blob. Text normalization, ident expansion,
 encoding attributes and filter drivers cannot transform the hashed bytes.
 Regular files retain their executable bit; symlinks hash their target bytes
 without following them. As with Git trees, empty directories are omitted.
-Nested Git repositories and special files are refused rather than omitted
-from the evidence. New blobs and the tree are written only to a scratch
+Nested Git repositories, special files, and paths Git cannot index are
+refused rather than omitted from the evidence. `git update-index` prints
+`Ignoring path` and still exits 0 for those paths, so the digest does not
+trust that exit status. The temporary index must contain exactly the
+enumerated entries; a missing path is a guard error. Refused up front: a
+`.git` component in any ASCII case (`.GIT`, `.Git`), the NTFS short name
+`git~1` / `GIT~1`, a `.git` name with a trailing dot or space (`.git.`,
+`.git `) at any depth, and a symlink named `.gitmodules`. New blobs and
+the tree are written only to a scratch
 `GIT_OBJECT_DIRECTORY` beside the worktree, created mode `0700` and refused if
 that path already exists. The repository object store is only an alternate.
 The scratch directory is not the shared temp directory. Drop deletes it. A
