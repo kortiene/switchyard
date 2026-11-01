@@ -37,27 +37,30 @@ group="$(id -gn "$owner")"
 
 # memory.events is hierarchical: a leaf OOM increments this unit's counter.
 # systemd's default OOMPolicy=stop then SIGTERMs the whole service, which is
-# the CI runner. Keep the kill inside the leaf (memory.oom.group) and tell
-# systemd to continue. systemd-oomd is also told not to act on this unit.
+# the CI runner. OOMPolicy is not a runtime set-property (systemd rejects it),
+# so install a drop-in and reload. The leaf still uses memory.oom.group.
 unit="$(basename "$parent")"
 oom_policy_before="n/a"
 oom_policy_after="n/a"
 oom_pressure="n/a"
 if [[ -d /run/systemd/system ]]; then
   case "$unit" in
-    *.service|*.scope) ;;
+    *.service) section="Service" ;;
+    *.scope) section="Scope" ;;
     *)
       echo "runner cgroup $parent is not a systemd service or scope; a leaf OOM would be attributed to an unknown unit" >&2
       exit 1
       ;;
   esac
   oom_policy_before="$(systemctl show -p OOMPolicy --value "$unit" 2>/dev/null || true)"
-  systemctl set-property --runtime "$unit" \
-    OOMPolicy=continue \
-    ManagedOOMMemoryPressure=auto \
-    ManagedOOMSwap=auto
+  install -d "/etc/systemd/system/${unit}.d"
+  cat >"/etc/systemd/system/${unit}.d/switchyard-oom-policy.conf" <<EOF
+[${section}]
+OOMPolicy=continue
+EOF
+  systemctl daemon-reload
   oom_policy_after="$(systemctl show -p OOMPolicy --value "$unit")"
-  oom_pressure="$(systemctl show -p ManagedOOMMemoryPressure --value "$unit")"
+  oom_pressure="$(systemctl show -p ManagedOOMMemoryPressure --value "$unit" 2>/dev/null || true)"
   if [[ "$oom_policy_after" != "continue" ]]; then
     echo "could not set $unit OOMPolicy=continue (was ${oom_policy_before:-unknown}, now ${oom_policy_after:-unknown})" >&2
     exit 1

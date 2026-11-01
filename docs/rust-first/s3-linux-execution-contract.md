@@ -23,11 +23,12 @@ join a leaf. The setup probe joins a leaf as the runner and requires
 use sudo.
 
 A leaf OOM increments the ancestor's hierarchical `memory.events`. systemd's
-default `OOMPolicy=stop` would then SIGTERM the runner service. When systemd is
-PID 1, the setup step sets that unit's runtime `OOMPolicy=continue` and turns
-off `systemd-oomd` management for it. The leaf still has `memory.oom.group` 1,
-so the workload is what the kernel kills. If that policy cannot be set, the job
-fails before any workload runs.
+default `OOMPolicy=stop` would then SIGTERM the runner service. `OOMPolicy` is
+not a runtime `set-property`. When systemd is PID 1, the setup step installs a
+drop-in and runs `daemon-reload` so the unit's policy is `continue`. The leaf
+still has `memory.oom.group` 1, so the workload is what the kernel kills. If
+the policy does not read back as `continue`, the job fails before any workload
+runs.
 
 If cgroup v2, a controller, `memory.swap.max`, or writability is missing,
 `execution-confinement` fails. There is no rlimit-only or unconfined fallback.
