@@ -15,10 +15,20 @@ mod error;
 mod execution;
 mod execution_env;
 mod execution_resolution;
+mod linux_execution;
 pub use execution_env::{
     ExecutionOperation, ExecutionReceipt, ExecutionRequest, ExecutionView, FAKE_WRITE_SCOPE,
 };
 pub use execution_resolution::{ExecutionResolutionDecision, ExecutionResolutionRequest};
+#[cfg(all(feature = "linux-execution", target_os = "linux"))]
+pub use linux_execution::helper_main as linux_helper_main;
+pub use linux_execution::{
+    EDIT_SCOPE as LINUX_EDIT_SCOPE, EXEC_CANCEL_SCOPE as LINUX_EXEC_CANCEL_SCOPE,
+    EXEC_START_SCOPE as LINUX_EXEC_START_SCOPE, EXEC_STATUS_SCOPE as LINUX_EXEC_STATUS_SCOPE,
+    LIST_SCOPE as LINUX_LIST_SCOPE, LinuxExecutionConfig, LinuxExecutionOutcome,
+    LinuxExecutionRequest, LinuxExecutionView, LinuxOperation, RANGE_SCOPE as LINUX_RANGE_SCOPE,
+    READ_SCOPE as LINUX_READ_SCOPE, WRITE_SCOPE as LINUX_WRITE_SCOPE,
+};
 mod persistence;
 mod policy;
 mod service;

@@ -1,3 +1,4 @@
+use super::execution::resolution_command_conflict;
 use super::*;
 use crate::{ExecutionReceipt, ExecutionResolutionDecision, ExecutionResolutionRequest};
 
@@ -48,6 +49,21 @@ impl Store {
             )
             .optional()
             .map_err(Error::storage)?;
+        if row.is_none() && user_version(&self.conn)? >= 7 {
+            let linux: bool = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM linux_execution_resolutions WHERE command_id=?1)",
+                    [&request.command_id],
+                    |row| row.get(0),
+                )
+                .map_err(Error::storage)?;
+            if linux {
+                return Err(Error::CommandConflict {
+                    command_id: request.command_id.clone(),
+                });
+            }
+        }
         match row {
             Some((hash, raw)) if hash == request.hash()? => {
                 Ok(Some(serde_json::from_str(&raw).map_err(Error::storage)?))
@@ -110,7 +126,7 @@ impl Store {
         tx.execute(
             "INSERT INTO execution_resolutions(command_id,operation_id,mission_id,request_hash,audit_json) VALUES (?1,?2,?3,?4,?5)",
             params![request.command_id,request.operation_id,request.binding.mission_id,request.hash()?,canonicalize(&audit)?],
-        ).map_err(Error::storage)?;
+        ).map_err(|error| resolution_command_conflict(&request.command_id, error))?;
         tx.commit().map_err(Error::storage)?;
         Ok(audit)
     }

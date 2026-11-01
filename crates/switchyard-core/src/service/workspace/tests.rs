@@ -584,7 +584,20 @@ fn v2_ledger_is_inspectable_then_migrates_without_creating_workspaces() {
     let m = mission(&mut h, &w);
     drop(h);
     let db = Connection::open(&w.db).unwrap();
-    db.execute_batch("DROP TABLE execution_resolutions; DROP TABLE execution_effects; DROP TABLE workspaces; DELETE FROM schema_migrations WHERE version>=3; PRAGMA user_version=2;").unwrap();
+    db.execute_batch(
+        "DROP TRIGGER IF EXISTS linux_effect_identity_unique;
+         DROP TRIGGER IF EXISTS simulated_effect_identity_unique;
+         DROP TRIGGER IF EXISTS linux_resolution_command_unique;
+         DROP TRIGGER IF EXISTS simulated_resolution_command_unique;
+         DROP TABLE IF EXISTS linux_execution_resolutions;
+         DROP TABLE IF EXISTS linux_execution_effects;
+         DROP TABLE execution_resolutions;
+         DROP TABLE execution_effects;
+         DROP TABLE workspaces;
+         DELETE FROM schema_migrations WHERE version>=3;
+         PRAGMA user_version=2;",
+    )
+    .unwrap();
     assert!(
         Host::inspect(&w.db, Some(&m.mission_id)).unwrap()[0]
             .workspace
@@ -599,7 +612,7 @@ fn v2_ledger_is_inspectable_then_migrates_without_creating_workspaces() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        6
+        7
     );
     assert_eq!(h.snapshot(&m.mission_id).unwrap().base_sha, m.base_sha);
     assert!(h.recover(&m.mission_id).unwrap().workspace.is_none());

@@ -33,3 +33,18 @@ mkdir -p "${SWITCHYARD_CONFINEMENT_EVIDENCE:?set evidence directory}"
 cargo fmt --all -- --check
 cargo clippy -p switchyard-confinement-probe --all-targets --features linux-confinement --locked -- -D warnings
 cargo test -p switchyard-confinement-probe --features linux-confinement --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/tests.log"
+# S3-A4 reuses this job. Missing delegation fails the job; nothing is skipped.
+cgroup="${SWITCHYARD_CGROUP_ROOT:-}"
+if [[ -z "$cgroup" || ! -d "$cgroup" || ! -w "$cgroup" ]]; then
+  echo "SWITCHYARD_CGROUP_ROOT is missing or not writable; refusing an unconfined run" >&2
+  exit 1
+fi
+{
+  echo "cgroup_root=$cgroup"
+  echo "cgroup_subtree=$(cat "$cgroup/cgroup.subtree_control")"
+  echo "cgroup_owner=$(stat -c '%U:%G' "$cgroup")"
+  echo "boot_id=$(cat /proc/sys/kernel/random/boot_id)"
+} | tee -a "$SWITCHYARD_CONFINEMENT_EVIDENCE/environment.txt"
+cargo build -p switchyard --bin switchyard-execution-helper --features linux-execution --locked
+cargo clippy -p switchyard-core -p switchyard --all-targets --features linux-execution --locked -- -D warnings
+cargo test -p switchyard --test linux_execution --features linux-execution --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/linux-execution.log"

@@ -26,6 +26,13 @@ impl Host {
         // forces the next call to see drivers added in between.
         let _filters = fs_workspace::FilterCacheScope::enter();
         self.store.assert_workspace_owner()?;
+        if self.store.linux_execution_blocked(mission_id)? {
+            return Err(Error::ExecutionBlocked {
+                mission_id: mission_id.to_string(),
+                detail: "unresolved linux execution effects; workspace was not verified or reused"
+                    .into(),
+            });
+        }
         let mission = self.store.load_mission(mission_id)?;
         if mission.attempt.id != attempt_id {
             return Err(Error::BindingMismatch {

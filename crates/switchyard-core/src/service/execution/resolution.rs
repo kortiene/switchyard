@@ -43,6 +43,11 @@ impl Host {
                 "inspect and reconcile the mission into needs_attention before resolving an effect",
             ));
         }
+        if self.store.linux_effect(&request.operation_id)?.is_some() {
+            return Err(Error::guard(
+                "this command only records simulated abandonment; a linux effect stays blocked until a host with the linux backend resolves it from durable cgroup evidence",
+            ));
+        }
         let effect = self
             .store
             .execution_effect(&request.operation_id)?

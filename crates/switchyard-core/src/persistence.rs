@@ -20,7 +20,10 @@ use crate::verification::NewVerification;
 
 mod execution;
 mod execution_resolution;
+pub(crate) mod linux_execution;
 mod workspace;
+
+const SCHEMA_VERSION: i64 = 7;
 
 const VERIFIER_JSON: &str = r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}"#;
 const ENVIRONMENT_JSON: &str = r#"{"confinement":"deferred_to_s3","host":"single"}"#;
@@ -95,7 +98,7 @@ impl Store {
                 detail: "database is not initialized".into(),
             });
         }
-        if version > 6 {
+        if version > SCHEMA_VERSION {
             return Err(Error::Storage {
                 detail: format!("database schema version {version} is newer than this host"),
             });
@@ -237,7 +240,7 @@ impl Store {
                 |row| row.get(0),
             )
             .map_err(Error::storage)?;
-        if current > 6 {
+        if current > SCHEMA_VERSION {
             return Err(Error::Storage {
                 detail: format!("database schema version {current} is newer than this host"),
             });
@@ -325,6 +328,19 @@ impl Store {
             )
             .map_err(Error::storage)?;
             tx.execute_batch("PRAGMA user_version = 6;")
+                .map_err(Error::storage)?;
+            tx.commit().map_err(Error::storage)?;
+        }
+        if current < 7 {
+            let tx = self.immediate()?;
+            tx.execute_batch(include_str!("migrations/007_linux_execution.sql"))
+                .map_err(Error::storage)?;
+            tx.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (7, ?1)",
+                [now_ms()],
+            )
+            .map_err(Error::storage)?;
+            tx.execute_batch("PRAGMA user_version = 7;")
                 .map_err(Error::storage)?;
             tx.commit().map_err(Error::storage)?;
         }
@@ -1030,6 +1046,10 @@ impl Store {
     }
 
     pub fn ops_blocked(&self, mission_id: &str) -> Result<bool> {
+        Ok(self.generic_ops_blocked(mission_id)? || self.execution_blocked(mission_id)?)
+    }
+
+    pub(crate) fn generic_ops_blocked(&self, mission_id: &str) -> Result<bool> {
         let count: i64 = self
             .conn
             .query_row(
@@ -1039,7 +1059,7 @@ impl Store {
                 |row| row.get(0),
             )
             .map_err(Error::storage)?;
-        Ok(count > 0 || self.execution_blocked(mission_id)?)
+        Ok(count > 0)
     }
 
     pub fn load_delivery(&self, mission_id: &str) -> Result<Option<DeliveryRecord>> {
@@ -1741,7 +1761,7 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
             .unwrap();
         assert_eq!(foreign_keys, 1);
-        assert_eq!(user_version(&store.conn).unwrap(), 6);
+        assert_eq!(user_version(&store.conn).unwrap(), 7);
         let index: String = store
             .conn
             .query_row(

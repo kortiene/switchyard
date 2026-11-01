@@ -11,10 +11,22 @@ description = "Switchyard Rust host CLI (S1 fake runtime)."
 name = "switchyard"
 path = "src/main.rs"
 
+[features]
+linux-execution = ["switchyard-core/linux-execution"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
 switchyard-core = { path = "../switchyard-core" }
+
+[[bin]]
+name = "switchyard-execution-helper"
+path = "src/bin/switchyard-execution-helper.rs"
+
+[[test]]
+name = "linux_execution"
+path = "tests/linux_execution.rs"
+required-features = ["linux-execution"]
 
 [dev-dependencies]
 tempfile = "3"

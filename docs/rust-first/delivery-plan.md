@@ -157,3 +157,11 @@ The [Linux confinement probe](s3-linux-confinement.md) in #127 introduces the
 `execution-confinement` check for deterministic Bubblewrap boundary and lifecycle
 scenarios. It is not the complete bridge/agent contract in the table above.
 Full S3 acceptance, real-backend #125 evidence and S2 GO remain separate gates.
+
+### S3-A4 confined Linux effects
+
+The [Linux execution contract](s3-linux-execution-contract.md) runs file and
+process effects through the S3-A2 intent flow inside the pinned Bubblewrap
+policy and a delegated cgroup v2 subtree. It is non-default and test-driven.
+FakeRuntime remains the product adapter. S2 remains NO-GO. An administrator
+still has to make `execution-confinement` a required check.

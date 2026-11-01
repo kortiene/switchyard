@@ -13,7 +13,7 @@ jobs:
   # this exact check name to branch protection; YAML alone cannot do that.
   execution-confinement:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       SWITCHYARD_BWRAP: /usr/local/libexec/switchyard-bwrap
       SWITCHYARD_CONFINEMENT_EVIDENCE: ${{ github.workspace }}/confinement-evidence
@@ -31,7 +31,12 @@ jobs:
           sudo install -o root -g root -m 0755 /usr/bin/bwrap "$SWITCHYARD_BWRAP"
           sudo install -m 0644 tools/confinement-probe/ci/bwrap.apparmor /etc/apparmor.d/switchyard-confinement-bwrap
           sudo apparmor_parser -r /etc/apparmor.d/switchyard-confinement-bwrap
-      - name: Prove boundaries and process-tree termination
+      - name: Delegate a cgroup v2 subtree to the unprivileged runner
+        run: |
+          mkdir -p confinement-evidence
+          sudo -E ./scripts/cgroup-delegate.sh
+          echo "SWITCHYARD_CGROUP_ROOT=$(cat confinement-evidence/cgroup-root.txt)" >> "$GITHUB_ENV"
+      - name: Prove boundaries, process-tree termination, and Linux execution
         run: ./scripts/confinement-verify.sh
       - name: Retain environment and test evidence even on failure
         if: always()

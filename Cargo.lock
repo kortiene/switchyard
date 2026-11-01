@@ -507,6 +507,7 @@ name = "switchyard-core"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+ "rustix",
  "serde_json",
  "sha2",
  "tempfile",
