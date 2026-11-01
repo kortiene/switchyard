@@ -229,8 +229,23 @@ impl Store {
                 canonicalize(&audit)?
             ],
         )
-        .map_err(|error| resolution_command_conflict(&request.command_id, error))?;
+        .map_err(|error| map_supersession_insert(&request.command_id, error))?;
         tx.commit().map_err(Error::storage)?;
         Ok(audit)
     }
+}
+
+fn map_supersession_insert(command_id: &str, error: rusqlite::Error) -> Error {
+    let text = error.to_string();
+    if text.contains("UNIQUE constraint failed")
+        && text.contains("execution_supersessions.operation_id")
+    {
+        return Error::guard("effect already has an immutable supersession; replay its command ID");
+    }
+    if text.contains("UNIQUE constraint failed")
+        && text.contains("execution_supersessions.abandonment_command_id")
+    {
+        return Error::guard("abandonment already has an immutable supersession");
+    }
+    resolution_command_conflict(command_id, error)
 }

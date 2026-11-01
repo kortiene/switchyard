@@ -74,9 +74,17 @@ built in a temporary index (`GIT_INDEX_FILE`), never the real index and never
 hide by being listed in `.gitignore`. That covers tracked files at their
 on-disk bytes, untracked files, and `.sy-tmp-*` leftovers whether or not they
 are ignored. On-disk bytes win when the real index holds a different staged
-blob. The command writes content-addressed objects into the repository
-database. It does not move HEAD, the branch, or the real index. A failed
-verify or a failed digest leaves the block in place.
+blob. New blobs and the tree are written only to a scratch
+`GIT_OBJECT_DIRECTORY`, with the repository object store as an alternate.
+Scratch is deleted with the temporary index, so ignored files do not become
+loose objects in the shared database. The command does not move HEAD, the
+branch, or the real index.
+
+The workspace `ready` check and S3-A1 verify run before any cgroup kill, and
+again after quiescence together with the digest. A refusal after a kill keeps
+the block and includes that kill evidence in the error. Sibling leaves are
+re-killed only while this Host holds the exclusive owner flock
+(`execution/owner.rs`); a second live Host cannot open the ledger.
 
 ## Ledger v9
 
@@ -92,7 +100,9 @@ Forward migration adds append-only `execution_supersessions`:
 | `audit_json` | |
 
 Triggers abort UPDATE and DELETE on this table and on both resolution tables.
-The cross-journal command-id triggers also cover supersessions. v1–v8 rows are
+The cross-journal command-id triggers also cover supersessions. A racing insert
+that loses `UNIQUE(operation_id)` or `UNIQUE(abandonment_command_id)` is a
+guard error, not a raw storage failure. v1–v8 rows are
 not rewritten. Blocking queries exclude superseded operations. Read-only
 inspection of a v1–v8 database shows `executionSupersessions` as an empty array
 and does not migrate. A writer upgrades to v9.

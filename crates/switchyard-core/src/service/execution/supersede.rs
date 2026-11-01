@@ -50,12 +50,23 @@ impl Host {
             ));
         }
         let journal = self.supersession_journal(request)?;
+        // Cheap checks before any cgroup.kill: the workspace must already be
+        // ready and pass S3-A1 verify, and the revision is read again so a
+        // stale caller never reaches rekill. The transaction repeats the
+        // revision check. A refusal after a kill reports that proof.
+        self.precheck_workspace(&request.binding.attempt_id)?;
+        self.recheck_revision_before_kill(request)?;
         let evidence_quiescence = self.fresh_linux_quiescence(
             &request.binding.mission_id,
             journal == "linux",
             &request.operation_id,
         )?;
-        let (digest, workspace_path) = self.supersession_workspace(&request.binding.attempt_id)?;
+        let (digest, workspace_path) = match self.reverify_and_digest(&request.binding.attempt_id) {
+            Ok(ready) => ready,
+            Err(error) => {
+                return Err(report_quiescence(error, &evidence_quiescence));
+            }
+        };
         let simulated = journal == "simulated";
         let evidence = json!({
             "source": "operator_supersession",
@@ -71,7 +82,30 @@ impl Host {
             "workspacePath": workspace_path,
             "simulated": simulated
         });
-        self.store.commit_supersession(request, journal, &evidence)
+        self.store
+            .commit_supersession(request, journal, &evidence)
+            .map_err(|error| report_quiescence(error, &evidence_quiescence))
+    }
+
+    fn recheck_revision_before_kill(&self, request: &ExecutionSupersessionRequest) -> Result<()> {
+        let mission = self.store.load_mission(&request.binding.mission_id)?;
+        if mission.phase.is_terminal() {
+            return Err(Error::TerminalImmutable {
+                phase: mission.phase.to_string(),
+            });
+        }
+        if request.expected_revision != mission.revision {
+            return Err(Error::StaleRevision {
+                expected: request.expected_revision,
+                actual: mission.revision,
+            });
+        }
+        if mission.phase != Phase::NeedsAttention {
+            return Err(Error::guard(
+                "inspect and reconcile the mission into needs_attention before superseding an effect",
+            ));
+        }
+        Ok(())
     }
 
     fn supersession_journal(&self, request: &ExecutionSupersessionRequest) -> Result<&'static str> {
@@ -172,7 +206,7 @@ impl Host {
         Ok(())
     }
 
-    fn supersession_workspace(&self, attempt_id: &str) -> Result<(String, String)> {
+    fn load_ready_workspace(&self, attempt_id: &str) -> Result<crate::workspace::WorkspaceRecord> {
         let workspace = self
             .store
             .load_workspace(attempt_id)?
@@ -180,9 +214,27 @@ impl Host {
         if workspace.view.state != "ready" {
             return Err(Error::guard("supersession requires a ready workspace"));
         }
+        Ok(workspace)
+    }
+
+    fn precheck_workspace(&self, attempt_id: &str) -> Result<()> {
+        let workspace = self.load_ready_workspace(attempt_id)?;
+        let _filters = fs_workspace::FilterCacheScope::enter();
+        fs_workspace::verify(&workspace)?;
+        Ok(())
+    }
+
+    fn reverify_and_digest(&self, attempt_id: &str) -> Result<(String, String)> {
+        let workspace = self.load_ready_workspace(attempt_id)?;
         let _filters = fs_workspace::FilterCacheScope::enter();
         fs_workspace::verify(&workspace)?;
         let digest = fs_workspace::content_digest(Path::new(&workspace.view.path))?;
         Ok((digest, workspace.view.path))
     }
+}
+
+fn report_quiescence(error: Error, quiescence: &Value) -> Error {
+    error.with_context(format!(
+        "supersession quiescence was proved and then refused: {quiescence}"
+    ))
 }

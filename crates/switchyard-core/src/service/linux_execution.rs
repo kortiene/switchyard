@@ -39,6 +39,15 @@ impl Host {
     /// superseded effects are not killed again. Every other Linux effect,
     /// including the one being superseded, is re-proven empty. A default build
     /// cannot do that and refuses.
+    ///
+    /// Re-killing a sibling is not a cross-host kill. [`crate::execution::OwnerLock`]
+    /// holds an exclusive `flock` on `{db}.owner.lock` for this Host's whole
+    /// lifetime (`execution/owner.rs`). `Host::open` fails with
+    /// `second_active_owner` while that lock is held, so no other live process
+    /// can own a supervisor for this ledger. `mission_supervisor_live` still
+    /// refuses when *this* Host has the supervisor in memory. A sibling left
+    /// `entered` or `running` in the ledger belongs to a dead owner; proving
+    /// that leaf empty is the quiescence check.
     pub(super) fn fresh_linux_quiescence(
         &self,
         mission_id: &str,
@@ -63,7 +72,7 @@ impl Host {
                 "linux": []
             }));
         }
-        self.prove_pending_linux(mission_id, &pending)
+        self.prove_pending_linux(mission_id, target_is_linux, &pending)
     }
 
     pub(super) fn linux_supervisor_blocks(&self, mission_id: &str) -> Result<()> {
@@ -80,6 +89,7 @@ impl Host {
     fn prove_pending_linux(
         &self,
         mission_id: &str,
+        target_is_linux: bool,
         pending: &[(
             String,
             crate::persistence::linux_execution::LinuxEffectRecord,
@@ -89,7 +99,17 @@ impl Host {
         if self.linux.is_some() {
             return self.prove_effects_for_supersede(mission_id, pending);
         }
-        let _ = (mission_id, pending);
+        let _ = mission_id;
+        if !target_is_linux {
+            let ids = pending
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(Error::guard(format!(
+                "simulated supersession refused: unsettled linux effect {ids} must be settled or re-proven empty, and this default build cannot prove that cgroup; the simulated effect stays blocked"
+            )));
+        }
         Err(Error::guard(LINUX_SUPERSEDE_GUIDANCE))
     }
 }
@@ -1102,22 +1122,28 @@ mod os {
                     "linux supersession refused: this host still has a live supervisor for the mission",
                 ));
             }
+            // OwnerLock excludes a second live Host; see fresh_linux_quiescence.
             let mut proofs = Vec::new();
             for (id, effect) in pending {
-                let doc = self.fresh_leaf(effect)?;
+                let doc = self
+                    .fresh_leaf(effect)
+                    .map_err(|error| attach_kill_evidence(error, &proofs))?;
                 if !crate::persistence::linux_execution::fresh_quiescence_is_empty(&doc) {
                     let reason = doc
                         .get("reason")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("unproven");
-                    if reason == "outside_root" {
-                        return Err(Error::guard(format!(
+                    let refusal = if reason == "outside_root" {
+                        format!(
                             "linux supersession refused: cgroup path for {id} is outside the delegated root"
-                        )));
-                    }
-                    return Err(Error::guard(format!(
-                        "linux supersession refused: cgroup for {id} is {reason} and not populated 0; stored abandonment quiescence is not reused"
-                    )));
+                        )
+                    } else {
+                        format!(
+                            "linux supersession refused: cgroup for {id} is {reason} and not populated 0; stored abandonment quiescence is not reused"
+                        )
+                    };
+                    let error = Error::guard(format!("{refusal}; kill evidence {doc}"));
+                    return Err(attach_kill_evidence(error, &proofs));
                 }
                 proofs.push(json!({"operationId": id, "quiescence": doc}));
             }
@@ -1192,6 +1218,16 @@ mod os {
             let proved = cgroup::rekill_and_prove(&identity, Duration::from_secs(5))?;
             Ok(quiescence_value(&proved, &identity))
         }
+    }
+
+    fn attach_kill_evidence(error: Error, proofs: &[serde_json::Value]) -> Error {
+        if proofs.is_empty() {
+            return error;
+        }
+        error.with_context(format!(
+            "supersession already re-killed other leaves: {}",
+            serde_json::Value::Array(proofs.to_vec())
+        ))
     }
 
     fn outcome(

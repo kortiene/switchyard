@@ -1835,6 +1835,7 @@ fn supersede_refuses_live_supervisor_bad_leaf_and_unproven_sibling() {
     let error = host.supersede_execution(&sup).unwrap_err();
     assert!(error.to_string().contains("op-v1:sibling"), "{error}");
     assert!(error.to_string().contains("missing"), "{error}");
+    assert!(error.to_string().contains("kill evidence"), "{error}");
     assert!(host.snapshot(&mission).unwrap().execution_blocked);
     assert!(
         host.snapshot(&mission)
@@ -1862,5 +1863,53 @@ fn supersede_refuses_live_supervisor_bad_leaf_and_unproven_sibling() {
     );
     assert!(!host.snapshot(&mission).unwrap().linux_execution_effects[0].superseded);
     let _ = host;
+    world.assert_origin();
+}
+
+#[test]
+fn supersede_refuses_an_unready_workspace_before_killing_the_leaf() {
+    let mut world = World::new();
+    let (mut host, mission, resolve, abandon) = abandoned_entered(&mut world);
+    let db = world.db();
+    let path = cgroup_path(&db, &resolve.operation_id);
+    let effect_before = effect_row(&db, &resolve.operation_id);
+    let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+    let pid = child.id();
+    fs::write(Path::new(&path).join("cgroup.procs"), format!("{pid}\n")).unwrap_or_else(|error| {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!(
+            "could not place a sleeper in the leaf ({error}); refusing to skip the kill-order check"
+        );
+    });
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE workspaces SET state='uncertain' WHERE attempt_id=?1",
+            [&resolve.binding.attempt_id],
+        )
+        .unwrap();
+    let sup = supersede_linux(&host, &mission, &resolve, &abandon, "supersede-before-kill");
+    let error = host.supersede_execution(&sup).unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("ready workspace"), "{text}");
+    assert!(
+        !text.contains("quiescence was proved") && !text.contains("fresh_cgroup_kill"),
+        "{text}"
+    );
+    assert!(
+        Path::new(&format!("/proc/{pid}")).exists(),
+        "the leaf was killed before the workspace check"
+    );
+    assert_eq!(effect_row(&db, &resolve.operation_id), effect_before);
+    assert!(host.snapshot(&mission).unwrap().execution_blocked);
+    assert!(
+        host.snapshot(&mission)
+            .unwrap()
+            .execution_supersessions
+            .is_empty()
+    );
+    let _ = child.kill();
+    let _ = child.wait();
     world.assert_origin();
 }

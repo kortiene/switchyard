@@ -712,9 +712,12 @@ pub(crate) fn verify(w: &WorkspaceRecord) -> Result<(String, String)> {
 /// Ignored files are included (`git add --all --force`), so a leftover cannot
 /// hide by being listed in `.gitignore`. That includes untracked `.sy-tmp-*`
 /// files whether or not they are ignored. On-disk bytes win over a staged blob
-/// that differs from the worktree. The command writes content-addressed
-/// objects into the repository database and does not move HEAD, the branch, or
-/// the real index.
+/// that differs from the worktree. New blobs and the tree object are written
+/// only under `GIT_OBJECT_DIRECTORY` in the scratch directory, with the
+/// repository object store as `GIT_ALTERNATE_OBJECT_DIRECTORIES`. Scratch is
+/// removed afterward, so ignored files and secrets never become loose objects
+/// in the shared database. The command does not move HEAD, the branch, or the
+/// real index.
 pub(crate) fn content_digest(tree: &Path) -> Result<String> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -722,17 +725,47 @@ pub(crate) fn content_digest(tree: &Path) -> Result<String> {
         .as_nanos();
     let scratch =
         std::env::temp_dir().join(format!("switchyard-index-{}-{}", std::process::id(), nanos));
-    std::fs::create_dir_all(&scratch).map_err(Error::storage)?;
+    let objects = scratch.join("objects");
+    std::fs::create_dir_all(&objects).map_err(Error::storage)?;
     let _cleanup = ScratchDir(scratch.clone());
     let index = path_text(&scratch.join("index"))?;
-    git_with_index(tree, &index, &["read-tree", "HEAD"])?;
-    git_with_index(tree, &index, &["add", "--all", "--force"])?;
-    let oid = git_with_index(tree, &index, &["write-tree"])?;
+    let object_dir = path_text(&objects)?;
+    let alternates = path_text(&common_objects(tree)?)?;
+    git_isolated(
+        tree,
+        &index,
+        &object_dir,
+        &alternates,
+        &["read-tree", "HEAD"],
+    )?;
+    git_isolated(
+        tree,
+        &index,
+        &object_dir,
+        &alternates,
+        &["add", "--all", "--force"],
+    )?;
+    let oid = git_isolated(tree, &index, &object_dir, &alternates, &["write-tree"])?;
     let oid = oid.trim();
     if ![40, 64].contains(&oid.len()) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(Error::guard("workspace content digest was not a tree id"));
     }
     Ok(oid.to_string())
+}
+
+fn common_objects(tree: &Path) -> Result<PathBuf> {
+    let common = git(tree, &["rev-parse", "--git-common-dir"])?;
+    let common = Path::new(common.trim());
+    let common = if common.is_absolute() {
+        common.to_path_buf()
+    } else {
+        tree.join(common)
+    };
+    let objects = std::fs::canonicalize(common.join("objects")).map_err(Error::storage)?;
+    if !objects.is_dir() {
+        return Err(Error::guard("workspace object store is unavailable"));
+    }
+    Ok(objects)
 }
 
 struct ScratchDir(PathBuf);
@@ -743,9 +776,17 @@ impl Drop for ScratchDir {
     }
 }
 
-fn git_with_index(tree: &Path, index: &str, args: &[&str]) -> Result<String> {
+fn git_isolated(
+    tree: &Path,
+    index: &str,
+    object_dir: &str,
+    alternates: &str,
+    args: &[&str],
+) -> Result<String> {
     let mut command = command(tree)?;
     command.env("GIT_INDEX_FILE", index);
+    command.env("GIT_OBJECT_DIRECTORY", object_dir);
+    command.env("GIT_ALTERNATE_OBJECT_DIRECTORIES", alternates);
     let output = command.args(args).output().map_err(Error::storage)?;
     let bytes = super::git::checked_output(args, output)?;
     String::from_utf8(bytes)

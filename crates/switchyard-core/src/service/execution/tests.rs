@@ -2205,6 +2205,10 @@ fn supersede_workspace_failures_keep_the_block_and_leave_git_unchanged() {
             .stdout;
         let sup = supersede_of(&host, &request, &abandon, "supersede-workspace");
         let error = host.supersede_execution(&sup).unwrap_err();
+        assert!(
+            !error.to_string().contains("quiescence was proved"),
+            "workspace refusal must happen before any kill: {error}"
+        );
         match case {
             "unready" => assert!(error.to_string().contains("ready workspace"), "{error}"),
             "pointer" => assert!(
@@ -2327,11 +2331,16 @@ fn supersede_audit_failure_rolls_back_and_resolution_rows_are_append_only() {
         )
         .unwrap();
     let sup = supersede_of(&host, &request, &abandon, "supersede-rollback");
+    let error = host.supersede_execution(&sup).unwrap_err();
+    let error_text = error.to_string();
     assert!(
-        host.supersede_execution(&sup)
-            .unwrap_err()
-            .to_string()
-            .contains("injected supersession failure")
+        error_text.contains("injected supersession failure"),
+        "{error_text}"
+    );
+    assert!(error_text.contains("quiescence was proved"), "{error_text}");
+    assert!(
+        error_text.contains("synchronous_in_process_no_workers"),
+        "{error_text}"
     );
     let after = host.snapshot(&mission).unwrap();
     assert_eq!(after.revision, before.revision);
@@ -2626,4 +2635,170 @@ fn v8_upgrade_preserves_abandoned_simulated_and_linux_rows() {
     assert!(snapshot.execution_supersessions.is_empty());
     assert_eq!(snapshot.execution_effects[0].state, "uncertain");
     assert!(!snapshot.execution_effects[0].superseded);
+}
+
+fn loose_object_count(repo: &Path) -> usize {
+    let objects = repo.join(".git/objects");
+    let mut count = 0usize;
+    for entry in std::fs::read_dir(&objects).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.len() == 2 && name.chars().all(|c| c.is_ascii_hexdigit()) {
+            count += std::fs::read_dir(entry.path()).unwrap().count();
+        }
+    }
+    count
+}
+
+#[test]
+fn supersede_sibling_rekill_cannot_race_a_second_host() {
+    let (dir, host, _request, _abandon) = abandoned_effect();
+    let db = dir.path().join("mission.sqlite");
+    let error = match Host::open(&db) {
+        Err(error) => error,
+        Ok(_) => panic!("a second host opened the locked ledger"),
+    };
+    assert_eq!(error.category(), "second_active_owner");
+    assert!(
+        error
+            .to_string()
+            .contains("second active owner already holds the host lock")
+    );
+    drop(host);
+    let _reopened = Host::open(&db).unwrap();
+}
+
+#[test]
+fn worktree_digest_keeps_ignored_blobs_out_of_the_repository() {
+    let (dir, host, request) = setup();
+    let repo = dir.path().join("repo");
+    let tree = Path::new(
+        &host
+            .snapshot(&request.binding.mission_id)
+            .unwrap()
+            .workspace
+            .unwrap()
+            .path,
+    )
+    .to_path_buf();
+    let before = loose_object_count(&repo);
+    std::fs::write(tree.join(".gitignore"), "secret.env\n").unwrap();
+    std::fs::write(tree.join("secret.env"), "TOKEN=should-not-enter-the-odb\n").unwrap();
+    std::fs::write(tree.join(".sy-tmp-left"), "leftover").unwrap();
+    let digest = crate::execution::workspace::content_digest(&tree).unwrap();
+    assert_eq!(digest.len(), 40);
+    assert_eq!(loose_object_count(&repo), before);
+    std::fs::write(tree.join("secret.env"), "TOKEN=changed\n").unwrap();
+    let again = crate::execution::workspace::content_digest(&tree).unwrap();
+    assert_ne!(again, digest);
+    assert_eq!(loose_object_count(&repo), before);
+    let _ = host;
+}
+
+#[test]
+fn simulated_supersede_names_the_blocking_linux_sibling() {
+    let (dir, mut host, request, abandon) = abandoned_effect();
+    let mission = request.binding.mission_id.clone();
+    let db = dir.path().join("mission.sqlite");
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO linux_execution_effects(
+                operation_id, mission_id, attempt_id, session_id, payload_hash, request_json,
+                started_generation, state, cgroup_path, cgroup_dev, cgroup_ino, boot_id,
+                entered_at, created_at
+             ) VALUES (
+                'op-v1:blocking-sibling', ?1, ?2, ?3, 'sha256:sibling', '{}', 1, 'entered',
+                '/sys/fs/cgroup/switchyard/sy-sibling', 1, 2, 'boot', 10, 10
+             )",
+            rusqlite::params![
+                mission,
+                request.binding.attempt_id,
+                request.binding.session_id
+            ],
+        )
+        .unwrap();
+    let revision = host.snapshot(&mission).unwrap().revision;
+    let sup = supersede_of(&host, &request, &abandon, "supersede-sibling-name");
+    let error = host.supersede_execution(&sup).unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("op-v1:blocking-sibling"), "{text}");
+    assert!(text.contains("simulated supersession refused"), "{text}");
+    assert!(
+        !text.contains("linux supersession requires the delegated cgroup backend"),
+        "{text}"
+    );
+    assert!(host.snapshot(&mission).unwrap().execution_blocked);
+    assert!(
+        host.snapshot(&mission)
+            .unwrap()
+            .execution_supersessions
+            .is_empty()
+    );
+    assert_eq!(host.snapshot(&mission).unwrap().revision, revision);
+}
+
+#[test]
+fn supersede_unique_races_are_guard_errors() {
+    let (dir, mut host, request, abandon) = abandoned_effect();
+    let mission = request.binding.mission_id.clone();
+    let db = dir.path().join("mission.sqlite");
+    let abandonment = abandon["commandId"].as_str().unwrap();
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO execution_supersessions(
+                command_id, operation_id, journal, abandonment_command_id, request_hash, audit_json
+             ) VALUES ('decoy-supersede', 'op-v1:decoy', 'simulated', ?1, 'sha256:decoy', '{}')",
+            [abandonment],
+        )
+        .unwrap();
+    let revision = host.snapshot(&mission).unwrap().revision;
+    let sup = supersede_of(&host, &request, &abandon, "supersede-abandon-unique");
+    let error = host.supersede_execution(&sup).unwrap_err();
+    let text = error.to_string();
+    assert_eq!(error.category(), "guard_failed");
+    assert!(
+        text.contains("abandonment already has an immutable supersession"),
+        "{text}"
+    );
+    assert!(!text.contains("storage failed"), "{text}");
+    assert!(text.contains("quiescence was proved"), "{text}");
+    assert_eq!(host.snapshot(&mission).unwrap().revision, revision);
+    assert!(
+        host.snapshot(&mission)
+            .unwrap()
+            .execution_supersessions
+            .is_empty()
+    );
+
+    let (dir, mut host, request, abandon) = abandoned_effect();
+    let mission = request.binding.mission_id.clone();
+    let db = dir.path().join("mission.sqlite");
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO execution_supersessions(
+                command_id, operation_id, journal, abandonment_command_id, request_hash, audit_json
+             ) VALUES ('decoy-operation', ?1, 'simulated', 'other-abandonment', 'sha256:decoy', '{}')",
+            [request.operation_id().unwrap()],
+        )
+        .unwrap();
+    let revision = host.snapshot(&mission).unwrap().revision;
+    let raced = supersede_of(&host, &request, &abandon, "supersede-operation-unique");
+    let error = host
+        .store
+        .commit_supersession(&raced, "simulated", &serde_json::json!({}))
+        .unwrap_err();
+    let text = error.to_string();
+    assert_eq!(error.category(), "guard_failed");
+    assert!(
+        text.contains("effect already has an immutable supersession"),
+        "{text}"
+    );
+    assert!(!text.contains("storage failed"), "{text}");
+    assert_eq!(host.snapshot(&mission).unwrap().revision, revision);
+    let rows = host.snapshot(&mission).unwrap().execution_supersessions;
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].get("resultingRevision").is_none(), "{rows:?}");
 }
