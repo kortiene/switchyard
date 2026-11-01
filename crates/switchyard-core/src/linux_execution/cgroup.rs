@@ -103,6 +103,33 @@ pub(crate) fn observe(expected: &CgroupIdentity) -> Result<Quiescence> {
     read_state(expected, false)
 }
 
+/// Kill the recorded leaf even when it already reads empty, then require
+/// `populated 0`. A missing or replaced leaf is returned without a write.
+pub(crate) fn rekill_and_prove(expected: &CgroupIdentity, timeout: Duration) -> Result<Quiescence> {
+    let state = read_state(expected, true)?;
+    if state.reason == "mismatched" || state.reason == "missing" {
+        return Ok(state);
+    }
+    fs::write(expected.path.join("cgroup.kill"), "1\n").map_err(|error| {
+        Error::guard(format!(
+            "cgroup.kill failed ({error}); termination is unproven"
+        ))
+    })?;
+    let start = Instant::now();
+    loop {
+        let mut state = read_state(expected, true)?;
+        if state.proven || state.reason == "mismatched" || state.reason == "missing" {
+            return Ok(state);
+        }
+        if start.elapsed() > timeout {
+            state.proven = false;
+            state.reason = "nonempty".into();
+            return Ok(state);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 pub(crate) fn kill_and_prove(expected: &CgroupIdentity, timeout: Duration) -> Result<Quiescence> {
     let mut state = read_state(expected, true)?;
     if state.reason == "mismatched" || state.reason == "missing" {

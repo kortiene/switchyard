@@ -165,3 +165,12 @@ process effects through the S3-A2 intent flow inside the pinned Bubblewrap
 policy and a delegated cgroup v2 subtree. It is non-default and test-driven.
 FakeRuntime remains the product adapter. S2 remains NO-GO. An administrator
 still has to make `execution-confinement` a required check.
+
+### S3-A5 supersede an abandoned decision
+
+[s3-execution-supersede.md](s3-execution-supersede.md) appends one
+evidence-backed supersession for an abandoned simulated or Linux effect. The
+effect stays `uncertain`, the outcome stays unknown, and the existing worktree
+is kept after a fresh S3-A1 verify. Linux supersession is Host API only and
+runs in the `execution-confinement` job. FakeRuntime remains the product
+adapter. S2 remains NO-GO. This is not a full S3 claim.

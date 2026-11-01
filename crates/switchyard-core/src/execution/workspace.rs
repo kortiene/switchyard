@@ -705,6 +705,242 @@ pub(crate) fn verify(w: &WorkspaceRecord) -> Result<(String, String)> {
     Ok((tree_identity, path_text(&admin)?))
 }
 
+/// Digest of the worktree as it exists on disk.
+///
+/// The digest is a Git tree id from a temporary index (`GIT_INDEX_FILE`). The
+/// real index is never the write target, and its lock is not `index.lock`.
+/// Files are enumerated from disk, including ignored and untracked `.sy-tmp-*`
+/// files. Raw blobs (`hash-object --no-filters`) bypass all Git attribute
+/// conversions. Symlinks contribute their target bytes without being followed;
+/// regular files retain their executable bit. New blobs and the tree are written
+/// only under `GIT_OBJECT_DIRECTORY` in a private scratch directory beside the
+/// worktree, with the repository object store as
+/// `GIT_ALTERNATE_OBJECT_DIRECTORIES`. The directory is created mode `0700`
+/// and is refused if that path already exists. It is not the shared temp
+/// directory. A killed Host can leave it behind; the next digest on this
+/// attempt slot removes stale `switchyard-digest-*` directories before
+/// creating a new one. Drop removes it on the normal path, so ignored files
+/// never become loose objects in the shared database. The command does not
+/// move HEAD, the branch, or the real index.
+pub(crate) fn content_digest(tree: &Path) -> Result<String> {
+    let scratch = private_digest_scratch(tree)?;
+    let _cleanup = ScratchDir(scratch.clone());
+    let objects = scratch.join("objects");
+    create_private_dir(&objects)?;
+    let index = path_text(&scratch.join("index"))?;
+    let object_dir = path_text(&objects)?;
+    let alternates = path_text(&common_objects(tree)?)?;
+    git_isolated(
+        tree,
+        &index,
+        &object_dir,
+        &alternates,
+        &["read-tree", "--empty"],
+    )?;
+    let files = digest_files(tree)?;
+    let info_path = scratch.join("index-info");
+    let mut info = File::create(&info_path).map_err(Error::storage)?;
+    // Bound argv size and avoid a Git subprocess for every ignored build file.
+    for batch in files.chunks(32) {
+        let mut inputs = Vec::new();
+        for (i, (path, mode)) in batch.iter().enumerate() {
+            let path = tree.join(path);
+            if *mode == "120000" {
+                let target = fs::read_link(&path).map_err(Error::storage)?;
+                let input = scratch.join(format!("link-{i}"));
+                fs::write(&input, target.as_os_str().as_encoded_bytes()).map_err(Error::storage)?;
+                inputs.push(input);
+            } else {
+                inputs.push(path);
+            }
+        }
+        let args = ["hash-object", "-w", "--no-filters", "--"];
+        let output = isolated_command(tree, &index, &object_dir, &alternates)?
+            .args(args)
+            .args(inputs)
+            .output()
+            .map_err(Error::storage)?;
+        let hashes = super::git::checked_output(&args, output)?;
+        let hashes = String::from_utf8(hashes).map_err(Error::storage)?;
+        let hashes: Vec<_> = hashes.lines().collect();
+        if hashes.len() != batch.len() || hashes.iter().any(|hash| !is_commit_sha(hash)) {
+            return Err(Error::guard("workspace blob digest was not an object id"));
+        }
+        for ((path, mode), hash) in batch.iter().zip(hashes) {
+            write!(info, "{mode} {hash}\t").map_err(Error::storage)?;
+            info.write_all(path.as_os_str().as_encoded_bytes())
+                .map_err(Error::storage)?;
+            info.write_all(b"\0").map_err(Error::storage)?;
+        }
+    }
+    drop(info);
+    let args = ["update-index", "-z", "--index-info"];
+    let output = isolated_command(tree, &index, &object_dir, &alternates)?
+        .args(args)
+        .stdin(File::open(&info_path).map_err(Error::storage)?)
+        .output()
+        .map_err(Error::storage)?;
+    super::git::checked_output(&args, output)?;
+    let oid = git_isolated(tree, &index, &object_dir, &alternates, &["write-tree"])?;
+    let oid = oid.trim();
+    if ![40, 64].contains(&oid.len()) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::guard("workspace content digest was not a tree id"));
+    }
+    Ok(oid.to_string())
+}
+
+/// Enumerate disk contents independently of the real index and Git attributes.
+/// Git trees cannot represent special files or nested Git administration; refuse
+/// those rather than silently recording incomplete evidence. Empty directories
+/// are omitted, as with ordinary Git trees.
+fn digest_files(tree: &Path) -> Result<Vec<(PathBuf, &'static str)>> {
+    let mut pending = vec![tree.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).map_err(Error::storage)? {
+            let entry = entry.map_err(Error::storage)?;
+            if entry.file_name() == ".git" {
+                if directory == tree {
+                    continue;
+                }
+                return Err(Error::guard(
+                    "workspace digest cannot include a nested Git repository",
+                ));
+            }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(Error::storage)?;
+            if metadata.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let mode = if metadata.file_type().is_symlink() {
+                "120000"
+            } else if metadata.is_file() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if metadata.permissions().mode() & 0o100 != 0 {
+                        "100755"
+                    } else {
+                        "100644"
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    "100644"
+                }
+            } else {
+                return Err(Error::guard(
+                    "workspace digest cannot include special files",
+                ));
+            };
+            let relative = path.strip_prefix(tree).map_err(Error::storage)?;
+            files.push((relative.to_path_buf(), mode));
+        }
+    }
+    Ok(files)
+}
+
+/// Scratch lives in the attempt slot, next to the worktree, not in the shared
+/// temp directory. Only this Host can be digesting that slot: the owner flock
+/// excludes a second writer. Stale directories are leftovers from a Host that
+/// was killed before `Drop` ran; they are mode `0700` and are removed here.
+pub(crate) fn private_digest_scratch(tree: &Path) -> Result<PathBuf> {
+    let parent = tree
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| Error::guard("workspace has no parent directory for the digest scratch"))?;
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("switchyard-digest-") {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    let scratch = parent.join(format!("switchyard-digest-{}", uuid::Uuid::new_v4()));
+    create_private_dir(&scratch)?;
+    Ok(scratch)
+}
+
+pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
+    if path.exists() {
+        return Err(Error::guard("digest scratch path already exists"));
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(Error::guard("digest scratch path already exists"))
+        }
+        Err(error) => Err(Error::storage(error)),
+    }
+}
+
+fn common_objects(tree: &Path) -> Result<PathBuf> {
+    let common = git(tree, &["rev-parse", "--git-common-dir"])?;
+    let common = Path::new(common.trim());
+    let common = if common.is_absolute() {
+        common.to_path_buf()
+    } else {
+        tree.join(common)
+    };
+    let objects = std::fs::canonicalize(common.join("objects")).map_err(Error::storage)?;
+    if !objects.is_dir() {
+        return Err(Error::guard("workspace object store is unavailable"));
+    }
+    Ok(objects)
+}
+
+struct ScratchDir(PathBuf);
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn git_isolated(
+    tree: &Path,
+    index: &str,
+    object_dir: &str,
+    alternates: &str,
+    args: &[&str],
+) -> Result<String> {
+    let output = isolated_command(tree, index, object_dir, alternates)?
+        .args(args)
+        .output()
+        .map_err(Error::storage)?;
+    let bytes = super::git::checked_output(args, output)?;
+    String::from_utf8(bytes)
+        .map_err(|error| Error::git(format!("git output was not utf-8: {error}"), None))
+}
+
+fn isolated_command(
+    tree: &Path,
+    index: &str,
+    object_dir: &str,
+    alternates: &str,
+) -> Result<std::process::Command> {
+    let mut command = command(tree)?;
+    command.args(["-c", "core.splitIndex=false"]);
+    command.env("GIT_INDEX_FILE", index);
+    command.env("GIT_OBJECT_DIRECTORY", object_dir);
+    // Git accepts C-quoted entries; quoting protects ':' inside a path from
+    // being interpreted as an alternate-directory separator.
+    command.env(
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        serde_json::to_string(alternates).map_err(Error::storage)?,
+    );
+    Ok(command)
+}
+
 fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
         .and_then(|file| file.sync_all())
@@ -727,6 +963,19 @@ mod tests {
         assert_eq!(exited.category(), "guard_failed");
         assert!(!exited.is_transient());
         assert!(exited.to_string().contains("exit 128"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn digest_scratch_is_mode_0700_and_refuses_an_existing_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("switchyard-digest-one");
+        super::create_private_dir(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        let error = super::create_private_dir(&path).unwrap_err();
+        assert!(error.to_string().contains("already exists"), "{error}");
     }
 
     #[test]

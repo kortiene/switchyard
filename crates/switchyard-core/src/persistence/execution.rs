@@ -15,9 +15,9 @@ pub(crate) fn identity_conflict(operation_id: &str, error: rusqlite::Error) -> E
 }
 
 pub(crate) fn resolution_command_conflict(command_id: &str, error: rusqlite::Error) -> Error {
-    if error
-        .to_string()
-        .contains("resolution command identity already used")
+    let text = error.to_string();
+    if text.contains("resolution command identity already used")
+        || text.contains("supersession command identity already used")
     {
         Error::CommandConflict {
             command_id: command_id.to_string(),
@@ -50,13 +50,19 @@ impl Store {
         if user_version(&self.conn)? < 4 {
             return Ok(Vec::new());
         }
-        let mut stmt=self.conn.prepare("SELECT operation_id, state, payload_hash, started_generation FROM execution_effects WHERE mission_id=?1 ORDER BY created_at, operation_id").map_err(Error::storage)?;
+        let superseded = if user_version(&self.conn)? >= 9 {
+            "EXISTS(SELECT 1 FROM execution_supersessions s WHERE s.operation_id = execution_effects.operation_id AND s.journal = 'simulated')"
+        } else {
+            "0"
+        };
+        let mut stmt=self.conn.prepare(&format!("SELECT operation_id, state, payload_hash, started_generation, {superseded} FROM execution_effects WHERE mission_id=?1 ORDER BY created_at, operation_id")).map_err(Error::storage)?;
         stmt.query_map([mission], |r| {
             Ok(crate::ExecutionView {
                 operation_id: r.get(0)?,
                 state: r.get(1)?,
                 payload_hash: r.get(2)?,
                 started_generation: r.get(3)?,
+                superseded: r.get(4)?,
             })
         })
         .map_err(Error::storage)?
@@ -182,7 +188,27 @@ impl Store {
         if user_version(&self.conn)? < 4 {
             return Ok(false);
         }
-        let simulated: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM execution_effects WHERE mission_id=?1 AND state IN ('prepared', 'uncertain'))",[mission],|r| r.get(0)).map_err(Error::storage)?;
+        let simulated: bool = if user_version(&self.conn)? >= 9 {
+            self.conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM execution_effects e
+                    WHERE e.mission_id=?1 AND e.state IN ('prepared', 'uncertain')
+                      AND NOT EXISTS (
+                        SELECT 1 FROM execution_supersessions s
+                        WHERE s.operation_id = e.operation_id AND s.journal = 'simulated'
+                      )
+                 )",
+                [mission],
+                |row| row.get(0),
+            )
+        } else {
+            self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM execution_effects WHERE mission_id=?1 AND state IN ('prepared', 'uncertain'))",
+                [mission],
+                |row| row.get(0),
+            )
+        }
+        .map_err(Error::storage)?;
         Ok(simulated || self.linux_execution_blocked(mission)?)
     }
 }

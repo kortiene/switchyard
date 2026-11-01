@@ -38,14 +38,24 @@ impl Store {
         if user_version(&self.conn)? < 7 {
             return Ok(false);
         }
-        self.conn
-            .query_row(
-                &format!(
-                    "SELECT EXISTS(SELECT 1 FROM linux_execution_effects WHERE mission_id=?1 AND state IN {BLOCKING_STATES})"
-                ),
-                [mission],
-                |row| row.get(0),
+        let sql = if user_version(&self.conn)? >= 9 {
+            format!(
+                "SELECT EXISTS(
+                    SELECT 1 FROM linux_execution_effects e
+                    WHERE e.mission_id=?1 AND e.state IN {BLOCKING_STATES}
+                      AND NOT EXISTS (
+                        SELECT 1 FROM execution_supersessions s
+                        WHERE s.operation_id = e.operation_id AND s.journal = 'linux'
+                      )
+                 )"
             )
+        } else {
+            format!(
+                "SELECT EXISTS(SELECT 1 FROM linux_execution_effects WHERE mission_id=?1 AND state IN {BLOCKING_STATES})"
+            )
+        };
+        self.conn
+            .query_row(&sql, [mission], |row| row.get(0))
             .map_err(Error::storage)
     }
 
@@ -58,8 +68,13 @@ impl Store {
         } else {
             "NULL"
         };
+        let superseded = if user_version(&self.conn)? >= 9 {
+            "EXISTS(SELECT 1 FROM execution_supersessions s WHERE s.operation_id = linux_execution_effects.operation_id AND s.journal = 'linux')"
+        } else {
+            "0"
+        };
         let mut stmt = self.conn.prepare(
-            &format!("SELECT operation_id, state, payload_hash, started_generation, request_json, entered_at, receipt_json, quiescence_json, {released}
+            &format!("SELECT operation_id, state, payload_hash, started_generation, request_json, entered_at, receipt_json, quiescence_json, {released}, {superseded}
              FROM linux_execution_effects WHERE mission_id=?1 ORDER BY created_at, operation_id"),
         ).map_err(Error::storage)?;
         let rows = stmt
@@ -74,6 +89,7 @@ impl Store {
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<bool>>(8)?,
+                    row.get::<_, bool>(9)?,
                 ))
             })
             .map_err(Error::storage)?;
@@ -88,6 +104,7 @@ impl Store {
                 receipt,
                 quiescence,
                 released,
+                superseded,
             ) = row.map_err(Error::storage)?;
             let request: Value = serde_json::from_str(&request).unwrap_or(Value::Null);
             Ok(LinuxExecutionView {
@@ -109,6 +126,7 @@ impl Store {
                 released,
                 receipt_retained: receipt.is_some(),
                 quiescence: quiescence_summary(quiescence.as_deref()),
+                superseded,
             })
         })
         .collect()
@@ -161,6 +179,54 @@ impl Store {
             )
             .optional()
             .map_err(Error::storage)
+    }
+
+    pub(crate) fn linux_mission_effects(
+        &self,
+        mission: &str,
+    ) -> Result<Vec<(String, LinuxEffectRecord)>> {
+        if user_version(&self.conn)? < 7 {
+            return Ok(Vec::new());
+        }
+        let released = if user_version(&self.conn)? >= 8 {
+            "released_at"
+        } else {
+            "NULL"
+        };
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT operation_id, mission_id, attempt_id, session_id, payload_hash, state,
+                        started_generation, cgroup_path, cgroup_dev, cgroup_ino, boot_id,
+                        entered_at, receipt_json, quiescence_json, {released}
+                 FROM linux_execution_effects WHERE mission_id=?1
+                 ORDER BY created_at, operation_id"
+            ))
+            .map_err(Error::storage)?;
+        let rows = stmt
+            .query_map([mission], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    LinuxEffectRecord {
+                        mission_id: row.get(1)?,
+                        attempt_id: row.get(2)?,
+                        session_id: row.get(3)?,
+                        payload_hash: row.get(4)?,
+                        state: row.get(5)?,
+                        started_generation: row.get(6)?,
+                        cgroup_path: row.get(7)?,
+                        cgroup_dev: row.get(8)?,
+                        cgroup_ino: row.get(9)?,
+                        boot_id: row.get(10)?,
+                        entered_at: row.get(11)?,
+                        receipt_json: row.get(12)?,
+                        quiescence_json: row.get(13)?,
+                        released_at: row.get(14)?,
+                    },
+                ))
+            })
+            .map_err(Error::storage)?;
+        rows.map(|row| row.map_err(Error::storage)).collect()
     }
 
     pub(crate) fn prepare_linux(
@@ -683,6 +749,16 @@ impl Store {
         }
         Ok(())
     }
+}
+
+/// A fresh supersession proof. Stored abandonment quiescence is not accepted
+/// here: the caller has to have just re-killed the leaf or observed that the
+/// effect never had a workload.
+pub(crate) fn fresh_quiescence_is_empty(value: &Value) -> bool {
+    let proven = value.get("proven").and_then(Value::as_bool) == Some(true);
+    let populated = value.get("populated").and_then(Value::as_u64) == Some(0);
+    let reason = value.get("reason").and_then(Value::as_str);
+    proven && populated && matches!(reason, Some("populated 0" | "no_workload"))
 }
 
 fn quiescence_summary(raw: Option<&str>) -> String {

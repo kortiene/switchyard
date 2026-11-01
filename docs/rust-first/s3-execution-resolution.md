@@ -60,10 +60,10 @@ this API is not proof that their runtime work has stopped.
 
 Terminal missions are inspectable; new decisions are rejected. Replaying an
 already committed decision is read-only and remains possible with a current
-binding. Abandonment is deliberately final within this slice: it cannot clear
-the effect or authorize replay under a fresh effect ID. Evidence-based
-superseding decisions and cross-process real-backend recovery need a separately
-reviewed protocol; there is no SQL reset or generic settlement bypass.
+binding. Abandonment does not by itself clear the effect or authorize replay
+under a fresh effect ID. An evidence-backed supersession is a separate append
+([s3-execution-supersede.md](s3-execution-supersede.md)); there is no SQL reset
+or generic settlement bypass.
 
 ## Operator CLI
 
@@ -88,8 +88,9 @@ placeholders. If necessary run `mission recover` and re-inspect before choosing
 the revision. Successful abandonment returns `executionBlockRetained: true`;
 exit 0 means the audit committed, **not** that execution may resume. The mission
 stays blocked in `needs_attention`. Cancel can be requested, but unresolved
-effects still prevent terminal cancellation; lifting the block requires the
-future evidence protocol in #125. Help and JSON `nextSteps` explain this. Reuse the
+effects still prevent terminal cancellation. Lifting that one effect's block
+requires `mission supersede-execution` with fresh Host evidence; the outcome
+stays unknown. Help and JSON `nextSteps` explain this. Reuse the
 same arguments after ambiguous failure. There is no CLI receipt injection,
 force-resume flag or real execution enabled by this command.
 
@@ -106,4 +107,6 @@ or OS process-quiescence coverage.
 Real Linux effects use a separate journal and the policy in
 [s3-linux-execution-contract.md](s3-linux-execution-contract.md). The simulated
 abandonment command cannot supply that proof. Superseding an abandoned decision
-stays open.
+is specified in
+[s3-execution-supersede.md](s3-execution-supersede.md). The simulated CLI can
+supersede only the simulated journal. A default build refuses Linux rows.
