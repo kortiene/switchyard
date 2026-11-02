@@ -41,6 +41,15 @@ pub fn prepare(root: &Path, policy: &Path, probe: bool) -> io::Result<BridgeSand
     if !version.status.success() || version.stdout != b"v22.23.4\n" {
         return Err(io::Error::other("require pinned Node 22.23.4"));
     }
+    let version = Command::new("/usr/bin/prlimit")
+        .arg("--version")
+        .env_clear()
+        .output()?;
+    if !version.status.success() || version.stdout != b"prlimit from util-linux 2.39.3\n" {
+        return Err(io::Error::other(
+            "require /usr/bin/prlimit from util-linux 2.39.3",
+        ));
+    }
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../runtime/pi-source")
         .canonicalize()?;
@@ -138,6 +147,8 @@ pub fn prepare(root: &Path, policy: &Path, probe: bool) -> io::Result<BridgeSand
     }
     mount("--ro-bind", &fixtures.join("guard.cjs"), "/guard.cjs");
     mount("--ro-bind", &policy.canonicalize()?, "/lockdown.so");
+    // Test-only read-write session bind. The bridge can plant symlinks here.
+    // Product opens of bridge-writable paths must not follow them; see the S3 handoff.
     mount("--bind", &state, "/state");
     // PiBridge acquires this before starting the wrapper. Mask the actual inode:
     // bridge writes/unlink/rename cannot remove the host's ownership fence.

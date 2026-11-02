@@ -7,6 +7,7 @@ cd "$(dirname "$0")/.."
 [[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 ]]
 [[ "$(dpkg-query -W -f='${Version}' bubblewrap)" == 0.9.0-1ubuntu0.3 ]]
 [[ "$(node --version)" == v22.23.4 ]]
+[[ "$(/usr/bin/prlimit --version)" == 'prlimit from util-linux 2.39.3' ]]
 backend="${SWITCHYARD_BWRAP:-/usr/bin/bwrap}"
 [[ "$backend" = /* && -x "$backend" && ! -u "$backend" && ! -g "$backend" ]]
 [[ "$("$backend" --version)" == 'bubblewrap 0.9.0' ]]
@@ -19,7 +20,13 @@ export SWITCHYARD_PI_NODE="$(readlink -f "$(command -v node)")"
 export SWITCHYARD_BRIDGE_POLICY="$PWD/target/bridge-policy/lockdown.so"
 {
   git rev-parse HEAD HEAD^{tree}
-  git status --short
+  # After the Pi rebuild and the policy compile above. Porcelain omits gitignored
+  # build outputs (target/, runtime/pi-source artifacts), so those do not fail this.
+  [[ -z "$(git status --porcelain)" ]] || {
+    echo "dirty tree; refusing bridge confinement evidence" >&2
+    git status --porcelain >&2
+    exit 1
+  }
   node --version
   rustc --version
   cc --version

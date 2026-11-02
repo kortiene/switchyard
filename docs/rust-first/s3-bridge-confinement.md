@@ -94,6 +94,11 @@ OS/proxy design and positive/negative endpoint tests; this slice denies all
 networking and contains no credential broker. The native Rust agent runtime
 remains the long-term target; confinement belongs to Rust regardless of adapter.
 
+The harness bind-mounts its fresh session directory read-write, so the bridge
+can plant symlinks in `state/`. That is acceptable for this test-only harness.
+The product launch API must open bridge-writable paths with `O_NOFOLLOW` /
+`openat2` `RESOLVE_BENEATH`, or only through the owner-locked database.
+
 Policy references: [kernel seccomp semantics](https://docs.kernel.org/userspace-api/seccomp_filter.html)
 and [Bubblewrap's security model](https://github.com/containers/bubblewrap/blob/v0.9.0/README.md).
 Seccomp alone is not the filesystem boundary; the mount policy is essential.

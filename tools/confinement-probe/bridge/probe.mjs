@@ -52,12 +52,19 @@ await network('host Unix socket denied', () => createConnection(spec.socket));
 await network('loopback listener denied', () => createServer().listen(0, '127.0.0.1'));
 // Positive worker control, then the same native subprocess denial on that thread.
 await new Promise((resolve, reject) => {
+  let asserted = false;
   const worker = new Worker(`const { parentPort } = require('node:worker_threads');
     const { spawnSync } = require('node:child_process');
     parentPort.postMessage(spawnSync('/node', ['--version']).error?.code);`, {eval: true});
-  worker.once('message', code => { try { assert.equal(code, 'EPERM'); } catch (error) { reject(error); } });
+  worker.once('message', code => {
+    try { assert.equal(code, 'EPERM'); asserted = true; } catch (error) { reject(error); }
+  });
   worker.once('error', reject);
-  worker.once('exit', code => code === 0 ? resolve() : reject(new Error(`worker exit ${code}`)));
+  worker.once('exit', code => {
+    if (code !== 0) reject(new Error(`worker exit ${code}`));
+    else if (!asserted) reject(new Error('worker exited without an asserted subprocess denial'));
+    else resolve();
+  });
 });
 results.push('worker works and inherits subprocess denial');
 writeFileSync('/state/probe.json', JSON.stringify(results));

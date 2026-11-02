@@ -1,7 +1,8 @@
 use std::fs;
+use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::{
-    fs::symlink,
+    fs::{MetadataExt, OpenOptionsExt, symlink},
     net::{UnixListener, UnixStream},
 };
 use std::path::{Path, PathBuf};
@@ -12,7 +13,10 @@ use switchyard_confinement_probe::{
     bridge::{BridgeSandbox, prepare},
     probe,
 };
-use switchyard_core::{PiBridge, RuntimeBinding};
+use switchyard_core::{PiBridge, RuntimeBinding, lock_path};
+
+/// Linux `O_NOFOLLOW` (`0400000`). A final-component symlink fails with `ELOOP`.
+const O_NOFOLLOW: i32 = 0o400000;
 
 fn policy() -> PathBuf {
     std::env::var_os("SWITCHYARD_BRIDGE_POLICY")
@@ -56,6 +60,21 @@ fn observe(sandbox: &BridgeSandbox) -> (PathBuf, Vec<probe::ProcessIdentity>) {
         "must observe the live namespace before killing"
     );
     (namespace, members)
+}
+fn read_nofollow(path: &Path) -> Vec<u8> {
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+        .unwrap_or_else(|error| {
+            panic!(
+                "host read of {} must not follow a symlink: {error}",
+                path.display()
+            )
+        });
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    bytes
 }
 fn retain(name: &str, value: &Value) {
     let directory = std::env::var_os("SWITCHYARD_CONFINEMENT_EVIDENCE")
@@ -107,28 +126,69 @@ fn bridge_boundary_denials_preserve_host_authority_and_private_sqlite_recovers()
         .to_string(),
     )
     .unwrap();
+    let lock_path = lock_path(&sandbox.database);
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+        .unwrap();
+    let before_lock = fs::symlink_metadata(&lock_path).unwrap();
+    let lock_identity = (before_lock.dev(), before_lock.ino());
     let mut bridge = spawn(&sandbox, 1, "answer");
     open(&mut bridge);
     let report: Vec<String> =
-        serde_json::from_slice(&fs::read(root.join("state/probe.json")).unwrap()).unwrap();
-    assert_eq!(
-        report.len(),
-        26,
-        "all actual negative operations must run: {report:?}"
+        serde_json::from_slice(&read_nofollow(&root.join("state/probe.json"))).unwrap();
+    let mut expected = Vec::new();
+    for path in &protected {
+        let path = path.to_str().unwrap();
+        expected.push(format!("read {path}"));
+        expected.push(format!("write {path}"));
+    }
+    expected.extend(
+        [
+            "symlink escape",
+            "runtime write /runtime/pins.json",
+            "runtime write /node",
+            "runtime write /guard.cjs",
+            "runtime write /lockdown.so",
+            "owner lock write",
+            "owner lock unlink",
+            "owner lock rename",
+            "existing Node executable cannot spawn",
+            "credential and configuration environment absent",
+            "host TCP denied",
+            "host Unix socket denied",
+            "loopback listener denied",
+            "worker works and inherits subprocess denial",
+        ]
+        .into_iter()
+        .map(str::to_string),
     );
+    assert_eq!(report, expected, "all actual negative operations must run");
     assert_eq!(
-        fs::read_to_string(root.join("state/positive")).unwrap(),
+        String::from_utf8(read_nofollow(&root.join("state/positive"))).unwrap(),
         "private state works"
     );
+    let owner_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(&lock_path)
+        .unwrap_or_else(|error| {
+            panic!(
+                "host open of {} must not follow a symlink: {error}",
+                lock_path.display()
+            )
+        });
     assert!(
-        fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(root.join("state/session.sqlite.owner.lock"))
-            .unwrap()
-            .try_lock()
-            .is_err(),
+        owner_lock.try_lock().is_err(),
         "negative owner-lock attempts must preserve exclusivity"
+    );
+    let after_lock = fs::symlink_metadata(&lock_path).unwrap();
+    assert_eq!(
+        (after_lock.dev(), after_lock.ino()),
+        lock_identity,
+        "ro-bind mask must preserve the owner-lock device and inode"
     );
     let receipt = call(
         &mut bridge,
