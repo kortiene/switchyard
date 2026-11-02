@@ -88,3 +88,7 @@ crashes and recovery tests; S2 remains NO-GO.
 The [S2-B effect probe](../../docs/rust-first/s2-effect-outcomes.md) adds typed
 effect outcomes and tests lost replies and uncertain effects against the real
 Host simulated journal. It keeps the same product and S2 restrictions.
+
+The [S2-C cancellation probe](../../docs/rust-first/s2-cancellation.md) prevents
+concurrent duplicate aborts from cancelling later work and adds stop crash,
+timeout and bounded request-pressure evidence. The complete S2 gate stays open.

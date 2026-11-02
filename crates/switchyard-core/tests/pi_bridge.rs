@@ -48,6 +48,79 @@ fn call(
     })
 }
 
+#[test]
+fn uncooperative_abort_times_out_reaps_child_and_reopens_with_unsettled_intent() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("session.sqlite");
+    let mut bridge = spawn(&db, 1, "ignore-abort");
+    call(
+        &mut bridge,
+        "runtime.submit",
+        Some("work"),
+        json!({"type":"input","content":"wait"}),
+    )
+    .unwrap();
+    let limit = std::time::Instant::now() + Duration::from_secs(3);
+    while !bridge.stderr_tail().contains("waiting tool entered") {
+        assert!(
+            std::time::Instant::now() < limit,
+            "fixture did not enter its tool"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let started = std::time::Instant::now();
+    let error = call(&mut bridge, "runtime.abort", Some("stop"), json!({})).unwrap_err();
+    assert!(
+        error.to_string().contains("cancellation_timeout"),
+        "{error}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(
+        bridge.exit_status().unwrap().is_some(),
+        "Rust must reap the failed peer"
+    );
+    assert!(db.is_file());
+    drop(bridge);
+    // Keep the uncooperative fixture armed: replaying its tool would hang again.
+    let mut bridge = spawn(&db, 2, "ignore-abort");
+    let before = call(
+        &mut bridge,
+        "runtime.inspect",
+        None,
+        json!({"commandIds":["stop"]}),
+    )
+    .unwrap();
+    assert_eq!(before["scheduling"], "paused");
+    assert_eq!(before["stopping"], true);
+    assert_eq!(before["commands"][0]["receipt"]["settled"], false);
+    assert_eq!(before["commands"][0]["receipt"]["receipt"], "stop");
+    let stopped = call(&mut bridge, "runtime.abort", Some("stop"), json!({})).unwrap();
+    assert_eq!(
+        stopped,
+        json!({"commandId":"stop","accepted":true,"runtimeSettled":true})
+    );
+    assert!(
+        !bridge.stderr_tail().contains("waiting tool entered"),
+        "recovery must not rerun the tool"
+    );
+    let limit = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let snapshot = call(&mut bridge, "runtime.inspect", None, json!({})).unwrap();
+        if snapshot["runtimeIdle"] == true && snapshot["stopping"] == false {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < limit,
+            "recovered abort did not settle: {snapshot}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        !bridge.stderr_tail().contains("waiting tool entered"),
+        "recovery must not rerun the tool after the abort settles"
+    );
+}
+
 fn synthetic_peer(directory: &Path, script: &str) -> PiBridge {
     let launcher = directory.join("synthetic.mjs");
     std::fs::write(&launcher, script).unwrap();

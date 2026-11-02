@@ -4,6 +4,9 @@ use crate::execution::PiRuntime;
 use rusqlite::{Connection, params};
 use std::process::Command;
 
+#[path = "pi_host_tests/cancellation.rs"]
+mod cancellation;
+
 struct World {
     _tmp: tempfile::TempDir,
     db: PathBuf,
@@ -613,7 +616,22 @@ fn wait_until_terminal(host: &mut Host, req: &RuntimeRequest) -> Value {
 }
 
 fn process_alive(pid: u32) -> bool {
-    std::path::Path::new(&format!("/proc/{pid}")).exists()
+    // Signal 0 uses the same PID namespace as Child::id and delivers nothing.
+    // An unreaped zombie still occupies its pid, so this stays true until the
+    // parent waits, matching the old /proc existence check.
+    let Some(pid) = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return false;
+    };
+    match rustix::process::test_kill_process(pid) {
+        Ok(()) => true,
+        // The pid exists, but this process may not signal it.
+        Err(rustix::io::Errno::PERM) => true,
+        Err(rustix::io::Errno::SRCH) => false,
+        Err(error) => panic!("signal 0 check failed for pid {pid}: {error}"),
+    }
 }
 
 #[test]

@@ -190,7 +190,9 @@ cargo test --workspace --features pi-contract --locked
 Host cases and the existing transport/tool-replay tests. It remains a partial
 probe, not `pi-bridge-contract`. Missing dependencies fail rather than skip.
 
-Remaining S2 work includes durable typed effect rejection/conflict/uncertainty,
-non-cooperative cancellation, sustained backpressure and race cases, and the
-complete acceptance matrix. S3 still owns execution confinement, process trees,
-and real effect receipts. No live-provider or GitHub publication was performed.
+[S2-B](s2-effect-outcomes.md) adds durable typed effect outcomes, and
+[S2-C](s2-cancellation.md) adds abort crash recovery, timeout and request-pressure
+evidence. Remaining S2 work includes composing these proofs with the complete
+Host scheduling contract, additional storage/close/reopen races, and the full
+acceptance matrix. S3 still owns execution confinement, process trees and real
+effect receipts. No live-provider or GitHub publication was performed.

@@ -14,6 +14,13 @@ const Session = defineDoc({ kind: 'switchyard.bridge.session', scope: 'session',
 const Command = defineDocFamily({ kind: 'switchyard.bridge.command', scope: 'session', version: 1, family: true,
   initial: (_seed: null) => ({ hash: '', method: '', receipt: '', settled: false as boolean }), checkpointWhen: () => true });
 
+// Trusted conformance barriers only; never selected by a frame or model input.
+export type RuntimeBarriers = {
+  afterAdmission?: () => void;
+  afterAbortRecorded?: (fresh: boolean) => void | Promise<void>;
+  afterAbortSettled?: () => void | Promise<void>;
+};
+
 export class Runtime {
   private binding: Binding;
   private database: string;
@@ -24,9 +31,10 @@ export class Runtime {
   private negotiated = false;
   private opening = false;
   private closing = false;
-  private afterAdmission?: () => void;
-  constructor(database: string, binding: Binding, models: Models, tools: ToolRegistration[], afterAdmission?: () => void) {
-    this.database = database; this.binding = binding; this.models = models; this.tools = tools; this.afterAdmission = afterAdmission;
+  private barriers: RuntimeBarriers;
+  private aborts = new Map<string, { hash: string; promise: Promise<Json> }>();
+  constructor(database: string, binding: Binding, models: Models, tools: ToolRegistration[], barriers: RuntimeBarriers = {}) {
+    this.database = database; this.binding = binding; this.models = models; this.tools = tools; this.barriers = barriers;
   }
 
   async dispatch(frame: Frame): Promise<Json> {
@@ -146,24 +154,41 @@ export class Runtime {
     }, BACKGROUND_CONTEXT);
     // Only a new admission is a crash point. Replaying an existing receipt must
     // stay alive so recovery can resume that submission with the fixture armed.
-    if (admitted.fresh) this.afterAdmission?.();
+    if (admitted.fresh) this.barriers.afterAdmission?.();
     harness.resume();
     return { receiptId: admitted.receipt, commandId, requestId, payloadHash, admitted: true };
   }
 
   private async abort(commandId: string, payloadHash: string): Promise<Json> {
+    // The document deduplicates settled commands across restarts. Within one
+    // process, two copies must also share the *running* cancellation: a delayed
+    // second root.abort could otherwise cancel work admitted after the first
+    // copy settled and cleared stopCommand.
+    const pending = this.aborts.get(commandId);
+    if (pending) {
+      if (pending.hash !== payloadHash) throw new ProtocolError('command_conflict');
+      return pending.promise;
+    }
+    const promise = this.performAbort(commandId, payloadHash).finally(() => { this.aborts.delete(commandId); });
+    this.aborts.set(commandId, { hash: payloadHash, promise });
+    return promise;
+  }
+
+  private async performAbort(commandId: string, payloadHash: string): Promise<Json> {
     const harness = this.harness!;
     const complete = await harness.commit(async tx => {
       const state = await tx.doc(Session);
       const command = await tx.doc(Command, commandId, null);
       if (command.hash && (command.hash !== payloadHash || command.method !== 'runtime.abort')) throw new ProtocolError('command_conflict');
-      if (command.settled) return true;
+      if (command.settled) return { settled: true, fresh: false };
       if (state.stopCommand && state.stopCommand !== commandId) throw new ProtocolError('stopping', 'rejected');
+      const fresh = !command.hash;
       state.stopCommand = commandId;
       command.hash = payloadHash; command.method = 'runtime.abort'; command.receipt = commandId;
-      return false;
+      return { settled: false, fresh };
     }, BACKGROUND_CONTEXT);
-    if (!complete) {
+    if (!complete.settled) {
+      await this.barriers.afterAbortRecorded?.(complete.fresh);
       try {
         await this.root!.abort(withAbortSignal(AbortSignal.timeout(DEADLINE_MS), BACKGROUND_CONTEXT), { background: true });
       } catch { throw new ProtocolError('cancellation_timeout', 'uncertain'); }
@@ -172,6 +197,7 @@ export class Runtime {
         const command = await tx.doc(Command, commandId, null);
         command.settled = true; state.stopCommand = '';
       }, BACKGROUND_CONTEXT);
+      await this.barriers.afterAbortSettled?.();
     }
     return { commandId, accepted: true, runtimeSettled: true };
   }
