@@ -183,3 +183,12 @@ Rust-supervised Pi bridge under a separate mount/process/network policy. It
 proves boundary denials, private storage recovery and termination of a hung tool
 in the required `execution-confinement` job. This remains test-only; product
 Pi-to-Linux integration, model-only egress and full S3 acceptance stay open.
+
+### S3-B2 recoverable Pi-to-Linux writes
+
+The [file-write integration](s3-pi-linux-write.md) maps the bundled Pi forwarder
+to the public Rust Linux execution API and composes both real confinement
+boundaries in credential-free tests. Stable receipt replay, frozen deadlines,
+host-kill recovery and explicit uncertainty are covered. Product Pi mission
+dispatch, process forwarding, production supervision and full S3 acceptance
+remain separate; FakeRuntime stays the default.

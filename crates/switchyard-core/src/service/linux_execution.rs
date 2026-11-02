@@ -478,7 +478,10 @@ mod os {
             Err(Error::ExecutionUncertain { operation_id: id })
         }
 
-        fn authorize_new(&self, request: &LinuxExecutionRequest) -> Result<()> {
+        pub(in crate::service) fn authorize_new(
+            &self,
+            request: &LinuxExecutionRequest,
+        ) -> Result<()> {
             let mission = self.store.load_mission(&request.binding.mission_id)?;
             let except = match &request.operation {
                 LinuxOperation::ExecStatus {
@@ -831,6 +834,7 @@ mod os {
                 ));
             }
             let receipt = host_receipt(request, &result, leaf);
+            self.barrier("result");
             self.accept_runtime_binding(&request.binding, &request.binding.mission_id)?;
             self.store.save_linux_receipt(request, &receipt)?;
             self.barrier("receipt");

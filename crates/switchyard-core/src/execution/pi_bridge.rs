@@ -135,6 +135,7 @@ impl PiBridge {
         if !matches!(
             fixture,
             "answer"
+                | "file-write"
                 | "tools"
                 | "gated-tools"
                 | "recover"

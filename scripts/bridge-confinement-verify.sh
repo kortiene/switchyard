@@ -43,3 +43,11 @@ cargo clippy -p switchyard-confinement-probe --all-targets --features bridge-con
 # A harmless positive environment control exists in the Rust host, then the
 # Node fixture asserts it was removed by default-deny environment construction.
 SWITCHYARD_CREDENTIAL_SENTINEL=host-only-fixture cargo test -p switchyard-confinement-probe --test bridge_confinement --features bridge-confinement --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-tests.log"
+# S3-B2 composes both real boundaries through the public Host file-write mapper.
+# The mapper unit cases also run here with both features; the S2-only job cannot
+# compile this Linux-specific path. Missing cgroups/namespace support still fails.
+cargo build -p switchyard --bin switchyard-execution-helper --features linux-execution --locked
+export SWITCHYARD_EXECUTION_HELPER="$PWD/target/debug/switchyard-execution-helper"
+cargo clippy -p switchyard-confinement-probe --all-targets --features pi-linux-write --locked -- -D warnings
+cargo test -p switchyard-core --features 'pi-contract linux-execution' pi_linux_write --locked -- --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/pi-linux-mapper.log"
+cargo test -p switchyard-confinement-probe --test pi_linux_write --features pi-linux-write --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/pi-linux-write.log"
