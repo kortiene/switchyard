@@ -5,15 +5,19 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 fn entries(path: &Path) -> Vec<Value> {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    // The child appends JSONL while we poll. A read can split the last write,
+    // so only newline-terminated lines are complete records.
+    let complete = raw.rsplit_once('\n').map(|(done, _)| done).unwrap_or("");
+    complete
         .lines()
+        .filter(|line| !line.is_empty())
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
 }
 
 fn wait_entries(path: &Path, count: usize) -> Vec<Value> {
-    let until = Instant::now() + Duration::from_secs(5);
+    let until = Instant::now() + Duration::from_secs(30);
     loop {
         let found = entries(path);
         if found.len() >= count {
@@ -25,6 +29,30 @@ fn wait_entries(path: &Path, count: usize) -> Vec<Value> {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn entries_ignore_a_trailing_partial_line_while_polling() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("entered");
+    std::fs::write(
+        &path,
+        "{\"task\":\"t1\",\"name\":\"write_file\",\"generation\":1}\n{\"task\":\"t2\"",
+    )
+    .unwrap();
+    let partial = entries(&path);
+    assert_eq!(partial.len(), 1);
+    assert_eq!(partial[0]["task"], "t1");
+    assert_eq!(partial[0]["name"], "write_file");
+    std::fs::write(
+        &path,
+        "{\"task\":\"t1\",\"name\":\"write_file\",\"generation\":1}\n{\"task\":\"t2\",\"name\":\"write_pair\",\"generation\":2}\n",
+    )
+    .unwrap();
+    let complete = entries(&path);
+    assert_eq!(complete.len(), 2);
+    assert_eq!(complete[1]["task"], "t2");
+    assert_eq!(complete[1]["generation"], 2);
 }
 
 #[test]

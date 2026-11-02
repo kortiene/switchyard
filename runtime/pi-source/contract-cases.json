@@ -9,30 +9,30 @@
   },
   "admission-and-outbox": {
     "node": ["transactional admission and payload binding roll back and commit together"],
-    "rust": ["lost_ack_recovers_original_receipt_and_identity_across_repeated_restarts", "changed_canonical_content_under_same_request_conflicts_without_overwriting_receipt", "acknowledged_command_missing_in_pi_blocks_instead_of_resubmitting"]
+    "rust": ["service::pi_host_tests::lost_ack_recovers_original_receipt_and_identity_across_repeated_restarts", "service::pi_host_tests::changed_canonical_content_under_same_request_conflicts_without_overwriting_receipt", "service::pi_host_tests::acknowledged_command_missing_in_pi_blocks_instead_of_resubmitting"]
   },
   "snapshot-resync": {
     "node": ["watch resync reconstructs answered and aborted state after missed observations and restart"],
-    "rust": ["reconciled_active_host_resumes_the_same_durable_tool_tasks"]
+    "rust": ["service::pi_host_tests::contract::reconciled_active_host_resumes_the_same_durable_tool_tasks"]
   },
   "effect-replay": {
     "node": ["effect errors retain only the three owner-defined dispositions"],
-    "rust": ["multi_effect_and_nested_replay_reuse_host_receipts_after_sigkill", "uncertain_effect_replay_after_sigkill_never_reapplies_or_unblocks", "typed_effect_responses_preserve_all_four_dispositions"]
+    "rust": ["service::execution::tests::pi_effects::multi_effect_and_nested_replay_reuse_host_receipts_after_sigkill", "service::execution::tests::pi_effects::uncertain_effect_replay_after_sigkill_never_reapplies_or_unblocks", "typed_effect_responses_preserve_all_four_dispositions"]
   },
   "stop-composition": {
     "node": ["abort settles Pi without claiming that unacknowledged execution has stopped", "a delayed duplicate abort cannot cancel work admitted after the original settled"],
-    "rust": ["pending_stops_prevent_interrupted_tool_replay_across_two_recoveries", "runtime_abort_preserves_completed_and_uncertain_host_effects_across_restarts", "pending_pause_and_cancel_reconcile_lost_work_ack_before_abort_without_continuation"]
+    "rust": ["service::pi_host_tests::contract::pending_stops_prevent_interrupted_tool_replay_across_two_recoveries", "service::execution::tests::pi_effects::runtime_abort_preserves_completed_and_uncertain_host_effects_across_restarts", "service::pi_host_tests::pending_pause_and_cancel_reconcile_lost_work_ack_before_abort_without_continuation"]
   },
   "registry-and-authority": {
     "node": ["the bundled registry refuses unregistered code loading and host tools", "protocol, capabilities, binding and generation are checked before opening storage"],
-    "rust": ["external_observations_and_stop_claims_do_not_gain_authority", "malformed_peer_output_and_forged_authority_are_rejected_by_rust", "pi_probe_runtime_mut_is_absent"]
+    "rust": ["service::pi_host_tests::external_observations_and_stop_claims_do_not_gain_authority", "malformed_peer_output_and_forged_authority_are_rejected_by_rust", "service::pi_host_tests::pi_probe_runtime_mut_is_absent"]
   },
   "bounds-and-timeout": {
     "node": ["sustained bounded request bursts leave abort and inspection responsive", "pending request overflow exits and an interrupted abort recovers from its durable intent", "an uncooperative abort times out as cancellation_timeout"],
-    "rust": ["uncooperative_abort_times_out_reaps_child_and_reopens_with_unsettled_intent", "effect_flood_cannot_extend_a_call_indefinitely", "sustained_real_busy_continuation_cannot_starve_an_admitted_stop"]
+    "rust": ["uncooperative_abort_times_out_reaps_child_and_reopens_with_unsettled_intent", "effect_flood_cannot_extend_a_call_indefinitely", "service::pi_host_tests::cancellation::sustained_real_busy_continuation_cannot_starve_an_admitted_stop"]
   },
   "storage-and-close": {
     "node": ["close refuses an abort at afterAbortRecorded even on an idle runtime", "a concurrent call during a close that returns busy stays retryable", "background storage failure kills an uncooperative tool before session close can finish"],
-    "rust": ["missing_empty_and_corrupt_original_storage_block_without_replacement", "incompatible_configuration_and_default_fake_reopen_are_rejected", "abort_crashes_recover_original_stop_without_claiming_mission_quiescence"]
+    "rust": ["service::pi_host_tests::missing_empty_and_corrupt_original_storage_block_without_replacement", "service::pi_host_tests::incompatible_configuration_and_default_fake_reopen_are_rejected", "service::pi_host_tests::cancellation::abort_crashes_recover_original_stop_without_claiming_mission_quiescence"]
   }
 }

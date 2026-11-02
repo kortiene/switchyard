@@ -16,7 +16,7 @@ close #96, enable Pi in the product, or authorize live effects.
 | Catalog | `sha256-7fe1b41feaf43a7aad4bc832e6b306c7ced56e6d41bbc724b74e91eeacff6edf` |
 | Node / npm / TypeScript | `22.23.4` / `11.9.0` / `7.0.2` |
 | Rust / CI platform | `1.99.1` / `ubuntu-24.04` |
-| Adapter and code revision | Fingerprint validated in both peers; workflow artifact records the tested Git commit/tree, dirty flag, lock/vector/manifest hashes and full pins |
+| Adapter and code revision | Fingerprint validated in both peers; workflow artifact records the tested Git commit and tree (`commit`, `tree`), the pull-request head on `pull_request` (`pullRequestHead`), the dirty flag, lock/vector/manifest hashes and full pins |
 
 This is the reviewed source-build remedy, not the mismatched published package
 audited in [S2 feasibility](s2-feasibility.md). CI rebuilds all five packages and
@@ -29,10 +29,13 @@ artifact reproducibility are not newly claimed.
 
 Every row is proposed evidence requiring acceptance review. Exact executable
 test names are in [`contract-cases.json`](../../runtime/pi-source/contract-cases.json).
-The runner executes the entire Node and feature-enabled Rust workspace suites,
-then requires every named case to have passed. Deleting/renaming a mandatory
-case without updating its evidence fails the gate. Skipped, ignored, filtered,
-cancelled and todo tests are refused.
+Rust names there are the exact `cargo test` identifiers: the full module path
+for library tests, and the function name for an integration test at the harness
+root. A same-named test in another module does not count. The runner executes
+the entire Node and feature-enabled Rust workspace suites, then requires every
+named case to have passed. Deleting/renaming a mandatory case without updating
+its evidence fails the gate. Skipped, ignored, filtered, cancelled and todo
+tests are refused.
 
 | #96 requirement | Executable evidence | Scope / interpretation |
 | --- | --- | --- |
@@ -82,16 +85,39 @@ Logs and `evidence.json` are retained in the workflow's
 `pi-bridge-contract-evidence` artifact, including failed runs. A pre-run build or
 installation failure fails the job even if no runner artifact exists.
 `conformance=passed` means tests passed; `acceptance` deliberately remains
-`NO-GO until reviewed`. A local dirty checkout is recorded as dirty, not as
-evidence for an exact committed revision. No source rebuild is implied by a
-local run that reused cached artifacts; CI independently performs the rebuild.
+`NO-GO until reviewed`.
 
-Local validation of this change passed the runner with 41 Node tests and 218
-Rust tests (196 core, 13 bridge, 9 CLI), no skipped/ignored/filtered tests,
+`commit` is `git rev-parse HEAD` and `tree` is that commit's tree: the revision
+the runner actually tested. On `pull_request`, `actions/checkout` checks out
+`refs/pull/<n>/merge`, GitHub's synthetic merge of the PR head into the base.
+`commit` and `tree` identify that merge commit. `pullRequestHead` is
+`github.event.pull_request.head.sha`, passed in as `SWITCHYARD_PR_HEAD_SHA`.
+Match `pullRequestHead` to the head SHA shown on the pull request, and match
+`commit` and `tree` to the merge CI executed. A `pull_request` run that omits the head SHA fails the gate. On
+`push` to `main`, `merge_group`, and `workflow_dispatch` there is no pull-request
+head: `pullRequestHead` is null and `commit` is the checked-out revision (the
+pushed commit, the merge-group commit, or the dispatched ref). Match `commit`.
+
+A local dirty checkout is recorded as dirty and can still report test results.
+It is not evidence for an exact committed revision. When `CI` is set, a dirty
+tree fails the gate before `conformance` can become `passed`. The check sees
+the tree after `build.mjs` and `npm ci`, and again after the test steps.
+Contract logs are written under gitignored `runtime/pi-source/.contract-results/`.
+The source rebuild writes gitignored `.build-*`, `.artifacts/`, `.catalog-cache/`,
+and `node_modules/`. Cargo writes the gitignored root `target/` directory. The
+normal CI sequence therefore leaves a clean tree. No source rebuild is implied
+by a local run that reused cached artifacts; CI independently performs the rebuild.
+The workflow caches the Cargo registry and `target/` so a later run is not a
+fully cold compile. `cargo test` may use 20 minutes inside the 25-minute job.
+
+Local validation of this change passed the runner with 41 Node tests and 219
+Rust tests (197 core, 13 bridge, 9 CLI), no skipped/ignored/filtered tests,
 formatting, Clippy and TypeScript checks. Source artifacts/dependencies were
 reused locally with integrity checks. A negative run on Node 24.22.1 failed at
-the exact-version check. The PR records the published head/tree and CI runs;
-the local dirty-tree result does not stand in for clean CI revision evidence.
+the exact-version check. The artifact records `commit` and `tree` for the
+tested checkout and `pullRequestHead` for the PR head. A local dirty-tree
+result does not stand in for clean CI revision evidence, and a dirty tree in
+CI fails the gate.
 
 The existing `pi-bridge-probe`, `pi-source-candidate` and package-audit jobs remain
 separate historical checks. This adds coverage and an evidence-aware gate; it
@@ -102,11 +128,14 @@ calling it merge-enforced. Ruleset enforcement is not changed by this PR.
 
 ## Review and downstream handoff
 
-Review every matrix row against the exact head SHA and uploaded CI evidence,
-including the credential-free source-build remedy and bounded protocol
-refinements. If any mandatory row remains unproven, record its blocker in #96
-and retain NO-GO. If all rows are accepted, record an explicit S2 GO with the
-reviewed commit, source/Node pins and CI run, then update #94/#96/#97. Do not
+Review every matrix row against the uploaded CI evidence, including the
+credential-free source-build remedy and bounded protocol refinements. On a
+pull request, match `pullRequestHead` to the PR head SHA and match `commit`
+and `tree` to the synthetic merge commit the workflow tested. On main and
+merge-queue runs, match `commit`. If any mandatory row remains unproven, record
+its blocker in #96 and retain NO-GO. If all rows are accepted, record an
+explicit S2 GO with the reviewed commit, source/Node pins and CI run, then
+update #94/#96/#97. Do not
 treat merge, a green check, or a PR closing keyword as that decision.
 
 S3 Track B still owns product Pi-to-Linux effect mapping, file/process handles,

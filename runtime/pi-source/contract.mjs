@@ -14,18 +14,30 @@ const pins = JSON.parse(readFileSync(join(source, 'pins.json'), 'utf8'));
 const cases = JSON.parse(readFileSync(join(source, 'contract-cases.json'), 'utf8'));
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const command = (name, args, cwd = root) => execFileSync(name, args, { cwd, encoding: 'utf8' }).trim();
+const gitDirty = () => command('git', ['status', '--porcelain', '--untracked-files=all']);
+const pullRequestHead = process.env.SWITCHYARD_PR_HEAD_SHA?.trim() || null;
+const dirtyAtStart = gitDirty();
 const evidence = {
   conformance: 'failed', acceptance: 'NO-GO until reviewed',
+  // `commit`/`tree` are the checkout that actually ran. On pull_request that is
+  // GitHub's synthetic merge (refs/pull/N/merge), not the PR head.
   commit: command('git', ['rev-parse', 'HEAD']),
   tree: command('git', ['rev-parse', 'HEAD^{tree}']),
-  dirty: command('git', ['status', '--porcelain', '--untracked-files=all']) !== '',
+  pullRequestHead,
+  dirty: dirtyAtStart !== '',
   node: process.versions.node, pins, cases, checks: [],
 };
 
-function run(label, executable, args, cwd = root) {
+function assertCleanCiTree(status, when) {
+  if (process.env.CI && status !== '') {
+    throw new Error(`CI tree is dirty ${when}; refusing conformance:\n${status}`);
+  }
+}
+
+function run(label, executable, args, cwd = root, timeout = 600_000) {
   console.log(`Contract: ${label}`);
   const result = spawnSync(executable, args, {
-    cwd, encoding: 'utf8', timeout: 600_000, maxBuffer: 32 * 1024 * 1024,
+    cwd, encoding: 'utf8', timeout, maxBuffer: 32 * 1024 * 1024,
     env: { ...process.env, SWITCHYARD_PI_NODE: process.execPath, CARGO_TERM_COLOR: 'never' },
   });
   const stdout = result.stdout ?? '';
@@ -41,6 +53,12 @@ function run(label, executable, args, cwd = root) {
 }
 
 try {
+  if (pullRequestHead !== null) assert.match(pullRequestHead, /^[0-9a-f]{40}$/, 'SWITCHYARD_PR_HEAD_SHA must be the full pull request head');
+  if (process.env.GITHUB_EVENT_NAME === 'pull_request') {
+    assert.ok(pullRequestHead, 'pull_request CI must set SWITCHYARD_PR_HEAD_SHA to github.event.pull_request.head.sha');
+  }
+  // build.mjs and npm ci run before this process in CI. A dirty tree there cannot pass.
+  assertCleanCiTree(dirtyAtStart, 'after build and install');
   assert.equal(process.versions.node, pins.node, 'The contract requires the exact Node pin; no skip');
   evidence.npm = command('npm', ['--version'], source);
   assert.equal(evidence.npm, pins.npm);
@@ -66,11 +84,14 @@ try {
     assert.match(node, new RegExp(`^# ${field} 0$`, 'm'), `Node ${field} must be zero`);
   }
   const nodePassed = new Set([...node.matchAll(/^ok \d+ - (.+)$/gm)].map(match => match[1]));
-  const rust = run('rust-tests', 'cargo', ['test', '--workspace', '--features', 'pi-contract', '--locked']);
+  // Clippy warms target/. A cold cargo test on a busy runner can still exceed
+  // 10 minutes while the 25-minute job has time left; the workflow also caches Cargo.
+  const rust = run('rust-tests', 'cargo', ['test', '--workspace', '--features', 'pi-contract', '--locked'], root, 1_200_000);
   const summaries = [...rust.matchAll(/^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out;/gm)];
   assert(summaries.length > 0, 'No Rust test summaries found');
   for (const summary of summaries) assert(summary.slice(2).every(count => count === '0'), 'Rust tests must not fail, skip or filter');
-  const rustPassed = new Set([...rust.matchAll(/^test (\S+) \.\.\. ok$/gm)].map(match => match[1].split('::').at(-1)));
+  // Exact cargo identifiers (full module path when the test has one). A same-named test elsewhere does not count.
+  const rustPassed = new Set([...rust.matchAll(/^test (\S+) \.\.\. ok$/gm)].map(match => match[1]));
   for (const [property, required] of Object.entries(cases)) {
     assert(required.node.length + required.rust.length > 0, `No evidence for ${property}`);
     for (const name of required.node) assert(nodePassed.has(name), `Missing Node evidence for ${property}: ${name}`);
@@ -78,6 +99,9 @@ try {
   }
   evidence.nodeTests = Number(node.match(/^# tests (\d+)$/m)[1]);
   evidence.rustTests = summaries.reduce((total, match) => total + Number(match[1]), 0);
+  const dirtyAtEnd = gitDirty();
+  evidence.dirty = dirtyAtEnd !== '';
+  assertCleanCiTree(dirtyAtEnd, 'after the contract checks');
   evidence.conformance = 'passed';
   console.log(`Contract passed: ${evidence.nodeTests} Node and ${evidence.rustTests} Rust tests, none skipped. Acceptance still requires review.`);
 } catch (error) {
