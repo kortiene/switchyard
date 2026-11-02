@@ -20,10 +20,15 @@ persisted stop intent, live tasks and unsettled submissions, so a freshly
 reopened session cannot close over an incomplete stop merely because its
 in-memory call count is zero. Calls that arrive while those checks are still
 running get `busy`, not `session_unavailable`. A throw from the check, including
-`snapshot` or `inspect`, clears that fence so the connection is not left
-unavailable. Once close is admitted it fences later calls. A busy close leaves
-the session usable. A successful close is terminal for that connection;
-reopening requires a new supervised process and generation.
+`snapshot` or `inspect`, resets that fence so in-process `Runtime` state stays
+consistent. The direct Runtime test can still inspect and close. Over the
+bridge, `transport.ts` treats any non-`ProtocolError` from dispatch as fatal
+(`fail`/`failFatal`), so a real `snapshot` or `inspect` throw still ends the
+peer and the Host reopens. The `closing` reset after `harness.close` throws is
+the same: it keeps the in-process Runtime consistent, and a non-protocol throw
+over the bridge is still fatal. Once close is admitted it fences later calls.
+A busy close leaves the session usable. A successful close is terminal for that
+connection; reopening requires a new supervised process and generation.
 Close remains connection-local, with no durable business-command receipt. A
 lost close reply requires killing/reaping the peer and reopening the retained
 session, rather than assuming completion or deleting its files.
@@ -59,7 +64,7 @@ close error. Neither fixture is selectable through protocol/model input.
 | Background scheduler storage failure | `a background SQLite failure terminates the peer without another host request` | Peer exits without another request or request timer. Admission already committed remains inspectable, whether its reply arrived or was lost. |
 | Close's database acknowledgement fails | `storage-close` | No close success reply; nonzero peer exit and retained session. Two later generations reopen and close it successfully. |
 | Close races with abort before settlement or before reply | `cancellation.test.ts`: both close/abort barriers | Close returns busy; the original abort can finish. |
-| Call arrives while a close check will return busy, or that check throws | Same file: pending-close and close-check throw tests | The call is `busy` and retryable. A throw from the check leaves the session open for inspection and a later close. |
+| Call arrives while a close check will return busy, or that check throws | Same file: pending-close and close-check throw tests | The concurrent call is `busy` and retryable. The throw resets in-process Runtime state so a direct caller can still inspect and close. A non-protocol throw over the bridge, including a real `snapshot`/`inspect` failure or a throw from `harness.close`, is still fatal: the peer exits and the Host reopens. |
 | Tool ignores its abort context | Same file: uncooperative abort | The deadline reports `cancellation_timeout` without requiring the thrown reason to be the deadline's reason object. |
 | Close races with submission before transaction entry | Same file: admitted submit | Close returns busy; submission commits its original receipt and can be cancelled. |
 | Close wins before later calls | Same file: admitted close | Later submit, abort, inspect and close are unavailable throughout close; the same instance cannot reopen. |
