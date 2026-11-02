@@ -23,6 +23,10 @@ the enabled Linux backend, the current owner/generation, an implementing mission
 an unblocked execution ledger, a ready owned workspace and the existing Linux
 authorization checks. Merely calling this API cannot enable the backend.
 
+A new effect is rejected unless the Host runtime is FakeRuntime; lifting that
+gate is S3 Track B product Pi dispatch wiring under
+[#97](https://github.com/kortiene/switchyard/issues/97).
+
 Only the exact bundled `file.write` payload is accepted: a workspace-relative
 path, string content, `workspace-write` capability and `attempt-bound` deadline
 policy. Unknown fields, other methods/policies, forged operation IDs/hashes,

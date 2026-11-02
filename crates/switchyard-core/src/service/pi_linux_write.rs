@@ -73,6 +73,9 @@ impl Host {
                     },
                 );
             }
+            // Reject a new effect off FakeRuntime: this API is the harness,
+            // not product Pi dispatch. S3 Track B under #97 lifts the gate
+            // (docs/rust-first/s3-pi-linux-write.md).
             if self.linux.is_none() || self.runtime.fake_mut().is_none() {
                 return Ok(PiEffectOutcome::Rejected);
             }
