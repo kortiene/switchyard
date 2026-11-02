@@ -38,10 +38,15 @@ Only expiration of that call's own deadline becomes `cancellation_timeout`.
 The classification follows the fired deadline when no storage error was
 observed, so a wrapped abort reason is still a timeout and a SQLite failure
 is not.
-The launcher also observes the public `Harness.closed` failure result and
-terminates the transport, including when storage fails in the scheduler with
-no outstanding host request. Failures retain the bounded diagnostic and cannot
-emit a success acknowledgement for an uncommitted operation.
+The adapter observes `HarnessOptions.onReport` with `kind: "storage_failed"`
+and immediately fences the runtime and signals fatal transport termination.
+`Harness.closed` remains a fallback for failed closure or rejection. Waiting
+only for `closed` is insufficient: Pi joins running tool invocations before
+resolving it, so a tool that ignores cancellation can block it forever. The
+first failure retains its original cause, and ordinary task/extension reports
+do not trigger this path. Fatal exit does not wait for another host request.
+Failures retain the bounded diagnostic and cannot emit a success acknowledgement
+for an uncommitted operation.
 
 ## Fault model and evidence
 
@@ -54,6 +59,14 @@ the public database `close` method and throws after it succeeds, modeling a lost
 close acknowledgement. It is an injected failure, not an actual filesystem
 close error. Neither fixture is selectable through protocol/model input.
 
+The `storage-background-hang` fixture waits for a test-owned file gate after
+entering its tool. The test releases it only after all host requests have
+replied. The tool enables `query_only`, attempts a write through the public
+`api.commit`/application-document API, then ignores the failure and cancellation.
+The regression failed on `c6c8860`: the peer stayed alive until the test killed
+it. With immediate failure reporting it exits within the three-second test
+bound, before the ten-second request watchdog could substitute for the fix.
+
 | Boundary | Test evidence | Required result |
 | --- | --- | --- |
 | Before submission admission commit | `transport.test.ts`: `storage-submit`; `pi_host_tests/storage.rs`: admission failure | No success reply or durable submission/receipt. Rust retains the pending original request; authorized replay admits it once. |
@@ -62,6 +75,7 @@ close error. Neither fixture is selectable through protocol/model input.
 | Before bridge abort settlement commit | `storage-abort-settlement`, Node and Host tests | Runtime work can be aborted while the bridge stop remains incomplete. Rust must not acknowledge it until explicit recovery settles it. |
 | After Pi settles, Rust acknowledgement write fails | `rust_ack_write_failure_recovers_a_settled_pi_abort_without_repeating_it` | A real Rust SQLite trigger aborts the acknowledgement transaction. Recovery acknowledges the original Pi receipt; an armed settlement-crash fixture verifies cancellation is not reapplied. |
 | Background scheduler storage failure | `a background SQLite failure terminates the peer without another host request` | Peer exits without another request or request timer. Admission already committed remains inspectable, whether its reply arrived or was lost. |
+| Background storage failure with an uncooperative tool | `background storage failure kills an uncooperative tool before session close can finish` | Nonzero peer exit with the SQLite diagnostic, without another host frame or outstanding request. Two later generations preserve the original receipt and abort the work without rerunning the tool; the fault fixture stays armed. |
 | Close's database acknowledgement fails | `storage-close` | No close success reply; nonzero peer exit and retained session. Two later generations reopen and close it successfully. |
 | Close races with abort before settlement or before reply | `cancellation.test.ts`: both close/abort barriers | Close returns busy; the original abort can finish. |
 | Call arrives while a close check will return busy, or that check throws | Same file: pending-close and close-check throw tests | The concurrent call is `busy` and retryable. The throw resets in-process Runtime state so a direct caller can still inspect and close. A non-protocol throw over the bridge, including a real `snapshot`/`inspect` failure or a throw from `harness.close`, is still fatal: the peer exits and the Host reopens. |
@@ -96,7 +110,7 @@ cargo test --workspace --features pi-contract --locked
 
 Local validation passed formatting, standard Clippy and 157 core + 9 CLI tests;
 feature-enabled Clippy and 193 core + 12 bridge + 9 CLI tests; TypeScript
-typechecking and all 37 Node tests. No test was ignored or skipped.
+typechecking and all 38 Node tests. No test was ignored or skipped.
 
 The existing `pi-bridge-probe` and `pi-source-candidate` workflows include these
 new tests automatically. They remain partial evidence, not `pi-bridge-contract`.

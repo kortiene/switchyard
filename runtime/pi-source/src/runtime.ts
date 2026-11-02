@@ -161,15 +161,22 @@ export class Runtime {
     this.barriers.databaseOpened?.(database);
     const registry = createRegistry();
     registry.install(defineExtension({ name: 'switchyard-forwarders', tools: this.tools }));
-    const harness = await Harness.open(await SqliteStorage.open(database), { models: this.models, registry }, BACKGROUND_CONTEXT);
-    this.harness = harness;
-    void harness.closed.then(end => {
-      if (end.kind === 'failed') { this.sessionFailed = true; this.closing = true; this.failSession(end.error); }
-    }, error => {
+    const fail = (error: unknown) => {
+      if (this.sessionFailed) return;
       this.sessionFailed = true;
       this.closing = true;
       this.failSession(error);
-    });
+    };
+    const harness = await Harness.open(await SqliteStorage.open(database), {
+      models: this.models, registry,
+      // `closed` waits for task invocations to join. An uncooperative tool can
+      // prevent that forever, so surface the fatal report as soon as it occurs.
+      onReport: report => { if (report.kind === 'storage_failed') fail(report.error); },
+    }, BACKGROUND_CONTEXT);
+    this.harness = harness;
+    void harness.closed.then(end => {
+      if (end.kind === 'failed') fail(end.error);
+    }, fail);
     await harness.commit(async tx => {
       const state = await tx.doc(Session);
       if (requireExisting && !state.sessionId) throw new ProtocolError('session_missing');

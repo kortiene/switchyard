@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -385,5 +385,72 @@ test('a background SQLite failure terminates the peer without another host reque
       assert.equal(resumed.effects.length, 0);
       assert.equal((await resumed.request('runtime.abort', {}, { commandId: 'stop' })).error, undefined);
     } finally { await resumed.close(); }
+  } finally { await p.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('background storage failure kills an uncooperative tool before session close can finish', { timeout: 15_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'switchyard-background-hang-'));
+  const p = await peer('storage-background-hang', { directory, cleanup: false });
+  try {
+    assert.equal((await p.request('runtime.hello', hello)).error, undefined);
+    assert.equal((await p.request('runtime.open', {})).error, undefined);
+    const submitted = await p.request('runtime.submit', { type: 'input', content: 'wait' }, { commandId: 'work' });
+    assert.equal(submitted.error, undefined);
+    const receipt = (submitted.result as { receiptId: string; payloadHash: string });
+    const enteredBy = Date.now() + 3_000;
+    while (!p.diagnostics().includes('waiting tool entered') && Date.now() < enteredBy) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.match(p.diagnostics(), /waiting tool entered/);
+    // All requests have replied. Inject the background write refusal without
+    // sending another frame, and require exit before the 10 s request deadline.
+    await writeFile(join(directory, 'pi.sqlite.fail'), 'release');
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      assert.equal(await Promise.race([p.exited, new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('storage failure waited for the uncooperative tool to close')), 3_000);
+      })]), 1);
+    } finally { clearTimeout(timeout); }
+    assert.match(p.diagnostics(), /pi-bridge: .*attempt to write a readonly database/);
+
+    // Keep the hanging fixture and fault gate armed on both later generations.
+    // Replaying its tool would fail storage again and terminate the new peer.
+    let originalStop: Json | undefined;
+    for (const generation of [2, 3]) {
+      const resumed = await peer('storage-background-hang', { directory, generation, cleanup: false });
+      try {
+        assert.equal((await resumed.request('runtime.hello', hello)).error, undefined);
+        assert.equal((await resumed.request('runtime.open', { requireExisting: true })).error, undefined);
+        const inspect = async () => {
+          const response = await resumed.request('runtime.inspect', { commandIds: ['work', 'stop'] });
+          assert.equal(response.error, undefined);
+          return response.result as { scheduling: string; runtimeIdle: boolean; stopping: boolean;
+            commands: { receipt: { receipt: string; hash: string; settled: boolean } | null; reason: string | null }[] };
+        };
+        const before = await inspect();
+        assert.equal(before.scheduling, 'paused');
+        assert.equal(before.commands[0].receipt?.receipt, receipt.receiptId);
+        assert.equal(before.commands[0].receipt?.hash, receipt.payloadHash);
+        assert.equal(before.commands[0].receipt?.settled, true);
+        if (generation === 2) assert.equal(before.commands[1].receipt, null);
+        else assert.deepEqual(before.commands[1].receipt, originalStop);
+        assert.deepEqual((await resumed.request('runtime.abort', {}, { commandId: 'stop' })).result,
+          { commandId: 'stop', accepted: true, runtimeSettled: true });
+        const idleBy = Date.now() + 3_000;
+        let after = await inspect();
+        while ((!after.runtimeIdle || after.stopping) && Date.now() < idleBy) {
+          await new Promise(resolve => setTimeout(resolve, 5)); after = await inspect();
+        }
+        assert.equal(after.runtimeIdle, true);
+        assert.equal(after.stopping, false);
+        assert.equal(after.commands[0].reason, 'aborted');
+        assert.deepEqual(after.commands[0].receipt, before.commands[0].receipt);
+        assert.equal(after.commands[1].receipt?.settled, true);
+        originalStop = after.commands[1].receipt;
+        assert.doesNotMatch(resumed.diagnostics(), /waiting tool entered/);
+        assert.equal(resumed.effects.length, 0);
+        assert.deepEqual((await resumed.request('runtime.close', {}, { commandId: 'close' })).result, { closed: true });
+      } finally { await resumed.close(); }
+    }
   } finally { await p.close(); await rm(directory, { recursive: true, force: true }); }
 });
