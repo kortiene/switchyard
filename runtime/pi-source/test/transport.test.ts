@@ -251,6 +251,64 @@ test('crash-after-admission kills a fresh submit and leaves an idempotent replay
   }
 });
 
+test('watch resync reconstructs answered and aborted state after missed observations and restart', { timeout: 20_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'switchyard-resync-'));
+  let original: Json;
+  const first = await peer('cooperative-wait', { directory, cleanup: false });
+  try {
+    await first.request('runtime.hello', hello);
+    await first.request('runtime.open', {});
+    const ack = await first.request('runtime.submit', { type: 'input', content: 'wait' }, { commandId: 'aborted' });
+    assert.equal(ack.error, undefined);
+    original = ack.result!;
+    const until = Date.now() + 5_000;
+    while (!first.diagnostics().includes('waiting tool entered') && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 5));
+    assert(first.diagnostics().includes('waiting tool entered'));
+    assert.equal((await first.request('runtime.abort', {}, { commandId: 'stop' })).error, undefined);
+  } finally { await first.close(); }
+  const second = await peer('recover', { directory, generation: 2, cleanup: false });
+  try {
+    await second.request('runtime.hello', hello);
+    await second.request('runtime.open', { requireExisting: true });
+    const resync = (await second.request('runtime.watch', { commandIds: ['aborted'] })).result as {
+      resyncRequired: boolean; snapshot: { scheduling: string; runtimeIdle: boolean; commands: { receipt: { receipt: string }; status: string; reason: string }[] };
+    };
+    assert.equal(resync.resyncRequired, true);
+    assert.equal(resync.snapshot.scheduling, 'paused');
+    assert.equal(resync.snapshot.runtimeIdle, true);
+    assert.equal(resync.snapshot.commands[0].status, 'unanswered');
+    assert.equal(resync.snapshot.commands[0].reason, 'aborted');
+    assert.equal(resync.snapshot.commands[0].receipt.receipt, (original! as { receiptId: string }).receiptId);
+    assert.equal((await second.request('runtime.submit', { type: 'input', content: 'answer' }, { commandId: 'answered' })).error, undefined);
+    const until = Date.now() + 5_000;
+    let done = false;
+    while (Date.now() < until) {
+      const frame = await second.request('runtime.inspect', { commandIds: ['answered'] });
+      const snapshot = frame.result as { runtimeIdle: boolean; commands: { status: string }[] };
+      if (snapshot.runtimeIdle && snapshot.commands[0].status === 'done') { done = true; break; }
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert(done);
+    // The reconnecting observer received none of the preceding responses.
+  } finally { await second.close(); }
+  const third = await peer('recover', { directory, generation: 3, cleanup: false });
+  try {
+    await third.request('runtime.hello', hello);
+    await third.request('runtime.open', { requireExisting: true });
+    const resync = (await third.request('runtime.watch', { commandIds: ['answered', 'aborted', 'stop'] })).result as {
+      resyncRequired: boolean; snapshot: { runtimeIdle: boolean; stopping: boolean; commands: { status: string | null; reason: string | null; receipt: { settled: boolean } }[] };
+    };
+    assert.equal(resync.resyncRequired, true);
+    assert.equal(resync.snapshot.runtimeIdle, true);
+    assert.equal(resync.snapshot.stopping, false);
+    assert.deepEqual(resync.snapshot.commands.map(row => row.reason), [null, 'aborted', null]);
+    assert.deepEqual(resync.snapshot.commands.map(row => row.status), ['done', 'unanswered', null]);
+    assert.equal(resync.snapshot.commands[2].receipt.settled, true);
+    assert.deepEqual((await third.request('runtime.inspect', { commandIds: ['answered', 'aborted', 'stop'] })).result, resync.snapshot);
+    assert.equal(third.effects.length, 0, 'resync must be inert');
+  } finally { await third.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 for (const [name, input] of [
   ['malformed', '{not json}\n'],
   ['oversized', 'x'.repeat(MAX_FRAME)],

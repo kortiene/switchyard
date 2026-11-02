@@ -1,0 +1,83 @@
+{
+  "values": [
+    {
+      "value": null,
+      "canonical": "null",
+      "hash": "sha256:74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+    },
+    {
+      "value": {
+        "": 1,
+        "𐀀": 2,
+        "text": "é\n\"\\"
+      },
+      "canonical": "{\"text\":\"é\\n\\\"\\\\\",\"𐀀\":2,\"\":1}",
+      "hash": "sha256:867e4579a6e9a326d2e0bcfd6b1d301c021b132d911e3f08e9820067d7fd92ed"
+    },
+    {
+      "value": [
+        -9007199254740991,
+        9007199254740991
+      ],
+      "canonical": "[-9007199254740991,9007199254740991]",
+      "hash": "sha256:cbad3dd0e71e92fb3519919946bde0ab3086ddacce65983bddec595cb27c19da"
+    },
+    {
+      "value": {
+        "b": false,
+        "a": [
+          0,
+          true,
+          null,
+          {
+            "x": "🚂:a|b"
+          }
+        ]
+      },
+      "canonical": "{\"a\":[0,true,null,{\"x\":\"🚂:a|b\"}],\"b\":false}",
+      "hash": "sha256:b985ff1ce075e09ab2759759ce9b1b9401096e01240d736af6d2a9444490461b"
+    }
+  ],
+  "operations": [
+    {
+      "binding": {
+        "missionId": "m",
+        "attemptId": "a",
+        "sessionId": "s"
+      },
+      "task": "t",
+      "key": "write-file:v1",
+      "id": "op-v1:a165c6a35d056f4883f9d6e04f75ecbf9683e39550da3941f53a848bb30a90ae"
+    },
+    {
+      "binding": {
+        "missionId": "mission|é",
+        "attemptId": "a:☃",
+        "sessionId": "s|🌍"
+      },
+      "task": "task:嵌套|1",
+      "key": "write-pair:first:v1",
+      "id": "op-v1:b50da2d1f93092117be37de59f378e533bf2384bea3eeb809cd928d3d40300a3"
+    },
+    {
+      "binding": {
+        "missionId": "m",
+        "attemptId": "a|b",
+        "sessionId": "c"
+      },
+      "task": "d",
+      "key": "e",
+      "id": "op-v1:1ccb39ff4113acc0866a973dc8f4ff86d72ee51b542aee8a37eba29313474fa1"
+    },
+    {
+      "binding": {
+        "missionId": "m",
+        "attemptId": "a",
+        "sessionId": "b|c"
+      },
+      "task": "d",
+      "key": "e",
+      "id": "op-v1:0a84184b1cc260874a3f34b9be2a786941781dd31e063153cca3d0fb4cdccdeb"
+    }
+  ]
+}

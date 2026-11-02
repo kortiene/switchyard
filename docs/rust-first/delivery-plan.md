@@ -30,7 +30,7 @@ S2 is the proof-of-concept gate for pinned Pi Durable 1.4.0 behind the sandboxed
 | `adw_sdlc/` | Reference while useful. No long-term coexistence or user-compatibility promise. |
 | State v1 | Frozen (`adw/state.schema.json`, `agents/<adw-id>/state.json`): no further changes, no new consumers. Python compatibility is dropped. |
 
-S2 records GO or NO-GO in its issue and evidence ledger with exact source/package/Node identities, commands, results and unresolved constraints. The [2026-10-29 package audit](s2-feasibility.md) records NO-GO for published 1.4.0: its source/API does not match the inspected baseline. S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and that audit. The diagnostic `pi-package-audit` check and the `pi-source-candidate` rebuild are not the planned `pi-bridge-contract` check. #96 stays NO-GO until every proof row below passes. An unproven mandatory property is NO-GO, not a warning. This cleanup does not execute that gate.
+S2 records GO or NO-GO in its issue and evidence ledger with exact source/package/Node identities, commands, results and unresolved constraints. The [2026-10-29 package audit](s2-feasibility.md) records NO-GO for published 1.4.0: its source/API does not match the inspected baseline. The [S2-E contract gate](s2-contract-gate.md) now assembles source-build, Host, effect, cancellation and recovery evidence in `pi-bridge-contract`. S2 remains NO-GO pending review of that matrix against its exact CI revision. The diagnostic `pi-package-audit`, source rebuild and partial probe are not acceptance decisions. An unproven mandatory property is NO-GO, not a warning.
 
 | Required proof | NO-GO condition |
 | --- | --- |

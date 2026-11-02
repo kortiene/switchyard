@@ -43,7 +43,7 @@ fn request_for(template: &ExecutionRequest, effect: &Value) -> ExecutionRequest 
     request
 }
 
-fn replay_after_sigkill(uncertain: bool) {
+fn replay_after_sigkill(uncertain: bool, stop: Option<CommandBody>) {
     let (directory, mut host, mut template) = setup();
     let db = directory.path().join("pi.sqlite");
     let mut bridge = spawn(&db, template.binding.clone(), "tools");
@@ -104,6 +104,18 @@ fn replay_after_sigkill(uncertain: bool) {
     let mut first_request = first_request.expect("effect must apply before Pi is killed");
     let original = original.unwrap();
     assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 1);
+    let stop_command = if let Some(stop) = &stop {
+        command(&mut host, &template.binding.mission_id, stop.clone());
+        Some(
+            host.store
+                .list_commands(&template.binding.mission_id)
+                .unwrap()
+                .pop()
+                .unwrap(),
+        )
+    } else {
+        None
+    };
     drop(bridge);
     drop(host);
 
@@ -117,6 +129,74 @@ fn replay_after_sigkill(uncertain: bool) {
     template.binding.generation = host.generation();
     first_request.binding.generation = host.generation();
     let mut bridge = spawn(&db, template.binding.clone(), "recover");
+    if let Some(stop) = stop_command {
+        // Compose the existing real Host simulated journal with actual Pi
+        // cancellation. This explicit test driver is not product Pi effect wiring.
+        let stop_payload: Value = serde_json::from_str(&stop.payload_canonical).unwrap();
+        let stop_params =
+            json!({"hostCommand":{"payload":stop_payload,"payloadHash":stop.payload_hash}});
+        for round in 0..2 {
+            let before = bridge
+                .call(
+                    "runtime.inspect",
+                    None,
+                    json!({"commandIds":["tools"]}),
+                    &mut |_| panic!("inert inspection resumed an interrupted effect"),
+                )
+                .unwrap();
+            assert_eq!(before["scheduling"], "paused");
+            let stopped = bridge
+                .call(
+                    "runtime.abort",
+                    Some(&stop.request_id),
+                    stop_params.clone(),
+                    &mut |_| panic!("abort replayed an interrupted effect"),
+                )
+                .unwrap();
+            assert_eq!(
+                stopped,
+                json!({"commandId":stop.request_id, "accepted":true, "runtimeSettled":true})
+            );
+            let after = bridge
+                .call(
+                    "runtime.watch",
+                    None,
+                    json!({"commandIds":["tools", stop.request_id]}),
+                    &mut |_| panic!("snapshot resync replayed an effect"),
+                )
+                .unwrap();
+            assert_eq!(after["snapshot"]["runtimeIdle"], true);
+            assert_eq!(after["snapshot"]["commands"][0]["reason"], "aborted");
+            assert_eq!(after["snapshot"]["commands"][1]["receipt"]["settled"], true);
+            assert_eq!(
+                after["snapshot"]["commands"][1]["receipt"]["hash"],
+                payload_hash(&json!({"method":"runtime.abort","params":stop_params})).unwrap()
+            );
+            assert_eq!(
+                host.execute_fake_operation_outcome(&first_request),
+                original
+            );
+            let mut new = first_request.clone();
+            new.effect_key = "unauthorized-after-stop".into();
+            assert_eq!(
+                host.execute_fake_operation_outcome(&new),
+                PiEffectOutcome::Rejected
+            );
+            let state = host.snapshot(&template.binding.mission_id).unwrap();
+            assert_eq!(state.execution_effects.len(), 1);
+            assert_eq!(state.execution_blocked, uncertain);
+            assert_eq!(host.runtime_mut().unwrap().simulated_effect_count(), 0);
+            if round == 0 {
+                drop(bridge);
+                drop(host);
+                host = Host::open(&directory.path().join("mission.sqlite")).unwrap();
+                template.binding.generation = host.generation();
+                first_request.binding.generation = host.generation();
+                bridge = spawn(&db, template.binding.clone(), "recover");
+            }
+        }
+        return;
+    }
     let mut replayed = 0;
     let mut refused_new = 0;
     let mut effect = |value: &Value| {
@@ -231,10 +311,23 @@ fn written_path(effect: &Value) -> String {
 
 #[test]
 fn multi_effect_and_nested_replay_reuse_host_receipts_after_sigkill() {
-    replay_after_sigkill(false);
+    replay_after_sigkill(false, None);
 }
 
 #[test]
 fn uncertain_effect_replay_after_sigkill_never_reapplies_or_unblocks() {
-    replay_after_sigkill(true);
+    replay_after_sigkill(true, None);
+}
+
+#[test]
+fn runtime_abort_preserves_completed_and_uncertain_host_effects_across_restarts() {
+    // An uncertain effect already puts the mission in needs_attention, where
+    // Cancel is allowed but Pause is not. Keep the real policy in this matrix.
+    for (uncertain, stop) in [
+        (false, CommandBody::Pause),
+        (false, CommandBody::Cancel),
+        (true, CommandBody::Cancel),
+    ] {
+        replay_after_sigkill(uncertain, Some(stop));
+    }
 }

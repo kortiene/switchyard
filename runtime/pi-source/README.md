@@ -97,3 +97,11 @@ The [S2-D storage/close probe](../../docs/rust-first/s2-storage-recovery.md) add
 SQLite write refusals, failed Rust acknowledgements and close/reopen races.
 It fences close against unfinished calls and stops, and terminates the peer
 on background storage failure. S2 remains NO-GO.
+
+The [S2-E contract gate](../../docs/rust-first/s2-contract-gate.md) adds shared
+cross-language vectors, registry/refusal and snapshot-resync checks, composed
+stop/replay evidence, and the always-running `pi-bridge-contract` workflow.
+After building/installing the pinned artifacts, run `node contract.mjs` here
+or `node runtime/pi-source/contract.mjs` from the repository root. The runner
+refuses missing, skipped or filtered mandatory evidence and saves exact revision
+metadata and logs. S2 GO still requires review; FakeRuntime remains the default.
