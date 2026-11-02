@@ -95,9 +95,12 @@ networking and contains no credential broker. The native Rust agent runtime
 remains the long-term target; confinement belongs to Rust regardless of adapter.
 
 The harness bind-mounts its fresh session directory read-write, so the bridge
-can plant symlinks in `state/`. That is acceptable for this test-only harness.
-The product launch API must open bridge-writable paths with `O_NOFOLLOW` /
-`openat2` `RESOLVE_BENEATH`, or only through the owner-locked database.
+can plant symlinks in `state/`. Final-component `O_NOFOLLOW` is sufficient in
+this test-only harness because only the leaf name is bridge-controlled. The
+product launch API must open bridge-writable paths with `openat2` and
+`RESOLVE_BENEATH` (plus `RESOLVE_NO_SYMLINKS` where links are not expected), or
+`O_NOFOLLOW` on every component via `openat` walked from a trusted directory
+file descriptor, or only through the owner-locked database.
 
 Policy references: [kernel seccomp semantics](https://docs.kernel.org/userspace-api/seccomp_filter.html)
 and [Bubblewrap's security model](https://github.com/containers/bubblewrap/blob/v0.9.0/README.md).
