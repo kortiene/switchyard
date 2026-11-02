@@ -1,5 +1,16 @@
 use super::*;
 
+fn assert_peer_reaped(pid: u32) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while process_alive(pid) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "failed peer {pid} must be reaped"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn sqlite_admission_failure_preserves_the_outbox_until_original_command_recovers() {
     let w = world();
@@ -71,7 +82,9 @@ fn sqlite_abort_failures_preserve_pending_stops_and_recover_without_claiming_qui
                 "{fixture}: {error}"
             );
             assert!(!message.contains("cancellation_timeout"), "{error}");
-            assert!(!process_alive(pid), "failed peer must be reaped");
+            // Reaping is normally finished inside the dispatch error, but a
+            // late wait must not flake. The peer still has to be gone.
+            assert_peer_reaped(pid);
             assert!(pi(&mut h).database(&req.binding).is_file());
             let pending = h.snapshot(&mission.mission_id).unwrap();
             assert_eq!(pending.phase, stop.phase);

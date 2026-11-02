@@ -67,7 +67,7 @@ const runtime = new Runtime(database, binding, models, tools, {
     sqlite.close = async () => { await close(); throw new Error('fixture: SQLite close acknowledgement lost'); };
   } : undefined,
 });
-void runtime.failed.then(error => transport.fail(error));
+void runtime.failed.then(error => transport.failFatal(error));
 let busyContinue = mode === 'busy-once';
 let stoppingOnce = mode === 'stopping-once';
 transport.start(frame => {

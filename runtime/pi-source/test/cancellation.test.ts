@@ -155,6 +155,81 @@ test('an admitted close fences later submit, abort and inspection through comple
   } finally { release.release(); await closing; await rm(p.directory, { recursive: true, force: true }); }
 });
 
+test('a concurrent call during a close that returns busy stays retryable', { timeout: 10_000 }, async () => {
+  const recorded = barrier();
+  const releaseAbort = barrier();
+  const checking = barrier();
+  const releaseCheck = barrier();
+  const p = await fixture({
+    afterAbortRecorded: async () => { recorded.release(); await releaseAbort.promise; },
+    beforeCloseCheck: async () => { checking.release(); await releaseCheck.promise; },
+  });
+  const stopping = p.call('runtime.abort', 'stop');
+  try {
+    await recorded.promise;
+    const closing = p.call('runtime.close', 'close');
+    await checking.promise;
+    for (const method of ['runtime.submit', 'runtime.abort', 'runtime.inspect', 'runtime.close']) {
+      await assert.rejects(p.call(method, 'late', { type: 'input', content: 'late' }),
+        { category: 'busy', admission: 'retry' });
+    }
+    releaseCheck.release();
+    await assert.rejects(closing, { category: 'busy', admission: 'retry' });
+    const during = await p.call('runtime.inspect') as { stopping: boolean };
+    assert.equal(during.stopping, true);
+    releaseAbort.release();
+    await stopping;
+  } finally { releaseCheck.release(); releaseAbort.release(); await stopping.catch(() => undefined); await p.close(); }
+});
+
+test('a throw during the close check does not wedge the session', { timeout: 10_000 }, async () => {
+  let checks = 0;
+  const p = await fixture({ beforeCloseCheck: () => {
+    checks += 1;
+    // Same try as snapshot/inspect. A storage throw fails the session; this one must not.
+    if (checks === 1) throw new Error('snapshot failed');
+  } });
+  try {
+    await assert.rejects(p.call('runtime.close', 'close'), /snapshot failed/);
+    const snapshot = await p.call('runtime.inspect') as { scheduling: string; stopping: boolean };
+    assert.equal(snapshot.scheduling, 'paused');
+    assert.equal(snapshot.stopping, false);
+    assert.deepEqual(await p.call('runtime.close', 'close'), { closed: true });
+  } finally { await rm(p.directory, { recursive: true, force: true }); }
+});
+
+test('an uncooperative abort times out as cancellation_timeout', { timeout: 15_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'switchyard-ignore-abort-'));
+  const binding = { missionId: 'm', attemptId: 'a', sessionId: 's', generation: 1 };
+  const entered = barrier();
+  const faux = fauxProvider();
+  faux.setResponses([fauxAssistantMessage([fauxToolCall('uncooperative', {})], { stopReason: 'toolUse' })]);
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const tools = [defineTool({ name: 'uncooperative', description: 'Ignores cancellation.', replay: 'safe',
+    parameters: Type.Object({}), execute: async () => {
+      entered.release();
+      await new Promise<void>(() => {});
+      return { output: [] };
+    } })];
+  const runtime = new Runtime(join(directory, 'pi.sqlite'), binding, models, tools);
+  let sequence = 0;
+  const call = (method: string, commandId?: string, params: Record<string, Json> = {}) => runtime.dispatch({
+    protocol: 0, kind: 'request', id: `host:${++sequence}`, binding, method, commandId, params,
+  });
+  // AbortSignal.timeout does not keep the event loop alive. The supervised
+  // child stays alive on stdin; this isolated test holds a timer instead.
+  const keepAlive = setInterval(() => {}, 1_000);
+  try {
+    await call('runtime.hello', undefined, { source: SOURCE, adapter: ADAPTER, maxFrame: MAX_FRAME,
+      maxPending: MAX_PENDING, capabilities: CAPABILITIES });
+    await call('runtime.open');
+    await call('runtime.submit', 'work', { type: 'input', content: 'wait' });
+    await entered.promise;
+    await assert.rejects(call('runtime.abort', 'stop'), { category: 'cancellation_timeout', admission: 'uncertain' });
+  } finally { clearInterval(keepAlive); await rm(directory, { recursive: true, force: true }); }
+});
+
 test('a storage failure inside Pi cancellation retains the SQLite cause', { timeout: 10_000 }, async () => {
   let database: SqliteDatabase;
   const p = await fixture({ databaseOpened: db => { database = db; },

@@ -2,7 +2,7 @@
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import { type Models } from '@earendil-works/pi-ai/models';
 import { ConversationBusy, ConversationIdle, createRegistry, defineDoc, defineDocFamily, defineExtension,
-  Harness, type Conversation, type SubmissionDraft, type ToolRegistration } from '@earendil-works/pi-durable';
+  Harness, SessionFailed, StorageRequestError, type Conversation, type SubmissionDraft, type ToolRegistration } from '@earendil-works/pi-durable';
 import { SqliteStorage, type SqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite';
 import { openNodeSqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { ADAPTER, canonical, CAPABILITIES, DEADLINE_MS, hash, MAX_FRAME, MAX_PENDING, PROTOCOL, ProtocolError, SOURCE,
@@ -23,6 +23,7 @@ export type RuntimeBarriers = {
   afterAbortRecorded?: (fresh: boolean) => void | Promise<void>;
   beforeAbortSettled?: () => void | Promise<void>;
   afterAbortSettled?: () => void | Promise<void>;
+  beforeCloseCheck?: () => void | Promise<void>;
   beforeClose?: () => void | Promise<void>;
 };
 
@@ -35,7 +36,9 @@ export class Runtime {
   private root?: Conversation;
   private negotiated = false;
   private opening = false;
+  private closePending = false;
   private closing = false;
+  private sessionFailed = false;
   private activeCalls = 0;
   private failSession!: (error: unknown) => void;
   // Storage can fail in the scheduler without an outstanding host request.
@@ -68,6 +71,8 @@ export class Runtime {
       return this.open(params.requireExisting === true);
     }
     if (!this.root || !this.harness || this.closing) throw new ProtocolError('session_unavailable');
+    // A close that is still checking storage is retryable. Only an admitted close is terminal.
+    if (this.closePending) throw new ProtocolError('busy', 'retry');
     if (frame.method === 'runtime.close') {
       this.validateCommand(frame);
       if (Object.keys(params).length) throw new ProtocolError('invalid_params');
@@ -87,22 +92,32 @@ export class Runtime {
   }
 
   private async close(): Promise<Json> {
+    // Checks stay retryable. `closing` starts only after they pass, and a throw
+    // from this block — snapshot, inspect, or the check barrier — cannot leave it set.
+    this.closePending = true;
+    try {
+      if (this.barriers.beforeCloseCheck) await this.barriers.beforeCloseCheck();
+      if (this.activeCalls > 0) throw new ProtocolError('busy', 'retry');
+      const state = await this.harness!.snapshot(Session, BACKGROUND_CONTEXT);
+      const inspection = await this.harness!.inspect(BACKGROUND_CONTEXT);
+      // A restart has no in-memory calls but may retain an unfinished stop.
+      if (this.activeCalls > 0 || state?.stopCommand || inspection.tasks.length > 0 || inspection.submissions.length > 0) {
+        throw new ProtocolError('busy', 'retry');
+      }
+    } finally {
+      this.closePending = false;
+    }
     this.closing = true;
-    if (this.activeCalls > 0) {
-      this.closing = false;
-      throw new ProtocolError('busy', 'retry');
+    try {
+      await this.barriers.beforeClose?.();
+      await this.harness!.close(withAbortSignal(AbortSignal.timeout(DEADLINE_MS), BACKGROUND_CONTEXT));
+      // Closing is terminal for this connection, not evidence of OS quiescence.
+      return { closed: true };
+    } catch (error) {
+      // A storage failure may already have marked the session terminal.
+      if (!this.sessionFailed) this.closing = false;
+      throw error;
     }
-    const state = await this.harness!.snapshot(Session, BACKGROUND_CONTEXT);
-    const inspection = await this.harness!.inspect(BACKGROUND_CONTEXT);
-    // A restart has no in-memory calls but may retain an unfinished stop.
-    if (state?.stopCommand || inspection.tasks.length > 0 || inspection.submissions.length > 0) {
-      this.closing = false;
-      throw new ProtocolError('busy', 'retry');
-    }
-    await this.barriers.beforeClose?.();
-    await this.harness!.close(withAbortSignal(AbortSignal.timeout(DEADLINE_MS), BACKGROUND_CONTEXT));
-    // Closing is terminal for this connection, not evidence of OS quiescence.
-    return { closed: true };
   }
 
   private async dispatchOpen(frame: Frame, params: Record<string, Json>): Promise<Json> {
@@ -149,7 +164,11 @@ export class Runtime {
     const harness = await Harness.open(await SqliteStorage.open(database), { models: this.models, registry }, BACKGROUND_CONTEXT);
     this.harness = harness;
     void harness.closed.then(end => {
-      if (end.kind === 'failed') { this.closing = true; this.failSession(end.error); }
+      if (end.kind === 'failed') { this.sessionFailed = true; this.closing = true; this.failSession(end.error); }
+    }, error => {
+      this.sessionFailed = true;
+      this.closing = true;
+      this.failSession(error);
     });
     await harness.commit(async tx => {
       const state = await tx.doc(Session);
@@ -234,8 +253,11 @@ export class Runtime {
       try {
         await this.root!.abort(withAbortSignal(deadline, BACKGROUND_CONTEXT), { background: true });
       } catch (error) {
-        if (deadline.aborted && error === deadline.reason) throw new ProtocolError('cancellation_timeout', 'uncertain');
-        throw error; // Storage failure is fatal, not cooperative cancellation timeout.
+        // Pi does not promise the rejection is `deadline.reason` itself. A fired
+        // deadline with no storage error is an uncooperative timeout. A SQLite
+        // or session failure stays fatal even if that deadline also elapsed.
+        if (deadline.aborted && !observedStorageError(error)) throw new ProtocolError('cancellation_timeout', 'uncertain');
+        throw error;
       }
       await this.barriers.beforeAbortSettled?.();
       await harness.commit(async tx => {
@@ -268,4 +290,17 @@ export class Runtime {
       runtimeIdle: inspection.tasks.length === 0, liveTaskCount: inspection.tasks.length,
       unsettledSubmissionCount: inspection.submissions.length };
   }
+}
+
+function observedStorageError(error: unknown, seen = new Set<unknown>()): boolean {
+  if (error === null || typeof error !== 'object' || seen.has(error)) return false;
+  seen.add(error);
+  if (error instanceof SessionFailed || error instanceof StorageRequestError) return true;
+  if (error instanceof AggregateError && error.errors.some(item => observedStorageError(item, seen))) return true;
+  if (error instanceof Error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string' && code.startsWith('ERR_SQLITE')) return true;
+    return observedStorageError(error.cause, seen);
+  }
+  return false;
 }

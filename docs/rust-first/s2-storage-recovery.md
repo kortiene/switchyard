@@ -18,15 +18,21 @@ The adapter now counts admitted session calls, including readers. Close returns
 `busy` with retry disposition while any such call is unfinished. It also checks
 persisted stop intent, live tasks and unsettled submissions, so a freshly
 reopened session cannot close over an incomplete stop merely because its
-in-memory call count is zero. Once close is admitted it fences later calls.
-A busy close leaves the session usable. A successful close is terminal for that
-connection; reopening requires a new supervised process and generation.
+in-memory call count is zero. Calls that arrive while those checks are still
+running get `busy`, not `session_unavailable`. A throw from the check, including
+`snapshot` or `inspect`, clears that fence so the connection is not left
+unavailable. Once close is admitted it fences later calls. A busy close leaves
+the session usable. A successful close is terminal for that connection;
+reopening requires a new supervised process and generation.
 Close remains connection-local, with no durable business-command receipt. A
 lost close reply requires killing/reaping the peer and reopening the retained
 session, rather than assuming completion or deleting its files.
 
 Storage exceptions during `Conversation.abort` now keep their original cause.
 Only expiration of that call's own deadline becomes `cancellation_timeout`.
+The classification follows the fired deadline when no storage error was
+observed, so a wrapped abort reason is still a timeout and a SQLite failure
+is not.
 The launcher also observes the public `Harness.closed` failure result and
 terminates the transport, including when storage fails in the scheduler with
 no outstanding host request. Failures retain the bounded diagnostic and cannot
@@ -53,6 +59,8 @@ close error. Neither fixture is selectable through protocol/model input.
 | Background scheduler storage failure | `a background SQLite failure terminates the peer without another host request` | Peer exits without another request or request timer. Admission already committed remains inspectable, whether its reply arrived or was lost. |
 | Close's database acknowledgement fails | `storage-close` | No close success reply; nonzero peer exit and retained session. Two later generations reopen and close it successfully. |
 | Close races with abort before settlement or before reply | `cancellation.test.ts`: both close/abort barriers | Close returns busy; the original abort can finish. |
+| Call arrives while a close check will return busy, or that check throws | Same file: pending-close and close-check throw tests | The call is `busy` and retryable. A throw from the check leaves the session open for inspection and a later close. |
+| Tool ignores its abort context | Same file: uncooperative abort | The deadline reports `cancellation_timeout` without requiring the thrown reason to be the deadline's reason object. |
 | Close races with submission before transaction entry | Same file: admitted submit | Close returns busy; submission commits its original receipt and can be cancelled. |
 | Close wins before later calls | Same file: admitted close | Later submit, abort, inspect and close are unavailable throughout close; the same instance cannot reopen. |
 | Restart with incomplete stop | Transport storage matrix | Close is busy even without a live request. New input stays rejected; changed stop payload conflicts. |
@@ -83,7 +91,7 @@ cargo test --workspace --features pi-contract --locked
 
 Local validation passed formatting, standard Clippy and 157 core + 9 CLI tests;
 feature-enabled Clippy and 193 core + 12 bridge + 9 CLI tests; TypeScript
-typechecking and all 34 Node tests. No test was ignored or skipped.
+typechecking and all 37 Node tests. No test was ignored or skipped.
 
 The existing `pi-bridge-probe` and `pi-source-candidate` workflows include these
 new tests automatically. They remain partial evidence, not `pi-bridge-contract`.
