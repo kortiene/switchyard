@@ -136,6 +136,7 @@ impl PiBridge {
             fixture,
             "answer"
                 | "tools"
+                | "gated-tools"
                 | "recover"
                 | "crash-before-admission"
                 | "crash-after-admission"

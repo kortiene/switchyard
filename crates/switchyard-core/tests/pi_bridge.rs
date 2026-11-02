@@ -485,3 +485,34 @@ fn malformed_peer_output_and_forged_authority_are_rejected_by_rust() {
         );
     }
 }
+
+#[test]
+fn shared_contract_vectors_match_typescript_canonical_and_operation_hashes() {
+    let vectors: Value = serde_json::from_str(include_str!(
+        "../../../runtime/pi-source/contract-vectors.json"
+    ))
+    .unwrap();
+    for vector in vectors["values"].as_array().unwrap() {
+        assert_eq!(
+            switchyard_core::canonicalize(&vector["value"]).unwrap(),
+            vector["canonical"]
+        );
+        assert_eq!(
+            switchyard_core::payload_hash(&vector["value"]).unwrap(),
+            vector["hash"]
+        );
+    }
+    for vector in vectors["operations"].as_array().unwrap() {
+        let binding = &vector["binding"];
+        assert_eq!(
+            switchyard_core::operation_id(
+                binding["attemptId"].as_str().unwrap(),
+                binding["sessionId"].as_str().unwrap(),
+                vector["task"].as_str().unwrap(),
+                vector["key"].as_str().unwrap(),
+            )
+            .unwrap(),
+            vector["id"]
+        );
+    }
+}
