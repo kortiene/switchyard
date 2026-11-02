@@ -3,14 +3,15 @@ on:
   pull_request:
   push:
     branches: [main]
+  merge_group:
 permissions:
   contents: read
 concurrency:
   group: execution-confinement-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  # Partial S3-A3 evidence, not full S3 or S2 GO. An administrator must add
-  # this exact check name to branch protection; YAML alone cannot do that.
+  # Required by the execution-confinement ruleset. Track A + bounded S3-B1
+  # evidence; product Pi execution and model-only egress remain separate work.
   execution-confinement:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -19,10 +20,19 @@ jobs:
       SWITCHYARD_CONFINEMENT_EVIDENCE: ${{ github.workspace }}/confinement-evidence
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: runtime/pi-source/.node-version
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           toolchain: 1.99.1
           components: rustfmt, clippy
+      - name: Build the exact credential-free Pi source candidate
+        run: |
+          node runtime/pi-source/install-npm.mjs
+          cd runtime/pi-source
+          node build.mjs
+          npm ci
       - name: Install the reviewed backend and per-binary userns permission
         run: |
           sudo apt-get update
@@ -39,6 +49,8 @@ jobs:
           echo "SWITCHYARD_CGROUP_ROOT=$(cat confinement-evidence/cgroup-root.txt)" >> "$GITHUB_ENV"
       - name: Prove boundaries, process-tree termination, and Linux execution
         run: ./scripts/confinement-verify.sh
+      - name: Prove separate bridge confinement and recovery
+        run: ./scripts/bridge-confinement-verify.sh
       - name: Retain environment and test evidence even on failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

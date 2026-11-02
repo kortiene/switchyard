@@ -3,9 +3,23 @@
 Scope: [#96](https://github.com/kortiene/switchyard/issues/96), under
 [#94](https://github.com/kortiene/switchyard/issues/94), after merged S2-D
 [#140](https://github.com/kortiene/switchyard/pull/140) (`42a94d3`).
-**Decision: NO-GO pending review of this complete evidence matrix and its CI run.**
-This PR proposes the credential-free acceptance gate. It does not award GO,
-close #96, enable Pi in the product, or authorize live effects.
+**Decision: S2 GO for the credential-free source-built candidate, accepted
+2026-11-02 in [#96](https://github.com/kortiene/switchyard/issues/96).**
+The reviewed revision is merged #141, `c19a5ead22a5972b34adebe64294b725905948b0`,
+tree `73611a251e54eee796a85b95a53fb2460e74cc7b` (the final reviewed PR tree).
+The [main contract run](https://github.com/kortiene/switchyard/actions/runs/41429977093)
+passed 41 Node and 219 Rust tests, formatting, Clippy and TypeScript. The downloaded
+[artifact](https://github.com/kortiene/switchyard/actions/runs/41429977093/artifacts/13133353221)
+has ZIP SHA-256 `c7bc1755f5088fb36e045969fb1f1973dc8399748e066cc580039b04c93c9829`;
+all five log hashes, mandatory-case results, exact revision and clean tree were
+verified. All six main workflows passed. The artifact's `NO-GO until reviewed`
+field deliberately does not award acceptance; this records the separate review.
+
+This accepts the bounded matrix below and the source-build remedy. It does not
+enable Pi in the product or authorize live effects. The published-package audit
+remains NO-GO. The ruleset audit found that `pi-bridge-contract` is not required
+on main; [#142](https://github.com/kortiene/switchyard/issues/142) tracks the
+administrator change separately from technical acceptance.
 
 ## Exact candidate
 
@@ -27,7 +41,7 @@ artifact reproducibility are not newly claimed.
 
 ## Mandatory evidence matrix
 
-Every row is proposed evidence requiring acceptance review. Exact executable
+Every row below was included in the acceptance review. Exact executable
 test names are in [`contract-cases.json`](../../runtime/pi-source/contract-cases.json).
 Rust names there are the exact `cargo test` identifiers: the full module path
 for library tests, and the function name for an integration test at the harness
