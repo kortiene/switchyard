@@ -145,6 +145,7 @@ fn bridge_boundary_denials_preserve_host_authority_and_private_sqlite_recovers()
             json!({"commandIds":["work"]}),
         );
         if snapshot["runtimeIdle"] == true {
+            assert_eq!(snapshot["commands"][0]["status"], "done");
             break;
         }
         assert!(Instant::now() < limit, "answer did not complete");
