@@ -278,10 +278,20 @@ fn confined_write_cannot_follow_a_symlink_into_host_authority() {
     let mut outcomes = Vec::new();
     run(&mut bridge, &mut |params| {
         let outcome = host.execute_pi_linux_write(&binding, params, now() + 20_000);
-        outcomes.push(outcome.clone());
+        outcomes.push((params.clone(), outcome.clone()));
         outcome
     });
-    assert_eq!(outcomes, vec![PiEffectOutcome::Uncertain]);
+    assert_eq!(outcomes.len(), 1);
+    let (params, outcome) = &outcomes[0];
+    let PiEffectOutcome::Completed(receipt) = outcome else {
+        panic!("expected a durable denied receipt: {outcome:?}");
+    };
+    // Completed means a settled outcome, not a successful mutation. The
+    // Linux helper definitively refused the non-regular path before writing.
+    assert_eq!(receipt["disposition"], "denied");
+    assert_eq!(receipt["result"]["helper"]["ok"], false);
+    assert_eq!(receipt["result"]["helper"]["reason"], "not-regular");
+    assert_eq!(receipt["result"]["quiescenceProven"], true);
     assert!(
         fs::symlink_metadata(world.workspace.join("output.txt"))
             .unwrap()
@@ -290,7 +300,22 @@ fn confined_write_cannot_follow_a_symlink_into_host_authority() {
     );
     assert_eq!(
         host.snapshot(&world.mission).unwrap().phase,
-        Phase::NeedsAttention
+        Phase::Implementing
+    );
+    assert!(!host.snapshot(&world.mission).unwrap().execution_blocked);
+    fs::remove_file(world.workspace.join("output.txt")).unwrap();
+    fs::write(
+        world.workspace.join("output.txt"),
+        "now writable; still no replay",
+    )
+    .unwrap();
+    assert_eq!(
+        host.execute_pi_linux_write(&binding, params, now() + 20_000),
+        *outcome
+    );
+    assert_eq!(
+        fs::read(world.workspace.join("output.txt")).unwrap(),
+        b"now writable; still no replay"
     );
     stop(&mut bridge, &sandbox);
     world.assert_origin();

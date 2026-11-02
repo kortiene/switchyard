@@ -48,7 +48,7 @@ returned after deadline expiry, while a new write still obeys the existing
 | --- | --- |
 | Invalid binding, unsupported payload, or semantic refusal before backend entry | `execution_rejected` |
 | Same owner/operation with different normalized content, or simulated journal collision | `operation_conflict` |
-| Completed Linux row with its matching real-backend receipt | Original receipt |
+| Completed Linux row with its matching real-backend receipt, including a definitive denied result | Original receipt with its result/disposition unchanged |
 | Durable Linux proof of non-application | `execution_rejected`; original identity is never relaunched |
 | Released/applied work without a durable result, unreadable evidence, or unknown backend error | `execution_uncertain` |
 
@@ -58,6 +58,11 @@ checks before reporting an outcome. Existing backend replay can settle a stored
 receipt after proving cgroup quiescence. An applied effect without a durable
 receipt remains uncertain and blocks new work. Operator supersession does not
 turn an unknown outcome into a completed receipt.
+
+`Completed` describes settlement, not successful mutation. In particular, the
+Linux helper can return a durable `denied` receipt for an escaping symlink.
+Consumers must inspect the receipt's disposition/result; replay retains that
+denial even if the path later becomes writable.
 
 ## Executable acceptance
 
@@ -72,7 +77,8 @@ backend pins or cgroup delegation fails; there are no optional success paths.
   operation identities and receipts. The original checkout, branch and index
   remain unchanged.
 - An actual forwarded write through an escaping symlink cannot modify protected
-  host content; its failed Linux mutation remains uncertain.
+  host content. Its durable denied receipt is retained on replay, including after
+  the symlink is replaced with a writable regular file.
 - A Rust child host is killed at four actual Linux boundaries: prepared before
   release; applied before receipt persistence; receipt persisted before completion;
   and completed before the reply reaches Pi. The bridge namespace must be empty
