@@ -92,3 +92,8 @@ Host simulated journal. It keeps the same product and S2 restrictions.
 The [S2-C cancellation probe](../../docs/rust-first/s2-cancellation.md) prevents
 concurrent duplicate aborts from cancelling later work and adds stop crash,
 timeout and bounded request-pressure evidence. The complete S2 gate stays open.
+
+The [S2-D storage/close probe](../../docs/rust-first/s2-storage-recovery.md) adds
+SQLite write refusals, failed Rust acknowledgements and close/reopen races.
+It fences close against unfinished calls and stops, and terminates the peer
+on background storage failure. S2 remains NO-GO.

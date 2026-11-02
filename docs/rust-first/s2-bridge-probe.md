@@ -64,7 +64,8 @@ register a waiting tool to test cooperative and non-cooperative cancellation.
   one in-flight cancellation, so a delayed duplicate cannot cancel newer work.
   `runtimeSettled` describes Pi only; Rust must
   separately reconcile external effects and prove execution quiescence.
-- `runtime.close` is connection-local and accepted only while Pi is idle. A lost
+- `runtime.close` is connection-local and accepted only with no admitted
+  session calls, persisted stop intent, live tasks or unsettled submissions. A lost
   close reply means the caller kills/reaps the peer and reopens with a new
   generation; it is not a durable business command or a publication result.
 - External frames never enter S1's fake verification/publication observation
@@ -82,6 +83,9 @@ register a waiting tool to test cooperative and non-cooperative cancellation.
 - [S2-C cancellation evidence](s2-cancellation.md) covers duplicate aborts,
   stop-intent/settlement crashes, cooperative and uncooperative tools,
   sustained busy retries, bounded request bursts and overflow recovery.
+- [S2-D storage/close evidence](s2-storage-recovery.md) covers failed admission,
+  abort and acknowledgement writes, fatal background storage errors, and
+  close/abort/reopen interleavings.
 
 ## Evidence
 
@@ -129,8 +133,8 @@ The `pi-bridge-probe` CI job is deliberately separate from the future full
   contract, including remaining scheduling and cancellation races;
 - composing the [S2-B durable effect evidence](s2-effect-outcomes.md) with the
   complete Host scheduling and cancellation contract;
-- additional storage-failure and close/abort/reopen races beyond the focused
-  [S2-C probes](s2-cancellation.md);
+- auditing the [S2-D storage and close/reopen matrix](s2-storage-recovery.md)
+  against the complete contract alongside the earlier probes;
 - final review of the transport refinements and a complete S2 evidence matrix.
 
 S3 must separately prove OS confinement, process-tree termination and safe

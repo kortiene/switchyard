@@ -114,8 +114,15 @@ export class Transport {
     } catch { /* best-effort; the peer still exits */ }
   }
 
-  private fail() {
+  // Fatal session termination only. Not a general error path: recoverable
+  // protocol errors are responses, and this exits the process.
+  failFatal(error: unknown) {
+    this.fail(error);
+  }
+
+  private fail(error?: unknown) {
     if (this.dead) return;
+    if (error !== undefined) this.diagnostic(error);
     this.dead = true;
     for (const wait of this.pendingEffects.values()) {
       clearTimeout(wait.timer);

@@ -86,8 +86,9 @@ is gone after; no test is skipped or weakened to accommodate the environment.
 
 - Compose Host scheduling, typed effect recovery and cancellation in the full
   S2 acceptance matrix; these tests do not enable Linux effects through Pi.
-- Review the remaining storage-failure and close/abort/reopen interleavings,
-  including behavior when storage cannot commit settlement.
+- [S2-D](s2-storage-recovery.md) adds selected storage-failure and
+  close/abort/reopen interleavings, including failed settlement commits. Audit
+  these with the other mandatory cases in the complete gate matrix.
 - Record exact reviewed revisions and the complete mandatory evidence before
   adding `pi-bridge-contract` and changing #96 to GO.
 - S3 Track B retains bridge confinement, model-only egress, real process-tree
