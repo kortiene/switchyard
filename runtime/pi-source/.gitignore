@@ -2,3 +2,4 @@
 .artifacts/
 .catalog-cache/
 node_modules/
+.contract-results/

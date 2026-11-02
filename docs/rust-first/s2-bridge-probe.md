@@ -126,6 +126,12 @@ metadata during CI.
 
 ## Remaining S2 acceptance
 
+The [S2-E contract gate](s2-contract-gate.md) now assembles the earlier slices
+with composed stop/tool recovery, snapshot resync, registry checks and shared
+identity vectors. Its always-running `pi-bridge-contract` job is proposed
+acceptance evidence; S2 remains NO-GO pending review. The list below records
+the handoff from this partial probe, now assessed in that matrix.
+
 The `pi-bridge-probe` CI job is deliberately separate from the future full
 `pi-bridge-contract` gate. Remaining work includes:
 
