@@ -9,9 +9,11 @@ description = "Test-only S3-A3 Linux confinement probe; not an ExecutionEnv back
 
 [features]
 linux-confinement = []
+bridge-confinement = ["linux-confinement", "dep:switchyard-core"]
 
 [dependencies]
 serde_json = "1"
+switchyard-core = { path = "../../crates/switchyard-core", features = ["pi-contract"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
@@ -20,6 +22,11 @@ tempfile = "3"
 name = "confinement-fixture"
 path = "src/main.rs"
 required-features = ["linux-confinement"]
+
+[[test]]
+name = "bridge_confinement"
+path = "tests/bridge_confinement.rs"
+required-features = ["bridge-confinement"]
 
 [[test]]
 name = "confinement"

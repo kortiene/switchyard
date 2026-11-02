@@ -1,10 +1,10 @@
 # Delivery plan: One Recoverable, Verified Change
 
-Status: S1 implemented (#105). S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and [s2-feasibility.md](s2-feasibility.md). S3–S8 are planned. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md). Disposition recorded 2026-10-30; see [#109](https://github.com/kortiene/switchyard/issues/109) for current disposition.
+Status: S1 implemented (#105). S2 is GO for the credential-free source-built candidate; see the [reviewed revision and evidence](s2-contract-gate.md). S3 Track A is delivered within its documented scope; Track B is in progress, and S4–S8 remain planned. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md). Disposition updated 2026-11-02; see [#109](https://github.com/kortiene/switchyard/issues/109) for current disposition.
 
 ## Implementation sequence
 
-Use focused PRs in dependency order. S1's domain with a fake runtime is complete in [#105](https://github.com/kortiene/switchyard/pull/105), closing [#95](https://github.com/kortiene/switchyard/issues/95). Next prove the Pi bridge in [#96](https://github.com/kortiene/switchyard/issues/96), then enable confined real effects. S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and [s2-feasibility.md](s2-feasibility.md).
+Use focused PRs in dependency order. S1's domain with a fake runtime is complete in [#105](https://github.com/kortiene/switchyard/pull/105), closing [#95](https://github.com/kortiene/switchyard/issues/95). Next prove separate bridge confinement and product Pi-to-Linux integration in [#97](https://github.com/kortiene/switchyard/issues/97), before live effects. S2 is GO for the credential-free source-built candidate; see the [reviewed revision and evidence](s2-contract-gate.md).
 
 | Slice | Issue | Depends on | Reviewable outcome |
 | --- | --- | --- | --- |
@@ -30,7 +30,7 @@ S2 is the proof-of-concept gate for pinned Pi Durable 1.4.0 behind the sandboxed
 | `adw_sdlc/` | Reference while useful. No long-term coexistence or user-compatibility promise. |
 | State v1 | Frozen (`adw/state.schema.json`, `agents/<adw-id>/state.json`): no further changes, no new consumers. Python compatibility is dropped. |
 
-S2 records GO or NO-GO in its issue and evidence ledger with exact source/package/Node identities, commands, results and unresolved constraints. The [2026-10-29 package audit](s2-feasibility.md) records NO-GO for published 1.4.0: its source/API does not match the inspected baseline. The [S2-E contract gate](s2-contract-gate.md) now assembles source-build, Host, effect, cancellation and recovery evidence in `pi-bridge-contract`. S2 remains NO-GO pending review of that matrix against its exact CI revision. The diagnostic `pi-package-audit`, source rebuild and partial probe are not acceptance decisions. An unproven mandatory property is NO-GO, not a warning.
+S2 records GO or NO-GO in its issue and evidence ledger with exact source/package/Node identities, commands, results and unresolved constraints. The [2026-10-29 package audit](s2-feasibility.md) records NO-GO for published 1.4.0: its source/API does not match the inspected baseline. The [S2-E contract gate](s2-contract-gate.md) now assembles source-build, Host, effect, cancellation and recovery evidence in `pi-bridge-contract`. The matrix was accepted on 2026-11-02 for merged #141 at `c19a5ea`; the exact pins, CI run and bounded GO are recorded there. Required-check enforcement is the separate administrator task [#142](https://github.com/kortiene/switchyard/issues/142). The diagnostic `pi-package-audit`, source rebuild and partial probe are not acceptance decisions. An unproven mandatory property is NO-GO, not a warning.
 
 | Required proof | NO-GO condition |
 | --- | --- |
@@ -88,7 +88,7 @@ Credential-free automation should include fake-provider/fake-forge protocol test
 
 The current [verify workflow](../../.github/workflows/verify.yml) runs the TypeScript gate on Node 20.19.0 and 22 with check names verify (node 20.19.0) and verify (node 22). The floor leg skips the optional existing Pi SDK; both current suites use mocks. Neither proves the new Pi Durable bridge. S1 adds the separate `rust-core` job and does not change those TypeScript checks or branch protection.
 
-As of 2026-10-30, `pi-package-audit` and `pi-source-candidate` also exist. They record the published-package NO-GO and the pinned source rebuild. They are not `pi-bridge-contract`. S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and [s2-feasibility.md](s2-feasibility.md). A green audit or source rebuild is not live execution.
+As of 2026-10-30, `pi-package-audit` and `pi-source-candidate` also exist. They record the published-package NO-GO and the pinned source rebuild. They are not `pi-bridge-contract`. S2 is GO for the credential-free source-built candidate; see the [reviewed revision and evidence](s2-contract-gate.md). A green audit or source rebuild is not live execution.
 
 Add these separate jobs as their implementation slices land:
 
@@ -163,8 +163,9 @@ Full S3 acceptance, real-backend #125 evidence and S2 GO remain separate gates.
 The [Linux execution contract](s3-linux-execution-contract.md) runs file and
 process effects through the S3-A2 intent flow inside the pinned Bubblewrap
 policy and a delegated cgroup v2 subtree. It is non-default and test-driven.
-FakeRuntime remains the product adapter. S2 remains NO-GO. An administrator
-still has to make `execution-confinement` a required check.
+FakeRuntime remains the product adapter. S2 was NO-GO at this delivery; the later
+source-candidate acceptance is recorded above. `execution-confinement` is now
+required on main by ruleset 26316769 (audited 2026-11-02).
 
 ### S3-A5 supersede an abandoned decision
 
@@ -173,4 +174,12 @@ evidence-backed supersession for an abandoned simulated or Linux effect. The
 effect stays `uncertain`, the outcome stays unknown, and the existing worktree
 is kept after a fresh S3-A1 verify. Linux supersession is Host API only and
 runs in the `execution-confinement` job. FakeRuntime remains the product
-adapter. S2 remains NO-GO. This is not a full S3 claim.
+adapter. This is not a full S3 claim; the later S2 acceptance is recorded above.
+
+### S3-B1 separate bridge confinement
+
+The [credential-free bridge harness](s3-bridge-confinement.md) runs the real
+Rust-supervised Pi bridge under a separate mount/process/network policy. It
+proves boundary denials, private storage recovery and termination of a hung tool
+in the required `execution-confinement` job. This remains test-only; product
+Pi-to-Linux integration, model-only egress and full S3 acceptance stay open.

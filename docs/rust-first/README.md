@@ -24,17 +24,17 @@ Read the [runtime protocol](runtime-protocol.md) and [delivery plan](delivery-pl
 
 ## Implementation status
 
-This table is navigation as of 2026-10-31. See [#109](https://github.com/kortiene/switchyard/issues/109) for current disposition. It does not change the normative transitions below, and it does not record an S2 GO or a live run.
+This table is navigation as of 2026-11-02. See [#109](https://github.com/kortiene/switchyard/issues/109) for consolidation disposition. S2 acceptance is recorded separately in [the contract gate](s2-contract-gate.md); this does not change normative transitions or record a live run.
 
 | Work | Status |
 | --- | --- |
 | S1 ([#95](https://github.com/kortiene/switchyard/issues/95), [#105](https://github.com/kortiene/switchyard/pull/105)) | Implemented. `crates/switchyard-core/` and `crates/switchyard/` persist missions and drive them with a fake runtime. No model calls, GitHub writes, state v1 resume, or confinement. |
-| S2 ([#96](https://github.com/kortiene/switchyard/issues/96)) | **NO-GO**. See [#96](https://github.com/kortiene/switchyard/issues/96) and [s2-feasibility.md](s2-feasibility.md). |
-| S3 ([#97](https://github.com/kortiene/switchyard/issues/97)) | S3-A1 adds explicit [worktree ownership/recovery](s3-workspace-ownership.md). S3-A2 adds [simulated effect receipts](s3-execution-receipts.md). S3-A3 adds a [Linux confinement feasibility probe](s3-linux-confinement.md). S3-A4 adds a non-default [confined Linux ExecutionEnv](s3-linux-execution-contract.md) with durable quiescence evidence. S3-A5 adds [supersession of an abandoned decision](s3-execution-supersede.md) after fresh quiescence and a workspace digest. FakeRuntime stays the product adapter. S2 remains NO-GO. Full S3, Track B, seccomp, and reboot recovery remain open. TypeScript managed-worktree work is stopped. |
-| S4–S8 ([#98](https://github.com/kortiene/switchyard/issues/98)–[#102](https://github.com/kortiene/switchyard/issues/102)) | Planned. Pi-dependent live work stays blocked while S2 is NO-GO. |
+| S2 ([#96](https://github.com/kortiene/switchyard/issues/96)) | **GO for the credential-free source-built candidate**, accepted 2026-11-02. See [exact revision and evidence](s2-contract-gate.md). The published-package audit remains NO-GO. |
+| S3 ([#97](https://github.com/kortiene/switchyard/issues/97)) | S3-A1 adds explicit [worktree ownership/recovery](s3-workspace-ownership.md). S3-A2 adds [simulated effect receipts](s3-execution-receipts.md). S3-A3 adds a [Linux confinement feasibility probe](s3-linux-confinement.md). S3-A4 adds a non-default [confined Linux ExecutionEnv](s3-linux-execution-contract.md) with durable quiescence evidence. S3-A5 adds [supersession of an abandoned decision](s3-execution-supersede.md) after fresh quiescence and a workspace digest. FakeRuntime stays the product adapter. Track B starts with a [separate bridge confinement harness](s3-bridge-confinement.md). Product Pi wiring, model-only egress, full S3 and reboot recovery remain open. TypeScript managed-worktree work is stopped. |
+| S4–S8 ([#98](https://github.com/kortiene/switchyard/issues/98)–[#102](https://github.com/kortiene/switchyard/issues/102)) | Planned. Live mission execution waits on S3 integration and confinement. |
 | Native Rust agent runtime | Accepted long-term target (2026-10-29). Not implemented. A published-package NO-GO does not select the TypeScript engine instead. |
 
-`runtime/pi/` is the published-package audit. `runtime/pi-source/` is the reproducible source candidate. Neither is the product runtime. S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and [s2-feasibility.md](s2-feasibility.md).
+`runtime/pi/` is the historical published-package NO-GO audit. `runtime/pi-source/` is the reproducible source candidate accepted by S2. Neither is the product runtime. See [S2 acceptance](s2-contract-gate.md) and [S3 bridge confinement](s3-bridge-confinement.md).
 
 ## Repository baseline
 

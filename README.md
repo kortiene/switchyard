@@ -88,9 +88,9 @@ in the [package development guide](./adw_sdlc/README.md#development).
 | Work | Status |
 | --- | --- |
 | **S1** [#95](https://github.com/kortiene/switchyard/issues/95) | Implemented. Mission ledger, command outbox, fake runtime. |
-| **S2** [#96](https://github.com/kortiene/switchyard/issues/96) | **NO-GO**. See [#96](https://github.com/kortiene/switchyard/issues/96) and the [S2 feasibility audit](./docs/rust-first/s2-feasibility.md). |
-| **S3** [#97](https://github.com/kortiene/switchyard/issues/97) | S3-A1 adds explicit [worktree ownership/recovery](./docs/rust-first/s3-workspace-ownership.md). S3-A2 adds [simulated effect receipts](./docs/rust-first/s3-execution-receipts.md). Real effects, confinement and process supervision remain open. |
-| **S4–S8** [#98](https://github.com/kortiene/switchyard/issues/98)–[#102](https://github.com/kortiene/switchyard/issues/102) | Planned. Pi-dependent live work stays blocked while S2 is NO-GO. |
+| **S2** [#96](https://github.com/kortiene/switchyard/issues/96) | **GO for the credential-free source-built candidate**, accepted 2026-11-02. See the [exact revision and evidence](./docs/rust-first/s2-contract-gate.md). The published-package audit remains NO-GO. |
+| **S3** [#97](https://github.com/kortiene/switchyard/issues/97) | Track A delivers owned worktrees, effect receipts, a non-default Linux backend and evidence-backed recovery. Track B starts with the [separate bridge confinement harness](./docs/rust-first/s3-bridge-confinement.md). Product Pi wiring, model-only egress and full S3 acceptance remain open. |
+| **S4–S8** [#98](https://github.com/kortiene/switchyard/issues/98)–[#102](https://github.com/kortiene/switchyard/issues/102) | Planned. Live mission execution waits on S3 integration and confinement. |
 | **Native Rust agent runtime** | Accepted long-term target (2026-10-29). Not implemented. Replacing the proof-of-concept adapter needs its own reviewed gate. |
 
 Product milestone:
