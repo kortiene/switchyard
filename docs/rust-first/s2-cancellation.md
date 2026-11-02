@@ -29,13 +29,13 @@ is introduced. FakeRuntime ledgers are unaffected.
 
 | Boundary | Executable evidence | Required result |
 | --- | --- | --- |
-| Delayed duplicate abort races with later work | `test/cancellation.test.ts`: delayed duplicate test | Original receipt is shared; later work stays active. |
+| Delayed duplicate abort races with later work | `test/cancellation.test.ts`: delayed duplicate test | Original receipt is shared and `afterAbortRecorded` runs once; later work stays active. |
 | Admission while a stop is incomplete | Same file: pending abort test | Input, steering and a different stop are rejected without receipts; changed content under the same ID conflicts. |
 | SIGKILL after stop intent, before Pi cancellation | `pi_host_tests/cancellation.rs`: `abort_crashes_recover_original_stop_without_claiming_mission_quiescence` | Rust keeps the stop pending; a new generation inspects the incomplete document and replays the original command. |
 | SIGKILL after settlement, before Rust acknowledgement | Same test, second crash fixture | Recovery acknowledges the stored receipt without repeating the abort. Both Pause and Cancel survive two restarts with the fixtures still armed. |
 | Repeated real Pi `ConversationBusy` | `sustained_real_busy_continuation_cannot_starve_an_admitted_stop` | Eight retries keep the Continue pending; an admitted Pause/Cancel suppresses it, settles the runtime stop, and survives restart. |
-| Tool ignores its abort context | `tests/pi_bridge.rs`: `uncooperative_abort_times_out_reaps_child_and_reopens_with_unsettled_intent` | The five-second abort deadline returns uncertainty; Rust kills/reaps the child, retains storage and reopens inertly. Explicit replay settles the original intent without rerunning the tool. |
-| Bounded sustained transport pressure | `test/transport.test.ts`: bounded bursts test | Eight rounds of 16 concurrent requests (128 total) preserve abort receipts and inspection responsiveness. |
+| Tool ignores its abort context | `tests/pi_bridge.rs`: `uncooperative_abort_times_out_reaps_child_and_reopens_with_unsettled_intent` | The five-second abort deadline returns uncertainty; Rust kills/reaps the child, retains storage and reopens inertly. Explicit replay settles the original intent. Inspection reaches `runtimeIdle` with `stopping == false` before a second check that the tool was not rerun. |
+| Bounded sustained transport pressure | `test/transport.test.ts`: bounded bursts test | Eight rounds each submit fresh work and abort it with its own command ID under 16 concurrent requests (128 total). Every round is a real cancellation; receipts and inspection stay responsive. |
 | More than 16 unfinished requests | Same file: overflow test | The peer exits without acknowledging the pending stop. Reopen finds the original incomplete intent and explicit replay settles it. |
 
 The conformance launcher supplies barriers after the durable stop-intent commit
@@ -74,10 +74,13 @@ feature-enabled Clippy gate, all feature-enabled tests (190 core, 12 bridge
 and 9 CLI), TypeScript typechecking and all 23 Node tests. The Node run reused
 the existing locked artifacts/dependencies; the candidate integrity and
 source-map checks passed. A fresh source rebuild remains part of CI.
-The existing child-liveness test now uses signal 0 instead of looking up a
-PID in `/proc`, whose mount can belong to an outer container PID namespace.
-It still verifies that the child exists before termination and is gone after;
-no test is skipped or weakened to accommodate the environment.
+The existing child-liveness test checks the child with
+`rustix::process::test_kill_process` (signal 0, in-process) instead of `/proc`
+or an external `kill` binary. `/proc` can belong to an outer container PID
+namespace, and slim images may not ship `kill`. An unreaped zombie still
+counts as present until this parent waits, matching the old `/proc` existence
+check. The test still verifies that the child exists before termination and
+is gone after; no test is skipped or weakened to accommodate the environment.
 
 ## Remaining gate work
 

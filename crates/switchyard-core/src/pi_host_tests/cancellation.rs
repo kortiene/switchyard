@@ -13,7 +13,16 @@ fn abort_crashes_recover_original_stop_without_claiming_mission_quiescence() {
             admit(&mut h, &mission.mission_id, CommandBody::StartPlanning).unwrap();
             h.dispatch_pending(&mission.mission_id).unwrap();
             let stop = admit(&mut h, &mission.mission_id, stop).unwrap();
-            assert!(h.dispatch_pending(&mission.mission_id).is_err());
+            // SIGKILL drops the peer mid-response. Only that transport loss is
+            // the crash precondition; a binding or payload error is a different failure.
+            match h.dispatch_pending(&mission.mission_id) {
+                Err(Error::GuardFailed { detail })
+                    if detail == "interrupted or oversized bridge frame"
+                        || detail.starts_with("interrupted or oversized bridge frame\n") => {}
+                other => {
+                    panic!("SIGKILL fixture must interrupt the bridge transport, got {other:?}")
+                }
+            }
             let snapshot = h.snapshot(&mission.mission_id).unwrap();
             assert_eq!(snapshot.phase, stop.phase);
             assert_eq!(snapshot.pending_commands.len(), 1);

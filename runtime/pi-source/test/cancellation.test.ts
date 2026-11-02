@@ -68,6 +68,7 @@ test('a delayed duplicate abort cannot cancel work admitted after the original s
     await p.entered.promise;
     duplicate.release();
     assert.deepEqual(await twice, receipt);
+    assert.equal(calls, 1, 'coalesced duplicates must record one cancellation');
     const snapshot = await p.call('runtime.inspect', undefined, { commandIds: ['new-work'] }) as {
       commands: { status: string; reason: string | null }[]; runtimeIdle: boolean;
     };

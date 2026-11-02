@@ -54,27 +54,34 @@ async function peer(mode = 'answer', options: { directory?: string; generation?:
   } };
 }
 
-test('sustained bounded request bursts leave abort and inspection responsive', { timeout: 15_000 }, async () => {
+test('sustained bounded request bursts leave abort and inspection responsive', { timeout: 30_000 }, async () => {
+  const rounds = 8;
   const p = await peer('cooperative-wait');
   try {
     assert.equal((await p.request('runtime.hello', hello)).error, undefined);
     assert.equal((await p.request('runtime.open', {})).error, undefined);
-    assert.equal((await p.request('runtime.submit', { type: 'input', content: 'wait' }, { commandId: 'work' })).error, undefined);
-    const limit = Date.now() + 3_000;
-    while (!p.diagnostics().includes('waiting tool entered') && Date.now() < limit) await new Promise(resolve => setTimeout(resolve, 5));
-    assert(p.diagnostics().includes('waiting tool entered'));
-    for (let round = 0; round < 8; round++) {
+    const entered = () => p.diagnostics().split('waiting tool entered').length - 1;
+    for (let round = 0; round < rounds; round++) {
+      const work = `work-${round}`;
+      const stop = `stop-${round}`;
+      assert.equal((await p.request('runtime.submit', { type: 'input', content: 'wait' }, { commandId: work })).error, undefined);
+      const limit = Date.now() + 3_000;
+      while (entered() < round + 1 && Date.now() < limit) await new Promise(resolve => setTimeout(resolve, 5));
+      assert.equal(entered(), round + 1, `round ${round} must enter a fresh waiting tool`);
       const responses = await Promise.all(Array.from({ length: MAX_PENDING }, (_, i) => i === 0
-        ? p.request('runtime.abort', {}, { commandId: 'stop' })
-        : p.request('runtime.inspect', { commandIds: ['work', 'stop'] })));
-      for (const response of responses) assert.equal(response.error, undefined);
-      assert.deepEqual(responses[0].result, { commandId: 'stop', accepted: true, runtimeSettled: true });
+        ? p.request('runtime.abort', {}, { commandId: stop })
+        : p.request('runtime.inspect', { commandIds: [work, stop] })));
+      for (const response of responses) assert.equal(response.error, undefined, JSON.stringify(response.error));
+      assert.deepEqual(responses[0].result, { commandId: stop, accepted: true, runtimeSettled: true });
     }
-    const snapshot = (await p.request('runtime.inspect', { commandIds: ['work', 'stop'] })).result as {
-      commands: { reason: string | null; receipt: { settled: boolean } }[]; runtimeIdle: boolean;
+    const ids = Array.from({ length: rounds }, (_, round) => [`work-${round}`, `stop-${round}`]).flat();
+    const snapshot = (await p.request('runtime.inspect', { commandIds: ids })).result as {
+      commands: { reason: string | null; receipt: { settled: boolean } | null }[]; runtimeIdle: boolean;
     };
-    assert.equal(snapshot.commands[0].reason, 'aborted');
-    assert.equal(snapshot.commands[1].receipt.settled, true);
+    for (let round = 0; round < rounds; round++) {
+      assert.equal(snapshot.commands[round * 2].reason, 'aborted', `work-${round}`);
+      assert.equal(snapshot.commands[round * 2 + 1].receipt?.settled, true, `stop-${round}`);
+    }
     assert.equal(snapshot.runtimeIdle, true);
     assert.equal(p.child.exitCode, null);
   } finally { await p.close(); }

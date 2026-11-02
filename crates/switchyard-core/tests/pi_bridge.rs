@@ -103,6 +103,22 @@ fn uncooperative_abort_times_out_reaps_child_and_reopens_with_unsettled_intent()
         !bridge.stderr_tail().contains("waiting tool entered"),
         "recovery must not rerun the tool"
     );
+    let limit = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let snapshot = call(&mut bridge, "runtime.inspect", None, json!({})).unwrap();
+        if snapshot["runtimeIdle"] == true && snapshot["stopping"] == false {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < limit,
+            "recovered abort did not settle: {snapshot}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        !bridge.stderr_tail().contains("waiting tool entered"),
+        "recovery must not rerun the tool after the abort settles"
+    );
 }
 
 fn synthetic_peer(directory: &Path, script: &str) -> PiBridge {

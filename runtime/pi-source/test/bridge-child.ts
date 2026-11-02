@@ -16,9 +16,12 @@ if (!database || !bindingJson || !['answer', 'tools', 'recover', 'crash-before-a
   'busy-once', 'stopping-once', 'mismatch'].includes(mode)) throw new Error('Invalid launcher arguments');
 const binding = JSON.parse(bindingJson) as Binding;
 const faux = fauxProvider();
-faux.setResponses(['ignore-abort', 'cooperative-wait'].includes(mode) ? [
-  fauxAssistantMessage([fauxToolCall('uncooperative', {})], { stopReason: 'toolUse' }),
-] : mode === 'tools' ? [
+const waitingTool = () => fauxAssistantMessage([fauxToolCall('uncooperative', {})], { stopReason: 'toolUse' });
+// One fresh tool turn per burst round in transport.test.ts. Abort ends the run,
+// so the next submit consumes the next queued response.
+faux.setResponses(mode === 'cooperative-wait' ? Array.from({ length: 8 }, waitingTool)
+  : mode === 'ignore-abort' ? [waitingTool()]
+  : mode === 'tools' ? [
   fauxAssistantMessage([fauxToolCall('write_pair', { prefix: 'pair' }, { id: 'parent-pair' }),
     fauxToolCall('nested_write', { path: 'nested', content: 'child' }, { id: 'parent-nested' })], { stopReason: 'toolUse' }),
   fauxAssistantMessage('done'),
