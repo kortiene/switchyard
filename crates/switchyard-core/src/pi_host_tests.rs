@@ -6,6 +6,8 @@ use std::process::Command;
 
 #[path = "pi_host_tests/cancellation.rs"]
 mod cancellation;
+#[path = "pi_host_tests/storage.rs"]
+mod storage;
 
 struct World {
     _tmp: tempfile::TempDir,

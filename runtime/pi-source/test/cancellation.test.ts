@@ -7,6 +7,7 @@ import { awaitWithContext } from '@earendil-works/chord/context';
 import { Type } from '@earendil-works/pi-ai';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai/providers/faux';
+import type { SqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite';
 import { defineTool } from '@earendil-works/pi-durable';
 import { ADAPTER, CAPABILITIES, MAX_FRAME, MAX_PENDING, SOURCE, hash, type Json } from '../src/protocol.ts';
 import { Runtime, type RuntimeBarriers } from '../src/runtime.ts';
@@ -39,7 +40,7 @@ async function fixture(barriers: RuntimeBarriers) {
   await call('runtime.hello', undefined, { source: SOURCE, adapter: ADAPTER, maxFrame: MAX_FRAME,
     maxPending: MAX_PENDING, capabilities: CAPABILITIES });
   await call('runtime.open');
-  return { call, entered, async close() {
+  return { call, entered, directory, failed: runtime.failed, async close() {
     await call('runtime.abort', 'cleanup');
     await call('runtime.close', 'close');
     await rm(directory, { recursive: true, force: true });
@@ -99,4 +100,71 @@ test('a pending abort fences new work and competing stops while retaining payloa
     release.release();
     await stopping;
   } finally { release.release(); await p.close(); }
+});
+
+for (const stage of ['afterAbortRecorded', 'afterAbortSettled'] as const) {
+  test(`close refuses an abort at ${stage} even on an idle runtime`, { timeout: 10_000 }, async () => {
+    const recorded = barrier();
+    const release = barrier();
+    const p = await fixture({ [stage]: async () => { recorded.release(); await release.promise; } });
+    const stopping = p.call('runtime.abort', 'stop').then(result => ({ result }), error => ({ error }));
+    await recorded.promise;
+    const closed = await p.call('runtime.close', 'close').then(result => ({ result }), error => ({ error }));
+    release.release();
+    const stopped = await stopping;
+    const cleanup = await p.close().then(() => undefined, error => error);
+    assert('error' in closed, 'close must not succeed while an abort still owns storage');
+    assert.equal(closed.error.category, 'busy');
+    assert('result' in stopped, 'the refused close must leave cancellation able to settle');
+    assert.equal(cleanup, undefined);
+  });
+}
+
+test('close refuses an admitted submit before its storage transaction starts', { timeout: 10_000 }, async () => {
+  const entered = barrier();
+  const release = barrier();
+  const p = await fixture({ beforeAdmission: async () => { entered.release(); await release.promise; } });
+  const submitting = p.call('runtime.submit', 'work', { type: 'input', content: 'wait' });
+  try {
+    await entered.promise;
+    await assert.rejects(p.call('runtime.close', 'close'), { category: 'busy' });
+    release.release();
+    const admitted = await submitting as { receiptId: string };
+    await p.entered.promise;
+    const snapshot = await p.call('runtime.inspect', undefined, { commandIds: ['work'] }) as {
+      commands: { receipt: { receipt: string } }[];
+    };
+    assert.equal(snapshot.commands[0].receipt.receipt, admitted.receiptId);
+  } finally { release.release(); await submitting; await p.close(); }
+});
+
+test('an admitted close fences later submit, abort and inspection through completion', { timeout: 10_000 }, async () => {
+  const entered = barrier();
+  const release = barrier();
+  const p = await fixture({ beforeClose: async () => { entered.release(); await release.promise; } });
+  const closing = p.call('runtime.close', 'close');
+  try {
+    await entered.promise;
+    for (const method of ['runtime.submit', 'runtime.abort', 'runtime.inspect', 'runtime.close']) {
+      await assert.rejects(p.call(method, 'late', { type: 'input', content: 'late' }), { category: 'session_unavailable' });
+    }
+    release.release();
+    assert.deepEqual(await closing, { closed: true });
+    await assert.rejects(p.call('runtime.abort', 'late'), { category: 'session_unavailable' });
+    await assert.rejects(p.call('runtime.open'), { category: 'already_open' });
+  } finally { release.release(); await closing; await rm(p.directory, { recursive: true, force: true }); }
+});
+
+test('a storage failure inside Pi cancellation retains the SQLite cause', { timeout: 10_000 }, async () => {
+  let database: SqliteDatabase;
+  const p = await fixture({ databaseOpened: db => { database = db; },
+    afterAbortRecorded: async () => { await database.exec('PRAGMA query_only = ON'); } });
+  try {
+    await p.call('runtime.submit', 'work', { type: 'input', content: 'wait' });
+    await p.entered.promise;
+    await assert.rejects(p.call('runtime.abort', 'stop'), /attempt to write a readonly database/);
+    const error = await p.failed;
+    assert.match(String(error), /attempt to write a readonly database/);
+    await assert.rejects(p.call('runtime.inspect'), { category: 'session_unavailable' });
+  } finally { await rm(p.directory, { recursive: true, force: true }); }
 });

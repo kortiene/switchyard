@@ -114,8 +114,9 @@ export class Transport {
     } catch { /* best-effort; the peer still exits */ }
   }
 
-  private fail() {
+  fail(error?: unknown) {
     if (this.dead) return;
+    if (error !== undefined) this.diagnostic(error);
     this.dead = true;
     for (const wait of this.pendingEffects.values()) {
       clearTimeout(wait.timer);

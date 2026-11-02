@@ -3,7 +3,7 @@ import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/conte
 import { type Models } from '@earendil-works/pi-ai/models';
 import { ConversationBusy, ConversationIdle, createRegistry, defineDoc, defineDocFamily, defineExtension,
   Harness, type Conversation, type SubmissionDraft, type ToolRegistration } from '@earendil-works/pi-durable';
-import { SqliteStorage } from '@earendil-works/pi-durable/storage/sqlite';
+import { SqliteStorage, type SqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite';
 import { openNodeSqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { ADAPTER, canonical, CAPABILITIES, DEADLINE_MS, hash, MAX_FRAME, MAX_PENDING, PROTOCOL, ProtocolError, SOURCE,
   type Binding, type Frame, type Json } from './protocol.ts';
@@ -16,9 +16,14 @@ const Command = defineDocFamily({ kind: 'switchyard.bridge.command', scope: 'ses
 
 // Trusted conformance barriers only; never selected by a frame or model input.
 export type RuntimeBarriers = {
-  afterAdmission?: () => void;
+  databaseOpened?: (database: SqliteDatabase) => void;
+  beforeAdmission?: () => void | Promise<void>;
+  afterAdmission?: () => void | Promise<void>;
+  beforeAbortRecorded?: () => void | Promise<void>;
   afterAbortRecorded?: (fresh: boolean) => void | Promise<void>;
+  beforeAbortSettled?: () => void | Promise<void>;
   afterAbortSettled?: () => void | Promise<void>;
+  beforeClose?: () => void | Promise<void>;
 };
 
 export class Runtime {
@@ -31,6 +36,10 @@ export class Runtime {
   private negotiated = false;
   private opening = false;
   private closing = false;
+  private activeCalls = 0;
+  private failSession!: (error: unknown) => void;
+  // Storage can fail in the scheduler without an outstanding host request.
+  readonly failed = new Promise<unknown>(resolve => { this.failSession = resolve; });
   private barriers: RuntimeBarriers;
   private aborts = new Map<string, { hash: string; promise: Promise<Json> }>();
   constructor(database: string, binding: Binding, models: Models, tools: ToolRegistration[], barriers: RuntimeBarriers = {}) {
@@ -59,27 +68,53 @@ export class Runtime {
       return this.open(params.requireExisting === true);
     }
     if (!this.root || !this.harness || this.closing) throw new ProtocolError('session_unavailable');
+    if (frame.method === 'runtime.close') {
+      this.validateCommand(frame);
+      if (Object.keys(params).length) throw new ProtocolError('invalid_params');
+      return this.close();
+    }
+    // Include readers: closing storage must not race an already admitted call,
+    // even when Pi has no tasks (for example between the two abort commits).
+    this.activeCalls++;
+    try { return await this.dispatchOpen(frame, params); }
+    finally { this.activeCalls--; }
+  }
+
+  private validateCommand(frame: Frame) {
+    if (typeof frame.commandId !== 'string' || frame.commandId.length === 0 || frame.commandId.length > 256) {
+      throw new ProtocolError('invalid_command');
+    }
+  }
+
+  private async close(): Promise<Json> {
+    this.closing = true;
+    if (this.activeCalls > 0) {
+      this.closing = false;
+      throw new ProtocolError('busy', 'retry');
+    }
+    const state = await this.harness!.snapshot(Session, BACKGROUND_CONTEXT);
+    const inspection = await this.harness!.inspect(BACKGROUND_CONTEXT);
+    // A restart has no in-memory calls but may retain an unfinished stop.
+    if (state?.stopCommand || inspection.tasks.length > 0 || inspection.submissions.length > 0) {
+      this.closing = false;
+      throw new ProtocolError('busy', 'retry');
+    }
+    await this.barriers.beforeClose?.();
+    await this.harness!.close(withAbortSignal(AbortSignal.timeout(DEADLINE_MS), BACKGROUND_CONTEXT));
+    // Closing is terminal for this connection, not evidence of OS quiescence.
+    return { closed: true };
+  }
+
+  private async dispatchOpen(frame: Frame, params: Record<string, Json>): Promise<Json> {
     if (frame.method === 'runtime.inspect' || frame.method === 'runtime.watch') {
       const snapshot = await this.inspect(params);
       // Snapshot polling is explicit. This adapter does not advertise lossless event replay.
       return frame.method === 'runtime.watch' ? { resyncRequired: true, snapshot } : snapshot;
     }
-    if (!['runtime.submit', 'runtime.steer', 'runtime.abort', 'runtime.close'].includes(frame.method ?? '')) {
+    if (!['runtime.submit', 'runtime.steer', 'runtime.abort'].includes(frame.method ?? '')) {
       throw new ProtocolError('unsupported_method');
     }
-    if (typeof frame.commandId !== 'string' || frame.commandId.length === 0 || frame.commandId.length > 256) {
-      throw new ProtocolError('invalid_command');
-    }
-    if (frame.method === 'runtime.close') {
-      // Closing does not certify process-tree quiescence or any mission fact.
-      this.closing = true;
-      if ((await this.harness.inspect(BACKGROUND_CONTEXT)).tasks.length > 0) {
-        this.closing = false;
-        throw new ProtocolError('busy', 'retry');
-      }
-      await this.harness.close(withAbortSignal(AbortSignal.timeout(DEADLINE_MS), BACKGROUND_CONTEXT));
-      return { closed: true };
-    }
+    this.validateCommand(frame);
     // Keep S1's full canonical command under the Pi conflict hash, including
     // abort/continue payloads that otherwise have identical Pi parameters.
     if (params.hostCommand !== undefined) {
@@ -91,8 +126,8 @@ export class Runtime {
     if (frame.method === 'runtime.abort' && Object.keys(params).some(key => key !== 'hostCommand')) throw new ProtocolError('invalid_params');
     const payloadHash = hash({ method: frame.method, params });
     try {
-      if (frame.method === 'runtime.abort') return await this.abort(frame.commandId, payloadHash);
-      return await this.submit(frame.commandId, frame.method!, payloadHash, params);
+      if (frame.method === 'runtime.abort') return await this.abort(frame.commandId!, payloadHash);
+      return await this.submit(frame.commandId!, frame.method!, payloadHash, params);
     } catch (error) {
       if (error instanceof ConversationIdle) throw new ProtocolError('idle', 'rejected');
       // Busy is retryable: a Continue racing a running turn is sent again later.
@@ -108,10 +143,14 @@ export class Runtime {
     await database.exec('PRAGMA synchronous = FULL');
     const mode = await database.get<{ synchronous: number }>('PRAGMA synchronous');
     if (mode?.synchronous !== 2) throw new Error('SQLite durability unavailable');
+    this.barriers.databaseOpened?.(database);
     const registry = createRegistry();
     registry.install(defineExtension({ name: 'switchyard-forwarders', tools: this.tools }));
     const harness = await Harness.open(await SqliteStorage.open(database), { models: this.models, registry }, BACKGROUND_CONTEXT);
     this.harness = harness;
+    void harness.closed.then(end => {
+      if (end.kind === 'failed') { this.closing = true; this.failSession(end.error); }
+    });
     await harness.commit(async tx => {
       const state = await tx.doc(Session);
       if (requireExisting && !state.sessionId) throw new ProtocolError('session_missing');
@@ -141,6 +180,7 @@ export class Runtime {
       draft = { type: 'input', content: params.content, requestId, whenBusy: method === 'runtime.steer' ? 'steer' : 'reject',
         ...(method === 'runtime.steer' ? { whenIdle: 'reject' as const } : {}) };
     }
+    await this.barriers.beforeAdmission?.();
     const admitted = await harness.commit(async tx => {
       if (this.closing) throw new ProtocolError('session_unavailable');
       const state = await tx.doc(Session);
@@ -154,7 +194,7 @@ export class Runtime {
     }, BACKGROUND_CONTEXT);
     // Only a new admission is a crash point. Replaying an existing receipt must
     // stay alive so recovery can resume that submission with the fixture armed.
-    if (admitted.fresh) this.barriers.afterAdmission?.();
+    if (admitted.fresh) await this.barriers.afterAdmission?.();
     harness.resume();
     return { receiptId: admitted.receipt, commandId, requestId, payloadHash, admitted: true };
   }
@@ -176,6 +216,7 @@ export class Runtime {
 
   private async performAbort(commandId: string, payloadHash: string): Promise<Json> {
     const harness = this.harness!;
+    await this.barriers.beforeAbortRecorded?.();
     const complete = await harness.commit(async tx => {
       const state = await tx.doc(Session);
       const command = await tx.doc(Command, commandId, null);
@@ -189,9 +230,14 @@ export class Runtime {
     }, BACKGROUND_CONTEXT);
     if (!complete.settled) {
       await this.barriers.afterAbortRecorded?.(complete.fresh);
+      const deadline = AbortSignal.timeout(DEADLINE_MS);
       try {
-        await this.root!.abort(withAbortSignal(AbortSignal.timeout(DEADLINE_MS), BACKGROUND_CONTEXT), { background: true });
-      } catch { throw new ProtocolError('cancellation_timeout', 'uncertain'); }
+        await this.root!.abort(withAbortSignal(deadline, BACKGROUND_CONTEXT), { background: true });
+      } catch (error) {
+        if (deadline.aborted && error === deadline.reason) throw new ProtocolError('cancellation_timeout', 'uncertain');
+        throw error; // Storage failure is fatal, not cooperative cancellation timeout.
+      }
+      await this.barriers.beforeAbortSettled?.();
       await harness.commit(async tx => {
         const state = await tx.doc(Session);
         const command = await tx.doc(Command, commandId, null);
