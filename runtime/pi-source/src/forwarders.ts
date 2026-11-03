@@ -2,7 +2,7 @@
 import { Type } from '@earendil-works/pi-ai';
 import { awaitWithContext, type Context } from '@earendil-works/chord/context';
 import { defineTool, type ToolExecutionApi } from '@earendil-works/pi-durable';
-import { hash, operationId, type Binding } from './protocol.ts';
+import { hash, operationId, type Binding, type Json } from './protocol.ts';
 import { Transport } from './transport.ts';
 
 export function forwarders(binding: Binding, transport: Transport) {
@@ -12,7 +12,27 @@ export function forwarders(binding: Binding, transport: Transport) {
       taskId: String(api.taskId), effectKey: key, payloadHash: hash(payload), payload }), context);
     return JSON.stringify(reply);
   };
+  const processEffect = async (api: ToolExecutionApi, key: string, method: string,
+    fields: Record<string, Json>, context: Context) => {
+    const payload = { method, ...fields, capability: 'workspace-process', deadlinePolicy: 'attempt-bound' };
+    return JSON.stringify(await awaitWithContext(transport.request('execution.request', {
+      operationId: operationId(binding, String(api.taskId), key), taskId: String(api.taskId),
+      effectKey: key, payloadHash: hash(payload), payload }), context));
+  };
+  const handle = Type.Object({ startOperationId: Type.String(), startPayloadHash: Type.String() });
   return [
+    defineTool({ name: 'process_start', description: 'Start a confined workspace process through Rust; returns a handle, not an exit result.', replay: 'safe',
+      parameters: Type.Object({ argv: Type.Array(Type.String()) }),
+      execute: async (args, api, context) => ({ output: [{ type: 'text' as const,
+        text: await processEffect(api, 'process-start:v1', 'process.start', args, context) }] }) }),
+    defineTool({ name: 'process_status', description: 'Observe a process handle through Rust. Replay returns this historical observation.', replay: 'safe',
+      parameters: handle,
+      execute: async (args, api, context) => ({ output: [{ type: 'text' as const,
+        text: await processEffect(api, 'process-status:v1', 'process.status', args, context) }] }) }),
+    defineTool({ name: 'process_cancel', description: 'Terminate a process and descendants through Rust.', replay: 'safe',
+      parameters: handle,
+      execute: async (args, api, context) => ({ output: [{ type: 'text' as const,
+        text: await processEffect(api, 'process-cancel:v1', 'process.cancel', args, context) }] }) }),
     defineTool({ name: 'write_file', description: 'Request a file write through the owner.', replay: 'safe',
       parameters: Type.Object({ path: Type.String(), content: Type.String() }),
       execute: async (args, api, context) => ({ output: [{ type: 'text' as const,

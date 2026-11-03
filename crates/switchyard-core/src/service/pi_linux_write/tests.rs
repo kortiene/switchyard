@@ -158,19 +158,19 @@ fn classifier_never_treats_absence_or_failed_evidence_as_rejection() {
     let (dir, mut host, binding, params) = setup();
     let request = parse_write(&binding, &params, 123).unwrap();
     assert_eq!(
-        host.pi_linux_write_outcome(&request).unwrap(),
+        host.pi_linux_outcome(&request).unwrap(),
         PiEffectOutcome::Uncertain
     );
     host.store.prepare_linux(&request, None).unwrap();
     assert_eq!(
-        host.pi_linux_write_outcome(&request).unwrap(),
+        host.pi_linux_outcome(&request).unwrap(),
         PiEffectOutcome::Uncertain
     );
     host.store
         .quarantine_linux(&request.operation_id().unwrap())
         .unwrap();
     assert_eq!(
-        host.pi_linux_write_outcome(&request).unwrap(),
+        host.pi_linux_outcome(&request).unwrap(),
         PiEffectOutcome::Uncertain
     );
     // A corrupted stored request is not permission to create a replacement.

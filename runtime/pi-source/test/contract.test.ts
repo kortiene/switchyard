@@ -46,7 +46,7 @@ test('the bundled registry refuses unregistered code loading and host tools', { 
   const transport = new Transport(binding);
   transport.request = async () => { effects++; throw new Error('unregistered tool reached execution'); };
   const tools = forwarders(binding, transport);
-  assert.deepEqual(tools.map(tool => tool.name).sort(), ['nested_write', 'write_file', 'write_pair']);
+  assert.deepEqual(tools.map(tool => tool.name).sort(), ['nested_write', 'process_cancel', 'process_start', 'process_status', 'write_file', 'write_pair']);
   const runtime = new Runtime(join(directory, 'pi.sqlite'), binding, models, tools);
   let sequence = 0;
   const call = (method: string, commandId?: string, params: Record<string, Json> = {}) => runtime.dispatch({

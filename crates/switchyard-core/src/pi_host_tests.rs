@@ -8,6 +8,8 @@ use std::process::Command;
 mod cancellation;
 #[path = "pi_host_tests/contract.rs"]
 mod contract;
+#[path = "pi_host_tests/stop_delivery.rs"]
+mod stop_delivery;
 #[path = "pi_host_tests/storage.rs"]
 mod storage;
 

@@ -103,7 +103,8 @@ explicitly configured by the test host.
 
 ## Remaining work
 
-Process forwarding, Pi Pause/Cancel past blocked workspaces, production bridge
+[S3-B3](s3-pi-linux-process.md) adds process forwarding and credential-free Pi
+Pause/Cancel past blocked workspaces. Product Pi/Linux dispatch, production bridge
 storage/supervision/resource controls, model-only egress and full composed S3
 acceptance remain separate slices. The test launcher's existing storage/path
 limitations still apply; see [S3-B1](s3-bridge-confinement.md). Native Rust remains

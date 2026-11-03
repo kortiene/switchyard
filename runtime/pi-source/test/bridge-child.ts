@@ -1,6 +1,6 @@
 // Credential-free conformance launcher. No live provider or product CLI exposes this bridge yet.
 import { createModels } from '@earendil-works/pi-ai/models';
-import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai/providers/faux';
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseFactory } from '@earendil-works/pi-ai/providers/faux';
 import { Type } from '@earendil-works/pi-ai';
 import { defineDoc, defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
 import type { SqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite';
@@ -12,7 +12,7 @@ import { Runtime } from '../src/runtime.ts';
 import { Transport } from '../src/transport.ts';
 
 const [database, bindingJson, mode] = process.argv.slice(2);
-if (!database || !bindingJson || !['answer', 'file-write', 'tools', 'recover', 'crash-before-admission', 'crash-after-admission',
+if (!database || !bindingJson || !['answer', 'file-write', 'process-fast', 'process-wait', 'process-hold', 'process-cancel', 'tools', 'recover', 'crash-before-admission', 'crash-after-admission',
   'crash-after-abort-recorded', 'crash-after-abort-settled', 'hold-abort', 'ignore-abort', 'cooperative-wait',
   'storage-submit', 'storage-abort-intent', 'storage-abort-cancel', 'storage-abort-settlement', 'storage-background', 'storage-close',
   'storage-background-hang', 'gated-tools',
@@ -24,6 +24,25 @@ const waitingTool = () => fauxAssistantMessage([fauxToolCall('uncooperative', {}
 // so the next submit consumes the next queued response.
 faux.setResponses(mode === 'cooperative-wait' ? Array.from({ length: 8 }, waitingTool)
   : mode === 'ignore-abort' || mode.startsWith('storage-abort-') || mode === 'storage-background-hang' ? [waitingTool()]
+  : mode.startsWith('process-') ? [
+    fauxAssistantMessage([fauxToolCall('process_start', { argv: ['/bin/sh', '-c',
+      mode === 'process-fast' ? 'echo once >> /workspace/process.marker; printf process-output; exit 7'
+        : "echo once >> /workspace/process.marker; /usr/bin/setsid /bin/sh -c 'while true; do echo tick >> /workspace/process.heartbeat; sleep 0.05; done' >/dev/null 2>&1 & sleep 30",
+    ] })], { stopReason: 'toolUse' }),
+    ...(mode === 'process-cancel' ? [(context: Parameters<FauxResponseFactory>[0]) => {
+      const result = context.messages.findLast(message => message.role === 'toolResult');
+      if (!result || result.role !== 'toolResult') throw new Error('missing process handle');
+      const output = result.content.find(part => part.type === 'text');
+      if (!output || output.type !== 'text') throw new Error('missing process handle text');
+      const handle = JSON.parse(output.text);
+      return fauxAssistantMessage([fauxToolCall('process_status', {
+        startOperationId: handle.startOperationId, startPayloadHash: handle.startPayloadHash,
+      }), fauxToolCall('process_cancel', {
+        startOperationId: handle.startOperationId, startPayloadHash: handle.startPayloadHash,
+      })], { stopReason: 'toolUse' });
+    }] : []),
+    fauxAssistantMessage('done'),
+  ]
   : mode === 'file-write' ? [
     fauxAssistantMessage([fauxToolCall('write_file', { path: 'output.txt', content: 'once' })], { stopReason: 'toolUse' }),
     fauxAssistantMessage('done'),
@@ -36,6 +55,15 @@ const models = createModels();
 models.setProvider(faux.provider);
 const transport = new Transport(binding);
 const tools: ToolRegistration[] = forwarders(binding, transport);
+if (mode === 'process-hold') {
+  const index = tools.findIndex(tool => tool.name === 'process_start');
+  const tool = tools[index];
+  tools[index] = { ...tool, execute: async (args, api, context) => {
+    const result = await tool.execute(args, api, context);
+    await awaitWithContext(new Promise<void>(() => {}), context);
+    return result;
+  } };
+}
 if (mode === 'gated-tools') {
   // Stop/recovery proof: interrupt real durable tool tasks before forwarding.
   // Kept armed on reopen so any accidental scheduling leaves durable evidence.
