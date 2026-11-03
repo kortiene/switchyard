@@ -68,10 +68,11 @@ cargo run --locked -p switchyard -- --help
 
 `./scripts/rust-verify.sh` is the Rust check. It expects the committed Rust
 1.99.1 toolchain in `rust-toolchain.toml` and runs `cargo fmt --check`,
-Clippy, and `cargo test` for the default feature set. The required
-`pi-bridge-contract` CI job also checks the Rust workspace with `pi-contract`;
-the required `execution-confinement` job checks the Linux backend and bridge
-lifecycle. There is currently no standalone `rust-core` workflow.
+Clippy, and `cargo test` for the default feature set. CI runs this as the
+`rust-core` job inside `verify.yml`. The required `pi-bridge-contract` job also
+checks the workspace with `pi-contract`; the required `execution-confinement`
+job checks the Linux backend and bridge lifecycle. `rust-core` itself is not
+in the current required-check set.
 
 The frozen TypeScript reference has a separate check. From `adw_sdlc/`:
 
@@ -121,7 +122,7 @@ against a model or GitHub.
 | [`docs/rust-first/`](./docs/rust-first/) | Active | Architecture, protocol, and gates. |
 | [`scripts/rust-verify.sh`](./scripts/rust-verify.sh) | Active | Rust local gate. |
 | [`wiki/`](./wiki/) | Active | OKF v0.1 map. Concepts cite canonical sources; they do not replace them. |
-| [`.github/workflows/`](./.github/workflows/) | Active | Legacy `verify`, published-package audit, source rebuild, bridge probe, full bridge contract, and execution confinement. |
+| [`.github/workflows/`](./.github/workflows/) | Active | Legacy verification and the `rust-core` job in `verify.yml`; package audit, source rebuild, bridge probe, full contract, and confinement workflows. |
 | [`adw_sdlc/`](./adw_sdlc/) | Reference | Frozen TypeScript engine: CLI, kernel, runners, and package docs. Kept while useful. |
 | [`adw/`](./adw/) | Reference | Frozen state v1 schema and fixtures. |
 | [`.adw/`](./.adw/) | Reference | Project pack. `.adw/prompts/` is generated; `npm run pack:check` owns that drift gate. |

@@ -337,7 +337,9 @@ fn confined_lifecycle_invalid_policy_stops_before_sqlite() {
         .err()
         .expect("an invalid policy must not start Pi");
     assert!(
-        error.to_string().contains("bridge lockdown guard rejected startup"),
+        error
+            .to_string()
+            .contains("bridge lockdown guard rejected startup"),
         "{error}"
     );
     let directory = fs::read_dir(tmp.path())

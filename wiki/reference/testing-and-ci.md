@@ -55,7 +55,7 @@ S1 adds a separate Rust gate. From the repository root:
 ./scripts/rust-verify.sh
 ```
 
-The script checks formatting, clippy, and `cargo test` with the committed Rust 1.99.1 toolchain. This is the default-feature local gate. There is no standalone `rust-core` workflow in the current tree. The required `pi-bridge-contract` job runs workspace formatting, Clippy and tests with `pi-contract`; the separate required `execution-confinement` job builds and tests Linux execution and the confined bridge lifecycle. Legacy `npm run verify` remains separate.
+The script checks formatting, clippy, and `cargo test` with the committed Rust 1.99.1 toolchain. This is the default-feature local gate. CI runs it as the `rust-core` job within `verify.yml`; `rust-core` is not currently required by the rulesets. The required `pi-bridge-contract` job runs workspace formatting, Clippy and tests with `pi-contract`; the separate required `execution-confinement` job builds and tests Linux execution and the confined bridge lifecycle. Legacy `npm run verify` remains separate.
 
 # Pi package audit (S2 NO-GO)
 
