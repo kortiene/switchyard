@@ -101,6 +101,55 @@ fn confined_process_start_status_cancel_retain_original_receipts() {
 }
 
 #[test]
+fn fresh_status_after_host_restart_marks_retained_handle_uncertain() {
+    let (world, mut host, sandbox) = World::new();
+    host.enable_linux_execution(config(None)).unwrap();
+    let b = binding(&host, &world.mission);
+    let mut bridge = spawn(&sandbox, b.clone(), "process-wait", false);
+    let mut handle = Value::Null;
+    run(&mut bridge, &mut |params| {
+        let out = host.execute_pi_linux_process(&b, params, now() + 20_000);
+        handle = completed(out.clone());
+        out
+    });
+    assert_eq!(handle["kind"], "process-handle");
+    let before = observation(&b, "before-restart", &handle, "process.status");
+    let original = completed(host.execute_pi_linux_process(&b, &before, now() + 20_000));
+    assert_eq!(original["startState"], "running");
+    stop(&mut bridge, &sandbox);
+    drop(host);
+
+    let mut host = Host::open(&world.db()).unwrap();
+    host.enable_linux_execution(config(None)).unwrap();
+    let b = binding(&host, &world.mission);
+    // The caller retained its handle. Do not call recover or replay start.
+    assert_eq!(
+        host.execute_pi_linux_process(&b, &before, 0),
+        PiEffectOutcome::Completed(original.clone())
+    );
+    for key in ["after-restart", "later"] {
+        let status = observation(&b, key, &handle, "process.status");
+        let receipt = completed(host.execute_pi_linux_process(&b, &status, now() + 20_000));
+        assert_eq!(receipt["startState"], "uncertain");
+        assert_eq!(receipt["startReceiptRetained"], false);
+        assert_eq!(receipt["startResult"], Value::Null);
+        assert_eq!(receipt["quiescence"]["proven"], true);
+    }
+    let snapshot = host.snapshot(&world.mission).unwrap();
+    assert_eq!(snapshot.phase, Phase::NeedsAttention);
+    assert!(snapshot.execution_blocked);
+    assert_eq!(
+        host.execute_pi_linux_process(&b, &before, 0),
+        PiEffectOutcome::Completed(original)
+    );
+    assert_eq!(
+        fs::read(world.workspace.join("process.marker")).unwrap(),
+        b"once\n"
+    );
+    world.assert_origin();
+}
+
+#[test]
 fn process_output_and_nonzero_exit_are_durable_status_evidence() {
     let (world, mut host, sandbox) = World::new();
     host.enable_linux_execution(config(None)).unwrap();

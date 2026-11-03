@@ -38,7 +38,11 @@ if a previous caller received a handle. It is never relaunched on replay.
 
 Every status request has its own task/effect identity. Replaying one returns the
 same historical observation, even after cancellation. A new observation requires
-a new identity. The final-result summary includes the retained receipt hash,
+a new identity. A fresh status also detects an entered/released start with no
+live Host supervisor and no final receipt, records it as uncertain, and blocks
+new work—even when the caller retained the handle and never replayed start or
+called recovery. Status only observes cgroup quiescence; it does not kill the
+process or infer a successful exit from an empty cgroup. The final-result summary includes the retained receipt hash,
 disposition, exit code, and at most 2 KiB of UTF-8 per output stream, with explicit
 truncation flags. The complete original receipt stays in the Rust ledger. This
 bound leaves room for JSON escaping within the existing 64 KiB bridge frame.

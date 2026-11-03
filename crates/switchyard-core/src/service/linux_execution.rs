@@ -569,7 +569,24 @@ mod os {
         ) -> Result<()> {
             let start = self.matching_start(request, start_id, start_hash)?;
             self.poll_active(start_id)?;
-            let start = self.store.linux_effect(start_id)?.unwrap_or(start);
+            let mut start = self.store.linux_effect(start_id)?.unwrap_or(start);
+            // A durable handle may outlive its Host, so a new status can be the
+            // first request after restart (without replaying start or recover).
+            // Observe uncertainty without turning a status request into a kill.
+            let supervised = self
+                .linux
+                .as_ref()
+                .is_some_and(|session| session.active.contains_key(start_id));
+            if !supervised
+                && blocking(&start.state)
+                && (start.released_at.is_some() || start.entered_at.is_some())
+                && start.receipt_json.is_none()
+            {
+                self.store.quarantine_linux(start_id)?;
+                let mission = self.store.load_mission(&start.mission_id)?;
+                self.flag_linux_attention(&mission)?;
+                start = self.store.linux_effect(start_id)?.ok_or(Error::NotFound)?;
+            }
             let quiescence = self
                 .inspect_effect(&start, false)
                 .unwrap_or_else(|_| quiescence_document(false, "unproven", None, "", None));
@@ -1637,6 +1654,170 @@ mod os {
             .collect::<Vec<_>>();
         names.sort();
         assert_eq!(names, vec!["cgroup.events".to_string()]);
+    }
+
+    #[cfg(feature = "pi-contract")]
+    #[test]
+    fn pi_linux_fresh_status_quarantines_orphan_without_rewriting_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        for args in [
+            &["init", "--initial-branch=main"][..],
+            &["config", "user.email", "test@example.com"],
+            &["config", "user.name", "Test"],
+            &["commit", "--allow-empty", "-m", "base"],
+        ] {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let db = dir.path().join("mission.sqlite");
+        let mut host = Host::open(&db).unwrap();
+        let created = host
+            .create_mission(CreateMission {
+                repo,
+                issue_number: 97,
+                issue_title: "process guard".into(),
+                objective: "refuse".into(),
+                acceptance: "no kill".into(),
+                actor: "operator".into(),
+                max_repairs: 1,
+                max_plan_revisions: 1,
+            })
+            .unwrap();
+        let workspaces = dir.path().join("workspaces");
+        fs::create_dir(&workspaces).unwrap();
+        host.prepare_workspace(&created.mission_id, &created.attempt_id, &workspaces)
+            .unwrap();
+        let admit = |host: &mut Host, body: crate::CommandBody| {
+            let revision = host.snapshot(&created.mission_id).unwrap().revision;
+            host.admit(AdmitRequest {
+                command_id: None,
+                mission_id: created.mission_id.clone(),
+                attempt_id: None,
+                expected_revision: revision,
+                actor: "operator".into(),
+                origin: CommandOrigin::Operator,
+                body,
+            })
+            .unwrap();
+        };
+        admit(&mut host, crate::CommandBody::StartPlanning);
+        host.dispatch_pending(&created.mission_id).unwrap();
+        let digest = crate::policy::plan_digest_for("plan").unwrap();
+        host.apply_notification(
+            &created.mission_id,
+            RuntimeNotification::PlanCompleted {
+                plan: "plan".into(),
+                digest: digest.clone(),
+                quiescent: true,
+            },
+        )
+        .unwrap();
+        admit(
+            &mut host,
+            crate::CommandBody::ApprovePlan {
+                plan_digest: digest,
+            },
+        );
+        let mission = host.store.load_mission(&created.mission_id).unwrap();
+        assert_eq!(mission.phase, Phase::Implementing);
+        let binding = host.binding(&mission);
+
+        let operation = LinuxOperation::ExecStart {
+            argv: vec!["/bin/true".into()],
+        };
+        let start = LinuxExecutionRequest {
+            binding: binding.clone(),
+            tool_task_id: "start".into(),
+            effect_key: "start".into(),
+            capability_scope: operation.scope().into(),
+            deadline_ms: crate::domain::now_ms() + 5000,
+            operation,
+        };
+        let start_id = start.operation_id().unwrap();
+        host.store.prepare_linux(&start, None).unwrap();
+        rusqlite::Connection::open(&db).unwrap().execute(
+            "UPDATE linux_execution_effects SET state='running', released_at=1, entered_at=1 WHERE operation_id=?1",
+            [&start_id],
+        ).unwrap();
+        let operation = LinuxOperation::ExecStatus {
+            start_operation_id: start_id.clone(),
+            start_payload_hash: start.payload_hash().unwrap(),
+        };
+        let historical = LinuxExecutionRequest {
+            binding: binding.clone(),
+            tool_task_id: "observer".into(),
+            effect_key: "before".into(),
+            capability_scope: operation.scope().into(),
+            deadline_ms: start.deadline_ms,
+            operation,
+        };
+        let row = host.store.linux_effect(&start_id).unwrap().unwrap();
+        let receipt = observation_receipt(&historical, &row, &json!({"proven":false}));
+        host.store.prepare_linux(&historical, None).unwrap();
+        host.store
+            .complete_linux(&historical, &receipt, &json!({"proven":true}))
+            .unwrap();
+        drop(host);
+
+        let mut host = Host::open(&db).unwrap();
+        let mut binding = binding;
+        binding.generation = host.generation();
+        // Deliberately unusable executables: status must never relaunch or kill.
+        host.linux = Some(LinuxSession::new(LinuxExecutionConfig {
+            cgroup_root: dir.path().into(),
+            bubblewrap: "/nonexistent-bwrap".into(),
+            helper: "/nonexistent-helper".into(),
+            crash_at: None,
+            probe_request: None,
+            fail_launch: false,
+        }));
+        let payload = json!({"method":"process.status","startOperationId":start_id,
+            "startPayloadHash":start.payload_hash().unwrap(),"capability":"workspace-process","deadlinePolicy":"attempt-bound"});
+        let frame = |key: &str| {
+            json!({"operationId":operation_id(&binding.attempt_id,&binding.session_id,"observer",key).unwrap(),
+            "taskId":"observer","effectKey":key,"payloadHash":payload_hash(&payload).unwrap(),"payload":payload})
+        };
+        // Historical replay alone must neither reconcile the target nor change its receipt.
+        assert_eq!(
+            host.execute_pi_linux_process(&binding, &frame("before"), 0),
+            crate::PiEffectOutcome::Completed(receipt.clone())
+        );
+        assert_eq!(
+            host.store.linux_effect(&start_id).unwrap().unwrap().state,
+            "running"
+        );
+        for key in ["after", "later"] {
+            let out = host.execute_pi_linux_process(
+                &binding,
+                &frame(key),
+                crate::domain::now_ms() + 5000,
+            );
+            let crate::PiEffectOutcome::Completed(observed) = out else {
+                panic!("{out:?}")
+            };
+            assert_eq!(observed["startState"], "uncertain");
+            assert_eq!(observed["startReceiptRetained"], false);
+            assert_eq!(observed["startResult"], Value::Null);
+            assert_eq!(observed["quiescence"]["proven"], false);
+        }
+        let snapshot = host.snapshot(&binding.mission_id).unwrap();
+        assert_eq!(snapshot.phase, Phase::NeedsAttention);
+        assert!(snapshot.execution_blocked);
+        assert_eq!(
+            host.execute_pi_linux_process(&binding, &frame("before"), 0),
+            crate::PiEffectOutcome::Completed(receipt)
+        );
     }
 
     fn captured_receipt(
