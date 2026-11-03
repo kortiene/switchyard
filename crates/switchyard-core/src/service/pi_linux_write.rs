@@ -1,4 +1,4 @@
-//! S3-B2: the only Pi-to-Linux operation currently admitted is a file write.
+//! Shared Pi-to-Linux admission/replay rules, and the S3-B2 file-write mapper.
 //! The caller owns bridge confinement and supplies the authenticated binding
 //! and absolute deadline. Neither is taken from model-controlled parameters.
 use super::*;
@@ -19,15 +19,14 @@ impl Host {
         params: &Value,
         deadline_ms: i64,
     ) -> PiEffectOutcome {
-        self.pi_linux_write(binding, params, deadline_ms)
+        self.pi_linux_effect(binding, parse_write(binding, params, deadline_ms))
             .unwrap_or(PiEffectOutcome::Uncertain)
     }
 
-    fn pi_linux_write(
+    pub(super) fn pi_linux_effect(
         &mut self,
         binding: &RuntimeBinding,
-        params: &Value,
-        deadline_ms: i64,
+        parsed: Result<LinuxExecutionRequest>,
     ) -> Result<PiEffectOutcome> {
         if let Err(error) = self.accept_runtime_binding(binding, &binding.mission_id) {
             return match error {
@@ -37,7 +36,7 @@ impl Host {
                 _ => Err(error),
             };
         }
-        let mut request = match parse_write(binding, params, deadline_ms) {
+        let mut request = match parsed {
             Ok(request) => request,
             Err(_) => return Ok(PiEffectOutcome::Rejected),
         };
@@ -93,10 +92,13 @@ impl Host {
         // After entering the backend, a generic error is never a rejection.
         // Only this backend's durable evidence may settle the outcome.
         let _result = self.execute_linux_operation(&request);
-        self.pi_linux_write_outcome(&request)
+        self.pi_linux_outcome(&request)
     }
 
-    fn pi_linux_write_outcome(&self, request: &LinuxExecutionRequest) -> Result<PiEffectOutcome> {
+    pub(super) fn pi_linux_outcome(
+        &self,
+        request: &LinuxExecutionRequest,
+    ) -> Result<PiEffectOutcome> {
         self.accept_runtime_binding(&request.binding, &request.binding.mission_id)?;
         let id = request.operation_id()?;
         let hash = request.payload_hash()?;
@@ -132,7 +134,22 @@ impl Host {
                 {
                     return Ok(PiEffectOutcome::Uncertain);
                 }
+                if matches!(request.operation, LinuxOperation::ExecStart { .. }) {
+                    return Ok(PiEffectOutcome::Completed(process_handle(&id, &hash)));
+                }
                 Ok(PiEffectOutcome::Completed(receipt))
+            }
+            "running"
+                if matches!(request.operation, LinuxOperation::ExecStart { .. })
+                    && effect.entered_at.is_some()
+                    && effect.released_at.is_some()
+                    && effect.started_generation == request.binding.generation
+                    && self.linux_operation_live(&id) =>
+            {
+                // This acknowledges the start request only. The immutable
+                // identity/hash come from the committed Linux intent. Exit
+                // status/output require a separate, durable status operation.
+                Ok(PiEffectOutcome::Completed(process_handle(&id, &hash)))
             }
             "not_applied" => Ok(PiEffectOutcome::Rejected),
             _ => Ok(PiEffectOutcome::Uncertain),
@@ -140,20 +157,20 @@ impl Host {
     }
 }
 
-fn keys(value: &Value, expected: &[&str]) -> Result<()> {
+pub(super) fn keys(value: &Value, expected: &[&str]) -> Result<()> {
     let object = value
         .as_object()
         .ok_or_else(|| Error::guard("expected an object"))?;
     if object.len() != expected.len() || expected.iter().any(|key| !object.contains_key(*key)) {
-        return Err(Error::guard("unexpected Pi write fields"));
+        return Err(Error::guard("unexpected Pi effect fields"));
     }
     Ok(())
 }
 
-fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
+pub(super) fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value[key]
         .as_str()
-        .ok_or_else(|| Error::guard("expected a Pi write string"))
+        .ok_or_else(|| Error::guard("expected a Pi effect string"))
 }
 
 fn parse_write(
@@ -204,3 +221,11 @@ fn parse_write(
 
 #[cfg(test)]
 mod tests;
+
+/// Deterministic projection of an acknowledged Linux start intent. Never an
+/// exit receipt or permission to rerun. The same handle survives completion.
+fn process_handle(id: &str, hash: &str) -> Value {
+    json!({"kind":"process-handle", "operationId":id, "payloadHash":hash,
+        "backend":BUBBLEWRAP_BACKEND, "simulated":false, "disposition":"accepted",
+        "startOperationId":id, "startPayloadHash":hash})
+}

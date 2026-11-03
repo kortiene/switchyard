@@ -201,6 +201,13 @@ mod os {
             Ok(())
         }
 
+        #[cfg(feature = "pi-contract")]
+        pub(in crate::service) fn linux_operation_live(&self, id: &str) -> bool {
+            self.linux
+                .as_ref()
+                .is_some_and(|s| s.active.contains_key(id))
+        }
+
         pub fn execute_linux_operation(
             &mut self,
             request: &LinuxExecutionRequest,
@@ -884,6 +891,15 @@ mod os {
             start_hash: &str,
         ) -> Result<crate::persistence::linux_execution::LinuxEffectRecord> {
             let start = self.store.linux_effect(start_id)?.ok_or(Error::NotFound)?;
+            let intent: Value =
+                serde_json::from_str(&start.request_json).map_err(Error::storage)?;
+            if intent["operation"]["method"] != "exec_start"
+                || self.store.operation_superseded(start_id)?
+            {
+                return Err(Error::guard(
+                    "status/cancel requires a non-superseded process start",
+                ));
+            }
             if start.mission_id != request.binding.mission_id
                 || start.attempt_id != request.binding.attempt_id
                 || start.session_id != request.binding.session_id
@@ -1341,8 +1357,44 @@ mod os {
             "startState": start.state,
             "startEntered": start.entered_at.is_some(),
             "startReceiptRetained": start.receipt_json.is_some(),
+            "startResult": start.receipt_json.as_deref().and_then(process_result),
             "quiescence": quiescence,
         })
+    }
+
+    // Keep an observation safely below the 64 KiB bridge frame even when
+    // both streams contain control characters that expand during JSON encoding.
+    fn process_result(text: &str) -> Option<Value> {
+        let receipt: Value = serde_json::from_str(text).ok()?;
+        let result = &receipt["result"];
+        let bounded = |key: &str| {
+            let value = result[key].as_str().unwrap_or("");
+            let mut end = value.len().min(2048);
+            while !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            (value[..end].to_string(), end < value.len())
+        };
+        let (stdout, stdout_cut) = bounded("stdout");
+        let (stderr, stderr_cut) = bounded("stderr");
+        Some(json!({"receiptHash": payload_hash(&receipt).ok()?,
+            "disposition":receipt["disposition"], "exitCode":result["exitCode"],
+            "stdout":stdout, "stderr":stderr,
+            "stdoutTruncated":stdout_cut || result["stdoutTruncated"] == true,
+            "stderrTruncated":stderr_cut || result["stderrTruncated"] == true}))
+    }
+
+    #[test]
+    fn process_observation_bounds_utf8_and_json_expansion() {
+        let receipt = json!({"disposition":"exited","result":{"exitCode":3,
+            "stdout": "é".repeat(4000), "stderr": "\u{0}".repeat(4000)}});
+        let result = process_result(&receipt.to_string()).unwrap();
+        assert_eq!(result["stdout"].as_str().unwrap().len(), 2048);
+        assert_eq!(result["stderr"].as_str().unwrap().len(), 2048);
+        assert_eq!(result["stdoutTruncated"], true);
+        assert_eq!(result["stderrTruncated"], true);
+        assert_eq!(result["receiptHash"], payload_hash(&receipt).unwrap());
+        assert!(serde_json::to_vec(&result).unwrap().len() < 32 * 1024);
     }
 
     fn captured_receipt(

@@ -190,5 +190,13 @@ The [file-write integration](s3-pi-linux-write.md) maps the bundled Pi forwarder
 to the public Rust Linux execution API and composes both real confinement
 boundaries in credential-free tests. Stable receipt replay, frozen deadlines,
 host-kill recovery and explicit uncertainty are covered. Product Pi mission
-dispatch, process forwarding, production supervision and full S3 acceptance
+dispatch, production supervision and full S3 acceptance
 remain separate; FakeRuntime stays the default.
+
+### S3-B3 process handles and stop delivery
+
+The [process integration](s3-pi-linux-process.md) maps bundled start/status/cancel
+tools to the Linux ledger and exercises both confinement boundaries, descendant
+termination and host-crash replay. Credential-free Host/Pi abort delivery also
+bypasses blocked workspaces. These remain explicit test seams; production
+Host/Pi/Linux dispatch, bridge supervision and model-only egress remain under S3.

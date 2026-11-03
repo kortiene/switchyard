@@ -26,6 +26,12 @@ mod linux_execution;
     feature = "linux-execution",
     target_os = "linux"
 ))]
+mod pi_linux_process;
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
 mod pi_linux_write;
 mod workspace;
 
@@ -635,10 +641,13 @@ impl Host {
         }
     }
 
-    /// Deliver only already-admitted FakeRuntime Pause/Cancel commands. This
-    /// does not inspect or mutate a workspace, apply effects, or complete a stop.
-    /// Pi stop delivery remains behind its existing S2/Track B contract.
+    /// Deliver already-admitted Pause/Cancel without workspace readiness.
+    /// Pi sessions open inert and reconcile their original abort before retry.
+    /// Delivery never resumes work or certifies mission/writer quiescence.
     pub fn dispatch_stops(&mut self, mission_id: &str) -> Result<usize> {
+        let mission = self.store.load_mission(mission_id)?;
+        let binding = self.binding(&mission);
+        self.accept_runtime_binding(&binding, mission_id)?;
         let pending = self.store.list_commands(mission_id)?;
         let stop_admitted = pending.iter().any(|command| {
             command.state == CommandState::Pending
@@ -650,12 +659,44 @@ impl Host {
             self.terminate_linux_writers(mission_id)?;
         }
         self.reconcile_execution(mission_id)?;
-        if !matches!(self.runtime, RuntimeAdapter::Fake(_)) {
+        if !stop_admitted {
             return Ok(0);
         }
-        let mission = self.store.load_mission(mission_id)?;
-        let binding = self.binding(&mission);
-        self.accept_runtime_binding(&binding, mission_id)?;
+        #[cfg(feature = "pi-contract")]
+        if let RuntimeAdapter::Pi(runtime) = &mut self.runtime {
+            if runtime.was_closed(&binding) {
+                // Leave the stop pending. Normal dispatch still supersedes
+                // closed-phase work and supplies the existing restart guidance.
+                return Ok(0);
+            }
+            let initialized = self.store.runtime_initialized(&mission.attempt.id)?;
+            runtime.open(&binding, initialized)?;
+            if !initialized {
+                self.store.mark_runtime_initialized(&mission.attempt.id)?;
+            }
+            // Open is inert. Never resume old work to deliver cancellation.
+            // Verify acknowledged history before modifying this session.
+            if runtime.needs_resume(&binding) {
+                let acknowledged = pending
+                    .iter()
+                    .filter(|c| c.state == CommandState::Acknowledged && c.kind.is_runtime_bound())
+                    .map(|c| {
+                        Ok(crate::execution::AcknowledgedCheck {
+                            request: RuntimeRequest {
+                                binding: binding.clone(),
+                                request_id: c.request_id.clone(),
+                                payload_hash: c.payload_hash.clone(),
+                                method: runtime_method(c.kind),
+                            },
+                            payload: serde_json::from_str(&c.payload_canonical)
+                                .map_err(Error::storage)?,
+                            recorded: c.runtime_receipt_json.clone(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                runtime.require_acknowledged_batch(&acknowledged)?;
+            }
+        }
         let pending = self.store.list_commands(mission_id)?;
         let mut dispatched = 0;
         for command in pending.iter().filter(|command| {
@@ -681,7 +722,22 @@ impl Host {
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
             // FakeRuntime's idempotent abort validates stored identity, method
             // and payload on replay, returning the original durable receipt.
-            let receipt = self.runtime.dispatch(&request, &payload)?;
+            self.runtime.validate_command(&request, &payload)?;
+            // FakeRuntime abort validates its own original receipt. Pi must
+            // inspect first: replaying a settled abort must not cancel later work.
+            #[cfg(feature = "pi-contract")]
+            let reconciled = if matches!(self.runtime, RuntimeAdapter::Pi(_)) {
+                self.runtime.reconcile(&request, &payload)?
+            } else {
+                None
+            };
+            #[cfg(not(feature = "pi-contract"))]
+            let reconciled: Option<RuntimeReceipt> = None;
+            let receipt = match reconciled {
+                Some(receipt) => receipt,
+                None => self.runtime.dispatch(&request, &payload)?,
+            };
+            self.accept_runtime_binding(&binding, mission_id)?;
             self.store
                 .acknowledge(&command.id, &receipt_json(&receipt, self.runtime.name()))?;
             dispatched += 1;
@@ -920,7 +976,7 @@ impl Host {
 
     /// Reconcile one workspace, deliver pending commands, poll observations,
     /// and return a snapshot. An uncertain, busy, or transient workspace
-    /// failure permits FakeRuntime stop delivery, polling and the snapshot;
+    /// failure permits stop delivery, polling and the snapshot;
     /// that failure is returned after those steps. Stale generation and other
     /// host-level failures abort before either runs.
     pub fn recover(&mut self, mission_id: &str) -> Result<MissionSnapshot> {

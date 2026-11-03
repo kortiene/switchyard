@@ -48,6 +48,9 @@ SWITCHYARD_CREDENTIAL_SENTINEL=host-only-fixture cargo test -p switchyard-confin
 # compile this Linux-specific path. Missing cgroups/namespace support still fails.
 cargo build -p switchyard --bin switchyard-execution-helper --features linux-execution --locked
 export SWITCHYARD_EXECUTION_HELPER="$PWD/target/debug/switchyard-execution-helper"
-cargo clippy -p switchyard-confinement-probe --all-targets --features pi-linux-write --locked -- -D warnings
-cargo test -p switchyard-core --features 'pi-contract linux-execution' pi_linux_write --locked -- --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/pi-linux-mapper.log"
+cargo clippy -p switchyard-confinement-probe --all-targets --features pi-linux-process --locked -- -D warnings
+cargo test -p switchyard-core --features 'pi-contract linux-execution' pi_linux_ --locked -- --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/pi-linux-mapper.log"
 cargo test -p switchyard-confinement-probe --test pi_linux_write --features pi-linux-write --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/pi-linux-write.log"
+
+# S3-B3: process handles/status/cancel, operator stops, and process crash replay.
+cargo test -p switchyard-confinement-probe --test pi_linux_process --features pi-linux-process --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/pi-linux-process.log"

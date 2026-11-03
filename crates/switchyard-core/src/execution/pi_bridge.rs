@@ -136,6 +136,10 @@ impl PiBridge {
             fixture,
             "answer"
                 | "file-write"
+                | "process-fast"
+                | "process-wait"
+                | "process-hold"
+                | "process-cancel"
                 | "tools"
                 | "gated-tools"
                 | "recover"

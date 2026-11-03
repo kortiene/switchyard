@@ -11,6 +11,7 @@ description = "Test-only S3-A3 Linux confinement probe; not an ExecutionEnv back
 linux-confinement = []
 bridge-confinement = ["linux-confinement", "dep:switchyard-core"]
 pi-linux-write = ["bridge-confinement", "switchyard-core/linux-execution"]
+pi-linux-process = ["pi-linux-write"]
 
 [dependencies]
 serde_json = "1"
@@ -39,3 +40,8 @@ required-features = ["pi-linux-write"]
 name = "confinement"
 path = "tests/confinement.rs"
 required-features = ["linux-confinement"]
+
+[[test]]
+name = "pi_linux_process"
+path = "tests/pi_linux_process.rs"
+required-features = ["pi-linux-process"]
