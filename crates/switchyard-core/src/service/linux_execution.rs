@@ -1397,6 +1397,248 @@ mod os {
         assert!(serde_json::to_vec(&result).unwrap().len() < 32 * 1024);
     }
 
+    #[test]
+    fn pi_linux_status_refuses_a_file_write_start() {
+        assert_status_or_cancel_refused(false, false);
+    }
+
+    #[test]
+    fn pi_linux_cancel_refuses_a_file_write_start() {
+        assert_status_or_cancel_refused(true, false);
+    }
+
+    #[test]
+    fn pi_linux_status_refuses_a_superseded_start() {
+        assert_status_or_cancel_refused(false, true);
+    }
+
+    #[test]
+    fn pi_linux_cancel_refuses_a_superseded_start() {
+        assert_status_or_cancel_refused(true, true);
+    }
+
+    /// Status and cancel must refuse a file write or a superseded start before
+    /// any cgroup kill or a new effect row. The leaf is populated so a cancel
+    /// that skipped the `matching_start` guard would write `cgroup.kill`.
+    #[cfg(test)]
+    fn assert_status_or_cancel_refused(cancel: bool, superseded: bool) {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        for args in [
+            &["init", "--initial-branch=main"][..],
+            &["config", "user.email", "test@example.com"],
+            &["config", "user.name", "Test"],
+            &["commit", "--allow-empty", "-m", "base"],
+        ] {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let db = dir.path().join("mission.sqlite");
+        let mut host = Host::open(&db).unwrap();
+        let created = host
+            .create_mission(CreateMission {
+                repo,
+                issue_number: 97,
+                issue_title: "process guard".into(),
+                objective: "refuse".into(),
+                acceptance: "no kill".into(),
+                actor: "operator".into(),
+                max_repairs: 1,
+                max_plan_revisions: 1,
+            })
+            .unwrap();
+        let workspaces = dir.path().join("workspaces");
+        fs::create_dir(&workspaces).unwrap();
+        host.prepare_workspace(&created.mission_id, &created.attempt_id, &workspaces)
+            .unwrap();
+        let admit = |host: &mut Host, body: crate::CommandBody| {
+            let revision = host.snapshot(&created.mission_id).unwrap().revision;
+            host.admit(AdmitRequest {
+                command_id: None,
+                mission_id: created.mission_id.clone(),
+                attempt_id: None,
+                expected_revision: revision,
+                actor: "operator".into(),
+                origin: CommandOrigin::Operator,
+                body,
+            })
+            .unwrap();
+        };
+        admit(&mut host, crate::CommandBody::StartPlanning);
+        host.dispatch_pending(&created.mission_id).unwrap();
+        let digest = crate::policy::plan_digest_for("plan").unwrap();
+        host.apply_notification(
+            &created.mission_id,
+            RuntimeNotification::PlanCompleted {
+                plan: "plan".into(),
+                digest: digest.clone(),
+                quiescent: true,
+            },
+        )
+        .unwrap();
+        admit(
+            &mut host,
+            crate::CommandBody::ApprovePlan {
+                plan_digest: digest,
+            },
+        );
+        let mission = host.store.load_mission(&created.mission_id).unwrap();
+        assert_eq!(mission.phase, Phase::Implementing);
+        let binding = host.binding(&mission);
+
+        let root = dir.path().join("cgroup");
+        let leaf = root.join("leaf");
+        fs::create_dir_all(&leaf).unwrap();
+        fs::write(leaf.join("cgroup.events"), "populated 1\n").unwrap();
+        let leaf = fs::canonicalize(&leaf).unwrap();
+        let meta = fs::metadata(&leaf).unwrap();
+        let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+        let start_id = "op-v1:guard-target";
+        let start_hash = "sha256:guard-target";
+        let operation = if superseded {
+            json!({"method":"exec_start","argv":["/bin/echo","hello"]})
+        } else {
+            json!({"method":"write_file","path":"out.txt","content":"once"})
+        };
+        let scope = if superseded {
+            crate::linux_execution::EXEC_START_SCOPE
+        } else {
+            crate::linux_execution::WRITE_SCOPE
+        };
+        let request_json = json!({
+            "operation": operation,
+            "scope": scope,
+            "deadlineMs": 1,
+            "toolTaskId": "task",
+            "effectKey": "target"
+        });
+        let inserted = rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO linux_execution_effects(
+                    operation_id, mission_id, attempt_id, session_id, payload_hash, request_json,
+                    started_generation, state, cgroup_path, cgroup_dev, cgroup_ino, boot_id,
+                    entered_at, created_at
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,'running',?8,?9,?10,?11,1,1)",
+                rusqlite::params![
+                    start_id,
+                    binding.mission_id,
+                    binding.attempt_id,
+                    binding.session_id,
+                    start_hash,
+                    request_json.to_string(),
+                    i64::try_from(binding.generation).unwrap(),
+                    leaf.to_str().unwrap(),
+                    i64::try_from(meta.dev()).unwrap(),
+                    i64::try_from(meta.ino()).unwrap(),
+                    boot_id.trim(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(inserted, 1);
+        if superseded {
+            let inserted = rusqlite::Connection::open(&db)
+                .unwrap()
+                .execute(
+                    "INSERT INTO execution_supersessions(
+                        command_id, operation_id, journal, abandonment_command_id,
+                        request_hash, audit_json
+                     ) VALUES ('supersede-target', ?1, 'linux', 'abandon-target', 'sha256:supersede', '{}')",
+                    [start_id],
+                )
+                .unwrap();
+            assert_eq!(inserted, 1);
+        }
+        assert_eq!(
+            host.store.operation_superseded(start_id).unwrap(),
+            superseded
+        );
+        let recorded = host
+            .store
+            .linux_views(&binding.mission_id)
+            .unwrap()
+            .into_iter()
+            .find(|view| view.operation_id == start_id)
+            .unwrap();
+        assert_eq!(
+            recorded.method,
+            if superseded {
+                "exec_start"
+            } else {
+                "write_file"
+            }
+        );
+        assert_eq!(recorded.superseded, superseded);
+        assert_eq!(recorded.state, "running");
+
+        // The guard returns before this root is used. It is installed so a
+        // removed guard would kill this populated leaf instead of refusing.
+        host.linux = Some(LinuxSession::new(LinuxExecutionConfig {
+            cgroup_root: fs::canonicalize(&root).unwrap(),
+            bubblewrap: PathBuf::from("/nonexistent-bwrap"),
+            helper: PathBuf::from("/nonexistent-helper"),
+            crash_at: None,
+            probe_request: None,
+            fail_launch: false,
+        }));
+        let probe = if cancel {
+            LinuxOperation::ExecCancel {
+                start_operation_id: start_id.to_string(),
+                start_payload_hash: start_hash.to_string(),
+            }
+        } else {
+            LinuxOperation::ExecStatus {
+                start_operation_id: start_id.to_string(),
+                start_payload_hash: start_hash.to_string(),
+            }
+        };
+        let request = LinuxExecutionRequest {
+            binding,
+            tool_task_id: "task".into(),
+            effect_key: if cancel { "cancel" } else { "status" }.into(),
+            capability_scope: probe.scope().into(),
+            deadline_ms: crate::domain::now_ms() + 5_000,
+            operation: probe,
+        };
+        let probe_id = request.operation_id().unwrap();
+        let error = host.execute_linux_operation(&request).unwrap_err();
+        assert_eq!(error.category(), "guard_failed", "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("status/cancel requires a non-superseded process start"),
+            "{error}"
+        );
+        assert!(host.store.linux_effect(&probe_id).unwrap().is_none());
+        let start = host.store.linux_effect(start_id).unwrap().unwrap();
+        assert_eq!(start.state, "running");
+        assert!(start.receipt_json.is_none());
+        assert!(start.quiescence_json.is_none());
+        assert!(!leaf.join("cgroup.kill").exists());
+        assert_eq!(
+            fs::read_to_string(leaf.join("cgroup.events")).unwrap(),
+            "populated 1\n"
+        );
+        let mut names = fs::read_dir(&leaf)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, vec!["cgroup.events".to_string()]);
+    }
+
     fn captured_receipt(
         id: &str,
         hash: &str,

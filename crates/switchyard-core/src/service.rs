@@ -748,6 +748,9 @@ impl Host {
     /// Dispatch pending commands without verifying the workspace again.
     /// The caller must already have reconciled it in this owner generation.
     pub fn dispatch_reconciled(&mut self, mission_id: &str) -> Result<usize> {
+        // Stops run first. A Pi abort refused with `stopping` or rejected
+        // returns from here and does not reach `reject_pending` for that
+        // Pause/Cancel. Failing closed is intentional.
         let stops_dispatched = self.dispatch_stops(mission_id)?;
         let mission = self.store.load_mission(mission_id)?;
         self.store.require_workspace_ready(&mission.attempt.id)?;
