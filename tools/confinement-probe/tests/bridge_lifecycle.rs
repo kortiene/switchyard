@@ -1,12 +1,19 @@
 //! S3-B4 public lifecycle API against the real source-built Pi bridge.
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use switchyard_core::{ConfinedPiConfig, ConfinedPiSession, PiEffectOutcome, RuntimeBinding};
+
+fn private_root() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    root
+}
 
 fn path(name: &str) -> PathBuf {
     std::env::var_os(name)
@@ -80,7 +87,7 @@ fn retain(name: &str, value: &Value) {
 
 #[test]
 fn confined_lifecycle_replays_receipt_with_limits_and_generation_fences() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = private_root();
     let config = config(tmp.path());
     let mut first = ConfinedPiSession::open(&config, binding(1), "answer").unwrap();
     let record = first.lifecycle();
@@ -136,7 +143,7 @@ fn confined_lifecycle_replays_receipt_with_limits_and_generation_fences() {
 
 #[test]
 fn confined_lifecycle_kills_hung_bridge_before_inert_reopen() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = private_root();
     let config = config(tmp.path());
     let mut first = ConfinedPiSession::open(&config, binding(1), "ignore-abort").unwrap();
     submit(&mut first);
@@ -179,7 +186,7 @@ fn confined_lifecycle_kills_hung_bridge_before_inert_reopen() {
 
 #[test]
 fn confined_lifecycle_host_loss_recovers_original_session() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = private_root();
     let mut worker = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "bridge_lifecycle_crash_worker", "--nocapture"])
         .env("SWITCHYARD_LIFECYCLE_WORKER", tmp.path())
@@ -243,7 +250,7 @@ fn bridge_lifecycle_crash_worker() {
 
 #[test]
 fn confined_lifecycle_rejects_missing_storage_and_replaced_cgroup() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = private_root();
     let config = config(tmp.path());
     let mut session = ConfinedPiSession::open(&config, binding(1), "answer").unwrap();
     session.stop().unwrap();
@@ -254,12 +261,16 @@ fn confined_lifecycle_rejects_missing_storage_and_replaced_cgroup() {
         .unwrap()
         .unwrap()
         .path();
+    let path = dir.join("current.json");
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    // Simulate another owner dying during preparation of a recovered session.
+    record["phase"] = json!("prepared");
+    assert_eq!(record["requiresExisting"], true);
+    fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
     let database = dir.join("state/session.sqlite");
     fs::rename(&database, dir.join("retained.sqlite")).unwrap();
     assert!(ConfinedPiSession::open(&config, binding(2), "recover").is_err());
     fs::rename(dir.join("retained.sqlite"), &database).unwrap();
-    let path = dir.join("current.json");
-    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     record["cgroup"]["ino"] = json!(record["cgroup"]["ino"].as_u64().unwrap() + 1);
     fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
     assert!(ConfinedPiSession::open(&config, binding(2), "recover").is_err());
@@ -268,7 +279,7 @@ fn confined_lifecycle_rejects_missing_storage_and_replaced_cgroup() {
 #[test]
 fn confined_launcher_cannot_self_join_or_launch_without_release() {
     for release in [false, true] {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = private_root();
         fs::write(tmp.path().join("cgroup.procs"), "").unwrap();
         let marker = tmp.path().join("must-not-exist");
         let mut child = Command::new(path("SWITCHYARD_BRIDGE_LAUNCHER"))
@@ -293,7 +304,7 @@ fn confined_launcher_cannot_self_join_or_launch_without_release() {
 
 #[test]
 fn confined_lifecycle_wall_deadline_kills_idle_bridge() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = private_root();
     let mut session = ConfinedPiSession::open(&config(tmp.path()), binding(1), "answer").unwrap();
     let leaf = leaf(&session.lifecycle());
     assert!(
@@ -313,4 +324,30 @@ fn confined_lifecycle_wall_deadline_kills_idle_bridge() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(session.stop().unwrap()["proven"], true);
+}
+
+#[test]
+fn confined_lifecycle_invalid_policy_stops_before_sqlite() {
+    let tmp = private_root();
+    let install = tempfile::tempdir().unwrap();
+    let mut config = config(tmp.path());
+    config.policy = install.path().join("invalid.so");
+    fs::write(&config.policy, "not a shared library").unwrap();
+    let error = ConfinedPiSession::open(&config, binding(1), "answer")
+        .err()
+        .expect("an invalid policy must not start Pi");
+    assert!(
+        error.to_string().contains("bridge lockdown guard rejected startup"),
+        "{error}"
+    );
+    let directory = fs::read_dir(tmp.path())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(!directory.join("state/session.sqlite").exists());
+    let record: Value =
+        serde_json::from_slice(&fs::read(directory.join("current.json")).unwrap()).unwrap();
+    assert_eq!(record["termination"]["proven"], true);
 }

@@ -4,6 +4,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 #[test]
 fn confined_pi_storage_refuses_symlinks_hardlinks_and_shared_roots() {
     let tmp = tempfile::tempdir().unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let root = Directory::root(tmp.path()).unwrap();
     let sentinel = tmp.path().join("sentinel");
     fs::write(&sentinel, "unchanged").unwrap();
@@ -29,6 +30,7 @@ fn confined_pi_storage_refuses_symlinks_hardlinks_and_shared_roots() {
 #[test]
 fn confined_pi_storage_lock_and_atomic_record_retain_identity() {
     let tmp = tempfile::tempdir().unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let root = Directory::root(tmp.path()).unwrap();
     let lock = try_acquire_file(root.open_file("owner.lock", true).unwrap()).unwrap();
     assert!(try_acquire_file(root.open_file("owner.lock", true).unwrap()).is_err());

@@ -63,9 +63,14 @@ impl ConfinedPiSession {
             if previous["version"] != 1
                 || previous["identity"] != identity(&binding)
                 || previous["configuration"] != installed
+                || previous["requiresExisting"].as_bool().is_none()
+                || !matches!(
+                    previous["phase"].as_str(),
+                    Some("prepared" | "released" | "opened" | "stopped" | "uncertain")
+                )
                 || previous["generation"]
                     .as_u64()
-                    .is_none_or(|g| g >= binding.generation)
+                    .is_none_or(|g| g == 0 || g >= binding.generation)
             {
                 return Err(Error::guard(
                     "incompatible or stale confined bridge generation",
@@ -81,14 +86,21 @@ impl ConfinedPiSession {
                     proof.reason
                 )));
             }
-            require_existing = previous["phase"] != "prepared";
+            // A second crash during preparation must retain the original
+            // database requirement from an earlier generation.
+            require_existing =
+                previous["requiresExisting"] == true || previous["phase"] != "prepared";
             recovered = json!({"generation":previous["generation"],"cgroup":previous["cgroup"],
                 "proven":true,"events":proof.events});
             control.write(
                 &format!("recovered-{}.json", previous["generation"]),
                 &recovered,
             )?;
-        } else if state.exists("session.sqlite")? {
+        } else if fs::read_dir(&state.path)
+            .map_err(Error::storage)?
+            .next()
+            .is_some()
+        {
             return Err(Error::guard("unowned Pi storage cannot be adopted"));
         }
         state.inspect_state(require_existing)?;
@@ -96,7 +108,7 @@ impl ConfinedPiSession {
         let leaf =
             cgroup::create_bridge_leaf(&cgroup_root, &format!("bridge-{}", uuid::Uuid::new_v4()))?;
         let mut record = json!({"version":1,"identity":identity(&binding),"generation":binding.generation,
-            "configuration":installed,"phase":"prepared","recovered":recovered,
+            "configuration":installed,"phase":"prepared","recovered":recovered,"requiresExisting":require_existing,
             "cgroup":{"path":leaf.path,"dev":leaf.dev,"ino":leaf.ino,"boot":leaf.boot_id}});
         control.write("current.json", &record)?;
         let mut command = Command::new(&config.launcher);
@@ -157,6 +169,7 @@ impl ConfinedPiSession {
             return Err(Error::guard("confined bridge did not open inert"));
         }
         session.record["phase"] = json!("opened");
+        session.record["requiresExisting"] = json!(true);
         session.control.write("current.json", &session.record)?;
         Ok(session)
     }

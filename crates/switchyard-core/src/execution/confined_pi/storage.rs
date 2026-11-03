@@ -16,8 +16,8 @@ pub(super) struct Directory {
 
 impl Directory {
     pub fn root(path: &Path) -> Result<Self> {
-        if !path.is_absolute() {
-            return Err(Error::guard("bridge root must be absolute"));
+        if !path.is_absolute() || path.to_str().is_none() {
+            return Err(Error::guard("bridge root must be absolute UTF-8"));
         }
         let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let mut file = File::from(open("/", flags, Mode::empty()).map_err(Error::storage)?);

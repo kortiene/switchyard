@@ -19,15 +19,21 @@ pub(super) fn check(config: &ConfinedPiConfig) -> Result<Value> {
     if !cfg!(target_arch = "x86_64") {
         return Err(Error::guard("bridge policy requires Linux x86_64"));
     }
+    let prlimit = PathBuf::from("/usr/bin/prlimit");
     let mut files = Vec::new();
     for path in [
         &config.node,
         &config.bubblewrap,
         &config.launcher,
         &config.policy,
+        &prlimit,
     ] {
         let meta = fs::symlink_metadata(path).map_err(Error::storage)?;
-        if !path.is_absolute() || !meta.is_file() || meta.mode() & 0o6022 != 0 {
+        if !path.is_absolute()
+            || path.to_str().is_none()
+            || !meta.is_file()
+            || meta.mode() & 0o6022 != 0
+        {
             return Err(Error::guard(
                 "bridge runtime requires trusted absolute regular paths without setid/group/world writes",
             ));
@@ -37,6 +43,7 @@ pub(super) fn check(config: &ConfinedPiConfig) -> Result<Value> {
     for (path, expected) in [
         (&config.node, "v22.23.4\n"),
         (&config.bubblewrap, "bubblewrap 0.9.0\n"),
+        (&prlimit, "prlimit from util-linux 2.39.3\n"),
     ] {
         let output = Command::new(path)
             .arg("--version")

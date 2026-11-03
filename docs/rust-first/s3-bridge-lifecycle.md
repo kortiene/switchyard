@@ -20,7 +20,9 @@ Before recovery touches bridge data, the previous cgroup must be proven empty.
 State entries are inspected without following links; symlinks, hardlinks,
 special files and missing original storage block reopening. Evidence and
 uncertain storage are retained. The API never deletes or invents a Pi database
-to make recovery succeed.
+to make recovery succeed. The requirement to retain an existing database is
+persisted across repeated crashes, including a crash during preparation of a
+replacement generation.
 
 Generation must strictly increase on reopen. The stored mission, attempt,
 session, runtime/policy identity and cgroup identity must match. A stale or
