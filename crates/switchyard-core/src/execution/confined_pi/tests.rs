@@ -8,6 +8,8 @@ fn confined_pi_storage_refuses_symlinks_hardlinks_and_shared_roots() {
     let root = Directory::root(tmp.path()).unwrap();
     let sentinel = tmp.path().join("sentinel");
     fs::write(&sentinel, "unchanged").unwrap();
+    // Owner-only, so the hard link below is refused by nlink rather than mode.
+    fs::set_permissions(&sentinel, fs::Permissions::from_mode(0o600)).unwrap();
     symlink(&sentinel, tmp.path().join("owner.lock")).unwrap();
     assert!(root.open_file("owner.lock", true).is_err());
     fs::remove_file(tmp.path().join("owner.lock")).unwrap();
@@ -64,4 +66,35 @@ fn confined_pi_recovery_rejects_foreign_leaf_and_invalid_identity() {
     };
     assert!(validate(&binding, "eval").is_err());
     assert!(validate(&binding, "answer").is_ok());
+}
+
+#[test]
+fn confined_pi_proven_unopened_stop_does_not_require_existing_database() {
+    let row = |phase: &str, requires_existing: bool, proven: Option<bool>| {
+        let mut record = json!({"phase": phase, "requiresExisting": requires_existing});
+        if let Some(proven) = proven {
+            record["termination"] = json!({"proven": proven});
+        }
+        record
+    };
+    assert!(!require_existing_database(&row("prepared", false, None)));
+    assert!(require_existing_database(&row("prepared", true, None)));
+    assert!(require_existing_database(&row("released", false, None)));
+    assert!(require_existing_database(&row("opened", true, None)));
+    assert!(require_existing_database(&row(
+        "uncertain",
+        false,
+        Some(false)
+    )));
+    assert!(require_existing_database(&row(
+        "stopped",
+        false,
+        Some(false)
+    )));
+    assert!(require_existing_database(&row("stopped", true, Some(true))));
+    assert!(!require_existing_database(&row(
+        "stopped",
+        false,
+        Some(true)
+    )));
 }

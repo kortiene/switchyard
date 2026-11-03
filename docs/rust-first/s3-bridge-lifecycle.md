@@ -39,9 +39,11 @@ claim protection against a compromised Host or root administrator.
    boot identity; kill it and require `populated 0`; retain the proof.
 3. Inspect the original state, allocate a fresh limited cgroup, and durably
    record prepared intent.
-4. Spawn the trusted launcher, which waits on an unbuffered GO barrier. Record
-   its PID/start identity, move the unreaped child into the cgroup, and persist
-   released intent before sending GO.
+4. Spawn the trusted launcher on a supervisor thread owned by the session. The
+   launcher waits on an unbuffered GO barrier. Record its PID/start identity,
+   move the unreaped child into the cgroup, and persist released intent before
+   sending GO. That supervisor stays parked until `stop` has reaped the child,
+   so `open` may be called from a thread that ends before the session does.
 5. The launcher verifies membership and execs the fixed sandbox command. It
    never migrates itself, verifies the expected Host PID even under a subreaper,
    and requests SIGKILL on owner death. A missing GO or
@@ -49,11 +51,19 @@ claim protection against a compromised Host or root administrator.
 6. Rust negotiates the original protocol and requires an inert `runtime.open`.
    It does not resume pending tools as a side effect of recovery.
 
+Linux delivers `PR_SET_PDEATHSIG` when the thread that created the child exits.
+Bubblewrap `--die-with-parent` is the same `prctl` in the sandbox parent. The
+session supervisor is that thread, so the bridge follows the session rather
+than whichever thread happened to call `open`.
+
 Only the Host can migrate the launcher. After Host death, an unplaced child
 cannot enter a leaf after an empty-cgroup proof; a placed child and descendants
 are covered by cgroup termination. A crash after release intent but before Pi
-creates storage may conservatively block recovery on missing storage. No
-power-loss, reboot recovery or cross-host failover claim is made.
+creates storage may conservatively block recovery on missing storage. A proven
+`stopped` record that never reached `opened` (`requiresExisting` still false)
+accepted no command, so the next open may create storage. An unproven stop
+stays on the conservative path. No power-loss, reboot recovery or cross-host
+failover claim is made.
 
 ## Confinement and limits
 
@@ -63,6 +73,8 @@ closure, private writable state, and bounded temporary storage. Workspace,
 mission database, host control directory, credentials and sockets are absent.
 Networking and subprocess creation remain denied; Node threads are allowed.
 The guard rejects a missing/invalid native policy before Pi opens storage.
+`policy::source()` resolves that tree from `CARGO_MANIFEST_DIR` for this
+conformance entry point. Product wiring will need a real install location.
 
 The bridge gets its own cgroup: 256 MiB memory, no swap, 64 tasks and
 `cpu.max = 50000 100000`. Existing workspace execution limits are unchanged.
@@ -74,10 +86,15 @@ production agent budget. Requests retain the existing protocol timeout,
 frame limits, bounded diagnostics and typed effect outcomes.
 
 `stop()` reaps the direct child, kills the recorded leaf, requires empty
-membership, and persists termination evidence. Drop attempts the same cleanup;
-a failure leaves recovery blocking. Pi abort settlement is distinct from this
-bridge proof, and neither proves workspace effect success or mission completion.
-No lifecycle method is accepted from the public call facade.
+membership, and persists termination evidence. A later `stop()` returns that
+evidence and does not kill or rewrite it, so `Drop` cannot replace a proven
+stop with an uncertain one. `Drop` attempts the same cleanup; a failure leaves
+recovery blocking. Pi abort settlement is distinct from this bridge proof, and
+neither proves workspace effect success or mission completion. No lifecycle
+method is accepted from the public call facade.
+
+`bridge-<uuid>` cgroup leaves are not removed. Deleting them is a follow-up:
+it interacts with recovery that treats a missing leaf as an unproven stop.
 
 ## Validation and handoff
 
@@ -89,6 +106,8 @@ Missing platform/cgroup/namespace prerequisites fail; there is no fallback.
 Coverage includes storage-link attacks and exclusive locking; original receipt
 replay; stale generations; enforced cgroup settings; Host SIGKILL; a hung abort
 followed by inert recovery; missing original storage/replaced cgroup refusal;
+a proven stop before `runtime.open` followed by a successful reopen; an
+opened-then-stopped session that still requires its original database;
 no launch without GO and membership; and the real wall deadline. Existing B1
 negative boundary, B2 write, B3 process and S2 contract cases remain required.
 This does not claim exhaustive fault injection at every startup instruction.

@@ -40,6 +40,9 @@ pub struct ConfinedPiSession {
     record: Value,
     leaf: CgroupIdentity,
     watchdog: Option<(Sender<()>, JoinHandle<()>)>,
+    /// Owns the thread that spawned the launcher. Parent-death signals follow
+    /// that thread, so it stays alive until [`Self::stop`] has reaped the child.
+    launch_supervisor: Option<LaunchSupervisor>,
     stopped: bool,
 }
 
@@ -47,6 +50,11 @@ impl ConfinedPiSession {
     /// Open/recover one original Pi session inert. Generation must increase on
     /// every reopen. Recovery kills and proves the recorded leaf empty before
     /// inspecting bridge-writable state or launching a replacement.
+    ///
+    /// The launcher is spawned on a supervisor thread owned by this session.
+    /// Linux `PR_SET_PDEATHSIG` and bubblewrap `--die-with-parent` follow the
+    /// thread that created the child. The supervisor stays parked until
+    /// [`Self::stop`], so `open` may run on a thread that ends first.
     pub fn open(config: &ConfinedPiConfig, binding: RuntimeBinding, fixture: &str) -> Result<Self> {
         validate(&binding, fixture)?;
         let root = Directory::root(&config.root)?;
@@ -87,9 +95,9 @@ impl ConfinedPiSession {
                 )));
             }
             // A second crash during preparation must retain the original
-            // database requirement from an earlier generation.
-            require_existing =
-                previous["requiresExisting"] == true || previous["phase"] != "prepared";
+            // database requirement from an earlier generation. A proven stop
+            // that never reached "opened" has no history to keep.
+            require_existing = require_existing_database(&previous);
             recovered = json!({"generation":previous["generation"],"cgroup":previous["cgroup"],
                 "proven":true,"events":proof.events});
             control.write(
@@ -123,8 +131,12 @@ impl ConfinedPiSession {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut pending = PendingChild(Some(command.spawn().map_err(Error::storage)?));
-        let child = pending.0.as_mut().expect("spawned child");
+        let (child, launch_supervisor) = spawn_supervised(command)?;
+        let mut pending = PendingLaunch {
+            child: Some(child),
+            supervisor: Some(launch_supervisor),
+        };
+        let child = pending.child.as_mut().expect("spawned child");
         record["supervisor"] = json!({"pid":child.id(),"start":start_time(child.id())?});
         control.write("current.json", &record)?;
         // A direct unreaped child cannot have its PID recycled. Migration is
@@ -140,7 +152,8 @@ impl ConfinedPiSession {
             .write_all(b"GO\n")
             .map_err(Error::storage)?;
         let bridge =
-            PiBridge::from_child(pending.0.take().expect("spawned child"), binding, owner)?;
+            PiBridge::from_child(pending.child.take().expect("spawned child"), binding, owner)?;
+        let launch_supervisor = pending.supervisor.take().expect("launch supervisor");
         let (done, wait) = channel();
         let watched = leaf.clone();
         let watchdog = std::thread::spawn(move || {
@@ -157,6 +170,7 @@ impl ConfinedPiSession {
             record,
             leaf,
             watchdog: Some((done, watchdog)),
+            launch_supervisor: Some(launch_supervisor),
             stopped: false,
         };
         session.bridge.hello()?;
@@ -205,13 +219,35 @@ impl ConfinedPiSession {
         let result = self
             .bridge
             .call_with_effects(method, command, params, effect);
-        if self.bridge.exit_status().map_err(Error::storage)?.is_some() {
-            self.stop()?;
+        // The bridge exit is recorded either way. A failed call keeps its own
+        // error; only a call that succeeded surfaces a later stop failure.
+        match self.bridge.exit_status() {
+            Ok(Some(_)) => {
+                let stopped = self.stop();
+                if result.is_ok() {
+                    stopped?;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                if result.is_ok() {
+                    return Err(Error::storage(error));
+                }
+            }
         }
         result
     }
 
+    /// Reap the direct child and prove the recorded leaf empty. A second call
+    /// returns the recorded termination evidence and does not kill or rewrite it.
     pub fn stop(&mut self) -> Result<Value> {
+        if self.stopped {
+            let evidence = self.record["termination"].clone();
+            if evidence["proven"] != true {
+                return Err(Error::guard("confined bridge termination remains unproven"));
+            }
+            return Ok(evidence);
+        }
         if let Some((done, watchdog)) = self.watchdog.take() {
             let _ = done.send(());
             watchdog
@@ -220,12 +256,20 @@ impl ConfinedPiSession {
         }
         self.bridge.terminate();
         let proof = cgroup::rekill_and_prove(&self.leaf, Duration::from_secs(5))?;
-        self.stopped = true;
         self.record["phase"] = json!(if proof.proven { "stopped" } else { "uncertain" });
         let evidence = json!({"proven":proof.proven,"reason":proof.reason,"events":proof.events,
             "generation":self.binding().generation,"cgroup":self.record["cgroup"]});
         self.record["termination"] = evidence.clone();
         self.control.write("current.json", &self.record)?;
+        // Set before joining the supervisor so a join failure cannot make Drop
+        // re-kill and overwrite this record.
+        self.stopped = true;
+        if let Some(mut supervisor) = self.launch_supervisor.take() {
+            let joined = supervisor.shutdown();
+            if proof.proven {
+                joined?;
+            }
+        }
         if !proof.proven {
             return Err(Error::guard("confined bridge termination remains unproven"));
         }
@@ -249,14 +293,98 @@ impl Drop for ConfinedPiSession {
     }
 }
 
-struct PendingChild(Option<Child>);
-impl Drop for PendingChild {
+struct PendingLaunch {
+    child: Option<Child>,
+    supervisor: Option<LaunchSupervisor>,
+}
+
+impl Drop for PendingLaunch {
     fn drop(&mut self) {
-        if let Some(child) = self.0.as_mut() {
+        if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
             let _ = child.wait();
         }
+        // Join only after the child is dead so this thread's exit is not what
+        // delivers parent-death SIGKILL.
+        self.supervisor.take();
     }
+}
+
+/// Thread that forked the launcher. It parks until the session stops.
+struct LaunchSupervisor {
+    shutdown: Option<Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl LaunchSupervisor {
+    fn shutdown(&mut self) -> Result<()> {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            thread
+                .join()
+                .map_err(|_| Error::guard("bridge supervisor failed"))?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for LaunchSupervisor {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
+fn spawn_supervised(mut command: Command) -> Result<(Child, LaunchSupervisor)> {
+    let (started, ready) = channel();
+    let (shutdown, stop) = channel();
+    let thread = std::thread::Builder::new()
+        .name("confined-pi-supervisor".into())
+        .spawn(move || {
+            let spawned = command.spawn();
+            let failed = spawned.is_err();
+            if let Err(std::sync::mpsc::SendError(Ok(mut child))) = started.send(spawned) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+            if !failed {
+                let _ = stop.recv();
+            }
+        })
+        .map_err(Error::storage)?;
+    match ready.recv() {
+        Ok(Ok(child)) => Ok((
+            child,
+            LaunchSupervisor {
+                shutdown: Some(shutdown),
+                thread: Some(thread),
+            },
+        )),
+        Ok(Err(error)) => {
+            let _ = thread.join();
+            Err(Error::storage(error))
+        }
+        Err(_) => {
+            let _ = thread.join();
+            Err(Error::guard("bridge supervisor exited before spawn"))
+        }
+    }
+}
+
+/// `true` when recovery must find the original database.
+///
+/// A proven stop whose record never reached `"opened"` accepted no command.
+/// Crashes and unproven stops after release stay conservative, and an earlier
+/// generation's requirement survives a crash while the next one is only
+/// `"prepared"`.
+fn require_existing_database(previous: &Value) -> bool {
+    let proven_unopened_stop = previous["phase"] == "stopped"
+        && previous["termination"]["proven"] == true
+        && previous["requiresExisting"] == false;
+    !proven_unopened_stop
+        && (previous["requiresExisting"] == true || previous["phase"] != "prepared")
 }
 
 fn identity(binding: &RuntimeBinding) -> Value {

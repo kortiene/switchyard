@@ -92,6 +92,7 @@ pub(super) fn argv(config: &ConfinedPiConfig, state: &Path) -> Result<Vec<String
             "--unshare-cgroup",
             "--cap-drop",
             "ALL",
+            // Thread-directed PR_SET_PDEATHSIG. The session supervisor is that parent.
             "--die-with-parent",
             "--new-session",
             "--clearenv",

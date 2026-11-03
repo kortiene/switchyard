@@ -361,5 +361,58 @@ fn confined_lifecycle_invalid_policy_stops_before_sqlite() {
     assert!(!directory.join("state/session.sqlite").exists());
     let record: Value =
         serde_json::from_slice(&fs::read(directory.join("current.json")).unwrap()).unwrap();
+    assert_eq!(record["phase"], "stopped");
+    assert_eq!(record["requiresExisting"], false);
     assert_eq!(record["termination"]["proven"], true);
+    config.policy = path("SWITCHYARD_BRIDGE_POLICY");
+    let mut reopened =
+        ConfinedPiSession::open(&config, binding(2), "answer").unwrap_or_else(|error| {
+            panic!("proven stop before open must allow a new generation: {error}")
+        });
+    assert_eq!(reopened.lifecycle()["phase"], "opened");
+    assert!(directory.join("state/session.sqlite").exists());
+    let receipt = submit(&mut reopened);
+    idle(&mut reopened);
+    retain(
+        "bridge-lifecycle-unopened-stop.json",
+        &json!({"rejected": record, "reopened": reopened.lifecycle(), "receipt": receipt}),
+    );
+    assert_eq!(reopened.stop().unwrap()["proven"], true);
+}
+
+#[test]
+fn confined_lifecycle_opened_stop_still_requires_original_database() {
+    let tmp = private_root();
+    let config = config(tmp.path());
+    let mut session = ConfinedPiSession::open(&config, binding(1), "answer").unwrap();
+    let stopped = session.stop().unwrap();
+    assert_eq!(stopped["proven"], true);
+    assert_eq!(session.stop().unwrap(), stopped);
+    drop(session);
+    let directory = fs::read_dir(tmp.path())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let record: Value =
+        serde_json::from_slice(&fs::read(directory.join("current.json")).unwrap()).unwrap();
+    assert_eq!(record["phase"], "stopped");
+    assert_eq!(record["requiresExisting"], true);
+    assert_eq!(record["termination"], stopped);
+    let database = directory.join("state/session.sqlite");
+    fs::rename(&database, directory.join("state/retained.sqlite")).unwrap();
+    let error = ConfinedPiSession::open(&config, binding(2), "recover")
+        .err()
+        .expect("an opened session must keep its original database");
+    assert!(
+        error
+            .to_string()
+            .contains("original Pi database is missing"),
+        "{error}"
+    );
+    fs::rename(directory.join("state/retained.sqlite"), &database).unwrap();
+    let reopened = ConfinedPiSession::open(&config, binding(2), "recover").unwrap();
+    assert_eq!(reopened.lifecycle()["phase"], "opened");
+    assert_eq!(reopened.lifecycle()["requiresExisting"], true);
 }

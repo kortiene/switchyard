@@ -19,6 +19,9 @@ fn run() -> Result<(), String> {
         .parse::<i32>()
         .map_err(|error| error.to_string())?;
     let parent = rustix::process::getppid();
+    // Delivered when the spawning thread exits. The session keeps that
+    // supervisor alive until stop. The signal survives exec; bubblewrap
+    // `--die-with-parent` sets SIGKILL again in the sandbox parent.
     rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))
         .map_err(|error| error.to_string())?;
     if expected_parent <= 0
