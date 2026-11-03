@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 7543)
+Total output lines: 239
+
 # Rust-first Switchyard prototype
 
 Status: direction accepted 2026-10-29. S1 implemented (#105). S2 is GO for the credential-free source-built candidate; see [the acceptance record](s2-contract-gate.md). S3 delivers owned workspaces, confined effects and a non-default [bridge lifecycle](s3-bridge-lifecycle.md); product integration and S4–S8 remain open. The native Rust agent runtime is the long-term target and is not implemented.
@@ -86,8 +89,9 @@ S2 must establish an exact installable version and lockfile, supported Node vers
 
 The [S2 feasibility audit](s2-feasibility.md) found that npm 1.4.0 comes from a
 different source commit and lacks reviewed admission APIs. It records NO-GO
-(2026-10-29) and reproducible faux-provider probes. The source-built candidate was later accepted in
-[#96](https://github.com/kortiene/switchyard/issues/96) and that audit. The
+(2026-10-29) and reproducible faux-provider probes. The source-built candidate
+was later accepted in [#96](https://github.com/kortiene/switchyard/issues/96);
+see the [S2 acceptance record](s2-contract-gate.md). The
 diagnostic `pi-package-audit` job does not satisfy `pi-bridge-contract` or
 authorize live execution.
 
@@ -117,48 +121,7 @@ Sources: [README](https://github.com/earendil-works/pi/blob/e65b3b88c08412bb8ffb
 | Decision | Actor, action, rationale and exact plan/review digest |
 | Delivery | Authorized repository/branch target, tree/commit identity, publication state and PR identity |
 
-A runtime restart retains the business Attempt. A new scope, changed policy, or explicitly abandoned attempt creates a successor with new authority; old evidence/decisions remain auditable. A bounded repair within an attempt creates a new review revision and invalidates earlier verification/approval.
-
-## Normative mission transitions
-
-This table is normative for the proposed M1 implementation. Rust rejects every unlisted state transition. Each accepted transition checks the expected mission revision and atomically records its command/decision, resulting revision, and any outbox entry. Runtime notifications are observations used by Rust to evaluate guards; they cannot set mission state. Steering and inspection may leave state unchanged and still receive durable command receipts.
-
-| From | Command or reconciled observation | Guard and required effect | To |
-| --- | --- | --- | --- |
-| draft | start planning | Freeze attempt inputs and policy; acquire exclusive ownership; planning tools are read-only | planning |
-| planning | plan completed | Persist the complete plan and its digest; planning work is quiescent | awaiting_plan_approval |
-| awaiting_plan_approval | request revised plan | Record feedback; invalidate the old plan decision; enforce usage limits | planning |
-| awaiting_plan_approval | approve plan | Authorized actor confirms current plan digest; implementation policy is unchanged | implementing |
-| implementing | request verification / implementation settles | Freeze new mutation admission; confirm runtime and all writers quiescent; retain any interrupted effects for reconciliation | verifying |
-| verifying | complete PASS | Every frozen requirement passes with complete evidence for the current stable content | awaiting_review |
-| verifying | authorize bounded repair | FAIL is attributable to repairable code; policy permits repair; writers quiescent; limits available; atomically increment persistent repair count and invalidate old review/approval | implementing |
-| awaiting_review | request changes | Authorized feedback stays within frozen scope; writers quiescent; limits available; increment persistent repair count and invalidate old evidence/approval for the new revision | implementing |
-| awaiting_review | approve review | Confirm current digest, complete PASS and unchanged content; record actor/rationale | approved |
-| approved | publish | Explicit publication authority for this digest and target; revalidate frozen content; record delivery intent before external effects | publishing |
-| publishing | reconcile delivery complete | Exact approved tree/commit and one matching PR are proven; record delivery receipt | published |
-| awaiting_plan_approval, awaiting_review, approved | reject | Record explicit rejection; no delivery is in flight; writers quiescent | rejected |
-| draft, planning, awaiting_plan_approval, implementing, verifying, awaiting_review, approved | pause | Record resume target; close new admission and request drain/stop | pausing |
-| pausing | confirm stopped | Runtime and every writer quiescent; interrupted effects reconciled | paused |
-| paused | resume | Explicit authorization; original resume target revalidated with the same guards, plan/content/policy checks and ownership; no silent approval reuse | saved resume target |
-| Any nonterminal state except cancelling | cancel | Close admission, persist cancellation intent, request stop; retain in-flight publication receipts | cancelling |
-| cancelling | confirm cancelled | All writers stopped, effects reconciled, and no matching published PR exists; retain any already-created branch/commit | cancelled |
-| cancelling | discover publication already completed | Exact authorized delivery/PR is proven; cancellation cannot undo publication | published |
-| Any nonterminal state except needs_attention | detect uncertainty, invalid approval, ERROR/INCOMPLETE, exhausted limits, or failed stop | Revoke mutation/publication admission; persist prior phase, reason and permitted recovery target; invalidate stale evidence/approval | needs_attention |
-| needs_attention | explicit recovery | Prove ownership and effect outcomes; restore only a recorded, revalidated normal phase or paused; require that phase's guards; content drift returns to verifying, never directly approved | validated recovery target |
-
-Normal phases are draft, planning, awaiting_plan_approval, implementing, verifying, awaiting_review, approved, and publishing. Recovery cannot jump past a failed gate: pending stop/cancel intents must settle before resuming, and uncertain publication must reconcile before another publish attempt. A pause during publishing is rejected; cancellation during publishing follows the delivery-reconciliation rows above.
-
-published, rejected, and cancelled are terminal for the attempt. A successor attempt requires an explicit new command and identity; terminal records are never reopened. Policy/scope/verifier changes also require a successor attempt and new plan approval. A restart is not a new business attempt.
-
-A verification FAIL does not authorize unlimited automatic repair. Its guarded repair edge must consume a persisted allowance; ERROR/INCOMPLETE and unresolved external effects go to needs_attention. Changes after approval first invalidate it and enter needs_attention; reinspection/reverification and a new review are required before delivery.
-
-Plan approval authorizes implementation under the frozen policy. Delivery approval authorizes an exact reviewed result and target. Steering can refine work within policy; it cannot expand capabilities, alter acceptance tests, or approve publication.
-
-## S1 resolutions
-
-S1 (#95) implements the ledger and transition kernel with the clarifications below. They specify table edges the plan left to the implementation. They do not add Pi, confinement, live verification, or GitHub publication.
-
-- **Recovery targets.** Entering `needs_attention` stores one permitted target. `cancelling` is stored when that is the prior phase so cancellation can settle; it is not a normal phase and does not resume work. `pausing` and `paused` recover to `paused` only after quiescence is proven. An in-flight delivery recovers to `publishing` as reconcile-only: content drift does not skip that reconciliation, and `publish` is not an edge from `publishing`. Invalid approval, verification error, and incomplete verification recover to `verifying` when no delivery is in flight. Explicit recovery must name that validated target. A saved `awaiting_review` or `approved` resume target is revalidated against current complete PASS evidence for the current content digest, not against `reviewed_digest` (that digest is absent before approval). Invalidated or missing PASS evidence changes the saved resume target to `verifying` while the mission stays paused. Drift from `approved` or `awaiting_review` as the recovery phase itself still validates to `verifying`, never `approved`.
+A runtime restart retains the business Attempt. A new scope, changed policy, or explicitly abandoned attempt creates a successor with new authority; old evidence/decisions remain auditable. A bounded repair within an attempt creates a new review revision and inv…1543 tokens truncated… when no delivery is in flight. Explicit recovery must name that validated target. A saved `awaiting_review` or `approved` resume target is revalidated against current complete PASS evidence for the current content digest, not against `reviewed_digest` (that digest is absent before approval). Invalidated or missing PASS evidence changes the saved resume target to `verifying` while the mission stays paused. Drift from `approved` or `awaiting_review` as the recovery phase itself still validates to `verifying`, never `approved`.
 - **Stop and resume.** `confirm_stopped` and `confirm_cancelled` are rejected while their runtime abort is still pending, or while admitted runtime work has no delivered abort. Recovery into `paused` and resume apply the same pause-settlement guard. Pending aborts are not superseded once runtime work was admitted, including admission discovered while reconciling a lost acknowledgment. The latest persisted phase-entry command identifies the current planning, implementation, or repair activity; earlier activities cannot satisfy its continuation check. A delivered abort ends preceding work. Resume and recovery into `planning` or `implementing` reuse a pending or acknowledged submission for the current activity after that stop boundary, including a pending continuation. Otherwise they enqueue one new continuation in the transition transaction. Pending requests retain their original identity until reconciliation; superseded commands are not revived.
 - **Terminal evidence and notification quarantine.** Terminal missions reject verification observations before any evidence or verification row is written. Evidence that belongs to a transition is committed in that same transaction. Permanently invalid runtime notifications (`illegal_transition`, `terminal_immutable`, stale or invalid frames, and other validation errors) are removed from the queue and stored in `notification_quarantine`, which `mission status` lists. Only storage and git IO errors stay at the head of the queue for retry.
 - **Verification FAIL** records evidence and does not change phase. Only `authorize_bounded_repair` consumes the persisted allowance. ERROR and INCOMPLETE are uncertainty observations.
