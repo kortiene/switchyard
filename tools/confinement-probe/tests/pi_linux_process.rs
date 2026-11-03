@@ -101,6 +101,227 @@ fn confined_process_start_status_cancel_retain_original_receipts() {
 }
 
 #[test]
+fn fresh_status_after_host_restart_marks_retained_handle_uncertain() {
+    let (world, mut host, sandbox) = World::new();
+    host.enable_linux_execution(config(None)).unwrap();
+    let b = binding(&host, &world.mission);
+    let mut bridge = spawn(&sandbox, b.clone(), "process-wait", false);
+    let mut handle = Value::Null;
+    run(&mut bridge, &mut |params| {
+        let out = host.execute_pi_linux_process(&b, params, now() + 20_000);
+        handle = completed(out.clone());
+        out
+    });
+    assert_eq!(handle["kind"], "process-handle");
+    let before = observation(&b, "before-restart", &handle, "process.status");
+    let original = completed(host.execute_pi_linux_process(&b, &before, now() + 20_000));
+    assert_eq!(original["startState"], "running");
+    stop(&mut bridge, &sandbox);
+    drop(host);
+
+    let mut host = Host::open(&world.db()).unwrap();
+    host.enable_linux_execution(config(None)).unwrap();
+    let b = binding(&host, &world.mission);
+    // The caller retained its handle. Do not call recover or replay start.
+    assert_eq!(
+        host.execute_pi_linux_process(&b, &before, 0),
+        PiEffectOutcome::Completed(original.clone())
+    );
+    for key in ["after-restart", "later"] {
+        let status = observation(&b, key, &handle, "process.status");
+        let receipt = completed(host.execute_pi_linux_process(&b, &status, now() + 20_000));
+        assert_eq!(receipt["startState"], "uncertain");
+        assert_eq!(receipt["startReceiptRetained"], false);
+        assert_eq!(receipt["startResult"], Value::Null);
+        assert_eq!(receipt["quiescence"]["proven"], true);
+    }
+    let snapshot = host.snapshot(&world.mission).unwrap();
+    assert_eq!(snapshot.phase, Phase::NeedsAttention);
+    assert!(snapshot.execution_blocked);
+    assert_eq!(
+        host.execute_pi_linux_process(&b, &before, 0),
+        PiEffectOutcome::Completed(original)
+    );
+    assert_eq!(
+        fs::read(world.workspace.join("process.marker")).unwrap(),
+        b"once\n"
+    );
+    world.assert_origin();
+}
+
+#[test]
+fn fresh_status_after_host_restart_leaves_live_process_in_cgroup() {
+    let (world, host, sandbox) = World::new();
+    drop(host);
+    let worker = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "pi_linux_process_live_orphan_worker",
+            "--nocapture",
+        ])
+        .env("SW_PI_PROCESS_ROOT", world.dir.path())
+        .env("SW_PI_PROCESS_MISSION", &world.mission)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    // Drop kills the cgroup and the stopped supervisor even when an assertion fails.
+    let mut live = LiveOrphan {
+        worker,
+        supervisor: None,
+        cgroup: None,
+    };
+    let stdout = live.worker.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if tx.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let until = Instant::now() + Duration::from_secs(25);
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(line) if line.contains("AT-live") => break,
+            Ok(_) => {}
+            Err(error) => panic!("missing live barrier: {error}"),
+        }
+    }
+    let info: Value =
+        serde_json::from_slice(&fs::read(world.dir.path().join("live.json")).unwrap()).unwrap();
+    let supervisor = u32::try_from(info["supervisor"].as_u64().unwrap()).unwrap();
+    let cgroup = PathBuf::from(info["cgroup"].as_str().unwrap());
+    let handle = info["handle"].clone();
+    let before = info["before"].clone();
+    let original = info["receipt"].clone();
+    live.supervisor = Some(supervisor);
+    live.cgroup = Some(cgroup.clone());
+    let heartbeat = world.workspace.join("process.heartbeat");
+    wait_file(&heartbeat);
+    assert_heartbeat_advances(&heartbeat);
+    assert_cgroup_populated(&cgroup);
+    // Host death closes the supervisor's control pipe, and that supervisor
+    // would then write cgroup.kill. Stop it first so the workload stays in
+    // the leaf across the restart. Status must not finish that kill.
+    signal(supervisor, "-STOP");
+    assert_heartbeat_advances(&heartbeat);
+    let namespace = probe::namespace_from_status(&sandbox.status_root).unwrap();
+    let members = probe::namespace_members(&namespace).unwrap();
+    assert!(!members.is_empty());
+    live.worker.kill().unwrap();
+    live.worker.wait().unwrap();
+    probe::require_quiescent(&namespace, &members).unwrap();
+    assert_cgroup_populated(&cgroup);
+    assert_heartbeat_advances(&heartbeat);
+
+    let mut host = Host::open(&world.db()).unwrap();
+    host.enable_linux_execution(config(None)).unwrap();
+    let b = binding(&host, &world.mission);
+    assert_eq!(
+        host.execute_pi_linux_process(&b, &before, 0),
+        PiEffectOutcome::Completed(original.clone())
+    );
+    assert_eq!(effect_state(&host, &world.mission, &handle), "running");
+    assert_heartbeat_advances(&heartbeat);
+    for key in ["after-restart", "later"] {
+        let status = observation(&b, key, &handle, "process.status");
+        let receipt = completed(host.execute_pi_linux_process(&b, &status, now() + 20_000));
+        assert_eq!(receipt["startState"], "uncertain");
+        assert_eq!(receipt["startReceiptRetained"], false);
+        assert_eq!(receipt["startResult"], Value::Null);
+        assert_eq!(receipt["quiescence"]["proven"], false);
+        assert_cgroup_populated(&cgroup);
+        assert_heartbeat_advances(&heartbeat);
+    }
+    let snapshot = host.snapshot(&world.mission).unwrap();
+    assert_eq!(snapshot.phase, Phase::NeedsAttention);
+    assert!(snapshot.execution_blocked);
+    assert_eq!(
+        host.execute_pi_linux_process(&b, &before, 0),
+        PiEffectOutcome::Completed(original)
+    );
+    assert_eq!(effect_state(&host, &world.mission, &handle), "uncertain");
+    assert_eq!(
+        fs::read(world.workspace.join("process.marker")).unwrap(),
+        b"once\n"
+    );
+    world.assert_origin();
+}
+
+struct LiveOrphan {
+    worker: std::process::Child,
+    supervisor: Option<u32>,
+    cgroup: Option<PathBuf>,
+}
+
+impl Drop for LiveOrphan {
+    fn drop(&mut self) {
+        if let Some(path) = &self.cgroup {
+            let _ = fs::write(path.join("cgroup.kill"), b"1\n");
+            let until = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < until {
+                let events = fs::read_to_string(path.join("cgroup.events")).unwrap_or_default();
+                if events.lines().any(|line| line == "populated 0") {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        if let Some(pid) = self.supervisor {
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+        let _ = self.worker.kill();
+        let _ = self.worker.wait();
+    }
+}
+
+fn signal(pid: u32, flag: &str) {
+    let status = Command::new("kill")
+        .args([flag, &pid.to_string()])
+        .status()
+        .unwrap_or_else(|error| panic!("spawn kill {flag} {pid}: {error}"));
+    assert!(status.success(), "kill {flag} {pid} failed: {status}");
+}
+
+fn assert_heartbeat_advances(path: &std::path::Path) {
+    let before = fs::metadata(path).unwrap().len();
+    let until = Instant::now() + Duration::from_secs(2);
+    while fs::metadata(path).unwrap().len() <= before {
+        assert!(
+            Instant::now() < until,
+            "process heartbeat stopped at {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn assert_cgroup_populated(path: &std::path::Path) {
+    let events = fs::read_to_string(path.join("cgroup.events"))
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    assert!(
+        events.lines().any(|line| line == "populated 1"),
+        "cgroup {} is not populated:\n{events}",
+        path.display()
+    );
+}
+
+fn effect_state(host: &Host, mission: &str, handle: &Value) -> String {
+    let id = handle["startOperationId"].as_str().unwrap();
+    host.snapshot(mission)
+        .unwrap()
+        .linux_execution_effects
+        .into_iter()
+        .find(|effect| effect.operation_id == id)
+        .unwrap()
+        .state
+}
+
+#[test]
 fn process_output_and_nonzero_exit_are_durable_status_evidence() {
     let (world, mut host, sandbox) = World::new();
     host.enable_linux_execution(config(None)).unwrap();
@@ -464,4 +685,63 @@ fn pi_linux_process_crash_worker() {
         host.execute_pi_linux_process(&binding, params, now() + 20_000)
     });
     panic!("crash worker passed its mandatory barrier");
+}
+
+#[test]
+fn pi_linux_process_live_orphan_worker() {
+    let Some(root) = std::env::var_os("SW_PI_PROCESS_ROOT").map(PathBuf::from) else {
+        return;
+    };
+    let mission = std::env::var("SW_PI_PROCESS_MISSION").unwrap();
+    let mut host = Host::open(&root.join("mission.sqlite")).unwrap();
+    host.enable_linux_execution(config(None)).unwrap();
+    let binding = binding(&host, &mission);
+    let sandbox = BridgeSandbox {
+        launcher: root.join("bridge/launch"),
+        database: root.join("bridge/state/session.sqlite"),
+        status_root: root.join("bridge/supervisor"),
+    };
+    let mut bridge = spawn(&sandbox, binding.clone(), "process-wait", false);
+    let mut handle = Value::Null;
+    run(&mut bridge, &mut |params| {
+        let out = host.execute_pi_linux_process(&binding, params, now() + 20_000);
+        handle = completed(out.clone());
+        out
+    });
+    assert_eq!(handle["kind"], "process-handle");
+    let before = observation(&binding, "before-restart", &handle, "process.status");
+    let original = completed(host.execute_pi_linux_process(&binding, &before, now() + 20_000));
+    assert_eq!(original["startState"], "running");
+    let start_id = handle["startOperationId"].as_str().unwrap();
+    let conn = rusqlite::Connection::open_with_flags(
+        root.join("mission.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let (pid, cgroup): (i64, String) = conn
+        .query_row(
+            "SELECT launcher_pid, cgroup_path FROM linux_execution_effects WHERE operation_id=?1",
+            [start_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    drop(conn);
+    fs::write(
+        root.join("live.json"),
+        serde_json::to_vec(&json!({
+            "supervisor": pid,
+            "cgroup": cgroup,
+            "handle": handle,
+            "before": before,
+            "receipt": original,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    println!("AT-live");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    // Stay alive so Drop does not kill the cgroup. The parent SIGKILLs this process.
+    loop {
+        std::thread::sleep(Duration::from_secs(30));
+    }
 }
