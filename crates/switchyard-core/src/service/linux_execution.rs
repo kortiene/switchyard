@@ -1385,7 +1385,7 @@ mod os {
     }
 
     #[test]
-    fn process_observation_bounds_utf8_and_json_expansion() {
+    fn pi_linux_process_observation_bounds_utf8_and_json_expansion() {
         let receipt = json!({"disposition":"exited","result":{"exitCode":3,
             "stdout": "é".repeat(4000), "stderr": "\u{0}".repeat(4000)}});
         let result = process_result(&receipt.to_string()).unwrap();

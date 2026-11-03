@@ -21,7 +21,8 @@ const STDERR_LIMIT: usize = 4096;
 /// it never rewrites the history of an existing operation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PiEffectOutcome {
-    /// The original durable receipt, including on replay.
+    /// The original durable receipt, including on replay. A process-start
+    /// handle acknowledges durable admission, not process completion or success.
     Completed(Value),
     /// This invocation admitted no new effect. An operation ID already stored
     /// for another mission, attempt, or session is also rejected, so the
