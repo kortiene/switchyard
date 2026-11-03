@@ -12,7 +12,7 @@ import { Runtime } from '../src/runtime.ts';
 import { Transport } from '../src/transport.ts';
 
 const [database, bindingJson, mode] = process.argv.slice(2);
-if (!database || !bindingJson || !['answer', 'tools', 'recover', 'crash-before-admission', 'crash-after-admission',
+if (!database || !bindingJson || !['answer', 'file-write', 'tools', 'recover', 'crash-before-admission', 'crash-after-admission',
   'crash-after-abort-recorded', 'crash-after-abort-settled', 'hold-abort', 'ignore-abort', 'cooperative-wait',
   'storage-submit', 'storage-abort-intent', 'storage-abort-cancel', 'storage-abort-settlement', 'storage-background', 'storage-close',
   'storage-background-hang', 'gated-tools',
@@ -24,7 +24,10 @@ const waitingTool = () => fauxAssistantMessage([fauxToolCall('uncooperative', {}
 // so the next submit consumes the next queued response.
 faux.setResponses(mode === 'cooperative-wait' ? Array.from({ length: 8 }, waitingTool)
   : mode === 'ignore-abort' || mode.startsWith('storage-abort-') || mode === 'storage-background-hang' ? [waitingTool()]
-  : mode === 'tools' || mode === 'gated-tools' ? [
+  : mode === 'file-write' ? [
+    fauxAssistantMessage([fauxToolCall('write_file', { path: 'output.txt', content: 'once' })], { stopReason: 'toolUse' }),
+    fauxAssistantMessage('done'),
+  ] : mode === 'tools' || mode === 'gated-tools' ? [
   fauxAssistantMessage([fauxToolCall('write_pair', { prefix: 'pair' }, { id: 'parent-pair' }),
     fauxToolCall('nested_write', { path: 'nested', content: 'child' }, { id: 'parent-nested' })], { stopReason: 'toolUse' }),
   fauxAssistantMessage('done'),

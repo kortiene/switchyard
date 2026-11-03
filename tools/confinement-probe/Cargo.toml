@@ -10,6 +10,7 @@ description = "Test-only S3-A3 Linux confinement probe; not an ExecutionEnv back
 [features]
 linux-confinement = []
 bridge-confinement = ["linux-confinement", "dep:switchyard-core"]
+pi-linux-write = ["bridge-confinement", "switchyard-core/linux-execution"]
 
 [dependencies]
 serde_json = "1"
@@ -17,6 +18,7 @@ switchyard-core = { path = "../../crates/switchyard-core", features = ["pi-contr
 
 [dev-dependencies]
 tempfile = "3"
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [[bin]]
 name = "confinement-fixture"
@@ -27,6 +29,11 @@ required-features = ["linux-confinement"]
 name = "bridge_confinement"
 path = "tests/bridge_confinement.rs"
 required-features = ["bridge-confinement"]
+
+[[test]]
+name = "pi_linux_write"
+path = "tests/pi_linux_write.rs"
+required-features = ["pi-linux-write"]
 
 [[test]]
 name = "confinement"

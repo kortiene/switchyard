@@ -8,6 +8,8 @@ use crate::persistence::execution::{identity_conflict, resolution_command_confli
 use crate::{ExecutionResolutionDecision, ExecutionResolutionRequest};
 
 pub(crate) struct LinuxEffectRecord {
+    #[cfg_attr(not(feature = "pi-contract"), allow(dead_code))]
+    pub request_json: String,
     pub mission_id: String,
     pub attempt_id: String,
     pub session_id: String,
@@ -155,11 +157,12 @@ impl Store {
         self.conn
             .query_row(
                 "SELECT mission_id, attempt_id, session_id, payload_hash, state, started_generation,
-                        cgroup_path, cgroup_dev, cgroup_ino, boot_id, entered_at, receipt_json, quiescence_json, released_at
+                        cgroup_path, cgroup_dev, cgroup_ino, boot_id, entered_at, receipt_json, quiescence_json, released_at, request_json
                  FROM linux_execution_effects WHERE operation_id=?1",
                 [id],
                 |row| {
                     Ok(LinuxEffectRecord {
+                        request_json: row.get(14)?,
                         mission_id: row.get(0)?,
                         attempt_id: row.get(1)?,
                         session_id: row.get(2)?,
@@ -198,7 +201,7 @@ impl Store {
             .prepare(&format!(
                 "SELECT operation_id, mission_id, attempt_id, session_id, payload_hash, state,
                         started_generation, cgroup_path, cgroup_dev, cgroup_ino, boot_id,
-                        entered_at, receipt_json, quiescence_json, {released}
+                        entered_at, receipt_json, quiescence_json, {released}, request_json
                  FROM linux_execution_effects WHERE mission_id=?1
                  ORDER BY created_at, operation_id"
             ))
@@ -208,6 +211,7 @@ impl Store {
                 Ok((
                     row.get::<_, String>(0)?,
                     LinuxEffectRecord {
+                        request_json: row.get(15)?,
                         mission_id: row.get(1)?,
                         attempt_id: row.get(2)?,
                         session_id: row.get(3)?,
