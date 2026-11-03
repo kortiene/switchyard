@@ -20,3 +20,6 @@ pub use runtime::{
 pub(crate) use adapter::RuntimeAdapter;
 #[cfg(feature = "pi-contract")]
 pub(crate) use pi_runtime::{AcknowledgedCheck, PiRuntime};
+
+#[cfg(all(feature = "pi-contract", feature = "linux-execution", target_os = "linux"))]
+pub(crate) mod confined_pi;

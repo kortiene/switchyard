@@ -44,6 +44,11 @@ pub fn try_acquire(db_path: &Path) -> Result<OwnerLock> {
         .truncate(false)
         .open(&path)
         .map_err(Error::storage)?;
+    try_acquire_file(file)
+}
+
+/// Lock an already safely opened host-only file.
+pub(crate) fn try_acquire_file(file: File) -> Result<OwnerLock> {
     match file.try_lock() {
         Ok(()) => Ok(OwnerLock {
             file,

@@ -27,6 +27,12 @@ jobs:
         with:
           toolchain: 1.99.1
           components: rustfmt, clippy
+      - name: Temporary compile and formatting diagnostics
+        run: |
+          cargo fmt --all
+          git diff --binary
+          cargo check --workspace --all-targets --all-features --locked
+          git restore .
       - name: Build the exact credential-free Pi source candidate
         run: |
           node runtime/pi-source/install-npm.mjs

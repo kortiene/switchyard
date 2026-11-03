@@ -61,3 +61,6 @@ pub use service::{
 
 #[cfg(test)]
 mod acceptance;
+
+#[cfg(all(feature = "pi-contract", feature = "linux-execution", target_os = "linux"))]
+pub use execution::confined_pi::{ConfinedPiConfig, ConfinedPiSession, confined_pi_launcher_main};

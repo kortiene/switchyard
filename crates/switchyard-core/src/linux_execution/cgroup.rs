@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 
+#[derive(Clone, Debug)]
 pub(crate) struct CgroupIdentity {
     pub path: PathBuf,
     pub dev: u64,
@@ -62,6 +63,16 @@ pub(crate) fn validate_delegation(root: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn create_leaf(root: &Path, name: &str) -> Result<CgroupIdentity> {
+    create_limited_leaf(root, name, MEMORY_MAX)
+}
+
+/// Node needs a separate reviewed memory allowance; execution limits stay unchanged.
+#[cfg(feature = "pi-contract")]
+pub(crate) fn create_bridge_leaf(root: &Path, name: &str) -> Result<CgroupIdentity> {
+    create_limited_leaf(root, name, "268435456")
+}
+
+fn create_limited_leaf(root: &Path, name: &str, memory_max: &str) -> Result<CgroupIdentity> {
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err(Error::guard(
             "cgroup leaf name is not a single path segment",
@@ -78,7 +89,7 @@ pub(crate) fn create_leaf(root: &Path, name: &str) -> Result<CgroupIdentity> {
             "cannot create a delegated cgroup leaf ({error}); refusing an unconfined fallback"
         ))
     })?;
-    if let Err(error) = apply_limits(&path) {
+    if let Err(error) = apply_limits(&path, memory_max) {
         let _ = fs::remove_dir(&path);
         return Err(error);
     }
@@ -179,8 +190,8 @@ pub(crate) fn git_file_is_regular(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-fn apply_limits(path: &Path) -> Result<()> {
-    write_file(path, "memory.max", MEMORY_MAX)?;
+fn apply_limits(path: &Path, memory_max: &str) -> Result<()> {
+    write_file(path, "memory.max", memory_max)?;
     write_file(path, "memory.swap.max", "0")?;
     write_file(path, "memory.oom.group", "1")?;
     write_file(path, "pids.max", PIDS_MAX)?;
