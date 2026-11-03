@@ -373,9 +373,7 @@ mod os {
                     self.store
                         .save_linux_quiescence(&view.operation_id, &quiescence)?;
                 }
-                if (effect.released_at.is_some() || effect.entered_at.is_some())
-                    && effect.receipt_json.is_none()
-                {
+                if orphaned_without_receipt(&effect) {
                     self.store.quarantine_linux(&view.operation_id)?;
                 }
             }
@@ -570,18 +568,15 @@ mod os {
             let start = self.matching_start(request, start_id, start_hash)?;
             self.poll_active(start_id)?;
             let mut start = self.store.linux_effect(start_id)?.unwrap_or(start);
-            // A durable handle may outlive its Host, so a new status can be the
-            // first request after restart (without replaying start or recover).
-            // Observe uncertainty without turning a status request into a kill.
+            // No supervisor is tracked for this start: the Host restarted, or
+            // poll_active already dropped a finished child whose result.json
+            // was missing or unparseable and wrote no receipt. Record that
+            // uncertainty. Status only observes; it must not kill.
             let supervised = self
                 .linux
                 .as_ref()
                 .is_some_and(|session| session.active.contains_key(start_id));
-            if !supervised
-                && blocking(&start.state)
-                && (start.released_at.is_some() || start.entered_at.is_some())
-                && start.receipt_json.is_none()
-            {
+            if !supervised && blocking(&start.state) && orphaned_without_receipt(&start) {
                 self.store.quarantine_linux(start_id)?;
                 let mission = self.store.load_mission(&start.mission_id)?;
                 self.flag_linux_attention(&mission)?;
@@ -1306,6 +1301,15 @@ mod os {
         matches!(state, "prepared" | "entered" | "running" | "uncertain")
     }
 
+    /// Entered or released, and still missing a final receipt. Callers also
+    /// require a blocking state and no live supervisor.
+    fn orphaned_without_receipt(
+        effect: &crate::persistence::linux_execution::LinuxEffectRecord,
+    ) -> bool {
+        (effect.released_at.is_some() || effect.entered_at.is_some())
+            && effect.receipt_json.is_none()
+    }
+
     fn prove_identity(leaf: &CgroupIdentity) -> Result<serde_json::Value> {
         let proved = cgroup::kill_and_prove(leaf, Duration::from_secs(2))?;
         Ok(quiescence_value(&proved, leaf))
@@ -1660,78 +1664,8 @@ mod os {
     #[test]
     fn pi_linux_fresh_status_quarantines_orphan_without_rewriting_history() {
         let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().join("repo");
-        fs::create_dir(&repo).unwrap();
-        for args in [
-            &["init", "--initial-branch=main"][..],
-            &["config", "user.email", "test@example.com"],
-            &["config", "user.name", "Test"],
-            &["commit", "--allow-empty", "-m", "base"],
-        ] {
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
         let db = dir.path().join("mission.sqlite");
-        let mut host = Host::open(&db).unwrap();
-        let created = host
-            .create_mission(CreateMission {
-                repo,
-                issue_number: 97,
-                issue_title: "process guard".into(),
-                objective: "refuse".into(),
-                acceptance: "no kill".into(),
-                actor: "operator".into(),
-                max_repairs: 1,
-                max_plan_revisions: 1,
-            })
-            .unwrap();
-        let workspaces = dir.path().join("workspaces");
-        fs::create_dir(&workspaces).unwrap();
-        host.prepare_workspace(&created.mission_id, &created.attempt_id, &workspaces)
-            .unwrap();
-        let admit = |host: &mut Host, body: crate::CommandBody| {
-            let revision = host.snapshot(&created.mission_id).unwrap().revision;
-            host.admit(AdmitRequest {
-                command_id: None,
-                mission_id: created.mission_id.clone(),
-                attempt_id: None,
-                expected_revision: revision,
-                actor: "operator".into(),
-                origin: CommandOrigin::Operator,
-                body,
-            })
-            .unwrap();
-        };
-        admit(&mut host, crate::CommandBody::StartPlanning);
-        host.dispatch_pending(&created.mission_id).unwrap();
-        let digest = crate::policy::plan_digest_for("plan").unwrap();
-        host.apply_notification(
-            &created.mission_id,
-            RuntimeNotification::PlanCompleted {
-                plan: "plan".into(),
-                digest: digest.clone(),
-                quiescent: true,
-            },
-        )
-        .unwrap();
-        admit(
-            &mut host,
-            crate::CommandBody::ApprovePlan {
-                plan_digest: digest,
-            },
-        );
-        let mission = host.store.load_mission(&created.mission_id).unwrap();
-        assert_eq!(mission.phase, Phase::Implementing);
-        let binding = host.binding(&mission);
+        let (mut host, binding) = implementing_process_host(dir.path());
 
         let operation = LinuxOperation::ExecStart {
             argv: vec!["/bin/true".into()],
@@ -1745,11 +1679,9 @@ mod os {
             operation,
         };
         let start_id = start.operation_id().unwrap();
-        host.store.prepare_linux(&start, None).unwrap();
-        rusqlite::Connection::open(&db).unwrap().execute(
-            "UPDATE linux_execution_effects SET state='running', released_at=1, entered_at=1 WHERE operation_id=?1",
-            [&start_id],
-        ).unwrap();
+        // Ledger transition only: release and entry are committed without a
+        // cgroup identity. The confined suite covers the live cgroup path.
+        record_running_without_cgroup(&mut host, &start);
         let operation = LinuxOperation::ExecStatus {
             start_operation_id: start_id.clone(),
             start_payload_hash: start.payload_hash().unwrap(),
@@ -1818,6 +1750,205 @@ mod os {
             host.execute_pi_linux_process(&binding, &frame("before"), 0),
             crate::PiEffectOutcome::Completed(receipt)
         );
+    }
+
+    #[cfg(all(test, feature = "pi-contract"))]
+    #[test]
+    fn pi_linux_same_host_status_quarantines_finished_child_without_result() {
+        for case in ["missing", "unparseable"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut host, binding) = implementing_process_host(dir.path());
+            let operation = LinuxOperation::ExecStart {
+                argv: vec!["/bin/true".into()],
+            };
+            let start = LinuxExecutionRequest {
+                binding: binding.clone(),
+                tool_task_id: "start".into(),
+                effect_key: case.into(),
+                capability_scope: operation.scope().into(),
+                deadline_ms: crate::domain::now_ms() + 5000,
+                operation,
+            };
+            let start_id = start.operation_id().unwrap();
+            // Ledger transition only, same as the restart test. This case keeps
+            // the Host and drops a finished child with no readable result.
+            record_running_without_cgroup(&mut host, &start);
+            host.linux = Some(LinuxSession::new(LinuxExecutionConfig {
+                cgroup_root: dir.path().into(),
+                bubblewrap: "/nonexistent-bwrap".into(),
+                helper: "/nonexistent-helper".into(),
+                crash_at: None,
+                probe_request: None,
+                fail_launch: false,
+            }));
+            let scratch = dir.path().join("scratch");
+            fs::create_dir(&scratch).unwrap();
+            if case == "unparseable" {
+                fs::write(scratch.join("result.json"), b"{").unwrap();
+            }
+            host.linux
+                .as_mut()
+                .unwrap()
+                .active
+                .insert(start_id.clone(), exited_active(scratch));
+            assert!(host.linux_operation_live(&start_id), "{case}");
+            let payload = json!({"method":"process.status","startOperationId":start_id,
+                "startPayloadHash":start.payload_hash().unwrap(),"capability":"workspace-process","deadlinePolicy":"attempt-bound"});
+            let frame = |key: &str| {
+                json!({"operationId":operation_id(&binding.attempt_id,&binding.session_id,"observer",key).unwrap(),
+                "taskId":"observer","effectKey":key,"payloadHash":payload_hash(&payload).unwrap(),"payload":payload})
+            };
+            for key in ["after-exit", "later"] {
+                let out = host.execute_pi_linux_process(
+                    &binding,
+                    &frame(key),
+                    crate::domain::now_ms() + 5000,
+                );
+                let crate::PiEffectOutcome::Completed(observed) = out else {
+                    panic!("{case}: {out:?}")
+                };
+                assert_eq!(observed["startState"], "uncertain", "{case}");
+                assert_eq!(observed["startReceiptRetained"], false, "{case}");
+                assert_eq!(observed["startResult"], Value::Null, "{case}");
+            }
+            let effect = host.store.linux_effect(&start_id).unwrap().unwrap();
+            assert_eq!(effect.state, "uncertain", "{case}");
+            assert!(effect.receipt_json.is_none(), "{case}");
+            assert!(!host.linux_operation_live(&start_id), "{case}");
+            let snapshot = host.snapshot(&binding.mission_id).unwrap();
+            assert_eq!(snapshot.phase, Phase::NeedsAttention, "{case}");
+            assert!(snapshot.execution_blocked, "{case}");
+        }
+    }
+
+    /// Release and entry without a cgroup. Callers cover the ledger transition;
+    /// the confined suite covers the live cgroup path.
+    #[cfg(all(test, feature = "pi-contract"))]
+    fn record_running_without_cgroup(host: &mut Host, start: &LinuxExecutionRequest) {
+        host.store.prepare_linux(start, None).unwrap();
+        host.store.mark_linux_released(start, 1, "1").unwrap();
+        host.store.mark_linux_entered(start, 1, "1").unwrap();
+        host.store.mark_linux_running(start).unwrap();
+    }
+
+    #[cfg(all(test, feature = "pi-contract"))]
+    fn implementing_process_host(dir: &Path) -> (Host, RuntimeBinding) {
+        let repo = dir.join("repo");
+        fs::create_dir(&repo).unwrap();
+        for args in [
+            &["init", "--initial-branch=main"][..],
+            &["config", "user.email", "test@example.com"],
+            &["config", "user.name", "Test"],
+            &["commit", "--allow-empty", "-m", "base"],
+        ] {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let mut host = Host::open(&dir.join("mission.sqlite")).unwrap();
+        let created = host
+            .create_mission(CreateMission {
+                repo,
+                issue_number: 97,
+                issue_title: "process guard".into(),
+                objective: "refuse".into(),
+                acceptance: "no kill".into(),
+                actor: "operator".into(),
+                max_repairs: 1,
+                max_plan_revisions: 1,
+            })
+            .unwrap();
+        let workspaces = dir.join("workspaces");
+        fs::create_dir(&workspaces).unwrap();
+        host.prepare_workspace(&created.mission_id, &created.attempt_id, &workspaces)
+            .unwrap();
+        let admit = |host: &mut Host, body: crate::CommandBody| {
+            let revision = host.snapshot(&created.mission_id).unwrap().revision;
+            host.admit(AdmitRequest {
+                command_id: None,
+                mission_id: created.mission_id.clone(),
+                attempt_id: None,
+                expected_revision: revision,
+                actor: "operator".into(),
+                origin: CommandOrigin::Operator,
+                body,
+            })
+            .unwrap();
+        };
+        admit(&mut host, crate::CommandBody::StartPlanning);
+        host.dispatch_pending(&created.mission_id).unwrap();
+        let digest = crate::policy::plan_digest_for("plan").unwrap();
+        host.apply_notification(
+            &created.mission_id,
+            RuntimeNotification::PlanCompleted {
+                plan: "plan".into(),
+                digest: digest.clone(),
+                quiescent: true,
+            },
+        )
+        .unwrap();
+        admit(
+            &mut host,
+            crate::CommandBody::ApprovePlan {
+                plan_digest: digest,
+            },
+        );
+        let mission = host.store.load_mission(&created.mission_id).unwrap();
+        assert_eq!(mission.phase, Phase::Implementing);
+        let binding = host.binding(&mission);
+        (host, binding)
+    }
+
+    #[cfg(all(test, feature = "pi-contract"))]
+    fn exited_active(scratch: PathBuf) -> ActiveExec {
+        let mut child = Command::new("/bin/true")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let raw = i32::try_from(child.id()).unwrap();
+        let pid = Pid::from_raw(raw).unwrap();
+        let pidfd = pidfd_open(pid, PidfdFlags::empty()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            let zombie = fs::read_to_string(format!("/proc/{}/stat", child.id()))
+                .ok()
+                .and_then(|stat| {
+                    stat.rsplit_once(") ")
+                        .map(|(_, rest)| rest.starts_with('Z'))
+                })
+                .unwrap_or(false);
+            if zombie {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (tx, lines) = mpsc::channel();
+        tx.send("DONE".to_string()).unwrap();
+        let stdin = child.stdin.take();
+        drop(child.stdout.take());
+        ActiveExec {
+            child,
+            stdin,
+            lines,
+            pidfd,
+            scratch: scratch.clone(),
+            cgroup: CgroupIdentity {
+                path: scratch.join("missing-leaf"),
+                dev: 1,
+                ino: 1,
+                boot_id: "test-boot".into(),
+            },
+        }
     }
 
     fn captured_receipt(

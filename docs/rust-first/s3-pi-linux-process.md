@@ -38,14 +38,17 @@ if a previous caller received a handle. It is never relaunched on replay.
 
 Every status request has its own task/effect identity. Replaying one returns the
 same historical observation, even after cancellation. A new observation requires
-a new identity. A fresh status also detects an entered/released start with no
-live Host supervisor and no final receipt, records it as uncertain, and blocks
-new work—even when the caller retained the handle and never replayed start or
-called recovery. Status only observes cgroup quiescence; it does not kill the
-process or infer a successful exit from an empty cgroup. The final-result summary includes the retained receipt hash,
-disposition, exit code, and at most 2 KiB of UTF-8 per output stream, with explicit
-truncation flags. The complete original receipt stays in the Rust ledger. This
-bound leaves room for JSON escaping within the existing 64 KiB bridge frame.
+a new identity. A fresh status detects an entered or released start with no
+final receipt and no supervisor in this Host. That covers a restart where the
+caller kept the handle and never replayed start or called recovery, and a live
+Host whose finished child was dropped because `result.json` was missing or
+unparseable. The start is recorded as uncertain and new work is blocked. Status
+only observes cgroup quiescence; it does not kill the process or infer a
+successful exit from an empty cgroup. The final-result summary includes the
+retained receipt hash, disposition, exit code, and at most 2 KiB of UTF-8 per
+output stream, with explicit truncation flags. The complete original receipt
+stays in the Rust ledger. This bound leaves room for JSON escaping within the
+existing 64 KiB bridge frame.
 
 ## Pause and Cancel
 
@@ -73,6 +76,12 @@ or cgroup prerequisites fail, with no fallback.
   The process handle and historical status/cancel receipts replay unchanged;
   conflicting command payloads cannot spawn another process.
 - A nonzero exit and stdout become durable status evidence.
+- A fresh status after Host restart marks an entered start with no receipt
+  uncertain and blocks new work. One case is a workload that has already
+  exited (`proven` true). Another restarts while `process-wait` is still in
+  its cgroup (`proven` false, needs attention) and leaves that process alive.
+  Status never kills. On a live Host, the next status does the same when a
+  finished child is dropped because `result.json` is missing or unparseable.
 - Admitted Pause and Cancel stop a forwarded process with detached descendants
   while its unresolved execution blocks workspace readiness. The explicit test
   driver also aborts the real confined Pi tool under the same operator identity.
