@@ -61,9 +61,11 @@ cannot enter a leaf after an empty-cgroup proof; a placed child and descendants
 are covered by cgroup termination. A crash after release intent but before Pi
 creates storage may conservatively block recovery on missing storage. A proven
 `stopped` record that never reached `opened` (`requiresExisting` still false)
-accepted no command, so the next open may create storage. An unproven stop
-stays on the conservative path. No power-loss, reboot recovery or cross-host
-failover claim is made.
+accepted no command, so the next open may create storage and may replace the
+recorded runtime configuration. An opened session keeps both the original
+database and the original configuration. An unproven stop stays on the
+conservative path. No power-loss, reboot recovery or cross-host failover claim
+is made.
 
 ## Confinement and limits
 

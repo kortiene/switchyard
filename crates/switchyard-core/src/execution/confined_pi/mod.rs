@@ -70,7 +70,9 @@ impl ConfinedPiSession {
         if let Some(previous) = previous {
             if previous["version"] != 1
                 || previous["identity"] != identity(&binding)
-                || previous["configuration"] != installed
+                // No command was accepted, so a corrected runtime can replace
+                // the rejected one. An opened session keeps its configuration.
+                || !(proven_unopened_stop(&previous) || previous["configuration"] == installed)
                 || previous["requiresExisting"].as_bool().is_none()
                 || !matches!(
                     previous["phase"].as_str(),
@@ -379,11 +381,15 @@ fn spawn_supervised(mut command: Command) -> Result<(Child, LaunchSupervisor)> {
 /// Crashes and unproven stops after release stay conservative, and an earlier
 /// generation's requirement survives a crash while the next one is only
 /// `"prepared"`.
-fn require_existing_database(previous: &Value) -> bool {
-    let proven_unopened_stop = previous["phase"] == "stopped"
+/// Proven stop whose record never reached `"opened"`.
+fn proven_unopened_stop(previous: &Value) -> bool {
+    previous["phase"] == "stopped"
         && previous["termination"]["proven"] == true
-        && previous["requiresExisting"] == false;
-    !proven_unopened_stop
+        && previous["requiresExisting"] == false
+}
+
+fn require_existing_database(previous: &Value) -> bool {
+    !proven_unopened_stop(previous)
         && (previous["requiresExisting"] == true || previous["phase"] != "prepared")
 }
 

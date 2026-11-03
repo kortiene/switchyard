@@ -92,9 +92,10 @@ fn confined_pi_proven_unopened_stop_does_not_require_existing_database() {
         Some(false)
     )));
     assert!(require_existing_database(&row("stopped", true, Some(true))));
-    assert!(!require_existing_database(&row(
-        "stopped",
-        false,
-        Some(true)
-    )));
+    let unopened = row("stopped", false, Some(true));
+    assert!(!require_existing_database(&unopened));
+    assert!(proven_unopened_stop(&unopened));
+    assert!(!proven_unopened_stop(&row("stopped", true, Some(true))));
+    assert!(!proven_unopened_stop(&row("released", false, None)));
+    assert!(!proven_unopened_stop(&row("prepared", false, None)));
 }
