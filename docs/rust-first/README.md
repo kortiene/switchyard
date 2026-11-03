@@ -1,6 +1,6 @@
 # Rust-first Switchyard prototype
 
-Status: direction accepted 2026-10-29. S1 implemented (#105). S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and [s2-feasibility.md](s2-feasibility.md). S3-A1 adds explicit [workspace ownership/recovery](s3-workspace-ownership.md); remaining S3 work and S4–S8 are planned. The native Rust agent runtime is the long-term target and is not implemented.
+Status: direction accepted 2026-10-29. S1 implemented (#105). S2 is GO for the credential-free source-built candidate; see [the acceptance record](s2-contract-gate.md). S3 delivers owned workspaces, confined effects and a non-default [bridge lifecycle](s3-bridge-lifecycle.md); product integration and S4–S8 remain open. The native Rust agent runtime is the long-term target and is not implemented.
 
 Planning date: 2026-10-28 (America/New_York).
 
@@ -76,7 +76,7 @@ flowchart TD
     CORE --> FORGE["GitHub delivery"]
 ```
 
-Start with one Rust library crate and one executable, using modules before adding more crates. S1 adds `crates/switchyard-core/` and `crates/switchyard/`. `runtime/pi/` contains the published-package audit. `runtime/pi-source/` contains the pinned source candidate from #107 and the [partial bridge probe](s2-bridge-probe.md). The Rust client is enabled only by `pi-contract` and does not replace the CLI's fake runtime. S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and [s2-feasibility.md](s2-feasibility.md). `web/` and `tests/acceptance/` remain planned paths, not packages or usable product commands.
+Start with one Rust library crate and one executable, using modules before adding more crates. S1 adds `crates/switchyard-core/` and `crates/switchyard/`. `runtime/pi/` contains the published-package audit. `runtime/pi-source/` contains the pinned source candidate from #107 and the [partial bridge probe](s2-bridge-probe.md). The Rust client is enabled only by `pi-contract` and does not replace the CLI's fake runtime. S2 is GO for the credential-free source-built candidate; see [the acceptance record](s2-contract-gate.md). `web/` and `tests/acceptance/` remain planned paths, not packages or usable product commands.
 
 ## Runtime baseline
 
@@ -86,7 +86,7 @@ S2 must establish an exact installable version and lockfile, supported Node vers
 
 The [S2 feasibility audit](s2-feasibility.md) found that npm 1.4.0 comes from a
 different source commit and lacks reviewed admission APIs. It records NO-GO
-(2026-10-29) and reproducible faux-provider probes. S2 is NO-GO; see
+(2026-10-29) and reproducible faux-provider probes. The source-built candidate was later accepted in
 [#96](https://github.com/kortiene/switchyard/issues/96) and that audit. The
 diagnostic `pi-package-audit` job does not satisfy `pi-bridge-contract` or
 authorize live execution.

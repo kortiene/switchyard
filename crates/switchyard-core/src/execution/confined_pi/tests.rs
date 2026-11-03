@@ -32,8 +32,10 @@ fn confined_pi_storage_lock_and_atomic_record_retain_identity() {
     let root = Directory::root(tmp.path()).unwrap();
     let lock = try_acquire_file(root.open_file("owner.lock", true).unwrap()).unwrap();
     assert!(try_acquire_file(root.open_file("owner.lock", true).unwrap()).is_err());
-    root.write("current.json", &json!({"generation":1})).unwrap();
-    root.write("current.json", &json!({"generation":2})).unwrap();
+    root.write("current.json", &json!({"generation":1}))
+        .unwrap();
+    root.write("current.json", &json!({"generation":2}))
+        .unwrap();
     assert_eq!(root.read("current.json").unwrap().unwrap()["generation"], 2);
     drop(lock);
     assert!(try_acquire_file(root.open_file("owner.lock", true).unwrap()).is_ok());
@@ -44,11 +46,20 @@ fn confined_pi_storage_lock_and_atomic_record_retain_identity() {
 #[test]
 fn confined_pi_recovery_rejects_foreign_leaf_and_invalid_identity() {
     let root = Path::new("/sys/fs/cgroup/delegated");
-    let row = json!({"cgroup":{"path":"/sys/fs/cgroup/foreign/bridge-a","dev":1,"ino":2,"boot":"b"}});
+    let row =
+        json!({"cgroup":{"path":"/sys/fs/cgroup/foreign/bridge-a","dev":1,"ino":2,"boot":"b"}});
     assert!(recorded_leaf(&row, root).is_err());
-    let binding = RuntimeBinding { mission_id:"m".into(), attempt_id:"a".into(), session_id:"s".into(), generation:0 };
+    let binding = RuntimeBinding {
+        mission_id: "m".into(),
+        attempt_id: "a".into(),
+        session_id: "s".into(),
+        generation: 0,
+    };
     assert!(validate(&binding, "answer").is_err());
-    let binding = RuntimeBinding { generation:1, ..binding };
+    let binding = RuntimeBinding {
+        generation: 1,
+        ..binding
+    };
     assert!(validate(&binding, "eval").is_err());
     assert!(validate(&binding, "answer").is_ok());
 }

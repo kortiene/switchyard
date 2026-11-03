@@ -3,8 +3,9 @@
 //! This crate owns mission transitions, the application SQLite ledger, the
 //! single-host owner lock, and a default fake agent runtime. The optional
 //! `pi-contract` feature adds a credential-free Host/Pi outbox probe. It does not read model
-//! credentials, write to GitHub, resume legacy ADW state, or confine a Pi
-//! process. Those boundaries belong to later slices.
+//! credentials, write to GitHub, or resume legacy ADW state. Both optional
+//! features together expose a non-default confined Pi session lifecycle;
+//! the product runtime and full Host/Pi/Linux dispatch remain separate.
 
 #![forbid(unsafe_code)]
 
@@ -62,5 +63,9 @@ pub use service::{
 #[cfg(test)]
 mod acceptance;
 
-#[cfg(all(feature = "pi-contract", feature = "linux-execution", target_os = "linux"))]
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
 pub use execution::confined_pi::{ConfinedPiConfig, ConfinedPiSession, confined_pi_launcher_main};

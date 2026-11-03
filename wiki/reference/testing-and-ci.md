@@ -3,7 +3,7 @@ type: Testing Reference
 title: Testing and CI
 description: The focused-test workflow, canonical verification chain, coverage policy, and CI execution matrix.
 tags: [reference, testing, coverage, ci, verification]
-timestamp: "2026-10-30T22:00:00Z"
+timestamp: "2026-11-03T23:00:00Z"
 ---
 
 # Canonical gate
@@ -55,27 +55,35 @@ S1 adds a separate Rust gate. From the repository root:
 ./scripts/rust-verify.sh
 ```
 
-The script checks formatting, clippy, and `cargo test` with the committed Rust 1.99.1 toolchain. CI runs it as the stable job name `rust-core` on `ubuntu-24.04`. It does not replace `npm run verify`. Adding the workflow job does not make `rust-core` a required status check; a maintainer has to add that exact name to branch protection or rulesets.
+The script checks formatting, clippy, and `cargo test` with the committed Rust 1.99.1 toolchain. This is the default-feature local gate. There is no standalone `rust-core` workflow in the current tree. The required `pi-bridge-contract` job runs workspace formatting, Clippy and tests with `pi-contract`; the separate required `execution-confinement` job builds and tests Linux execution and the confined bridge lifecycle. Legacy `npm run verify` remains separate.
 
 # Pi package audit (S2 NO-GO)
 
 The separate `pi-package-audit` job uses pinned Node 22.23.4 on Ubuntu 24.04 to
 reproduce the [S2 package/API incompatibilities](../../docs/rust-first/s2-feasibility.md).
 Its five probes and typecheck can pass while the integration remains NO-GO.
-`npm run gate` in `runtime/pi/` exits 1. The diagnostic job is not the planned
+`npm run gate` in `runtime/pi/` exits 1. The diagnostic job is not the full
 `pi-bridge-contract` check and grants no downstream live-execution readiness.
 The [audit package](../../runtime/pi/README.md) documents commands and limits.
 
 # Pinned source candidate
 
-[#107](https://github.com/kortiene/switchyard/pull/107) added `pi-source-candidate`. It rebuilds `runtime/pi-source/` when that path, its workflow, or `docs/rust-first/` changes. The job is not `pi-bridge-contract`. S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and the [S2 feasibility audit](../../docs/rust-first/s2-feasibility.md). A green audit or source rebuild is not live execution and is not S2 acceptance.
+[#107](https://github.com/kortiene/switchyard/pull/107) added `pi-source-candidate`. It rebuilds `runtime/pi-source/` when that path, its workflow, or `docs/rust-first/` changes. The job is not `pi-bridge-contract`. S2 GO for the source-built candidate was recorded on 2026-11-02; see [the acceptance record](../../docs/rust-first/s2-contract-gate.md). A green audit or source rebuild is not live execution and is not S2 acceptance.
 
 # Partial bridge probe
 
 The `pi-bridge-probe` job runs the feature-gated Rust transport and credential-free
 recovery probes against the rebuilt source candidate. See the
-[remaining S2 acceptance](../../docs/rust-first/s2-bridge-probe.md).
+[probe scope](../../docs/rust-first/s2-bridge-probe.md).
 It does not replace `pi-bridge-contract` or enable live execution.
+
+# Full contract and Linux confinement
+
+After rebuilding/installing the pinned source, run `node runtime/pi-source/contract.mjs` from the repository root. This verifies the full credential-free S2 matrix and writes revision-bound evidence.
+
+On the declared Ubuntu 24.04 x86_64 runner, `scripts/confinement-verify.sh` and `scripts/bridge-confinement-verify.sh` exercise real OS boundaries and recovery. They require the pinned backend, namespace support and writable delegated cgroups; missing support fails. See [bridge lifecycle](../../docs/rust-first/s3-bridge-lifecycle.md).
+
+A read-only ruleset audit on 2026-11-03 confirmed `pi-bridge-contract`, `execution-confinement`, `verify (node 20.19.0)` and `verify (node 22)` are required on main. Rulesets 26316513 and 26316769 enforce them; no status names are changed by S3-B4. These checks do not grant full S3 or live-provider acceptance.
 
 # Wiki validation policy
 

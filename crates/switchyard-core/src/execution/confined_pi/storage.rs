@@ -25,13 +25,18 @@ impl Directory {
             match part {
                 Component::RootDir => {}
                 Component::Normal(name) => {
-                    file = File::from(openat(&file, name, flags, Mode::empty()).map_err(Error::storage)?);
+                    file = File::from(
+                        openat(&file, name, flags, Mode::empty()).map_err(Error::storage)?,
+                    );
                 }
                 _ => return Err(Error::guard("bridge root contains a non-normal component")),
             }
         }
         private(&file)?;
-        Ok(Self { path: path.into(), file })
+        Ok(Self {
+            path: path.into(),
+            file,
+        })
     }
 
     pub fn child(&self, name: &str) -> Result<Self> {
@@ -41,19 +46,36 @@ impl Directory {
             Err(rustix::io::Errno::EXIST) => {}
             Err(error) => return Err(Error::storage(error)),
         }
-        let file = File::from(openat(&self.file, name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty()).map_err(Error::storage)?);
+        let file = File::from(
+            openat(
+                &self.file,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(Error::storage)?,
+        );
         private(&file)?;
-        Ok(Self { path: self.path.join(name), file })
+        Ok(Self {
+            path: self.path.join(name),
+            file,
+        })
     }
 
     pub fn open_file(&self, name: &str, create: bool) -> Result<File> {
         segment(name)?;
-        let flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK
-            | if create { OFlags::CREATE } else { OFlags::empty() };
-        let file = File::from(openat(&self.file, name, flags, Mode::from_raw_mode(0o600))
-            .map_err(Error::storage)?);
+        let flags = OFlags::RDWR
+            | OFlags::NOFOLLOW
+            | OFlags::CLOEXEC
+            | OFlags::NONBLOCK
+            | if create {
+                OFlags::CREATE
+            } else {
+                OFlags::empty()
+            };
+        let file = File::from(
+            openat(&self.file, name, flags, Mode::from_raw_mode(0o600)).map_err(Error::storage)?,
+        );
         regular(&file)?;
         if create {
             private(&file)?;
@@ -64,7 +86,9 @@ impl Directory {
     }
 
     pub fn read(&self, name: &str) -> Result<Option<Value>> {
-        if !self.exists(name)? { return Ok(None); }
+        if !self.exists(name)? {
+            return Ok(None);
+        }
         let mut file = self.open_file(name, false)?;
         private(&file)?;
         if file.metadata().map_err(Error::storage)?.len() > 64 * 1024 {
@@ -86,14 +110,24 @@ impl Directory {
 
     pub fn write(&self, name: &str, value: &Value) -> Result<()> {
         segment(name)?;
-        if self.exists(name)? { private(&self.open_file(name, false)?)?; }
+        if self.exists(name)? {
+            private(&self.open_file(name, false)?)?;
+        }
         let temporary = format!("pending-{}", uuid::Uuid::new_v4());
-        let mut file = File::from(openat(&self.file, temporary.as_str(),
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_raw_mode(0o600)).map_err(Error::storage)?);
-        file.write_all(&serde_json::to_vec(value).map_err(Error::storage)?).map_err(Error::storage)?;
+        let mut file = File::from(
+            openat(
+                &self.file,
+                temporary.as_str(),
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o600),
+            )
+            .map_err(Error::storage)?,
+        );
+        file.write_all(&serde_json::to_vec(value).map_err(Error::storage)?)
+            .map_err(Error::storage)?;
         file.sync_all().map_err(Error::storage)?;
-        rustix::fs::renameat(&self.file, temporary.as_str(), &self.file, name).map_err(Error::storage)?;
+        rustix::fs::renameat(&self.file, temporary.as_str(), &self.file, name)
+            .map_err(Error::storage)?;
         self.file.sync_all().map_err(Error::storage)
     }
 
@@ -103,11 +137,15 @@ impl Directory {
         for entry in fs::read_dir(&self.path).map_err(Error::storage)? {
             let entry = entry.map_err(Error::storage)?;
             let name = entry.file_name();
-            let name = name.to_str().ok_or_else(|| Error::guard("non-UTF8 bridge state entry"))?;
+            let name = name
+                .to_str()
+                .ok_or_else(|| Error::guard("non-UTF8 bridge state entry"))?;
             regular(&self.open_file(name, false)?)?;
         }
         if require_database && !self.exists("session.sqlite")? {
-            return Err(Error::guard("original Pi database is missing; recovery blocked"));
+            return Err(Error::guard(
+                "original Pi database is missing; recovery blocked",
+            ));
         }
         Ok(())
     }
@@ -131,7 +169,9 @@ fn private(file: &File) -> Result<()> {
 fn regular(file: &File) -> Result<()> {
     let meta = file.metadata().map_err(Error::storage)?;
     if !meta.is_file() || meta.nlink() != 1 || meta.uid() != rustix::process::geteuid().as_raw() {
-        return Err(Error::guard("bridge storage entry must be an owned regular file with exactly one link"));
+        return Err(Error::guard(
+            "bridge storage entry must be an owned regular file with exactly one link",
+        ));
     }
     Ok(())
 }

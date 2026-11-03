@@ -145,7 +145,11 @@ pub fn prepare(root: &Path, policy: &Path, probe: bool) -> io::Result<BridgeSand
             &format!("/runtime/{part}"),
         );
     }
-    mount("--ro-bind", &source.join("confinement/guard.cjs"), "/guard.cjs");
+    mount(
+        "--ro-bind",
+        &source.join("confinement/guard.cjs"),
+        "/guard.cjs",
+    );
     mount("--ro-bind", &policy.canonicalize()?, "/lockdown.so");
     // Test-only read-write session bind. The bridge can plant symlinks here.
     // Product opens of bridge-writable paths must not follow them; see the S3 handoff.
