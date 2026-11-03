@@ -12,14 +12,21 @@ pub fn confined_pi_launcher_main() {
 }
 
 fn run() -> Result<(), String> {
+    let mut args = std::env::args().skip(1);
+    let expected_parent = args
+        .next()
+        .ok_or("missing owner PID")?
+        .parse::<i32>()
+        .map_err(|error| error.to_string())?;
     let parent = rustix::process::getppid();
     rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))
         .map_err(|error| error.to_string())?;
-    if parent.is_none_or(|p| p.as_raw_nonzero().get() == 1) || parent != rustix::process::getppid()
+    if expected_parent <= 0
+        || parent.is_none_or(|p| p.as_raw_nonzero().get() != expected_parent)
+        || parent != rustix::process::getppid()
     {
         return Err("owner died before the startup barrier".into());
     }
-    let mut args = std::env::args().skip(1);
     let leaf = args.next().ok_or("missing cgroup")?;
     if args.next().as_deref() != Some("--") {
         return Err("missing command separator".into());

@@ -34,9 +34,11 @@ pub(super) fn check(config: &ConfinedPiConfig) -> Result<Value> {
             || !meta.is_file()
             || meta.mode() & 0o6022 != 0
         {
-            return Err(Error::guard(
-                "bridge runtime requires trusted absolute regular paths without setid/group/world writes",
-            ));
+            return Err(Error::guard(format!(
+                "untrusted bridge runtime path {} (mode {:o}); requires an absolute regular file without setid/group/world writes",
+                path.display(),
+                meta.mode()
+            )));
         }
         files.push(json!({"path":path,"sha256":crate::canonical::sha256_hex(&fs::read(path).map_err(Error::storage)?)}));
     }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test-only S3-B1 policy; no provider credentials, no fallback on missing support.
+# Credential-free S3-B1 through B4 gates; no fallback on missing support.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]]
@@ -16,7 +16,11 @@ mkdir -p target/bridge-policy "${SWITCHYARD_CONFINEMENT_EVIDENCE:?set evidence d
 cc -Wall -Wextra -Werror -O2 -shared -fPIC runtime/pi-source/confinement/lockdown.c -o target/bridge-policy/lockdown.so
 cc -Wall -Wextra -Werror -O2 -DLOCKDOWN_TEST runtime/pi-source/confinement/lockdown.c -pthread -o target/bridge-policy/lockdown-test
 target/bridge-policy/lockdown-test | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-native.log"
-export SWITCHYARD_PI_NODE="$(readlink -f "$(command -v node)")"
+# Install a byte-identical private candidate: the shared CI tool cache may be
+# group-writable and is not an acceptable trusted runtime installation.
+install -m 0755 "$(readlink -f "$(command -v node)")" "$PWD/target/bridge-policy/node"
+chmod 0755 target/bridge-policy/lockdown.so
+export SWITCHYARD_PI_NODE="$PWD/target/bridge-policy/node"
 export SWITCHYARD_BRIDGE_POLICY="$PWD/target/bridge-policy/lockdown.so"
 {
   git rev-parse HEAD HEAD^{tree}
@@ -57,6 +61,7 @@ cargo test -p switchyard-confinement-probe --test pi_linux_process --features pi
 
 # S3-B4: Rust-owned confined sessions; no product runtime/default change.
 cargo build -p switchyard --bin switchyard-bridge-launcher --features "pi-contract linux-execution" --locked
+chmod 0755 target/debug/switchyard-bridge-launcher
 export SWITCHYARD_BRIDGE_LAUNCHER="$PWD/target/debug/switchyard-bridge-launcher"
 cargo test -p switchyard-core --features "pi-contract linux-execution" confined_pi_ --locked -- --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-storage.log"
 cargo test -p switchyard-confinement-probe --test bridge_lifecycle --features pi-linux-process --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-lifecycle.log"

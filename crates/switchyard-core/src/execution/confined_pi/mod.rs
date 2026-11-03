@@ -113,6 +113,7 @@ impl ConfinedPiSession {
         control.write("current.json", &record)?;
         let mut command = Command::new(&config.launcher);
         command
+            .arg(std::process::id().to_string())
             .arg(&leaf.path)
             .arg("--")
             .args(&argv)

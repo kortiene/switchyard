@@ -43,7 +43,8 @@ claim protection against a compromised Host or root administrator.
    its PID/start identity, move the unreaped child into the cgroup, and persist
    released intent before sending GO.
 5. The launcher verifies membership and execs the fixed sandbox command. It
-   never migrates itself, and requests SIGKILL on owner death. A missing GO or
+   never migrates itself, verifies the expected Host PID even under a subreaper,
+   and requests SIGKILL on owner death. A missing GO or
    missing membership cannot execute the sandbox.
 6. Rust negotiates the original protocol and requires an inert `runtime.open`.
    It does not resume pending tools as a side effect of recovery.

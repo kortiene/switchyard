@@ -278,14 +278,20 @@ fn confined_lifecycle_rejects_missing_storage_and_replaced_cgroup() {
 
 #[test]
 fn confined_launcher_cannot_self_join_or_launch_without_release() {
-    for release in [false, true] {
+    for (release, parent) in [
+        (false, std::process::id()),
+        (true, std::process::id()),
+        (false, 0),
+    ] {
         let tmp = private_root();
         fs::write(tmp.path().join("cgroup.procs"), "").unwrap();
         let marker = tmp.path().join("must-not-exist");
         let mut child = Command::new(path("SWITCHYARD_BRIDGE_LAUNCHER"))
+            .arg(parent.to_string())
             .arg(tmp.path())
             .args(["--", "/usr/bin/touch"])
             .arg(&marker)
+            .stderr(Stdio::piped())
             .stdin(Stdio::piped())
             .spawn()
             .unwrap();
@@ -293,7 +299,11 @@ fn confined_launcher_cannot_self_join_or_launch_without_release() {
             child.stdin.as_mut().unwrap().write_all(b"GO\n").unwrap();
         }
         drop(child.stdin.take());
-        assert!(!child.wait().unwrap().success());
+        let result = child.wait_with_output().unwrap();
+        assert!(!result.status.success());
+        if parent == 0 {
+            assert!(String::from_utf8_lossy(&result.stderr).contains("owner died"));
+        }
         assert!(!marker.exists());
         assert_eq!(
             fs::read_to_string(tmp.path().join("cgroup.procs")).unwrap(),
