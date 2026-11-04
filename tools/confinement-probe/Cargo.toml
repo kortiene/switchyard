@@ -45,3 +45,8 @@ required-features = ["linux-confinement"]
 name = "pi_linux_process"
 path = "tests/pi_linux_process.rs"
 required-features = ["pi-linux-process"]
+
+[[test]]
+name = "bridge_lifecycle"
+path = "tests/bridge_lifecycle.rs"
+required-features = ["pi-linux-process"]

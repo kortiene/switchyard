@@ -1,4 +1,4 @@
-// Linux x86_64, test-only bridge policy. Runs in the dynamic loader, before
+// Linux x86_64, credential-free bridge policy. Runs in the dynamic loader, before
 // Node starts threads or loads JavaScript. No preload failure may reach Pi:
 // guard.cjs independently requires the constructor's success marker.
 #define _GNU_SOURCE

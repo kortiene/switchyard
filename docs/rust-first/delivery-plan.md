@@ -200,3 +200,11 @@ tools to the Linux ledger and exercises both confinement boundaries, descendant
 termination and host-crash replay. Credential-free Host/Pi abort delivery also
 bypasses blocked workspaces. These remain explicit test seams; production
 Host/Pi/Linux dispatch, bridge supervision and model-only egress remain under S3.
+
+### S3-B4 Rust-owned confined bridge sessions
+
+The [bridge lifecycle](s3-bridge-lifecycle.md) adds a non-default Rust session API
+with protected control records, no-follow storage inspection, generation fences,
+cgroup limits, a startup barrier and quiescent recovery. It remains credential-free
+and uses the fixed conformance entry point. Product Host/Pi/Linux dispatch,
+model-only egress and full S3 acceptance remain open.

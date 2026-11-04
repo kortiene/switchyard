@@ -1,0 +1,138 @@
+use super::*;
+use std::os::unix::fs::{PermissionsExt, symlink};
+
+#[test]
+fn confined_pi_storage_refuses_symlinks_hardlinks_and_shared_roots() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let root = Directory::root(tmp.path()).unwrap();
+    let sentinel = tmp.path().join("sentinel");
+    fs::write(&sentinel, "unchanged").unwrap();
+    // Owner-only, so the hard link below is refused by nlink rather than mode.
+    fs::set_permissions(&sentinel, fs::Permissions::from_mode(0o600)).unwrap();
+    symlink(&sentinel, tmp.path().join("owner.lock")).unwrap();
+    assert!(root.open_file("owner.lock", true).is_err());
+    fs::remove_file(tmp.path().join("owner.lock")).unwrap();
+    fs::hard_link(&sentinel, tmp.path().join("owner.lock")).unwrap();
+    assert!(root.open_file("owner.lock", true).is_err());
+    symlink(tmp.path(), tmp.path().join("redirect")).unwrap();
+    assert!(Directory::root(&tmp.path().join("redirect")).is_err());
+    assert!(root.child("redirect").is_err());
+    symlink(&sentinel, tmp.path().join("current.json")).unwrap();
+    assert!(root.read("current.json").is_err());
+    assert!(root.write("current.json", &json!({})).is_err());
+    let state = root.child("state").unwrap();
+    symlink(&sentinel, state.path.join("session.sqlite")).unwrap();
+    assert!(state.inspect_state(true).is_err());
+    assert_eq!(fs::read_to_string(&sentinel).unwrap(), "unchanged");
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(Directory::root(tmp.path()).is_err());
+}
+
+#[test]
+fn confined_pi_storage_lock_and_atomic_record_retain_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let root = Directory::root(tmp.path()).unwrap();
+    let lock = try_acquire_file(root.open_file("owner.lock", true).unwrap()).unwrap();
+    assert!(try_acquire_file(root.open_file("owner.lock", true).unwrap()).is_err());
+    root.write("current.json", &json!({"generation":1}))
+        .unwrap();
+    root.write("current.json", &json!({"generation":2}))
+        .unwrap();
+    assert_eq!(root.read("current.json").unwrap().unwrap()["generation"], 2);
+    drop(lock);
+    assert!(try_acquire_file(root.open_file("owner.lock", true).unwrap()).is_ok());
+    assert!(root.child("../escape").is_err());
+    assert!(root.child("state").unwrap().inspect_state(true).is_err());
+}
+
+#[test]
+fn confined_pi_recovery_rejects_foreign_leaf_and_invalid_identity() {
+    let root = Path::new("/sys/fs/cgroup/delegated");
+    let row =
+        json!({"cgroup":{"path":"/sys/fs/cgroup/foreign/bridge-a","dev":1,"ino":2,"boot":"b"}});
+    assert!(recorded_leaf(&row, root).is_err());
+    let binding = RuntimeBinding {
+        mission_id: "m".into(),
+        attempt_id: "a".into(),
+        session_id: "s".into(),
+        generation: 0,
+    };
+    assert!(validate(&binding, "answer").is_err());
+    let binding = RuntimeBinding {
+        generation: 1,
+        ..binding
+    };
+    assert!(validate(&binding, "eval").is_err());
+    assert!(validate(&binding, "answer").is_ok());
+}
+
+#[test]
+fn confined_pi_proven_unopened_stop_does_not_require_existing_database() {
+    let row = |phase: &str, requires_existing: bool, proven: Option<bool>| {
+        let mut record = json!({"phase": phase, "requiresExisting": requires_existing});
+        if let Some(proven) = proven {
+            record["termination"] = json!({"proven": proven});
+        }
+        record
+    };
+    assert!(!require_existing_database(&row("prepared", false, None)));
+    assert!(require_existing_database(&row("prepared", true, None)));
+    assert!(require_existing_database(&row("released", false, None)));
+    assert!(require_existing_database(&row("opened", true, None)));
+    assert!(require_existing_database(&row(
+        "uncertain",
+        false,
+        Some(false)
+    )));
+    assert!(require_existing_database(&row(
+        "stopped",
+        false,
+        Some(false)
+    )));
+    assert!(require_existing_database(&row("stopped", true, Some(true))));
+    let unopened = row("stopped", false, Some(true));
+    assert!(!require_existing_database(&unopened));
+    assert!(proven_unopened_stop(&unopened));
+    assert!(!proven_unopened_stop(&row("stopped", true, Some(true))));
+    assert!(!proven_unopened_stop(&row("released", false, None)));
+    assert!(!proven_unopened_stop(&row("prepared", false, None)));
+}
+
+#[test]
+fn confined_pi_configuration_swap_requires_an_empty_unopened_stop() {
+    let record =
+        |phase: &str, requires_existing: bool, proven: Option<bool>, configuration: &str| {
+            let mut previous = json!({
+                "phase": phase,
+                "requiresExisting": requires_existing,
+                "configuration": configuration,
+            });
+            if let Some(proven) = proven {
+                previous["termination"] = json!({"proven": proven});
+            }
+            previous
+        };
+    let unopened = record("stopped", false, Some(true), "rejected-policy");
+    let corrected = json!("corrected-policy");
+    let same = json!("rejected-policy");
+    assert!(allows_configuration(&unopened, &corrected, true));
+    assert!(!allows_configuration(&unopened, &corrected, false));
+    assert!(allows_configuration(&unopened, &same, false));
+    assert!(!allows_configuration(
+        &record("stopped", true, Some(true), "rejected-policy"),
+        &corrected,
+        true
+    ));
+    assert!(!allows_configuration(
+        &record("stopped", false, Some(false), "rejected-policy"),
+        &corrected,
+        true
+    ));
+    assert!(!allows_configuration(
+        &record("released", false, None, "rejected-policy"),
+        &corrected,
+        true
+    ));
+}

@@ -1,8 +1,9 @@
 # Pinned Pi source candidate
 
 This is the bounded source-build remedy for [S2 / #96](https://github.com/kortiene/switchyard/issues/96).
-The published-1.4.0 NO-GO evidence stays in `../pi/`. This candidate is
-**NEEDS-FULL-S2**, not an integration approval or a usable coding runtime.
+The published-1.4.0 NO-GO evidence stays in `../pi/`. The source-built candidate received **S2 GO on 2026-11-02**; see the
+[reviewed scope and evidence](../../docs/rust-first/s2-contract-gate.md).
+Product Pi execution and live providers remain gated on S3.
 
 This directory is disposable S2 proof-of-concept evidence, with no long-term
 maintenance or TypeScript runtime compatibility promise. Rust remains the target
@@ -75,7 +76,8 @@ Four candidate tests verify:
 These remove the demonstrated package/API mismatch. They do not prove the
 Rust process bridge, durable payload conflicts, tool replay, cancellation,
 transport limits, operating-system confinement, or real issue-to-PR acceptance.
-S2 stays open, and Pi-dependent live work stays blocked until the full gate.
+Those proofs were assembled and accepted in the S2-E gate below. Live product
+execution still requires S3 confinement and integration acceptance.
 
 The dependent [process-bridge probe](../../docs/rust-first/s2-bridge-probe.md)
 adds a feature-gated Rust supervisor and credential-free wire/replay tests.
@@ -83,20 +85,20 @@ Its extra tests are partial S2 evidence; the regular mission CLI is unchanged.
 
 The [S2-A Host/outbox probe](../../docs/rust-first/s2-host-outbox.md) uses the same
 pinned faux child with the real Rust ledger. It adds deterministic admission-gap
-crashes and recovery tests; S2 remains NO-GO.
+crashes and recovery tests that contributed to the accepted S2 matrix.
 
 The [S2-B effect probe](../../docs/rust-first/s2-effect-outcomes.md) adds typed
 effect outcomes and tests lost replies and uncertain effects against the real
-Host simulated journal. It keeps the same product and S2 restrictions.
+Host simulated journal. It retains the FakeRuntime product default.
 
 The [S2-C cancellation probe](../../docs/rust-first/s2-cancellation.md) prevents
 concurrent duplicate aborts from cancelling later work and adds stop crash,
-timeout and bounded request-pressure evidence. The complete S2 gate stays open.
+timeout and bounded request-pressure evidence. These cases are included in the accepted S2 gate.
 
 The [S2-D storage/close probe](../../docs/rust-first/s2-storage-recovery.md) adds
 SQLite write refusals, failed Rust acknowledgements and close/reopen races.
 It fences close against unfinished calls and stops, and terminates the peer
-on background storage failure. S2 remains NO-GO.
+on background storage failure. These cases contributed to S2 acceptance.
 
 The [S2-E contract gate](../../docs/rust-first/s2-contract-gate.md) adds shared
 cross-language vectors, registry/refusal and snapshot-resync checks, composed
@@ -104,4 +106,9 @@ stop/replay evidence, and the always-running `pi-bridge-contract` workflow.
 After building/installing the pinned artifacts, run `node contract.mjs` here
 or `node runtime/pi-source/contract.mjs` from the repository root. The runner
 refuses missing, skipped or filtered mandatory evidence and saves exact revision
-metadata and logs. S2 GO still requires review; FakeRuntime remains the default.
+metadata and logs. The reviewed S2 GO is recorded separately from test results;
+FakeRuntime remains the default.
+
+The [S3-B4 session API](../../docs/rust-first/s3-bridge-lifecycle.md) uses the
+shared native policy in `confinement/` with Rust-owned storage, cgroups and
+quiescent recovery. It remains credential-free and non-default.

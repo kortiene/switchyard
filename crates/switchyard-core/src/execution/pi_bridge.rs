@@ -186,18 +186,30 @@ impl PiBridge {
             )
         };
         let owner = try_acquire(&database)?;
-        let mut child = Command::new(node)
+        let mut command = Command::new(node);
+        command
             .arg("--experimental-strip-types")
             .arg(launcher)
             .arg(&database)
             .arg(binding_json(&binding).to_string())
             .arg(fixture)
-            .env_clear()
+            .env_clear();
+        let child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(Error::storage)?;
+        Self::from_child(child, binding, owner)
+    }
+
+    /// Attach the unchanged wire transport after a confined launcher has been
+    /// durably recorded, placed in its cgroup and released by the Rust owner.
+    pub(crate) fn from_child(
+        mut child: Child,
+        binding: RuntimeBinding,
+        owner: OwnerLock,
+    ) -> Result<Self> {
         let mut input = child.stdin.take().expect("piped stdin");
         let output = child.stdout.take().expect("piped stdout");
         let mut diagnostics = child.stderr.take().expect("piped stderr");

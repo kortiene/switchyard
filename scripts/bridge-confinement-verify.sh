@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test-only S3-B1 policy; no provider credentials, no fallback on missing support.
+# Credential-free S3-B1 through B4 gates; no fallback on missing support.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]]
@@ -13,10 +13,14 @@ backend="${SWITCHYARD_BWRAP:-/usr/bin/bwrap}"
 [[ "$("$backend" --version)" == 'bubblewrap 0.9.0' ]]
 cmp /usr/bin/bwrap "$backend"
 mkdir -p target/bridge-policy "${SWITCHYARD_CONFINEMENT_EVIDENCE:?set evidence directory}"
-cc -Wall -Wextra -Werror -O2 -shared -fPIC tools/confinement-probe/bridge/lockdown.c -o target/bridge-policy/lockdown.so
-cc -Wall -Wextra -Werror -O2 -DLOCKDOWN_TEST tools/confinement-probe/bridge/lockdown.c -pthread -o target/bridge-policy/lockdown-test
+cc -Wall -Wextra -Werror -O2 -shared -fPIC runtime/pi-source/confinement/lockdown.c -o target/bridge-policy/lockdown.so
+cc -Wall -Wextra -Werror -O2 -DLOCKDOWN_TEST runtime/pi-source/confinement/lockdown.c -pthread -o target/bridge-policy/lockdown-test
 target/bridge-policy/lockdown-test | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-native.log"
-export SWITCHYARD_PI_NODE="$(readlink -f "$(command -v node)")"
+# Install a byte-identical private candidate: the shared CI tool cache may be
+# group-writable and is not an acceptable trusted runtime installation.
+install -m 0755 "$(readlink -f "$(command -v node)")" "$PWD/target/bridge-policy/node"
+chmod 0755 target/bridge-policy/lockdown.so
+export SWITCHYARD_PI_NODE="$PWD/target/bridge-policy/node"
 export SWITCHYARD_BRIDGE_POLICY="$PWD/target/bridge-policy/lockdown.so"
 {
   git rev-parse HEAD HEAD^{tree}
@@ -30,7 +34,7 @@ export SWITCHYARD_BRIDGE_POLICY="$PWD/target/bridge-policy/lockdown.so"
   node --version
   rustc --version
   cc --version
-  sha256sum "$SWITCHYARD_PI_NODE" "$SWITCHYARD_BRIDGE_POLICY" tools/confinement-probe/bridge/*
+  sha256sum "$SWITCHYARD_PI_NODE" "$SWITCHYARD_BRIDGE_POLICY" tools/confinement-probe/bridge/* runtime/pi-source/confinement/*
   ldd "$SWITCHYARD_PI_NODE"
   for library in libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 libstdc++.so.6 libgcc_s.so.1; do
     sha256sum "/lib/x86_64-linux-gnu/$library"
@@ -54,3 +58,10 @@ cargo test -p switchyard-confinement-probe --test pi_linux_write --features pi-l
 
 # S3-B3: process handles/status/cancel, operator stops, and process crash replay.
 cargo test -p switchyard-confinement-probe --test pi_linux_process --features pi-linux-process --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/pi-linux-process.log"
+
+# S3-B4: Rust-owned confined sessions; no product runtime/default change.
+cargo build -p switchyard --bin switchyard-bridge-launcher --features "pi-contract linux-execution" --locked
+chmod 0755 target/debug/switchyard-bridge-launcher
+export SWITCHYARD_BRIDGE_LAUNCHER="$PWD/target/debug/switchyard-bridge-launcher"
+cargo test -p switchyard-core --features "pi-contract linux-execution" confined_pi_ --locked -- --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-storage.log"
+cargo test -p switchyard-confinement-probe --test bridge_lifecycle --features pi-linux-process --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-lifecycle.log"
