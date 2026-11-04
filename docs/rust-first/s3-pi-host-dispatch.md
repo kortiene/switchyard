@@ -51,16 +51,18 @@ unverified workspace, protected-path denial, authority rejection, adapter
 mismatch, receipt replay, and Host SIGKILL at bridge-live, pre-ACK, prepared-effect
 and receipt barriers. The existing B1–B4 suites remain enabled.
 
-Before this candidate satisfies #148, require successful CI evidence and add
-Host-driven negative bridge syscall probes, stale/foreign callback assertions,
-and explicit hung-extension stop/recovery coverage. Do not close #148 or #97 on
-the strength of compilation or the default tests alone.
+The suite also covers Host-driven forbidden file/socket/child-process probes,
+stale and foreign effect bindings, and hung-extension stop/recovery. The negative
+probe uses a test-only trusted launcher that adds two read-only fixture mounts;
+all production confinement arguments remain intact. Require successful CI
+evidence before accepting this candidate; compilation alone is insufficient.
 
 The 60-second bridge wall deadline, 256 MiB and 64-task limits are conformance
 budgets. Production budgets belong to S4. A stopped session cannot be replaced
 within the same owner generation; a later Host reopen uses a new generation.
 Cgroup leaves are retained because recovery needs their identity; each reopen
-adds a leaf. Bounded cleanup must preserve recovery evidence and is deferred.
+adds a leaf. [#151](https://github.com/kortiene/switchyard/issues/151) tracks
+bounded cleanup that preserves recovery evidence.
 The compiled source-tree lookup remains confined to this fixed conformance
 entry point; `config.policy` selects the trusted native policy library, but
 relocatable runtime/guard installation is still deferred. These APIs are not an

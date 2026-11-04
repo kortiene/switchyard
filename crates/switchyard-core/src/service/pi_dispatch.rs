@@ -132,7 +132,10 @@ impl Host {
         {
             self.terminate_linux_writers(&binding.mission_id)?;
             let mission = self.store.load_mission(&binding.mission_id)?;
-            if !mission.phase.is_terminal() && !error.is_transient() {
+            if !mission.phase.is_terminal()
+                && !matches!(mission.phase, Phase::Pausing | Phase::Cancelling)
+                && !error.is_transient()
+            {
                 self.uncertainty(&mission, AttentionReason::ExecutionUncertain)?;
             }
         }

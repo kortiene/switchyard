@@ -3607,3 +3607,36 @@ fn supersede_unique_races_are_guard_errors() {
     assert_eq!(rows.len(), 1);
     assert!(rows[0].get("resultingRevision").is_none(), "{rows:?}");
 }
+
+#[test]
+fn v9_inspection_and_upgrade_preserve_original_effect_receipts() {
+    let (dir, mut host, request) = setup();
+    host.execute_fake_operation(&request).unwrap();
+    let before = host
+        .snapshot(&request.binding.mission_id)
+        .unwrap()
+        .to_json();
+    drop(host);
+    let db = dir.path().join("mission.sqlite");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch("DROP TABLE pi_host_sessions; DELETE FROM schema_migrations WHERE version=10; PRAGMA user_version=9;").unwrap();
+    let inspected = Host::inspect(&db, Some(&request.binding.mission_id)).unwrap()[0].to_json();
+    assert_eq!(inspected["executionEffects"], before["executionEffects"]);
+    assert_eq!(
+        conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        9
+    );
+    let host = Host::open(&db).unwrap();
+    let after = host
+        .snapshot(&request.binding.mission_id)
+        .unwrap()
+        .to_json();
+    assert_eq!(after["executionEffects"], before["executionEffects"]);
+    assert_eq!(after["piHost"], Value::Null);
+    assert_eq!(
+        conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        10
+    );
+}
