@@ -23,9 +23,9 @@ the enabled Linux backend, the current owner/generation, an implementing mission
 an unblocked execution ledger, a ready owned workspace and the existing Linux
 authorization checks. Merely calling this API cannot enable the backend.
 
-A new effect is rejected unless the Host runtime is FakeRuntime; lifting that
-gate is S3 Track B product Pi dispatch wiring under
-[#97](https://github.com/kortiene/switchyard/issues/97).
+A new effect requires FakeRuntime or the explicit `Host::open_confined_pi`
+adapter. The unconfined Pi probe remains denied. See
+[S3-B5 Host dispatch](s3-pi-host-dispatch.md) for the non-default composition.
 
 Only the exact bundled `file.write` payload is accepted: a workspace-relative
 path, string content, `workspace-write` capability and `attempt-bound` deadline

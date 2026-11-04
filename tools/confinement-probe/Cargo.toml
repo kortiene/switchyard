@@ -50,3 +50,8 @@ required-features = ["pi-linux-process"]
 name = "bridge_lifecycle"
 path = "tests/bridge_lifecycle.rs"
 required-features = ["pi-linux-process"]
+
+[[test]]
+name = "pi_host_dispatch"
+path = "tests/pi_host_dispatch.rs"
+required-features = ["pi-linux-process"]

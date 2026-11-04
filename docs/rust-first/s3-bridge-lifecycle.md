@@ -3,8 +3,9 @@
 Scope: #97 and #94, following #143–#146. `ConfinedPiSession` is a non-default,
 credential-free Rust API behind `pi-contract` plus `linux-execution`. It uses
 the fixed source-built conformance entry point. FakeRuntime remains the
-product default. Product Host/Pi/Linux dispatch, provider credentials,
-model-only egress and full S3 acceptance remain separate.
+product default. [S3-B5](s3-pi-host-dispatch.md) adds an explicit Host-owned
+composition. Provider credentials, model-only egress and full S3 acceptance
+remain separate.
 
 ## Ownership and storage
 

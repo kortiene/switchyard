@@ -26,6 +26,12 @@ mod linux_execution;
     feature = "linux-execution",
     target_os = "linux"
 ))]
+mod pi_dispatch;
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
 mod pi_linux_process;
 #[cfg(all(
     feature = "pi-contract",
@@ -142,6 +148,7 @@ pub struct MissionSnapshot {
     pub successor_of_mission_id: Option<String>,
     pub head_sha: String,
     pub runtime_adapter: String,
+    pub pi_host: Option<Value>,
     pub verifier_json: String,
     pub delivery: Option<DeliveryView>,
     pub workspace: Option<crate::WorkspaceView>,
@@ -205,6 +212,7 @@ impl MissionSnapshot {
                 "frame": frame,
             })).collect::<Vec<_>>(),
         });
+        value["piHost"] = json!(self.pi_host);
         value["linuxExecutionEffects"] = json!(
             self.linux_execution_effects
                 .iter()
@@ -489,6 +497,15 @@ impl Host {
         request: AdmitRequest,
         verification: Option<&NewVerification>,
     ) -> Result<AdmitResult> {
+        self.admit_checked(request, verification, false)
+    }
+
+    fn admit_checked(
+        &mut self,
+        request: AdmitRequest,
+        verification: Option<&NewVerification>,
+        host_fact: bool,
+    ) -> Result<AdmitResult> {
         let mission = self.store.load_mission(&request.mission_id)?;
         let attempt_id = request
             .attempt_id
@@ -506,8 +523,10 @@ impl Host {
             .command_id
             .clone()
             .unwrap_or_else(|| crate::domain::new_id("c"));
-        self.runtime
-            .validate_admission(&request.body, request.origin)?;
+        if !host_fact {
+            self.runtime
+                .validate_admission(&request.body, request.origin)?;
+        }
         if request.body.kind().is_runtime_bound() {
             let runtime_request = RuntimeRequest {
                 binding: self.binding(&mission),
@@ -617,6 +636,14 @@ impl Host {
     /// use [`Self::dispatch_reconciled`] for any later dispatch so the
     /// workspace is not verified again.
     pub fn dispatch_pending(&mut self, mission_id: &str) -> Result<usize> {
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        if self.runtime.is_confined() {
+            self.ensure_confined_session(mission_id)?;
+        }
         self.reconcile_execution(mission_id)?;
         if self.store.linux_execution_blocked(mission_id)? {
             // Stop delivery still runs. Git verification waits until the
@@ -645,6 +672,14 @@ impl Host {
     /// Pi sessions open inert and reconcile their original abort before retry.
     /// Delivery never resumes work or certifies mission/writer quiescence.
     pub fn dispatch_stops(&mut self, mission_id: &str) -> Result<usize> {
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        if self.runtime.is_confined() {
+            return self.dispatch_confined_stops(mission_id);
+        }
         let mission = self.store.load_mission(mission_id)?;
         let binding = self.binding(&mission);
         self.accept_runtime_binding(&binding, mission_id)?;
@@ -748,6 +783,14 @@ impl Host {
     /// Dispatch pending commands without verifying the workspace again.
     /// The caller must already have reconciled it in this owner generation.
     pub fn dispatch_reconciled(&mut self, mission_id: &str) -> Result<usize> {
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        if self.runtime.is_confined() {
+            return self.dispatch_confined_work(mission_id);
+        }
         // Stops run first. A Pi abort refused with `stopping` or rejected
         // returns from here and does not reach `reject_pending` for that
         // Pause/Cancel. Failing closed is intentional.
@@ -955,7 +998,7 @@ impl Host {
     fn release_finished_sessions(&mut self) -> Result<()> {
         let open = match &self.runtime {
             RuntimeAdapter::Pi(runtime) => runtime.open_bindings(),
-            RuntimeAdapter::Fake(_) => return Ok(()),
+            _ => return Ok(()),
         };
         let mut finished = Vec::new();
         for binding in open {
@@ -983,6 +1026,14 @@ impl Host {
     /// that failure is returned after those steps. Stale generation and other
     /// host-level failures abort before either runs.
     pub fn recover(&mut self, mission_id: &str) -> Result<MissionSnapshot> {
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        if self.runtime.is_confined() {
+            self.ensure_confined_session(mission_id)?;
+        }
         self.reconcile_execution(mission_id)?;
         if self.store.linux_execution_blocked(mission_id)? {
             self.dispatch_stops(mission_id)?;
@@ -1014,6 +1065,14 @@ impl Host {
     }
 
     pub fn poll_runtime(&mut self, mission_id: &str) -> Result<Vec<NotifyOutcome>> {
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        if self.runtime.is_confined() {
+            return self.poll_confined(mission_id);
+        }
         let mut outcomes = Vec::new();
         while let Some(note) = self
             .runtime
@@ -1310,6 +1369,22 @@ impl Host {
     ) -> Result<NotifyOutcome> {
         if mission.phase == Phase::NeedsAttention {
             return Ok(unchanged(mission));
+        }
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        if self.runtime.is_confined() {
+            return self
+                .confined_host_fact(
+                    mission,
+                    CommandBody::DetectUncertainty {
+                        reason,
+                        content_digest: None,
+                    },
+                )
+                .map(NotifyOutcome::Transition);
         }
         self.admit_observation(
             mission,
@@ -1638,6 +1713,7 @@ fn snapshot_from(store: &Store, mission_id: &str, generation: u64) -> Result<Mis
             pr_identity: delivery.pr_identity,
             publication_state: delivery.publication_state,
         });
+    let pi_host = store.pi_host_view(&mission.attempt.id)?;
     Ok(MissionSnapshot {
         mission_id: mission.id,
         revision: mission.revision,
@@ -1667,6 +1743,7 @@ fn snapshot_from(store: &Store, mission_id: &str, generation: u64) -> Result<Mis
         commands: views,
         successor_of_mission_id: mission.successor_of_mission_id,
         head_sha: mission.repo.head_sha,
+        pi_host,
         runtime_adapter: mission.attempt.runtime_adapter,
         verifier_json: mission.attempt.verifier_json,
         delivery,
