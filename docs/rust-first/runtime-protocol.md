@@ -143,8 +143,10 @@ S2 owns fake-runtime/faux-provider conformance: duplicate admission, restart, lo
 ### Simulated execution evidence
 
 The Rust-only [simulated ExecutionEnv receipt path](s3-execution-receipts.md)
-implements intent/result persistence and generation-fenced replay using FakeRuntime.
-The [S2-B effect probe](s2-effect-outcomes.md) exercises that journal through Pi's
-durable tool identities, typed effect responses and restart tests. The default
-Host and CLI have no Pi execution wiring. Simulated evidence does not prove real
-effects or confinement. S2 was NO-GO at this delivery; the credential-free source-built candidate was accepted on 2026-11-02 (see the [S2 acceptance record](s2-contract-gate.md)).
+implements intent/result persistence and generation-fenced replay using
+FakeRuntime. The [S2-B effect probe](s2-effect-outcomes.md) exercises that
+journal through Pi's durable tool identities, typed effect responses and restart
+tests. The default Host and CLI have no Pi execution wiring. Simulated evidence
+does not prove real effects or confinement. S2 was NO-GO at this delivery; the
+credential-free source-built candidate was accepted on 2026-11-02 (see the
+[S2 acceptance record](s2-contract-gate.md)).

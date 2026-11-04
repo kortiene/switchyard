@@ -1,10 +1,12 @@
 # S2-B: typed effect outcomes and durable replay
 
 Scope: [#135](https://github.com/kortiene/switchyard/issues/135), under
-[#96](https://github.com/kortiene/switchyard/issues/96). **S2 was NO-GO at this delivery**; the credential-free source-built candidate was accepted on 2026-11-02 (see the [S2 acceptance record](s2-contract-gate.md)).
-This slice connects the credential-free Pi replay probe to the existing Host
-simulated execution journal. It adds no ledger schema, product runtime selection,
-Linux execution wiring, live model access, or execution-quiescence authority.
+[#96](https://github.com/kortiene/switchyard/issues/96). **S2 was NO-GO at this
+delivery**; the credential-free source-built candidate was accepted on
+2026-11-02 (see the [S2 acceptance record](s2-contract-gate.md)). This slice
+connects the credential-free Pi replay probe to the existing Host simulated
+execution journal. It adds no ledger schema, product runtime selection, Linux
+execution wiring, live model access, or execution-quiescence authority.
 
 ## Effect response contract
 

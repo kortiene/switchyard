@@ -17,10 +17,13 @@ field deliberately does not award acceptance; this records the separate review.
 
 This accepts the bounded matrix below and the source-build remedy. It does not
 enable Pi in the product or authorize live effects. The published-package audit
-remains NO-GO. At acceptance, the ruleset audit found that `pi-bridge-contract` was not
-required on main; [#142](https://github.com/kortiene/switchyard/issues/142) tracked
-the administrator change separately from technical acceptance. A later read-only
-audit (2026-11-03) confirmed ruleset 26316513 now requires it.
+remains NO-GO. At acceptance, the 2026-11-02 read-only ruleset audit found that
+`pi-bridge-contract` was not required on main and that ruleset 26316769
+required `execution-confinement`; [#142](https://github.com/kortiene/switchyard/issues/142)
+tracked the administrator change separately from technical acceptance. A later
+read-only audit (2026-11-03) confirmed ruleset 26316513 now requires
+`pi-bridge-contract` and reconfirmed ruleset 26316769 for
+`execution-confinement`.
 
 ## Exact candidate
 
@@ -137,9 +140,11 @@ CI fails the gate.
 The existing `pi-bridge-probe`, `pi-source-candidate` and package-audit jobs remain
 separate historical checks. This adds coverage and an evidence-aware gate; it
 does not simply rename the partial probe. Creating YAML does not install a
-required-check rule. After the first green run, a repository administrator must
-require the exact `pi-bridge-contract` check in the applicable ruleset before
-calling it merge-enforced. Ruleset enforcement is not changed by this PR.
+required-check rule. At S2-E delivery, after the first green run, a repository
+administrator had to require the exact `pi-bridge-contract` check in the
+applicable ruleset before calling it merge-enforced. Ruleset enforcement was not
+changed by the S2-E delivery. See the current-status note above: ruleset
+26316513 now requires `pi-bridge-contract`.
 
 ## Review and downstream handoff
 

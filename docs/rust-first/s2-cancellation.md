@@ -1,9 +1,11 @@
 # S2-C: cancellation recovery and bounded request pressure
 
-Scope: [#96](https://github.com/kortiene/switchyard/issues/96), following
-#136 and #138. **S2 was NO-GO at this delivery**; the credential-free source-built candidate was accepted on 2026-11-02 (see the [S2 acceptance record](s2-contract-gate.md)). FakeRuntime remains the product default.
-These are credential-free probes against the pinned Pi source candidate, not
-live execution or OS quiescence evidence.
+Scope: [#96](https://github.com/kortiene/switchyard/issues/96), following #136
+and #138. **S2 was NO-GO at this delivery**; the credential-free source-built
+candidate was accepted on 2026-11-02 (see the
+[S2 acceptance record](s2-contract-gate.md)). FakeRuntime remains the product
+default. These are credential-free probes against the pinned Pi source
+candidate, not live execution or OS quiescence evidence.
 
 ## Duplicate abort race
 

@@ -1,9 +1,12 @@
 # S3-A3: Linux confinement feasibility probe
 
-Scope: [#127](https://github.com/kortiene/switchyard/issues/127) under #97 Track A.
-Baseline: merged #126 (`af46d28`). This is an isolated deterministic test harness,
-not an ExecutionEnv implementation. Product Host/CLI still uses FakeRuntime.
-S2 was NO-GO at this delivery; the credential-free source-built candidate was accepted on 2026-11-02 (see the [S2 acceptance record](s2-contract-gate.md)). Full S3 and #125's real-backend recovery gate remain open.
+Scope: [#127](https://github.com/kortiene/switchyard/issues/127) under #97 Track
+A. Baseline: merged #126 (`af46d28`). This is an isolated deterministic test
+harness, not an ExecutionEnv implementation. Product Host/CLI still uses
+FakeRuntime. S2 was NO-GO at this delivery; the credential-free source-built
+candidate was accepted on 2026-11-02 (see the
+[S2 acceptance record](s2-contract-gate.md)). Full S3 and #125's real-backend
+recovery gate remain open.
 
 ## Decision and supported environment
 
@@ -114,12 +117,15 @@ used. Missing OS/kernel permissions, tools, package revision or observable
 processes make the job fail. The GitHub artifact retains the environment record,
 test log and fixture diagnostics even on test failure.
 
-`execution-confinement` is required on main by ruleset 26316769 (read-only
-audit, 2026-11-02); workflow YAML alone cannot configure that. A green probe is partial S3 evidence,
-not full bridge/agent confinement or S2 GO. The feature remains outside product
-execution until #125 evidence/recovery, aggregate resource policy, adversarial
-filesystem handling, stop-direction dispatch and the remaining #97 criteria
-are reviewed and implemented.
+`execution-confinement` is required on main by ruleset 26316769. A read-only
+audit on 2026-11-02 confirmed that ruleset; a read-only audit on 2026-11-03
+confirmed rulesets 26316769 and 26316513 (`execution-confinement` and
+`pi-bridge-contract`). Workflow YAML alone cannot configure that. A green probe
+is partial S3 evidence, not full bridge/agent confinement, and is not by itself
+S2 acceptance evidence. The feature remains outside product execution until #125
+evidence/recovery, aggregate resource policy, adversarial filesystem handling,
+stop-direction dispatch and the remaining #97 criteria are reviewed and
+implemented.
 
 ## Sources and rationale
 
