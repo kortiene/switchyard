@@ -18,7 +18,10 @@ ledger remain denied. No product execution command or network permission is adde
 Before workspace recovery, the Host opens the original confined session inert.
 The lifecycle layer first kills and proves the previous recorded cgroup empty.
 The Host reconciles execution evidence and original outbox receipts before
-resuming an acknowledged command. Missing initialized control state is an error,
+resuming an acknowledged command. It settles retained effect receipts or proven
+non-release from the frozen request before scheduling Pi; a captured result
+without a Host receipt remains uncertain. Stop delivery reconciles lost work
+acknowledgements before closing the bridge. Missing initialized control state is an error,
 not permission to create a fresh Pi database. Effect callbacks run against the
 same Host and repeat binding/generation checks. Existing op-v1 identities,
 frozen deadlines and Linux receipt replay remain authoritative.
@@ -49,7 +52,8 @@ or call PiBridge directly. Planning observations/S4 are outside this slice.
 The suite covers writes and process handles, cancellation, pause with an
 unverified workspace, protected-path denial, authority rejection, adapter
 mismatch, receipt replay, and Host SIGKILL at bridge-live, pre-ACK, prepared-effect
-and receipt barriers. The existing B1–B4 suites remain enabled.
+and receipt barriers, including process-start/result crash cases. The existing
+B1–B4 suites remain enabled.
 
 The suite also covers Host-driven forbidden file/socket/child-process probes,
 stale and foreign effect bindings, and hung-extension stop/recovery. The negative

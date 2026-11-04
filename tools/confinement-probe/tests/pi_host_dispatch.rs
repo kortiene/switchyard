@@ -619,3 +619,43 @@ exec '{launcher}' "${{args[@]}}"
     );
     world.origin();
 }
+
+#[test]
+fn host_stop_reconciles_lost_work_ack_before_closing_bridge() {
+    let (world, mut host) = World::new("file-write");
+    host.dispatch_pending(&world.mission).unwrap();
+    until(&mut host, &world.mission, |v| {
+        v["piHost"]["observation"]["runtimeIdle"] == true
+    });
+    let conn = rusqlite::Connection::open(world.db()).unwrap();
+    let (id, receipt): (String, String) = conn
+        .query_row(
+            "SELECT id,runtime_receipt_json FROM commands WHERE kind='approve_plan'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    conn.execute(
+        "UPDATE commands SET state='pending',runtime_receipt_json=NULL WHERE id=?1",
+        [&id],
+    )
+    .unwrap();
+    admit(&mut host, &world.mission, CommandBody::Cancel);
+    host.dispatch_stops(&world.mission).unwrap();
+    let after: (String, String) = conn
+        .query_row(
+            "SELECT state,runtime_receipt_json FROM commands WHERE id=?1",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(after, ("acknowledged".into(), receipt));
+    assert_eq!(
+        host.snapshot(&world.mission).unwrap().phase,
+        Phase::Cancelled
+    );
+    assert_eq!(
+        fs::read_to_string(world.workspace.join("output.txt")).unwrap(),
+        "once"
+    );
+}

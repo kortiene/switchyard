@@ -455,6 +455,31 @@ impl Host {
                 .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
             count += 1;
         }
+        // An abort may follow work whose Pi acknowledgement was lost. Preserve
+        // that original receipt before closing the transport; only absent work
+        // may be superseded. Never resubmit it merely to discover its receipt.
+        for command in self.store.list_commands(mission_id)? {
+            if command.state != CommandState::Pending || !is_runtime_work(command.kind) {
+                continue;
+            }
+            let request = RuntimeRequest {
+                binding: binding.clone(),
+                request_id: command.request_id.clone(),
+                payload_hash: command.payload_hash.clone(),
+                method: runtime_method(command.kind),
+            };
+            let payload =
+                serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+            if let Some(receipt) = self.confined_receipt(&request, &payload)? {
+                self.store
+                    .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
+            } else {
+                self.store.supersede_pending(
+                    &command.id,
+                    "admission closed before runtime accepted this command",
+                )?;
+            }
+        }
         let proof = self
             .confined_mut()?
             .sessions
