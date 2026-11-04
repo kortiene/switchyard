@@ -311,7 +311,7 @@ fn host_sigkill_reconciles_bridge_outbox_and_original_effects() {
         ("file-write", "pi-before-ack"),
         ("file-write", "prepared"),
         ("file-write", "receipt"),
-        ("process-fast", "running"),
+        ("process-hold", "running"),
         ("process-fast", "result"),
         ("process-fast", "receipt"),
     ] {
@@ -393,7 +393,7 @@ fn host_sigkill_reconciles_bridge_outbox_and_original_effects() {
             assert!(original_receipts[0].1.is_some());
             assert_eq!(original_receipts, world.receipts());
         }
-        if fixture == "process-fast" && world.workspace.join("process.marker").exists() {
+        if fixture.starts_with("process-") && world.workspace.join("process.marker").exists() {
             assert_eq!(
                 fs::read_to_string(world.workspace.join("process.marker")).unwrap(),
                 "once\n"
@@ -555,15 +555,17 @@ fn host_driven_bridge_denies_files_sockets_and_child_processes() {
                 r#"#!/bin/bash
 set -euo pipefail
 args=()
+previous=''
 for arg in "$@"; do
   if [[ "$arg" == --unshare-user ]]; then
     args+=(--ro-bind '{root}/probe.mjs' /probe.mjs --ro-bind '{root}/case.json' /case.json)
   fi
-  if [[ "$arg" == /runtime/test/bridge-child.ts ]]; then
+  if [[ "$arg" == /runtime/test/bridge-child.ts && "$previous" == --experimental-strip-types ]]; then
     args+=(/probe.mjs)
   else
     args+=("$arg")
   fi
+  previous="$arg"
 done
 exec '{launcher}' "${{args[@]}}"
 "#,
@@ -589,8 +591,17 @@ exec '{launcher}' "${{args[@]}}"
                 .starts_with("session-")
         })
         .unwrap();
-    let report: Vec<String> =
-        serde_json::from_slice(&fs::read(session.join("state/probe.json")).unwrap()).unwrap();
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut report_bytes = Vec::new();
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(0o400000)
+        .open(session.join("state/probe.json"))
+        .unwrap()
+        .read_to_end(&mut report_bytes)
+        .unwrap();
+    let report: Vec<String> = serde_json::from_slice(&report_bytes).unwrap();
     for required in [
         "existing Node executable cannot spawn",
         "host TCP denied",

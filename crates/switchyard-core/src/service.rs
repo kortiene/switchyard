@@ -670,7 +670,9 @@ impl Host {
 
     /// Deliver already-admitted Pause/Cancel without workspace readiness.
     /// Pi sessions open inert and reconcile their original abort before retry.
-    /// Delivery never resumes work or certifies mission/writer quiescence.
+    /// Delivery never resumes work. The confined adapter confirms completion
+    /// only after Rust proves bridge termination and all workspace effects settle;
+    /// a protocol abort acknowledgement alone never certifies quiescence.
     pub fn dispatch_stops(&mut self, mission_id: &str) -> Result<usize> {
         #[cfg(all(
             feature = "pi-contract",
