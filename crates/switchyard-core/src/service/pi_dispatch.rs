@@ -27,6 +27,87 @@ impl Host {
         Ok(host)
     }
 
+    /// Reconcile only an existing intent: reconstruct its frozen request and
+    /// settle a retained Host receipt (or proven non-release) without scheduling Pi.
+    pub(super) fn reconcile_confined_effect(
+        &mut self,
+        id: &str,
+        effect: &crate::persistence::linux_execution::LinuxEffectRecord,
+        proof: &Value,
+    ) -> Result<bool> {
+        use super::pi_linux_write::text;
+        use crate::{LinuxExecutionRequest, LinuxOperation};
+        if proof["proven"] != true || self.store.operation_superseded(id)? {
+            return Ok(false);
+        }
+        let absent = effect.released_at.is_none()
+            && effect.entered_at.is_none()
+            && effect.receipt_json.is_none();
+        if effect.receipt_json.is_none() && !absent {
+            return Ok(false);
+        }
+        let stored: Value = serde_json::from_str(&effect.request_json).map_err(Error::storage)?;
+        let op = &stored["operation"];
+        let operation = match op["method"].as_str() {
+            Some("write_file") => LinuxOperation::WriteFile {
+                path: text(op, "path")?.into(),
+                content: text(op, "content")?.into(),
+            },
+            Some("exec_start") => LinuxOperation::ExecStart {
+                argv: op["argv"]
+                    .as_array()
+                    .ok_or_else(|| Error::guard("invalid frozen argv"))?
+                    .iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| Error::guard("invalid frozen argument"))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            },
+            Some("exec_status") => LinuxOperation::ExecStatus {
+                start_operation_id: text(op, "startOperationId")?.into(),
+                start_payload_hash: text(op, "startPayloadHash")?.into(),
+            },
+            Some("exec_cancel") => LinuxOperation::ExecCancel {
+                start_operation_id: text(op, "startOperationId")?.into(),
+                start_payload_hash: text(op, "startPayloadHash")?.into(),
+            },
+            _ => return Ok(false),
+        };
+        let binding = RuntimeBinding {
+            mission_id: effect.mission_id.clone(),
+            attempt_id: effect.attempt_id.clone(),
+            session_id: effect.session_id.clone(),
+            generation: self.generation(),
+        };
+        self.accept_runtime_binding(&binding, &effect.mission_id)?;
+        let request = LinuxExecutionRequest {
+            binding,
+            operation,
+            tool_task_id: text(&stored, "toolTaskId")?.into(),
+            effect_key: text(&stored, "effectKey")?.into(),
+            capability_scope: text(&stored, "scope")?.into(),
+            deadline_ms: stored["deadlineMs"]
+                .as_i64()
+                .ok_or_else(|| Error::guard("missing frozen deadline"))?,
+        };
+        request.validate()?;
+        if request.operation_id()? != id || request.payload_hash()? != effect.payload_hash {
+            return Err(Error::guard("frozen Linux intent identity changed"));
+        }
+        if let Some(raw) = &effect.receipt_json {
+            let receipt: Value = serde_json::from_str(raw).map_err(Error::storage)?;
+            if receipt["backend"] != crate::linux_execution::BUBBLEWRAP_BACKEND {
+                return Err(Error::guard("invalid retained Linux backend"));
+            }
+            self.store.complete_linux(&request, &receipt, proof)?;
+        } else {
+            self.store.linux_not_applied(&request, proof)?;
+        }
+        Ok(true)
+    }
+
     fn confined_mut(&mut self) -> Result<&mut ConfinedRuntime> {
         match &mut self.runtime {
             RuntimeAdapter::Confined(runtime) => Ok(runtime),

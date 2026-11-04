@@ -378,6 +378,16 @@ mod os {
                 if let Ok(quiescence) = self.prove_effect(&effect) {
                     self.store
                         .save_linux_quiescence(&view.operation_id, &quiescence)?;
+                    #[cfg(feature = "pi-contract")]
+                    if self.runtime.is_confined()
+                        && self.reconcile_confined_effect(
+                            &view.operation_id,
+                            &effect,
+                            &quiescence,
+                        )?
+                    {
+                        continue;
+                    }
                 }
                 if orphaned_without_receipt(&effect) {
                     self.store.quarantine_linux(&view.operation_id)?;

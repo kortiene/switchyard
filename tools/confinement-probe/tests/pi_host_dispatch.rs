@@ -362,6 +362,12 @@ fn host_sigkill_reconciles_bridge_outbox_and_original_effects() {
         }
         let mut host = world.reopen();
         let recovered = host.recover(&world.mission);
+        if matches!(stage, "receipt" | "prepared") {
+            assert!(
+                recovered.is_ok(),
+                "settled {stage} evidence must reconcile before scheduling: {recovered:?}"
+            );
+        }
         let snapshot = host.snapshot(&world.mission).unwrap().to_json();
         assert_eq!(snapshot["piHost"]["lifecycle"]["recovered"]["proven"], true);
         if recovered.is_ok() {
