@@ -57,11 +57,11 @@ S1 adds a separate Rust gate. From the repository root:
 
 The script checks formatting, clippy, and `cargo test` with the committed Rust 1.99.1 toolchain. This is the default-feature local gate. CI runs it as the `rust-core` job within `verify.yml`; `rust-core` is not currently required by the rulesets. The required `pi-bridge-contract` job runs workspace formatting, Clippy and tests with `pi-contract`; the separate required `execution-confinement` job builds and tests Linux execution and the confined bridge lifecycle. Legacy `npm run verify` remains separate.
 
-# Pi package audit (S2 NO-GO)
+# Pi package audit (published-package NO-GO)
 
 The separate `pi-package-audit` job uses pinned Node 22.23.4 on Ubuntu 24.04 to
 reproduce the [S2 package/API incompatibilities](../../docs/rust-first/s2-feasibility.md).
-Its five probes and typecheck can pass while the integration remains NO-GO.
+Its five probes and typecheck can pass while the published-package decision remains NO-GO.
 `npm run gate` in `runtime/pi/` exits 1. The diagnostic job is not the full
 `pi-bridge-contract` check and grants no downstream live-execution readiness.
 The [audit package](../../runtime/pi/README.md) documents commands and limits.
@@ -83,7 +83,7 @@ After rebuilding/installing the pinned source, run `node runtime/pi-source/contr
 
 On the declared Ubuntu 24.04 x86_64 runner, `scripts/confinement-verify.sh` and `scripts/bridge-confinement-verify.sh` exercise real OS boundaries and recovery. They require the pinned backend, namespace support and writable delegated cgroups; missing support fails. See [bridge lifecycle](../../docs/rust-first/s3-bridge-lifecycle.md).
 
-A read-only ruleset audit on 2026-11-03 confirmed `pi-bridge-contract`, `execution-confinement`, `verify (node 20.19.0)` and `verify (node 22)` are required on main. Rulesets 26316513 and 26316769 enforce them; no status names are changed by S3-B4. These checks do not grant full S3 or live-provider acceptance.
+A read-only ruleset audit on 2026-11-02 confirmed ruleset 26316769 requires `execution-confinement` and that `pi-bridge-contract` was not yet required. A later read-only ruleset audit on 2026-11-03 confirmed `pi-bridge-contract`, `execution-confinement`, `verify (node 20.19.0)` and `verify (node 22)` are required on main. Rulesets 26316513 and 26316769 enforce them; no status names are changed by S3-B4. These checks do not grant full S3 or live-provider acceptance.
 
 # Wiki validation policy
 

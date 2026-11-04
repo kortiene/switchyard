@@ -1,9 +1,11 @@
 # S2-A: real Host outbox and Pi admission recovery
 
 Scope: [#119](https://github.com/kortiene/switchyard/issues/119), under
-[#96](https://github.com/kortiene/switchyard/issues/96). **S2 remains NO-GO.**
-This slice connects the S1 Host ledger to the pinned, credential-free Pi child.
-It does not enable live model calls, workspace effects, or a product runtime.
+[#96](https://github.com/kortiene/switchyard/issues/96). **S2 was NO-GO at this
+delivery**; the credential-free source-built candidate was accepted on
+2026-11-02 (see the [S2 acceptance record](s2-contract-gate.md)). This slice
+connects the S1 Host ledger to the pinned, credential-free Pi child. It does not
+enable live model calls, workspace effects, or a product runtime.
 
 ## Selection and authority
 

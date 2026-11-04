@@ -1,10 +1,12 @@
 # S2-D: storage failure and close/reopen recovery
 
 Scope: [#96](https://github.com/kortiene/switchyard/issues/96), after merged
-#139 (`cee9245182e4ee17209ce4e860ecebb9df42123b`). **S2 remains NO-GO and
-FakeRuntime remains the product default.** These are credential-free tests
-against the pinned Pi source candidate; they do not enable Linux effects or
-prove OS quiescence.
+#139 (`cee9245182e4ee17209ce4e860ecebb9df42123b`). **S2 was NO-GO at this
+delivery**; the credential-free source-built candidate was accepted on
+2026-11-02 (see the [S2 acceptance record](s2-contract-gate.md)). **FakeRuntime
+remains the product default.** These are credential-free tests against the
+pinned Pi source candidate; they do not enable Linux effects or prove OS
+quiescence.
 
 ## Corrected behavior
 

@@ -4,7 +4,15 @@ Decision: **NO-GO for the currently published 1.4.0 package against the reviewed
 S2 baseline** (2026-10-29). Tracking: [#96](https://github.com/kortiene/switchyard/issues/96),
 parent [#94](https://github.com/kortiene/switchyard/issues/94).
 
-## Current status — 2026-10-31
+## Current status
+
+**Update 2026-11-02:** the complete S2 gate passed for the credential-free
+source-built candidate, and [#96](https://github.com/kortiene/switchyard/issues/96)
+accepted S2 GO for that candidate; see the [S2 acceptance record](s2-contract-gate.md).
+The published-package NO-GO at the top of this page is unchanged, and Pi is not
+enabled in the product. The 2026-10-31 status below is kept as recorded.
+
+### Status as of 2026-10-31
 
 [#106](https://github.com/kortiene/switchyard/pull/106) merged this published-package
 NO-GO. [#107](https://github.com/kortiene/switchyard/pull/107) merged the pinned
@@ -146,7 +154,8 @@ not alter the published-package NO-GO above. The separate
 [bridge probe](s2-bridge-probe.md) records partial conformance evidence; it
 does not complete the integration gate.
 
-S2 is NO-GO until the whole gate passes; see Current status and
+S2 stayed NO-GO until the whole gate passed for the source-built candidate on
+2026-11-02; see Current status, the [S2 acceptance record](s2-contract-gate.md) and
 [#96](https://github.com/kortiene/switchyard/issues/96). A newer compatible published package with
 reviewed provenance is another bounded remedy when available. If neither the
 source candidate nor a published pin can pass that gate, review a native-Rust

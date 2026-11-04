@@ -1,10 +1,12 @@
 # Operator resolution of simulated execution effects
 
 Scope: #125 under #97 Track A, based on merged #124. This is the first,
-FakeRuntime-only implementation of the recovery policy. S2 remains NO-GO.
-Real backends remain gated on backend-specific evidence, enforced writer
-quiescence, confinement and process-tree supervision. This slice does not
-complete those prerequisites or close #125's real-backend gate.
+FakeRuntime-only implementation of the recovery policy. S2 was NO-GO at this
+delivery; the credential-free source-built candidate was accepted on 2026-11-02
+(see the [S2 acceptance record](s2-contract-gate.md)). Real backends remain
+gated on backend-specific evidence, enforced writer quiescence, confinement and
+process-tree supervision. This slice does not complete those prerequisites or
+close #125's real-backend gate.
 
 ## Decision contract
 

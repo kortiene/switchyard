@@ -1,8 +1,10 @@
 # S3: stop delivery through a blocked workspace
 
 Scope: #129 under #97 Track A, related to #98 and milestone #94. This is a
-FakeRuntime-only correction on the #128 baseline. S2 remains NO-GO; Pi stop
-semantics, real process supervision and OS-enforced quiescence are unchanged.
+FakeRuntime-only correction on the #128 baseline. S2 was NO-GO at this delivery;
+the credential-free source-built candidate was accepted on 2026-11-02 (see the
+[S2 acceptance record](s2-contract-gate.md)). Pi stop semantics, real process
+supervision and OS-enforced quiescence are unchanged.
 
 ## Delivery contract
 

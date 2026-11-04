@@ -2,9 +2,11 @@
 
 Scope: [#118](https://github.com/kortiene/switchyard/issues/118), under
 [#97](https://github.com/kortiene/switchyard/issues/97) Track A. This is
-Pi-independent workspace ownership. **S2 remains NO-GO.** FakeRuntime remains
-the product adapter. A worktree is not a sandbox: this adds no agent execution
-API, provider calls, Pi tool forwarding, verification or GitHub publication.
+Pi-independent workspace ownership. **S2 was NO-GO at this delivery**; the
+credential-free source-built candidate was accepted on 2026-11-02 (see the
+[S2 acceptance record](s2-contract-gate.md)). FakeRuntime remains the product
+adapter. A worktree is not a sandbox: this adds no agent execution API, provider
+calls, Pi tool forwarding, verification or GitHub publication.
 
 ## Explicit preparation
 

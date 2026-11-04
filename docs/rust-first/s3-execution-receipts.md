@@ -1,10 +1,12 @@
 # S3-A2: simulated ExecutionEnv operations and durable receipts
 
 Scope: [#123](https://github.com/kortiene/switchyard/issues/123), under
-[#97](https://github.com/kortiene/switchyard/issues/97) Track A. **S2 remains
-NO-GO.** This slice exercises the Rust-owned effect protocol with FakeRuntime.
-It adds no CLI execution command, Pi forwarding, real file backend, subprocess,
-provider call, sandbox or confinement claim.
+[#97](https://github.com/kortiene/switchyard/issues/97) Track A. **S2 was NO-GO
+at this delivery**; the credential-free source-built candidate was accepted on
+2026-11-02 (see the [S2 acceptance record](s2-contract-gate.md)). This slice
+exercises the Rust-owned effect protocol with FakeRuntime. It adds no CLI
+execution command, Pi forwarding, real file backend, subprocess, provider call,
+sandbox or confinement claim.
 
 ## Contract and authorization
 
