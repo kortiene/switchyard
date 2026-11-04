@@ -61,11 +61,13 @@ cannot enter a leaf after an empty-cgroup proof; a placed child and descendants
 are covered by cgroup termination. A crash after release intent but before Pi
 creates storage may conservatively block recovery on missing storage. A proven
 `stopped` record that never reached `opened` (`requiresExisting` still false)
-accepted no command, so the next open may create storage and may replace the
-recorded runtime configuration. An opened session keeps both the original
-database and the original configuration. An unproven stop stays on the
-conservative path. No power-loss, reboot recovery or cross-host failover claim
-is made.
+accepted no command. When `state/` is empty, the next open may create storage
+and may replace the recorded runtime configuration; the replaced configuration
+is kept in `recovered-<generation>.json`. Files already in `state/`, including
+a database created before a failed `runtime.open`, still refuse a different
+configuration. An opened session keeps both the original database and the
+original configuration. An unproven stop stays on the conservative path. No
+power-loss, reboot recovery or cross-host failover claim is made.
 
 ## Confinement and limits
 
@@ -108,9 +110,11 @@ Missing platform/cgroup/namespace prerequisites fail; there is no fallback.
 Coverage includes storage-link attacks and exclusive locking; original receipt
 replay; stale generations; enforced cgroup settings; Host SIGKILL; a hung abort
 followed by inert recovery; missing original storage/replaced cgroup refusal;
-a proven stop before `runtime.open` followed by a successful reopen; an
-opened-then-stopped session that still requires its original database;
-no launch without GO and membership; and the real wall deadline. Existing B1
+a proven stop before `runtime.open` followed by a successful reopen; refusal
+of a runtime swap when `state/` is not empty; an opened-then-stopped session
+that still requires its original database; `open` on a thread that exits
+before the next call; no launch without GO and membership; and the real wall
+deadline. Existing B1
 negative boundary, B2 write, B3 process and S2 contract cases remain required.
 This does not claim exhaustive fault injection at every startup instruction.
 

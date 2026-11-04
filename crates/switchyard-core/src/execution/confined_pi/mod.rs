@@ -68,11 +68,11 @@ impl ConfinedPiSession {
         let mut require_existing = false;
         let mut recovered = Value::Null;
         if let Some(previous) = previous {
+            let configuration_changed = previous["configuration"] != installed;
             if previous["version"] != 1
                 || previous["identity"] != identity(&binding)
-                // No command was accepted, so a corrected runtime can replace
-                // the rejected one. An opened session keeps its configuration.
-                || !(proven_unopened_stop(&previous) || previous["configuration"] == installed)
+                // Emptiness is checked after the old cgroup is proven dead.
+                || (configuration_changed && !proven_unopened_stop(&previous))
                 || previous["requiresExisting"].as_bool().is_none()
                 || !matches!(
                     previous["phase"].as_str(),
@@ -96,12 +96,23 @@ impl ConfinedPiSession {
                     proof.reason
                 )));
             }
+            // Quiescence first, so a live bridge cannot create session.sqlite
+            // after this look. A corrected runtime may replace the recorded one
+            // only when that directory is still empty.
+            if !allows_configuration(&previous, &installed, state.is_empty()?) {
+                return Err(Error::guard(
+                    "incompatible or stale confined bridge generation",
+                ));
+            }
             // A second crash during preparation must retain the original
             // database requirement from an earlier generation. A proven stop
             // that never reached "opened" has no history to keep.
             require_existing = require_existing_database(&previous);
             recovered = json!({"generation":previous["generation"],"cgroup":previous["cgroup"],
                 "proven":true,"events":proof.events});
+            if configuration_changed {
+                recovered["replacedConfiguration"] = previous["configuration"].clone();
+            }
             control.write(
                 &format!("recovered-{}.json", previous["generation"]),
                 &recovered,
@@ -375,12 +386,6 @@ fn spawn_supervised(mut command: Command) -> Result<(Child, LaunchSupervisor)> {
     }
 }
 
-/// `true` when recovery must find the original database.
-///
-/// A proven stop whose record never reached `"opened"` accepted no command.
-/// Crashes and unproven stops after release stay conservative, and an earlier
-/// generation's requirement survives a crash while the next one is only
-/// `"prepared"`.
 /// Proven stop whose record never reached `"opened"`.
 fn proven_unopened_stop(previous: &Value) -> bool {
     previous["phase"] == "stopped"
@@ -388,9 +393,22 @@ fn proven_unopened_stop(previous: &Value) -> bool {
         && previous["requiresExisting"] == false
 }
 
+/// `true` when recovery must find the original database.
+///
+/// A proven stop whose record never reached `"opened"` accepted no command.
+/// Crashes and unproven stops after release stay conservative, and an earlier
+/// generation's requirement survives a crash while the next one is only
+/// `"prepared"`.
 fn require_existing_database(previous: &Value) -> bool {
     !proven_unopened_stop(previous)
         && (previous["requiresExisting"] == true || previous["phase"] != "prepared")
+}
+
+/// A different runtime is allowed only for a proven stop that never opened
+/// while `state/` is still empty. The same configuration is always eligible
+/// here; database retention is a separate check.
+fn allows_configuration(previous: &Value, installed: &Value, state_empty: bool) -> bool {
+    previous["configuration"] == *installed || (proven_unopened_stop(previous) && state_empty)
 }
 
 fn identity(binding: &RuntimeBinding) -> Value {

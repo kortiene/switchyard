@@ -365,12 +365,32 @@ fn confined_lifecycle_invalid_policy_stops_before_sqlite() {
     assert_eq!(record["requiresExisting"], false);
     assert_eq!(record["termination"]["proven"], true);
     config.policy = path("SWITCHYARD_BRIDGE_POLICY");
+    let planted = directory.join("state/session.sqlite");
+    fs::write(&planted, "partial").unwrap();
+    fs::set_permissions(&planted, fs::Permissions::from_mode(0o600)).unwrap();
+    let refused = ConfinedPiSession::open(&config, binding(2), "answer")
+        .err()
+        .expect("a different runtime must not adopt bridge state");
+    assert!(
+        refused
+            .to_string()
+            .contains("incompatible or stale confined bridge generation"),
+        "{refused}"
+    );
+    fs::remove_file(&planted).unwrap();
     let mut reopened =
         ConfinedPiSession::open(&config, binding(2), "answer").unwrap_or_else(|error| {
             panic!("proven stop before open must allow a new generation: {error}")
         });
     assert_eq!(reopened.lifecycle()["phase"], "opened");
     assert!(directory.join("state/session.sqlite").exists());
+    let recovered: Value =
+        serde_json::from_slice(&fs::read(directory.join("recovered-1.json")).unwrap()).unwrap();
+    assert_eq!(recovered["replacedConfiguration"], record["configuration"]);
+    assert_ne!(
+        reopened.lifecycle()["configuration"],
+        record["configuration"]
+    );
     let receipt = submit(&mut reopened);
     idle(&mut reopened);
     retain(
@@ -415,4 +435,24 @@ fn confined_lifecycle_opened_stop_still_requires_original_database() {
     let reopened = ConfinedPiSession::open(&config, binding(2), "recover").unwrap();
     assert_eq!(reopened.lifecycle()["phase"], "opened");
     assert_eq!(reopened.lifecycle()["requiresExisting"], true);
+}
+
+#[test]
+fn confined_lifecycle_open_on_finished_thread_still_submits() {
+    let tmp = private_root();
+    let config = config(tmp.path());
+    let binding = binding(1);
+    // The spawning thread exits before submit. Parent-death SIGKILL follows
+    // that thread, so this fails if open forks the launcher on the caller.
+    let mut session =
+        std::thread::spawn(move || ConfinedPiSession::open(&config, binding, "answer"))
+            .join()
+            .expect("open thread panicked")
+            .unwrap_or_else(|error| panic!("open on a finished thread: {error}"));
+    // Delivery of the parent-death signal follows thread exit. Wait so a
+    // caller-thread fork is already dead before submit, instead of racing it.
+    std::thread::sleep(Duration::from_millis(200));
+    submit(&mut session);
+    idle(&mut session);
+    assert_eq!(session.stop().unwrap()["proven"], true);
 }

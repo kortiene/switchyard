@@ -99,3 +99,40 @@ fn confined_pi_proven_unopened_stop_does_not_require_existing_database() {
     assert!(!proven_unopened_stop(&row("released", false, None)));
     assert!(!proven_unopened_stop(&row("prepared", false, None)));
 }
+
+#[test]
+fn confined_pi_configuration_swap_requires_an_empty_unopened_stop() {
+    let record =
+        |phase: &str, requires_existing: bool, proven: Option<bool>, configuration: &str| {
+            let mut previous = json!({
+                "phase": phase,
+                "requiresExisting": requires_existing,
+                "configuration": configuration,
+            });
+            if let Some(proven) = proven {
+                previous["termination"] = json!({"proven": proven});
+            }
+            previous
+        };
+    let unopened = record("stopped", false, Some(true), "rejected-policy");
+    let corrected = json!("corrected-policy");
+    let same = json!("rejected-policy");
+    assert!(allows_configuration(&unopened, &corrected, true));
+    assert!(!allows_configuration(&unopened, &corrected, false));
+    assert!(allows_configuration(&unopened, &same, false));
+    assert!(!allows_configuration(
+        &record("stopped", true, Some(true), "rejected-policy"),
+        &corrected,
+        true
+    ));
+    assert!(!allows_configuration(
+        &record("stopped", false, Some(false), "rejected-policy"),
+        &corrected,
+        true
+    ));
+    assert!(!allows_configuration(
+        &record("released", false, None, "rejected-policy"),
+        &corrected,
+        true
+    ));
+}

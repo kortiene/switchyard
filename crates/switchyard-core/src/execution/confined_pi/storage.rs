@@ -131,6 +131,14 @@ impl Directory {
         self.file.sync_all().map_err(Error::storage)
     }
 
+    pub fn is_empty(&self) -> Result<bool> {
+        match fs::read_dir(&self.path).map_err(Error::storage)?.next() {
+            None => Ok(true),
+            Some(Ok(_)) => Ok(false),
+            Some(Err(error)) => Err(Error::storage(error)),
+        }
+    }
+
     /// Called only after the old cgroup is proven empty. SQLite may write its
     /// own sidecars; the host never follows or removes a bridge-planted link.
     pub fn inspect_state(&self, require_database: bool) -> Result<()> {
