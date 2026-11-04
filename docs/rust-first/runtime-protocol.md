@@ -1,6 +1,6 @@
 # Initial Rust / Pi runtime protocol
 
-Status: proposed v0 contract to prove in [S2 / #96](https://github.com/kortiene/switchyard/issues/96). S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and [s2-feasibility.md](s2-feasibility.md). No existing Rust SDK or upstream wire protocol is implied. Companion: [architecture](README.md).
+Status: v0 contract, accepted in [S2 / #96](https://github.com/kortiene/switchyard/issues/96) on 2026-11-02 for the credential-free source-built Pi candidate; see the [S2 acceptance record](s2-contract-gate.md). The published 1.4.0 package remains NO-GO ([s2-feasibility.md](s2-feasibility.md)). Pi is not enabled in the product. No existing Rust SDK or upstream wire protocol is implied. Companion: [architecture](README.md).
 
 The TypeScript bridge in this contract is the M1 proof-of-concept adapter for Pi Durable 1.4.0. It is not the end state. The long-term agent runtime is native Rust and implements this public contract for new attempts. `runner-pi` is frozen legacy and is not this bridge.
 
@@ -147,4 +147,4 @@ implements intent/result persistence and generation-fenced replay using FakeRunt
 The [S2-B effect probe](s2-effect-outcomes.md) exercises that journal through Pi's
 durable tool identities, typed effect responses and restart tests. The default
 Host and CLI have no Pi execution wiring. Simulated evidence does not prove real
-effects or confinement. S2 remains NO-GO.
+effects or confinement. S2 was NO-GO at this delivery; the credential-free source-built candidate was accepted on 2026-11-02 (see the [S2 acceptance record](s2-contract-gate.md)).

@@ -3,8 +3,11 @@
 This directory is a **feasibility probe, not the runtime bridge**. The decision
 for npm `@earendil-works/pi-durable@1.4.0` against the reviewed source baseline is
 **NO-GO** (2026-10-29). See the [evidence and current status](../../docs/rust-first/s2-feasibility.md).
-S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and that
-audit. The mission CLI still uses S1's
+S2 itself is GO for the separate credential-free source-built candidate in
+[`runtime/pi-source/`](../pi-source/README.md) (accepted 2026-11-02; see
+[#96](https://github.com/kortiene/switchyard/issues/96) and the
+[S2 acceptance record](../../docs/rust-first/s2-contract-gate.md)); that does not
+change this package's NO-GO. The mission CLI still uses S1's
 fake runtime. There is no model-provider spend, workspace execution, GitHub
 publication, or claim of confinement here.
 
@@ -20,7 +23,7 @@ npm run --silent gate
 
 `verify` typechecks and tests the observed package behavior, including a real
 SIGKILL/reopen test over Pi's SQLite storage. Those tests intentionally confirm
-the incompatibilities and therefore can pass while the integration is NO-GO.
+the incompatibilities and therefore can pass while this package's decision is NO-GO.
 The crash probe uses a **passive Pi entry**, not Rust's outbox or a coding tool.
 
 `audit:package` emits JSON evidence. `gate` emits the same evidence and exits

@@ -6,7 +6,7 @@ Scope: [#130](https://github.com/kortiene/switchyard/issues/130) under
 [#94](https://github.com/kortiene/switchyard/issues/94). Baseline: merged #131.
 
 This is a non-default, test-driven backend. FakeRuntime remains the product
-adapter. There is no execution CLI and no Pi wiring. **S2 remains NO-GO.** This
+adapter. There is no execution CLI and no Pi wiring. **S2 was NO-GO at this delivery**; the credential-free source-built candidate was accepted on 2026-11-02 (see the [S2 acceptance record](s2-contract-gate.md)). This
 slice does not claim full S3, Track B, seccomp, an egress allowlist, or reboot
 recovery.
 
@@ -37,8 +37,8 @@ If cgroup v2, a controller, `memory.swap.max`, or writability is missing,
 then runs as the runner and records the delegation next to the #128 environment
 log.
 
-An administrator still has to make `execution-confinement` a required check.
-Workflow YAML cannot do that.
+`execution-confinement` is now required on main by ruleset 26316769 (read-only
+audit, 2026-11-02). Workflow YAML alone cannot do that.
 
 ## Operations and identity
 

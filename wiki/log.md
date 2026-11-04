@@ -1,5 +1,10 @@
 # Switchyard wiki update log
 
+## 2026-11-03
+
+* **S2 status**: S2 is GO for the credential-free source-built Pi candidate, accepted 2026-11-02 in #96; see the [S2 acceptance record](../docs/rust-first/s2-contract-gate.md). Pages that said S2 is NO-GO now say so, or date the NO-GO to the slice that recorded it. The published 1.4.0 package NO-GO and the 2026-10-29 audit evidence are unchanged. GO does not enable Pi in the product, live effects or full S3.
+* **Required checks**: Pages now match the enforced rulesets, with `execution-confinement` and `pi-bridge-contract` required on main.
+
 ## 2026-10-30
 
 * **Active path**: The root README now leads with the Rust S1 host, `./scripts/rust-verify.sh`, and a repository role map. The TypeScript walkthrough, Cockpit, and quality-gate detail are one legacy reference with links to the package README and [Testing and CI](reference/testing-and-ci.md).

@@ -105,7 +105,8 @@ Read these before changing mission, recovery, or runtime behavior:
 - [Rust-first architecture and M1 scope](./docs/rust-first/README.md)
 - [Delivery plan and gates](./docs/rust-first/delivery-plan.md)
 - [Runtime protocol](./docs/rust-first/runtime-protocol.md)
-- [S2 package audit (NO-GO, 2026-10-29)](./docs/rust-first/s2-feasibility.md)
+- [S2 package audit (published package NO-GO, 2026-10-29)](./docs/rust-first/s2-feasibility.md)
+- [S2 acceptance record (source-built candidate GO, 2026-11-02)](./docs/rust-first/s2-contract-gate.md)
 - [Decision register](./wiki/decisions/invariants.md)
 
 The product objective is one recoverable, verified change: freeze an

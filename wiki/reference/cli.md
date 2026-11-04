@@ -58,7 +58,7 @@ See the [managed-worktree playbook](/operations/managed-worktrees.md) before rem
 
 # Rust prototype CLI
 
-S1 adds a separate `switchyard` binary. It is the active host in this checkout. It is not the TypeScript CLI above and it does not read ADW state. `switchyard mission status` is read-only. `switchyard mission create` records a local Git snapshot and does not call GitHub. The fake runtime is the only adapter on this binary. S2 is NO-GO; see [#96](https://github.com/kortiene/switchyard/issues/96) and the [S2 feasibility audit](../../docs/rust-first/s2-feasibility.md). Command details live in the binary's `--help` output and in the [Rust-first S1 resolutions](../../docs/rust-first/README.md#s1-resolutions). The local Rust check is `./scripts/rust-verify.sh` from the repository root.
+S1 adds a separate `switchyard` binary. It is the active host in this checkout. It is not the TypeScript CLI above and it does not read ADW state. `switchyard mission status` is read-only. `switchyard mission create` records a local Git snapshot and does not call GitHub. The fake runtime is the only adapter on this binary. S2 is GO for the credential-free source-built Pi candidate, but this binary still has only the fake runtime; see [#96](https://github.com/kortiene/switchyard/issues/96) and the [S2 acceptance record](../../docs/rust-first/s2-contract-gate.md). Command details live in the binary's `--help` output and in the [Rust-first S1 resolutions](../../docs/rust-first/README.md#s1-resolutions). The local Rust check is `./scripts/rust-verify.sh` from the repository root.
 
 # Precedence
 

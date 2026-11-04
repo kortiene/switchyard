@@ -8,7 +8,7 @@ timestamp: "2026-10-30T22:00:00Z"
 
 # Context
 
-This page describes the frozen TypeScript reference control plane in `adw_sdlc/`. The active mission host is the Rust S1 ledger in `crates/`. Its contracts are in the [Rust-first architecture](../../docs/rust-first/README.md). S2 remains NO-GO; see [decisions](/decisions/invariants.md).
+This page describes the frozen TypeScript reference control plane in `adw_sdlc/`. The active mission host is the Rust S1 ledger in `crates/`. Its contracts are in the [Rust-first architecture](../../docs/rust-first/README.md). S2 is GO for the credential-free source-built Pi candidate, but Pi is not enabled in the product; see [decisions](/decisions/invariants.md).
 
 The reference package separates deterministic delivery mechanics from repository-specific policy and interchangeable external integrations.
 

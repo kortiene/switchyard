@@ -17,9 +17,10 @@ field deliberately does not award acceptance; this records the separate review.
 
 This accepts the bounded matrix below and the source-build remedy. It does not
 enable Pi in the product or authorize live effects. The published-package audit
-remains NO-GO. The ruleset audit found that `pi-bridge-contract` is not required
-on main; [#142](https://github.com/kortiene/switchyard/issues/142) tracks the
-administrator change separately from technical acceptance.
+remains NO-GO. At acceptance, the ruleset audit found that `pi-bridge-contract` was not
+required on main; [#142](https://github.com/kortiene/switchyard/issues/142) tracked
+the administrator change separately from technical acceptance. A later read-only
+audit (2026-11-03) confirmed ruleset 26316513 now requires it.
 
 ## Exact candidate
 

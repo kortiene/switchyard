@@ -8,7 +8,7 @@ by [#132](https://github.com/kortiene/switchyard/pull/132). Milestone
 [#94](https://github.com/kortiene/switchyard/issues/94).
 
 FakeRuntime stays the product adapter. There is no Linux execution CLI and no
-Pi wiring. **S2 remains NO-GO.** This slice does not claim full S3, Track B,
+Pi wiring. **S2 was NO-GO at this delivery**; the credential-free source-built candidate was accepted on 2026-11-02 (see the [S2 acceptance record](s2-contract-gate.md)). This slice does not claim full S3, Track B,
 reboot recovery, seccomp, or an egress allowlist.
 
 ## What supersession is

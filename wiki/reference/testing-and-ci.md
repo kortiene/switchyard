@@ -57,11 +57,11 @@ S1 adds a separate Rust gate. From the repository root:
 
 The script checks formatting, clippy, and `cargo test` with the committed Rust 1.99.1 toolchain. This is the default-feature local gate. CI runs it as the `rust-core` job within `verify.yml`; `rust-core` is not currently required by the rulesets. The required `pi-bridge-contract` job runs workspace formatting, Clippy and tests with `pi-contract`; the separate required `execution-confinement` job builds and tests Linux execution and the confined bridge lifecycle. Legacy `npm run verify` remains separate.
 
-# Pi package audit (S2 NO-GO)
+# Pi package audit (published-package NO-GO)
 
 The separate `pi-package-audit` job uses pinned Node 22.23.4 on Ubuntu 24.04 to
 reproduce the [S2 package/API incompatibilities](../../docs/rust-first/s2-feasibility.md).
-Its five probes and typecheck can pass while the integration remains NO-GO.
+Its five probes and typecheck can pass while the published-package decision remains NO-GO.
 `npm run gate` in `runtime/pi/` exits 1. The diagnostic job is not the full
 `pi-bridge-contract` check and grants no downstream live-execution readiness.
 The [audit package](../../runtime/pi/README.md) documents commands and limits.
