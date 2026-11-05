@@ -1,6 +1,6 @@
 # Delivery plan: One Recoverable, Verified Change
 
-Status: S1 implemented (#105). S2 is GO for the credential-free source-built candidate; see the [reviewed revision and evidence](s2-contract-gate.md). S3 Track A is delivered within its documented scope; Track B slices B1–B5 are delivered. S3 is not complete: model-endpoint-only egress and the composed S3 acceptance remain. S4–S8 remain planned. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md). Disposition updated 2026-11-02; see [#109](https://github.com/kortiene/switchyard/issues/109) for current disposition.
+Status: S1 implemented (#105). S2 is GO for the credential-free source-built candidate; see the [reviewed revision and evidence](s2-contract-gate.md). S3 Track A is delivered within its documented scope; Track B slices B1–B5 are delivered. S3 is not complete: model-endpoint-only egress, bounded cleanup of retained bridge cgroup leaves (#151), and the composed S3 acceptance remain. S4–S8 remain planned. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md). Disposition updated 2026-11-02; see [#109](https://github.com/kortiene/switchyard/issues/109) for current disposition.
 
 ## Implementation sequence
 
@@ -207,7 +207,8 @@ The [bridge lifecycle](s3-bridge-lifecycle.md) adds a non-default Rust session A
 with protected control records, no-follow storage inspection, generation fences,
 cgroup limits, a startup barrier and quiescent recovery. It remains credential-free
 and uses the fixed conformance entry point. Product Host/Pi/Linux dispatch,
-model-only egress and full S3 acceptance remain open.
+model-endpoint-only egress and full S3 acceptance remain open
+(as of B4; see B5).
 
 ### S3-B5 Host-owned confined dispatch (delivered)
 
@@ -217,5 +218,5 @@ and Linux effect callbacks. The `pi-host-dispatch.log` gate exercises restart
 and stop boundaries. Accepted: all 7 CI checks passed, including
 `execution-confinement` with the `pi_host_dispatch` suite, and #148 is closed.
 FakeRuntime remains the CLI default. This does not enable Pi in the product.
-Model-endpoint-only egress and the composed S3 acceptance remain; #97 and #94
-stay open.
+Model-endpoint-only egress, bounded cleanup of retained bridge cgroup leaves
+(#151), and the composed S3 acceptance remain; #97 and #94 stay open.

@@ -2,7 +2,7 @@
 
 ## 2026-11-04
 
-* **S3-B5**: Host-owned confined Pi dispatch is delivered in #150 (`fc7a9e4`); #148 is closed. All 7 CI checks passed, including `execution-confinement` with the `pi_host_dispatch` suite. See the [dispatch record](../docs/rust-first/s3-pi-host-dispatch.md). The slice stays credential-free and non-default; FakeRuntime remains the product default. This does not enable Pi in the product or complete S3. Model-endpoint-only egress and the composed S3 acceptance remain.
+* **S3-B5**: Host-owned confined Pi dispatch is delivered in #150 (`fc7a9e4`); #148 is closed. All 7 CI checks passed, including `execution-confinement` with the `pi_host_dispatch` suite. See the [dispatch record](../docs/rust-first/s3-pi-host-dispatch.md). The slice stays credential-free and non-default; FakeRuntime remains the product default. This does not enable Pi in the product or complete S3. Model-endpoint-only egress, bounded cleanup of retained bridge cgroup leaves (#151), and the composed S3 acceptance remain.
 
 ## 2026-11-03
 

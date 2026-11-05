@@ -17,8 +17,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Evidence only. A green audit confirms the recorded NO-GO; it is NOT the
-  # planned pi-bridge-contract check and cannot approve S2 or unblock live work.
+  # Evidence only. A green audit confirms the published-package NO-GO. It is
+  # not pi-bridge-contract and does not unblock live work.
   pi-package-audit:
     name: pi-package-audit
     runs-on: ubuntu-24.04
@@ -44,10 +44,14 @@ jobs:
           import { readFileSync, appendFileSync } from 'node:fs';
           const report = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/pi-package-audit.json`, 'utf8'));
           if (report.decision !== 'NO-GO' || !Array.isArray(report.blockers) || report.blockers.length === 0) {
-            throw new Error('Expected observed incompatibilities; reassess the package audit without granting S2 GO');
+            throw new Error('Expected observed incompatibilities; reassess the published-package audit before changing its NO-GO');
           }
+          const version = report.packageAudit?.version;
+          const published = typeof version === 'string' && version.length > 0
+            ? `published ${version} package`
+            : 'published package';
           appendFileSync(process.env.GITHUB_STEP_SUMMARY,
-            '## Published package: NO-GO\n\nThe audit reproduced package/API incompatibilities. This job is not pi-bridge-contract. The published 1.4.0 package remains NO-GO. The source-built candidate is the accepted path (2026-11-02); see docs/rust-first/s2-contract-gate.md.\n');
+            `## Published package: NO-GO\n\nThe audit reproduced package/API incompatibilities. This job is not pi-bridge-contract. The ${published} remains NO-GO. The source-built candidate is the accepted path (2026-11-02); see docs/rust-first/s2-contract-gate.md.\n`);
           JS
       - uses: actions/upload-artifact@v4
         with:
