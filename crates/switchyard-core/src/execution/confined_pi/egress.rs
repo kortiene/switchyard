@@ -4,12 +4,13 @@
 //! was parsed.
 use std::fs;
 use std::io;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -29,8 +30,13 @@ const MAX_SPLICE: usize = 8;
 /// One operator-selected model URL and the only address the proxy may dial.
 ///
 /// Loopback is allowed so a host can pin a local model or a fixture stub.
-/// Link-local and cloud-metadata addresses are rejected here, and the bridge
-/// still has no IP stack of its own.
+/// Link-local and cloud-metadata addresses are rejected here, including their
+/// IPv4-mapped IPv6 forms. The bridge still has no IP stack of its own.
+///
+/// `https` only selects port 443 when the URL omits a port and is recorded
+/// for the operator. [`ModelProxy`] copies raw TCP bytes. It does not perform
+/// a TLS handshake, send SNI, or check a certificate. This is not a finished
+/// HTTPS route.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelEndpoint {
     url: String,
@@ -146,6 +152,14 @@ pub(super) struct ModelProxy {
     directory: PathBuf,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    splices: Arc<SpliceSet>,
+}
+
+/// Splice workers and the sockets that can shut them down. These threads run
+/// in the host, outside the bridge cgroup, so [`Drop`] must join them.
+struct SpliceSet {
+    workers: Mutex<Vec<JoinHandle<()>>>,
+    sockets: Mutex<Vec<(UnixStream, TcpStream)>>,
 }
 
 impl ModelProxy {
@@ -185,9 +199,14 @@ impl ModelProxy {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let inflight = Arc::new(AtomicUsize::new(0));
+        let splices = Arc::new(SpliceSet {
+            workers: Mutex::new(Vec::new()),
+            sockets: Mutex::new(Vec::new()),
+        });
+        let splices_for_accept = Arc::clone(&splices);
         let thread = match thread::Builder::new()
             .name("model-endpoint-proxy".into())
-            .spawn(move || accept_loop(listener, pinned, flag, inflight))
+            .spawn(move || accept_loop(listener, pinned, flag, inflight, splices_for_accept))
         {
             Ok(thread) => thread,
             Err(error) => {
@@ -200,6 +219,7 @@ impl ModelProxy {
             directory,
             stop,
             thread: Some(thread),
+            splices,
         })
     }
 
@@ -211,8 +231,19 @@ impl ModelProxy {
 impl Drop for ModelProxy {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // The accept thread registers every splice before it returns, so the
+        // sets below are complete once this join finishes.
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
+        }
+        let sockets = std::mem::take(&mut *lock_mutex(&self.splices.sockets));
+        for (client, upstream) in sockets {
+            let _ = client.shutdown(Shutdown::Both);
+            let _ = upstream.shutdown(Shutdown::Both);
+        }
+        let workers = std::mem::take(&mut *lock_mutex(&self.splices.workers));
+        for worker in workers {
+            let _ = worker.join();
         }
         let socket = self.directory.join(SOCKET_NAME);
         let _ = fs::remove_file(&socket);
@@ -220,6 +251,10 @@ impl Drop for ModelProxy {
             let _ = fs::remove_dir(&self.directory);
         }
     }
+}
+
+fn lock_mutex<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
 
 /// Private `/tmp/sy-<32 hex>` directory. Session paths include a hash and do
@@ -269,6 +304,7 @@ fn accept_loop(
     pinned: SocketAddr,
     stop: Arc<AtomicBool>,
     inflight: Arc<AtomicUsize>,
+    splices: Arc<SpliceSet>,
 ) {
     while !stop.load(Ordering::Relaxed) {
         match listener.accept() {
@@ -277,16 +313,7 @@ fn accept_loop(
                     inflight.fetch_sub(1, Ordering::Relaxed);
                     continue;
                 }
-                let inflight = Arc::clone(&inflight);
-                let permit = Arc::clone(&inflight);
-                if thread::Builder::new()
-                    .name("model-endpoint-splice".into())
-                    .spawn(move || {
-                        splice(client, pinned);
-                        permit.fetch_sub(1, Ordering::Relaxed);
-                    })
-                    .is_err()
-                {
+                if !start_splice(client, pinned, &inflight, &splices) {
                     inflight.fetch_sub(1, Ordering::Relaxed);
                 }
             }
@@ -301,32 +328,69 @@ fn accept_loop(
     }
 }
 
-fn splice(client: UnixStream, pinned: SocketAddr) {
+const SPLICE_IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Connect on this thread, register both sockets, then spawn the copy. [`Drop`]
+/// shuts the registered sockets down and joins the copy, so a hung upstream
+/// cannot outlive the proxy.
+fn start_splice(
+    client: UnixStream,
+    pinned: SocketAddr,
+    inflight: &Arc<AtomicUsize>,
+    splices: &Arc<SpliceSet>,
+) -> bool {
     if excluded(pinned.ip()) {
-        return;
+        return false;
     }
-    // Dial the pinned address only. This is not an HTTP proxy: the request
-    // target, Host header, and redirects are opaque bytes.
+    // Dial the pinned address only. This is not an HTTP proxy and not a TLS
+    // endpoint: request targets, Host headers, redirects, SNI, and certificates
+    // are not interpreted.
     let Ok(upstream) = TcpStream::connect_timeout(&pinned, Duration::from_secs(2)) else {
-        return;
+        return false;
     };
-    let Ok(mut client_read) = client.try_clone() else {
-        return;
+    if client.set_read_timeout(Some(SPLICE_IO_TIMEOUT)).is_err()
+        || client.set_write_timeout(Some(SPLICE_IO_TIMEOUT)).is_err()
+        || upstream.set_read_timeout(Some(SPLICE_IO_TIMEOUT)).is_err()
+        || upstream.set_write_timeout(Some(SPLICE_IO_TIMEOUT)).is_err()
+    {
+        return false;
+    }
+    let (Ok(mut client_read), Ok(mut client_write)) = (client.try_clone(), client.try_clone())
+    else {
+        return false;
     };
-    let Ok(mut upstream_read) = upstream.try_clone() else {
-        return;
+    let (Ok(mut upstream_read), Ok(mut upstream_write)) =
+        (upstream.try_clone(), upstream.try_clone())
+    else {
+        return false;
     };
-    let _ = client_read.set_read_timeout(Some(Duration::from_secs(30)));
-    let _ = upstream_read.set_read_timeout(Some(Duration::from_secs(30)));
-    let mut upstream_write = upstream;
-    let mut client_write = client;
-    let forward = thread::spawn(move || {
-        let _ = io::copy(&mut client_read, &mut upstream_write);
-        let _ = upstream_write.shutdown(std::net::Shutdown::Write);
-    });
-    let _ = io::copy(&mut upstream_read, &mut client_write);
-    let _ = client_write.shutdown(std::net::Shutdown::Write);
-    let _ = forward.join();
+    lock_mutex(&splices.sockets).push((client, upstream));
+    let permit = Arc::clone(inflight);
+    let spawned = thread::Builder::new()
+        .name("model-endpoint-splice".into())
+        .spawn(move || {
+            let forward = thread::spawn(move || {
+                let _ = io::copy(&mut client_read, &mut upstream_write);
+                let _ = upstream_write.shutdown(Shutdown::Write);
+            });
+            let _ = io::copy(&mut upstream_read, &mut client_write);
+            let _ = client_write.shutdown(Shutdown::Write);
+            let _ = forward.join();
+            permit.fetch_sub(1, Ordering::Relaxed);
+        });
+    match spawned {
+        Ok(worker) => {
+            lock_mutex(&splices.workers).push(worker);
+            true
+        }
+        Err(_) => {
+            if let Some((client, upstream)) = lock_mutex(&splices.sockets).pop() {
+                let _ = client.shutdown(Shutdown::Both);
+                let _ = upstream.shutdown(Shutdown::Both);
+            }
+            false
+        }
+    }
 }
 
 fn endpoint_syntax() -> Error {
@@ -344,10 +408,12 @@ fn metadata_name(host: &str) -> bool {
 
 fn excluded(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(ip) => {
-            ip.is_unspecified() || ip.is_broadcast() || ip.is_link_local() || ip.is_multicast()
-        }
+        IpAddr::V4(ip) => excluded_v4(ip),
         IpAddr::V6(ip) => {
+            // `::ffff:169.254.169.254` is not an IPv6 link-local address.
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                return excluded_v4(mapped);
+            }
             ip.is_unspecified()
                 || ip.is_multicast()
                 || ip.is_unicast_link_local()
@@ -359,10 +425,18 @@ fn excluded(ip: IpAddr) -> bool {
     }
 }
 
+fn excluded_v4(ip: Ipv4Addr) -> bool {
+    ip.is_unspecified() || ip.is_broadcast() || ip.is_link_local() || ip.is_multicast()
+}
+
 fn split_host(authority: &str, default_port: u16) -> Result<(String, u16)> {
     if let Some(rest) = authority.strip_prefix('[') {
         let (host, after) = rest.split_once(']').ok_or_else(endpoint_syntax)?;
-        if host.is_empty() || !host.chars().all(|c| c.is_ascii_hexdigit() || c == ':') {
+        if host.is_empty()
+            || !host
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+        {
             return Err(endpoint_syntax());
         }
         let port = if after.is_empty() {
@@ -460,6 +534,13 @@ mod tests {
                 .to_string(),
             "[::1]:9"
         );
+        assert_eq!(
+            ModelEndpoint::parse("http://[::ffff:127.0.0.1]:9/")
+                .unwrap()
+                .pinned()
+                .port(),
+            9
+        );
         for input in [
             "",
             "http://user:secret@127.0.0.1:9/",
@@ -482,6 +563,8 @@ mod tests {
         for input in [
             "http://169.254.169.254/latest",
             "http://169.254.170.2/",
+            "http://[::ffff:169.254.169.254]/",
+            "http://[::ffff:a9fe:a9fe]/",
             "http://[fd00:ec2::254]/",
             "http://metadata.google.internal/computeMetadata/v1/",
             "http://metadata.goog/",
@@ -572,5 +655,23 @@ mod tests {
         );
         drop(proxy);
         assert!(!socket_dir.exists());
+    }
+
+    #[test]
+    fn confined_pi_model_proxy_drop_joins_a_hung_upstream() {
+        let stub = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = stub.local_addr().unwrap().port();
+        let endpoint = ModelEndpoint::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let proxy = ModelProxy::start(&endpoint).unwrap();
+        let mut client = UnixStream::connect(proxy.directory().join(SOCKET_NAME)).unwrap();
+        let (_stuck, _) = stub.accept().unwrap();
+        client.write_all(b"still-open").unwrap();
+        let started = std::time::Instant::now();
+        drop(proxy);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "drop left the hung splice running for {:?}",
+            started.elapsed()
+        );
     }
 }

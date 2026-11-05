@@ -94,9 +94,12 @@ __attribute__((constructor)) static void lockdown(void) {
         (void)written;
         _exit(125);
     }
-    // Allow only AF_UNIX SOCK_STREAM. connect() cannot name an IP because no
-    // IP socket can be created. bind/listen stay denied. The mount namespace
-    // is what makes the proxy socket the only pathname that exists.
+    // Allow only AF_UNIX SOCK_STREAM plus connect. connect() cannot name an IP
+    // because no IP socket can be created. bind/listen stay denied. sendto,
+    // sendmsg, recvfrom, and recvmsg also stay denied, so glibc send/recv on
+    // this socket can return EPERM. Node's stream path uses write/read, which
+    // is the client this filter is built for. The mount namespace is what
+    // makes the proxy socket the only pathname that exists.
     struct sock_filter filter[] = {
         ARCH_AND_CLONE,
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_socket, 0, 11),
