@@ -24,6 +24,9 @@ When the host sets one endpoint, Rust parses it before launch:
 
 The bridge does not receive the URL in its environment. It receives a read-only
 directory containing one Unix socket, and `SWITCHYARD_BRIDGE_EGRESS=model-socket`.
+The host binds that socket in a private `/tmp/sy-<id>` directory. A session
+path includes a content hash and does not fit in `sockaddr_un`. The sandbox
+path stays `/model-proxy/endpoint.sock`.
 The native constructor treats any other value as fatal. Unset still installs
 the full socket deny. The filter then allows only `AF_UNIX` `SOCK_STREAM`
 `socket` and `connect`. `AF_INET`, `AF_INET6`, datagram sockets, `bind`,

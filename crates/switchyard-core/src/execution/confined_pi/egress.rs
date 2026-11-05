@@ -138,9 +138,10 @@ pub(super) fn mount_args(directory: &Path) -> Result<Vec<String>> {
     .collect())
 }
 
-/// Accepts connections on `directory/endpoint.sock` and splices each one to
+/// Accepts connections on a short `/tmp` socket and splices each one to
 /// `endpoint.pinned()`. Request bytes are not interpreted, so a URL inside
-/// the request cannot change the TCP destination.
+/// the request cannot change the TCP destination. The socket cannot live
+/// under the session directory: that path is longer than `sockaddr_un`.
 pub(super) struct ModelProxy {
     directory: PathBuf,
     stop: Arc<AtomicBool>,
@@ -148,43 +149,55 @@ pub(super) struct ModelProxy {
 }
 
 impl ModelProxy {
-    pub(super) fn start(directory: &Path, endpoint: &ModelEndpoint) -> Result<Self> {
-        let meta = fs::symlink_metadata(directory).map_err(Error::storage)?;
-        if !directory.is_absolute() || meta.file_type().is_symlink() || !meta.is_dir() {
+    pub(super) fn start(endpoint: &ModelEndpoint) -> Result<Self> {
+        let directory = create_proxy_dir()?;
+        let socket_path = directory.join(SOCKET_NAME);
+        // Linux `sun_path` is 108 bytes including the trailing NUL.
+        if socket_path.as_os_str().len() >= 108 {
+            let _ = fs::remove_dir(&directory);
             return Err(Error::guard(
-                "model proxy directory is not a real directory",
+                "model proxy socket path exceeds the Unix socket limit",
             ));
         }
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
-            .map_err(Error::storage)?;
-        let socket_path = directory.join(SOCKET_NAME);
-        match fs::symlink_metadata(&socket_path) {
-            Ok(meta) if meta.file_type().is_socket() => {
-                fs::remove_file(&socket_path).map_err(Error::storage)?;
+        let listener = match UnixListener::bind(&socket_path) {
+            Ok(listener) => listener,
+            Err(error) => {
+                let _ = fs::remove_dir(&directory);
+                return Err(Error::storage(error));
             }
-            Ok(_) => {
-                return Err(Error::guard("model proxy path exists and is not a socket"));
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(Error::storage(error)),
+        };
+        if let Err(error) = fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600)) {
+            let _ = fs::remove_file(&socket_path);
+            let _ = fs::remove_dir(&directory);
+            return Err(Error::storage(error));
         }
-        let listener = UnixListener::bind(&socket_path).map_err(Error::storage)?;
-        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
-            .map_err(Error::storage)?;
-        listener.set_nonblocking(true).map_err(Error::storage)?;
+        if let Err(error) = listener.set_nonblocking(true) {
+            let _ = fs::remove_file(&socket_path);
+            let _ = fs::remove_dir(&directory);
+            return Err(Error::storage(error));
+        }
         let pinned = endpoint.pinned();
         if excluded(pinned.ip()) {
+            let _ = fs::remove_file(&socket_path);
+            let _ = fs::remove_dir(&directory);
             return Err(excluded_destination());
         }
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let inflight = Arc::new(AtomicUsize::new(0));
-        let thread = thread::Builder::new()
+        let thread = match thread::Builder::new()
             .name("model-endpoint-proxy".into())
             .spawn(move || accept_loop(listener, pinned, flag, inflight))
-            .map_err(Error::storage)?;
+        {
+            Ok(thread) => thread,
+            Err(error) => {
+                let _ = fs::remove_file(&socket_path);
+                let _ = fs::remove_dir(&directory);
+                return Err(Error::storage(error));
+            }
+        };
         Ok(Self {
-            directory: directory.to_path_buf(),
+            directory,
             stop,
             thread: Some(thread),
         })
@@ -201,8 +214,54 @@ impl Drop for ModelProxy {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        let _ = fs::remove_file(self.directory.join(SOCKET_NAME));
+        let socket = self.directory.join(SOCKET_NAME);
+        let _ = fs::remove_file(&socket);
+        if proxy_dir_is_ours(&self.directory) {
+            let _ = fs::remove_dir(&self.directory);
+        }
     }
+}
+
+/// Private `/tmp/sy-<32 hex>` directory. Session paths include a hash and do
+/// not fit in `sockaddr_un`.
+fn create_proxy_dir() -> Result<PathBuf> {
+    let parent = Path::new("/tmp");
+    if !parent.is_dir() {
+        return Err(Error::guard("model proxy requires /tmp"));
+    }
+    for _ in 0..8 {
+        let name = format!("sy-{}", uuid::Uuid::new_v4().simple());
+        let directory = parent.join(&name);
+        if !proxy_dir_is_ours(&directory) {
+            return Err(Error::guard(
+                "model proxy socket path exceeds the Unix socket limit",
+            ));
+        }
+        match fs::create_dir(&directory) {
+            Ok(()) => {
+                fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+                    .map_err(Error::storage)?;
+                return Ok(directory);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(Error::storage(error)),
+        }
+    }
+    Err(Error::guard("model proxy directory could not be created"))
+}
+
+fn proxy_dir_is_ours(directory: &Path) -> bool {
+    directory.parent() == Some(Path::new("/tmp"))
+        && directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                let Some(rest) = name.strip_prefix("sy-") else {
+                    return false;
+                };
+                rest.len() == 32 && rest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        && directory.join(SOCKET_NAME).as_os_str().len() < 108
 }
 
 fn accept_loop(
@@ -451,14 +510,15 @@ mod tests {
         decoy.set_nonblocking(true).unwrap();
         let port = stub.local_addr().unwrap().port();
         let endpoint = ModelEndpoint::parse(&format!("http://127.0.0.1:{port}/v1")).unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let proxy = ModelProxy::start(directory.path(), &endpoint).unwrap();
+        let proxy = ModelProxy::start(&endpoint).unwrap();
+        let socket_dir = proxy.directory().to_path_buf();
+        assert!(super::proxy_dir_is_ours(&socket_dir));
         let args = mount_args(proxy.directory()).unwrap();
         assert_eq!(
             args,
             vec![
                 "--ro-bind",
-                directory.path().to_str().unwrap(),
+                socket_dir.to_str().unwrap(),
                 "/model-proxy",
                 "--setenv",
                 "SWITCHYARD_BRIDGE_EGRESS",
@@ -482,7 +542,7 @@ mod tests {
             let _ = stream.shutdown(std::net::Shutdown::Both);
             sent.send(request).unwrap();
         });
-        let mut client = UnixStream::connect(directory.path().join(SOCKET_NAME)).unwrap();
+        let mut client = UnixStream::connect(socket_dir.join(SOCKET_NAME)).unwrap();
         client
             .write_all(
                 b"GET http://169.254.169.254/latest HTTP/1.0\r\nHost: 169.254.169.254\r\n\r\n",
@@ -510,5 +570,7 @@ mod tests {
             matches!(decoy.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
             "a second local service must receive nothing"
         );
+        drop(proxy);
+        assert!(!socket_dir.exists());
     }
 }

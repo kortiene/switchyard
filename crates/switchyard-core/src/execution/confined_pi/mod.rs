@@ -162,10 +162,7 @@ impl ConfinedPiSession {
         }
         state.inspect_state(require_existing)?;
         let proxy = match &config.model_endpoint {
-            Some(endpoint) => {
-                let directory = control.child("model-proxy")?;
-                Some(egress::ModelProxy::start(&directory.path, endpoint)?)
-            }
+            Some(endpoint) => Some(egress::ModelProxy::start(endpoint)?),
             None => None,
         };
         let argv = policy::argv(
