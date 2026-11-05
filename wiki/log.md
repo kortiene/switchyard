@@ -2,7 +2,7 @@
 
 ## 2026-11-05
 
-* **S3-B6**: Model-endpoint-only egress for the confined Pi bridge (#153). The default remains full network denial. A host-configured endpoint is reached only through a pinned proxy; in-bridge tests deny every other destination. See the [egress record](../docs/rust-first/s3-model-egress.md). FakeRuntime remains the product default. This does not enable Pi or complete S3. #151 and composed acceptance remain.
+* **S3-B6**: Model-endpoint-only egress for the confined Pi bridge (#153). The default remains full network denial. A host-configured HTTP endpoint is reached only through a pinned proxy; unsupported HTTPS fails closed before DNS, and in-bridge tests deny every other destination. See the [egress record](../docs/rust-first/s3-model-egress.md). FakeRuntime remains the product default. This does not enable Pi or complete S3. #151 and composed acceptance remain.
 
 ## 2026-11-04
 

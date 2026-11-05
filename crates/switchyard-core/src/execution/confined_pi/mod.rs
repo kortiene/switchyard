@@ -48,7 +48,8 @@ pub struct ConfinedPiConfig {
     pub bubblewrap: PathBuf,
     pub launcher: PathBuf,
     pub policy: PathBuf,
-    /// Operator-selected model URL. `None` keeps the empty network namespace
+    /// Operator-selected credential-free HTTP model URL; HTTPS is not supported.
+    /// `None` keeps the empty network namespace
     /// and the full socket deny. Repository files and protocol frames cannot
     /// set this.
     pub model_endpoint: Option<ModelEndpoint>,

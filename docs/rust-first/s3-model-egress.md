@@ -14,11 +14,11 @@ the existing B1 and Host-dispatch negative tests still run.
 
 When the host sets one endpoint, Rust parses it before launch:
 
-- The value is a single `http` or `https` URL with no userinfo, query, or fragment.
-  `https` only defaults the port to 443 and is stored on the session record.
-  The proxy copies raw TCP bytes. It does not perform a TLS handshake, send
-  SNI, or check a certificate, and this slice has no TLS-over-Unix client.
-  A pinned `https` URL is not a finished model route.
+- The value is a single credential-free `http` URL with no userinfo, query,
+  or fragment. `https` is rejected before DNS or proxy creation: this slice
+  has no TLS-over-Unix client to send SNI and verify certificates. It never
+  silently downgrades HTTPS to plaintext. A reviewed TLS client and its
+  hostname/certificate tests are required before HTTPS endpoints can be admitted.
 - The host resolves it once, outside the bridge, and keeps exactly one address.
 - Link-local and cloud-metadata destinations are rejected, including IPv4-mapped
   forms such as `::ffff:169.254.169.254`. Loopback is allowed only as that
@@ -71,6 +71,13 @@ exchange through `/model-proxy/endpoint.sock` returns the stub's token. The
 request names the metadata URL; the stub receives those bytes and the second
 local listener receives none. The session record stores the operator URL and
 the pinned address.
+
+Rust unit tests additionally cover deterministic resolver failure, empty and
+ambiguous DNS answers, metadata returned by DNS, DNS names with an IPv6 pin,
+rejection of unsupported HTTPS before resolution, bounded retention across 64
+sequential exchanges, and all eight hung splices being stopped when the proxy
+is saturated. Resolver tests use injected answers rather than assuming public
+DNS will refuse `.invalid` names.
 
 These are fixture and local-stub results. They are not a live provider call.
 The required `execution-confinement` job runs this with the existing B1–B5

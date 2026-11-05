@@ -226,5 +226,7 @@ The [model-endpoint policy](s3-model-egress.md) keeps default-deny egress for
 the confined bridge and, only when the host sets one endpoint, allows a
 read-only Unix socket to a host proxy that splices to that pinned address.
 In-bridge tests deny every other destination and one local stub proves the
-route. FakeRuntime remains the CLI default. This does not enable Pi, carry
-provider credentials, or complete S3. #151 and composed acceptance remain.
+route. Only credential-free HTTP is admitted; HTTPS fails closed until a
+reviewed TLS client exists. FakeRuntime remains the CLI default. This does not
+enable Pi, carry provider credentials, or complete S3. #151 and composed
+acceptance remain.

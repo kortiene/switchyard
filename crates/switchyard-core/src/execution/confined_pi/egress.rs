@@ -34,10 +34,9 @@ const MAX_SPLICE: usize = 8;
 /// Link-local and cloud-metadata addresses are rejected here, including their
 /// IPv4-mapped IPv6 forms. The bridge still has no IP stack of its own.
 ///
-/// `https` only selects port 443 when the URL omits a port and is recorded
-/// for the operator. [`ModelProxy`] copies raw TCP bytes. It does not perform
-/// a TLS handshake, send SNI, or check a certificate. This is not a finished
-/// HTTPS route.
+/// Only credential-free `http` routes are supported. [`ModelProxy`] copies
+/// raw TCP bytes; there is no TLS client to send SNI or check certificates.
+/// Reject `https` before resolution instead of accepting a nonfunctional route.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelEndpoint {
     url: String,
@@ -46,6 +45,15 @@ pub struct ModelEndpoint {
 
 impl ModelEndpoint {
     pub fn parse(input: &str) -> Result<Self> {
+        Self::parse_with_resolver(input, |host, port| {
+            (host, port).to_socket_addrs().map(Iterator::collect)
+        })
+    }
+
+    fn parse_with_resolver(
+        input: &str,
+        resolve: impl FnOnce(&str, u16) -> io::Result<Vec<SocketAddr>>,
+    ) -> Result<Self> {
         if input.is_empty()
             || input.len() > 2048
             || input.chars().any(|c| c.is_whitespace() || c.is_control())
@@ -55,7 +63,11 @@ impl ModelEndpoint {
         let (scheme, rest) = input.split_once("://").ok_or_else(endpoint_syntax)?;
         let default_port = match scheme {
             "http" => 80u16,
-            "https" => 443u16,
+            "https" => {
+                return Err(Error::guard(
+                    "HTTPS model endpoints require a TLS client; only credential-free HTTP routes are supported",
+                ));
+            }
             _ => return Err(endpoint_syntax()),
         };
         if rest.contains(['@', '\\', '#', '?', '%']) {
@@ -72,9 +84,9 @@ impl ModelEndpoint {
         if metadata_name(&host) {
             return Err(excluded_destination());
         }
-        let mut addrs = (host.as_str(), port)
-            .to_socket_addrs()
-            .map_err(|_| Error::guard("model endpoint resolution is not a single address"))?;
+        let mut addrs = resolve(&host, port)
+            .map_err(|_| Error::guard("model endpoint resolution is not a single address"))?
+            .into_iter();
         let Some(pinned) = addrs.next() else {
             return Err(Error::guard(
                 "model endpoint resolution is not a single address",
@@ -88,9 +100,11 @@ impl ModelEndpoint {
         if excluded(pinned.ip()) {
             return Err(excluded_destination());
         }
-        let display = match pinned {
-            SocketAddr::V4(_) => host,
-            SocketAddr::V6(_) => format!("[{host}]"),
+        // Brackets describe a literal IPv6 host, not the family DNS resolved to.
+        let display = if host.contains(':') {
+            format!("[{host}]")
+        } else {
+            host
         };
         Ok(Self {
             url: format!("{scheme}://{display}:{port}{path}"),
@@ -423,7 +437,7 @@ fn reap_finished(splices: &SpliceSet) {
 }
 
 fn endpoint_syntax() -> Error {
-    Error::guard("model endpoint must be one http(s) URL without credentials")
+    Error::guard("model endpoint must be one http URL without credentials")
 }
 
 fn excluded_destination() -> Error {
@@ -553,13 +567,6 @@ mod tests {
             80
         );
         assert_eq!(
-            ModelEndpoint::parse("https://127.0.0.1/v1")
-                .unwrap()
-                .pinned()
-                .port(),
-            443
-        );
-        assert_eq!(
             ModelEndpoint::parse("http://[::1]:9/")
                 .unwrap()
                 .pinned()
@@ -588,7 +595,7 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains("one http(s) URL without credentials"),
+                    .contains("one http URL without credentials"),
                 "{input}: {error}"
             );
         }
@@ -608,14 +615,144 @@ mod tests {
                 "{input}: {error}"
             );
         }
-        let error = ModelEndpoint::parse("http://switchyard-endpoint-does-not-exist.invalid:9/")
-            .unwrap_err();
+        assert_eq!(record(None)["mode"], "denied");
+        assert_eq!(record(Some(&ok))["pinned"], "127.0.0.1:9");
+    }
+
+    #[test]
+    fn confined_pi_model_endpoint_resolution_is_fail_closed_and_deterministic() {
+        let url = "http://model.example.invalid:9/v1";
+        // Do not depend on public DNS: some local resolvers synthesize an address
+        // even for .invalid. Exercise the actual resolution seam instead.
+        for addresses in [
+            Vec::new(),
+            vec!["127.0.0.1:9".parse().unwrap(), "[::1]:9".parse().unwrap()],
+        ] {
+            let error = ModelEndpoint::parse_with_resolver(url, |_, _| Ok(addresses)).unwrap_err();
+            assert!(
+                error.to_string().contains("not a single address"),
+                "{error}"
+            );
+        }
+        let error = ModelEndpoint::parse_with_resolver(url, |_, _| {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "fixture DNS failure",
+            ))
+        })
+        .unwrap_err();
         assert!(
             error.to_string().contains("not a single address"),
             "{error}"
         );
-        assert_eq!(record(None)["mode"], "denied");
-        assert_eq!(record(Some(&ok))["pinned"], "127.0.0.1:9");
+        for address in ["169.254.169.254:9", "[::ffff:169.254.169.254]:9"] {
+            let error =
+                ModelEndpoint::parse_with_resolver(url, |_, _| Ok(vec![address.parse().unwrap()]))
+                    .unwrap_err();
+            assert!(
+                error.to_string().contains("link-local or metadata"),
+                "{error}"
+            );
+        }
+        for address in ["127.0.0.1:9", "[::1]:9"] {
+            let endpoint = ModelEndpoint::parse_with_resolver(url, |host, port| {
+                assert_eq!(host, "model.example.invalid");
+                assert_eq!(port, 9);
+                Ok(vec![address.parse().unwrap()])
+            })
+            .unwrap();
+            assert_eq!(endpoint.url(), url, "DNS names must not gain IPv6 brackets");
+            assert_eq!(endpoint.pinned(), address.parse().unwrap());
+        }
+    }
+
+    #[test]
+    fn confined_pi_model_endpoint_rejects_https_without_a_tls_client() {
+        let error = ModelEndpoint::parse_with_resolver("https://model.invalid/v1", |_, _| {
+            panic!("unsupported HTTPS must be rejected before DNS")
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("HTTPS model endpoints require a TLS client")
+        );
+        for input in [
+            "https://127.0.0.1/v1",
+            "https://127.0.0.1:80/v1",
+            "https://model.invalid/v1",
+        ] {
+            let error = ModelEndpoint::parse(input).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("HTTPS model endpoints require a TLS client"),
+                "{input}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn confined_pi_model_proxy_caps_connections_and_stops_all_hung_splices() {
+        let stub = TcpListener::bind("127.0.0.1:0").unwrap();
+        stub.set_nonblocking(true).unwrap();
+        let endpoint =
+            ModelEndpoint::parse(&format!("http://{}/", stub.local_addr().unwrap())).unwrap();
+        let proxy = ModelProxy::start(&endpoint).unwrap();
+        let splices = Arc::clone(&proxy.splices);
+        let mut clients = Vec::new();
+        let mut upstreams = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        for _ in 0..MAX_SPLICE {
+            clients.push(UnixStream::connect(proxy.directory().join(SOCKET_NAME)).unwrap());
+            loop {
+                match stub.accept() {
+                    Ok((upstream, _)) => {
+                        upstreams.push(upstream);
+                        break;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(std::time::Instant::now() < deadline, "proxy did not accept");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("stub accept failed: {error}"),
+                }
+            }
+        }
+        // The overflow connection must close without dialing another upstream.
+        let mut overflow = UnixStream::connect(proxy.directory().join(SOCKET_NAME)).unwrap();
+        overflow
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut byte = [0];
+        match overflow.read(&mut byte) {
+            Ok(0) => {}
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+            result => panic!("overflow connection was not refused: {result:?}"),
+        }
+        assert!(matches!(stub.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+        assert_eq!(lock_mutex(&splices.sockets).len(), MAX_SPLICE);
+        assert_eq!(lock_mutex(&splices.workers).len(), MAX_SPLICE);
+        let started = std::time::Instant::now();
+        drop(proxy);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "saturated proxy stop hung"
+        );
+        assert!(lock_mutex(&splices.sockets).is_empty());
+        assert!(lock_mutex(&splices.workers).is_empty());
+        for mut upstream in upstreams {
+            upstream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            assert_eq!(upstream.read(&mut byte).unwrap(), 0);
+        }
+        for mut client in clients {
+            client
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            assert_eq!(client.read(&mut byte).unwrap(), 0);
+        }
     }
 
     #[test]
