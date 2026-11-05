@@ -66,6 +66,8 @@ fn confined_pi_recovery_rejects_foreign_leaf_and_invalid_identity() {
     };
     assert!(validate(&binding, "eval").is_err());
     assert!(validate(&binding, "answer").is_ok());
+    assert!(validate(&binding, "http://169.254.169.254/latest").is_err());
+    assert!(validate(&binding, "http://127.0.0.1:9/v1").is_err());
 }
 
 #[test]

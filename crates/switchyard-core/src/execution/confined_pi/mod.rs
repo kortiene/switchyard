@@ -1,5 +1,6 @@
 //! Non-default, credential-free bridge lifecycle. The caller supplies trusted
 //! Host configuration; neither protocol frames nor model text select paths.
+mod egress;
 mod launcher;
 mod policy;
 mod storage;
@@ -20,7 +21,17 @@ use crate::linux_execution::cgroup::{self, CgroupIdentity};
 use crate::{Error, Result, payload_hash};
 use storage::Directory;
 
+pub use egress::ModelEndpoint;
 pub use launcher::confined_pi_launcher_main;
+
+/// Diagnostic network field. Unset stays the string `"denied"` so a host that
+/// did not opt in does not look like it gained a route.
+pub(crate) fn egress_network(config: &ConfinedPiConfig) -> Value {
+    match &config.model_endpoint {
+        None => json!("denied"),
+        Some(endpoint) => egress::record(Some(endpoint)),
+    }
+}
 
 /// Conformance wall for one bridge generation. Forwarded effects use half of
 /// this budget so a tool can settle before the watchdog fires. Production
@@ -37,6 +48,11 @@ pub struct ConfinedPiConfig {
     pub bubblewrap: PathBuf,
     pub launcher: PathBuf,
     pub policy: PathBuf,
+    /// Operator-selected credential-free HTTP model URL; HTTPS is not supported.
+    /// `None` keeps the empty network namespace
+    /// and the full socket deny. Repository files and protocol frames cannot
+    /// set this.
+    pub model_endpoint: Option<ModelEndpoint>,
 }
 
 pub struct ConfinedPiSession {
@@ -48,6 +64,8 @@ pub struct ConfinedPiSession {
     /// Owns the thread that spawned the launcher. Parent-death signals follow
     /// that thread, so it stays alive until [`Self::stop`] has reaped the child.
     launch_supervisor: Option<LaunchSupervisor>,
+    /// Host-side splice to the pinned model address. Absent when egress is denied.
+    proxy: Option<egress::ModelProxy>,
     stopped: bool,
 }
 
@@ -144,7 +162,15 @@ impl ConfinedPiSession {
             return Err(Error::guard("unowned Pi storage cannot be adopted"));
         }
         state.inspect_state(require_existing)?;
-        let argv = policy::argv(config, &state.path)?;
+        let proxy = match &config.model_endpoint {
+            Some(endpoint) => Some(egress::ModelProxy::start(endpoint)?),
+            None => None,
+        };
+        let argv = policy::argv(
+            config,
+            &state.path,
+            proxy.as_ref().map(|proxy| proxy.directory()),
+        )?;
         let leaf =
             cgroup::create_bridge_leaf(&cgroup_root, &format!("bridge-{}", uuid::Uuid::new_v4()))?;
         let mut record = json!({"version":1,"identity":identity(&binding),"generation":binding.generation,
@@ -203,6 +229,7 @@ impl ConfinedPiSession {
             leaf,
             watchdog: Some((done, watchdog)),
             launch_supervisor: Some(launch_supervisor),
+            proxy,
             stopped: false,
         };
         session.bridge.hello()?;
@@ -287,6 +314,9 @@ impl ConfinedPiSession {
                 .map_err(|_| Error::guard("bridge watchdog failed"))?;
         }
         self.bridge.terminate();
+        // Drop the proxy only after the bridge is dead so an in-flight splice
+        // is not the thing that decides termination.
+        self.proxy.take();
         let proof = cgroup::rekill_and_prove(&self.leaf, Duration::from_secs(5))?;
         self.record["phase"] = json!(if proof.proven { "stopped" } else { "uncertain" });
         let evidence = json!({"proven":proof.proven,"reason":proof.reason,"events":proof.events,

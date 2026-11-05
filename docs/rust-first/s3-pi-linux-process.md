@@ -100,5 +100,5 @@ the credential-free Pi adapter separately. These are composed test seams, **not*
 a production Host/Pi/Linux driver. New Linux effects require FakeRuntime or the explicit confined Host adapter;
 the CLI default, source pins, protocol version and credential policy are unchanged.
 [S3-B5 Host dispatch](s3-pi-host-dispatch.md) composes these APIs without a
-separate bridge driver. Production policy, model-only egress and full S3/live
-acceptance remain under #97.
+separate bridge driver. [S3-B6](s3-model-egress.md) is the model-endpoint
+policy. Production enablement and full S3/live acceptance remain under #97.

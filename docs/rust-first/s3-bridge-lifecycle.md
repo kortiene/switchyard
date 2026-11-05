@@ -4,8 +4,9 @@ Scope: #97 and #94, following #143–#146. `ConfinedPiSession` is a non-default,
 credential-free Rust API behind `pi-contract` plus `linux-execution`. It uses
 the fixed source-built conformance entry point. FakeRuntime remains the
 product default. [S3-B5](s3-pi-host-dispatch.md) adds an explicit Host-owned
-composition. Provider credentials, model-only egress and full S3 acceptance
-remain separate.
+composition. [S3-B6](s3-model-egress.md) adds optional model-endpoint egress;
+unset, this session still denies the network. Provider credentials and full S3
+acceptance remain separate.
 
 ## Ownership and storage
 
@@ -76,7 +77,8 @@ The reviewed B1 seccomp constructor and startup guard are shared from
 `runtime/pi-source/confinement/`. The bridge has a fixed read-only Node/runtime
 closure, private writable state, and bounded temporary storage. Workspace,
 mission database, host control directory, credentials and sockets are absent.
-Networking and subprocess creation remain denied; Node threads are allowed.
+Networking stays denied unless the host sets one model endpoint
+([S3-B6](s3-model-egress.md)). Subprocess creation remains denied; Node threads are allowed.
 The guard rejects a missing/invalid native policy before Pi opens storage.
 `policy::source()` resolves that tree from `CARGO_MANIFEST_DIR` for this
 conformance entry point. Product wiring will need a real install location.
@@ -119,8 +121,8 @@ deadline. Existing B1
 negative boundary, B2 write, B3 process and S2 contract cases remain required.
 This does not claim exhaustive fault injection at every startup instruction.
 
-Next: connect this lifecycle API to Host-owned Pi dispatch and observations,
-then route coding effects through the Linux ledger. Keep provider credentials
-and network egress disabled until the separate model-egress policy and composed
-S3 acceptance are reviewed. Preserve FakeRuntime defaults and the Rust-native
-runtime target. Do not close #97 from B4 alone.
+[S3-B5](s3-pi-host-dispatch.md) connects this API to Host dispatch.
+[S3-B6](s3-model-egress.md) is the optional model endpoint; unset, networking
+stays denied. Provider credentials stay disabled, and composed S3 acceptance
+is still required before product enablement. Preserve FakeRuntime defaults and
+the Rust-native runtime target. Do not close #97 from B4 alone.

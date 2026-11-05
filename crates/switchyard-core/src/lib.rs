@@ -68,4 +68,6 @@ mod acceptance;
     feature = "linux-execution",
     target_os = "linux"
 ))]
-pub use execution::confined_pi::{ConfinedPiConfig, ConfinedPiSession, confined_pi_launcher_main};
+pub use execution::confined_pi::{
+    ConfinedPiConfig, ConfinedPiSession, ModelEndpoint, confined_pi_launcher_main,
+};

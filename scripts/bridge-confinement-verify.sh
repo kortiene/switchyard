@@ -15,7 +15,14 @@ cmp /usr/bin/bwrap "$backend"
 mkdir -p target/bridge-policy "${SWITCHYARD_CONFINEMENT_EVIDENCE:?set evidence directory}"
 cc -Wall -Wextra -Werror -O2 -shared -fPIC runtime/pi-source/confinement/lockdown.c -o target/bridge-policy/lockdown.so
 cc -Wall -Wextra -Werror -O2 -DLOCKDOWN_TEST runtime/pi-source/confinement/lockdown.c -pthread -o target/bridge-policy/lockdown-test
+cc -Wall -Wextra -Werror -O2 -DLOCKDOWN_ENDPOINT_TEST runtime/pi-source/confinement/lockdown.c -pthread -o target/bridge-policy/lockdown-endpoint-test
 target/bridge-policy/lockdown-test | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-native.log"
+# Unset keeps full socket denial. model-socket is the only other accepted mode.
+if SWITCHYARD_BRIDGE_EGRESS=open target/bridge-policy/lockdown-test; then
+  echo "unexpected egress mode must not install a filter" >&2
+  exit 1
+fi
+SWITCHYARD_BRIDGE_EGRESS=model-socket target/bridge-policy/lockdown-endpoint-test | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-egress-native.log"
 # Install a byte-identical private candidate: the shared CI tool cache may be
 # group-writable and is not an acceptable trusted runtime installation.
 install -m 0755 "$(readlink -f "$(command -v node)")" "$PWD/target/bridge-policy/node"
@@ -68,3 +75,7 @@ cargo test -p switchyard-confinement-probe --test bridge_lifecycle --features pi
 
 # S3-B5: Host-owned dispatch, observations, stop proofs and replay.
 cargo test -p switchyard-confinement-probe --test pi_host_dispatch --features pi-linux-process --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/pi-host-dispatch.log"
+
+# S3-B6: one host-configured model endpoint through the session proxy.
+# Full denial remains the path exercised by the suites above.
+cargo test -p switchyard-confinement-probe --test bridge_egress --features pi-linux-process --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-egress.log"
