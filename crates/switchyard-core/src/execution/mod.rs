@@ -4,7 +4,7 @@ mod owner;
 #[cfg(feature = "pi-contract")]
 mod pi_bridge;
 #[cfg(feature = "pi-contract")]
-mod pi_runtime;
+pub(crate) mod pi_runtime;
 mod runtime;
 pub(crate) mod workspace;
 
@@ -27,3 +27,10 @@ pub(crate) use pi_runtime::{AcknowledgedCheck, PiRuntime};
     target_os = "linux"
 ))]
 pub(crate) mod confined_pi;
+
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
+pub(crate) mod confined_runtime;

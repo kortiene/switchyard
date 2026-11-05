@@ -185,6 +185,9 @@ impl Store {
         tx.commit().map_err(Error::storage)
     }
     pub(crate) fn execution_blocked(&self, mission: &str) -> Result<bool> {
+        Ok(self.simulated_execution_blocked(mission)? || self.linux_execution_blocked(mission)?)
+    }
+    pub(crate) fn simulated_execution_blocked(&self, mission: &str) -> Result<bool> {
         if user_version(&self.conn)? < 4 {
             return Ok(false);
         }
@@ -209,6 +212,6 @@ impl Store {
             )
         }
         .map_err(Error::storage)?;
-        Ok(simulated || self.linux_execution_blocked(mission)?)
+        Ok(simulated)
     }
 }

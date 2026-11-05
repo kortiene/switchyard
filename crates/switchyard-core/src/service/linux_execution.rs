@@ -27,7 +27,8 @@ impl Host {
     }
 
     fn flag_linux_attention(&mut self, mission: &crate::domain::MissionRecord) -> Result<()> {
-        let stopping_fake = matches!(self.runtime, RuntimeAdapter::Fake(_))
+        let stopping_fake = (matches!(self.runtime, RuntimeAdapter::Fake(_))
+            || self.runtime.is_confined())
             && matches!(mission.phase, Phase::Pausing | Phase::Cancelling);
         if !mission.phase.is_terminal() && !stopping_fake {
             self.uncertainty(mission, crate::domain::AttentionReason::ExecutionUncertain)?;
@@ -183,7 +184,7 @@ mod os {
 
     impl Host {
         pub fn enable_linux_execution(&mut self, config: LinuxExecutionConfig) -> Result<()> {
-            if self.runtime.fake_mut().is_none() {
+            if self.runtime.fake_mut().is_none() && !self.runtime.is_confined() {
                 return Err(Error::guard(
                     "linux execution is a non-default test backend and requires FakeRuntime",
                 ));
@@ -355,6 +356,11 @@ mod os {
 
         pub(super) fn reconcile_linux_os(&mut self, mission_id: &str) -> Result<()> {
             let views = self.store.linux_views(mission_id)?;
+            for view in &views {
+                if self.runtime.is_confined() {
+                    self.poll_active(&view.operation_id)?;
+                }
+            }
             for view in views {
                 if !blocking(&view.state) {
                     continue;
@@ -372,14 +378,73 @@ mod os {
                 if let Ok(quiescence) = self.prove_effect(&effect) {
                     self.store
                         .save_linux_quiescence(&view.operation_id, &quiescence)?;
+                    #[cfg(feature = "pi-contract")]
+                    if self.runtime.is_confined()
+                        && self.reconcile_confined_effect(
+                            &view.operation_id,
+                            &effect,
+                            &quiescence,
+                        )?
+                    {
+                        continue;
+                    }
                 }
                 if orphaned_without_receipt(&effect) {
                     self.store.quarantine_linux(&view.operation_id)?;
                 }
             }
-            if self.store.linux_execution_blocked(mission_id)? {
+            let unsettled = self.store.linux_views(mission_id)?;
+            let abandoned = unsettled.iter().any(|v| {
+                blocking(&v.state)
+                    && !v.superseded
+                    && !self
+                        .linux
+                        .as_ref()
+                        .is_some_and(|s| s.active.contains_key(&v.operation_id))
+            });
+            if self.store.linux_execution_blocked(mission_id)?
+                && (!self.runtime.is_confined() || abandoned)
+            {
                 let mission = self.store.load_mission(mission_id)?;
                 self.flag_linux_attention(&mission)?;
+            }
+            Ok(())
+        }
+
+        #[cfg(feature = "pi-contract")]
+        pub(in crate::service) fn stop_confined_linux_writers(
+            &mut self,
+            mission_id: &str,
+        ) -> Result<()> {
+            let ids: Vec<String> = self
+                .linux
+                .as_ref()
+                .map(|s| s.active.keys().cloned().collect())
+                .unwrap_or_default();
+            for id in ids {
+                let effect = self.store.linux_effect(&id)?.ok_or(Error::NotFound)?;
+                if effect.mission_id != mission_id {
+                    continue;
+                }
+                if effect.started_generation != self.generation() {
+                    return Err(Error::guard("stale supervised process"));
+                }
+                self.linux
+                    .as_mut()
+                    .expect("active Linux session")
+                    .active
+                    .remove(&id);
+                let proof = self.prove_effect(&effect)?;
+                self.store.save_linux_quiescence(&id, &proof)?;
+                if proof["proven"] == true
+                    && effect.entered_at.is_some()
+                    && effect.receipt_json.is_none()
+                {
+                    let receipt = json!({"operationId":id,"payloadHash":effect.payload_hash,
+                        "simulated":false,"backend":crate::linux_execution::BUBBLEWRAP_BACKEND,
+                        "disposition":"cancelled","result":{"disposition":"cancelled"}});
+                    self.complete_start_cancelled(&id, &effect.payload_hash, &receipt, &proof)?;
+                }
             }
             Ok(())
         }
@@ -1127,7 +1192,7 @@ mod os {
             }
         }
 
-        fn barrier(&self, stage: &str) {
+        pub(in crate::service) fn barrier(&self, stage: &str) {
             let crash = self
                 .linux
                 .as_ref()

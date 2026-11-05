@@ -1,6 +1,6 @@
 // Credential-free conformance launcher. No live provider or product CLI exposes this bridge yet.
 import { createModels } from '@earendil-works/pi-ai/models';
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseFactory } from '@earendil-works/pi-ai/providers/faux';
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseFactory, type FauxResponseStep } from '@earendil-works/pi-ai/providers/faux';
 import { Type } from '@earendil-works/pi-ai';
 import { defineDoc, defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
 import type { SqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite';
@@ -22,7 +22,7 @@ const faux = fauxProvider();
 const waitingTool = () => fauxAssistantMessage([fauxToolCall('uncooperative', {})], { stopReason: 'toolUse' });
 // One fresh tool turn per burst round in transport.test.ts. Abort ends the run,
 // so the next submit consumes the next queued response.
-faux.setResponses(mode === 'cooperative-wait' ? Array.from({ length: 8 }, waitingTool)
+const responses: FauxResponseStep[] = mode === 'cooperative-wait' ? Array.from({ length: 8 }, waitingTool)
   : mode === 'ignore-abort' || mode.startsWith('storage-abort-') || mode === 'storage-background-hang' ? [waitingTool()]
   : mode.startsWith('process-') ? [
     fauxAssistantMessage([fauxToolCall('process_start', { argv: ['/bin/sh', '-c',
@@ -50,7 +50,20 @@ faux.setResponses(mode === 'cooperative-wait' ? Array.from({ length: 8 }, waitin
   fauxAssistantMessage([fauxToolCall('write_pair', { prefix: 'pair' }, { id: 'parent-pair' }),
     fauxToolCall('nested_write', { path: 'nested', content: 'child' }, { id: 'parent-nested' })], { stopReason: 'toolUse' }),
   fauxAssistantMessage('done'),
-] : [fauxAssistantMessage('done')]);
+] : [fauxAssistantMessage('done')];
+// The faux queue is process-local. Choose a script step from the durable
+// transcript so reopen cannot issue a second fresh start/write after replay.
+if (['file-write', 'tools', 'process-fast', 'process-wait', 'process-hold', 'process-cancel'].includes(mode)) {
+  const response: FauxResponseFactory = (context, options, state, model) => {
+    const completedTurns = context.messages.filter(message =>
+      message.role === 'assistant' && message.stopReason === 'toolUse').length;
+    const step = responses[completedTurns] ?? fauxAssistantMessage('done');
+    return typeof step === 'function' ? step(context, options, state, model) : step;
+  };
+  faux.setResponses(responses.map(() => response));
+} else {
+  faux.setResponses(responses);
+}
 const models = createModels();
 models.setProvider(faux.provider);
 const transport = new Transport(binding);

@@ -4,6 +4,37 @@ use crate::{AdmitRequest, CommandBody, CommandOrigin, CommandState, Host, Operat
 use serde_json::json;
 
 #[test]
+fn host_supervisor_origin_is_not_publicly_admissible() {
+    assert_eq!(CommandOrigin::HostSupervisor.as_str(), "host_supervisor");
+    assert_eq!(
+        "host_supervisor".parse::<CommandOrigin>().unwrap(),
+        CommandOrigin::HostSupervisor
+    );
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    let error = host
+        .admit(AdmitRequest {
+            command_id: None,
+            mission_id: created.mission_id.clone(),
+            attempt_id: None,
+            expected_revision: created.revision,
+            actor: "forged".into(),
+            origin: CommandOrigin::HostSupervisor,
+            body: CommandBody::StartPlanning,
+        })
+        .unwrap_err();
+    assert_eq!(error.category(), "guard_failed");
+    assert!(error.to_string().contains("host supervisor"), "{error}");
+    assert!(
+        host.snapshot(&created.mission_id)
+            .unwrap()
+            .commands
+            .is_empty()
+    );
+}
+
+#[test]
 fn redelivery_with_a_different_payload_conflicts_and_keeps_the_command() {
     let world = open_world();
     let mut host = Host::open(&world.db).unwrap();

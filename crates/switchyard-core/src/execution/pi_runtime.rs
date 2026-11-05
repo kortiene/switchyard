@@ -359,7 +359,7 @@ fn command_rows(snapshot: &Value) -> Result<&Vec<Value>> {
         .ok_or_else(|| Error::guard("missing Pi command snapshot"))
 }
 
-fn receipt_from_row(
+pub(crate) fn receipt_from_row(
     request: &RuntimeRequest,
     method: &str,
     params: &Value,
@@ -431,7 +431,7 @@ fn no_effects(_: &Value) -> Result<Value> {
     ))
 }
 
-fn mapped(request: &RuntimeRequest, payload: &Value) -> Result<(&'static str, Value)> {
+pub(crate) fn mapped(request: &RuntimeRequest, payload: &Value) -> Result<(&'static str, Value)> {
     let kind = payload["kind"]
         .as_str()
         .ok_or_else(|| Error::guard("missing command kind"))?;

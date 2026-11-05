@@ -22,6 +22,11 @@ use storage::Directory;
 
 pub use launcher::confined_pi_launcher_main;
 
+/// Conformance wall for one bridge generation. Forwarded effects use half of
+/// this budget so a tool can settle before the watchdog fires. Production
+/// budgets belong to S4.
+pub(crate) const BRIDGE_WALL: Duration = Duration::from_secs(60);
+
 /// Trusted installation paths. `root` must already be a private (0700) directory
 /// outside workspaces; it is never mounted into the bridge. Linux x86_64 only.
 #[derive(Clone, Debug)]
@@ -56,6 +61,15 @@ impl ConfinedPiSession {
     /// thread that created the child. The supervisor stays parked until
     /// [`Self::stop`], so `open` may run on a thread that ends first.
     pub fn open(config: &ConfinedPiConfig, binding: RuntimeBinding, fixture: &str) -> Result<Self> {
+        Self::open_required(config, binding, fixture, false)
+    }
+
+    pub(crate) fn open_required(
+        config: &ConfinedPiConfig,
+        binding: RuntimeBinding,
+        fixture: &str,
+        require_original: bool,
+    ) -> Result<Self> {
         validate(&binding, fixture)?;
         let root = Directory::root(&config.root)?;
         let key = payload_hash(&identity(&binding))?;
@@ -65,6 +79,11 @@ impl ConfinedPiSession {
         let installed = policy::check(config)?;
         let cgroup_root = cgroup::validate_delegation(&config.cgroup_root)?;
         let previous = control.read("current.json")?;
+        if require_original && previous.is_none() {
+            return Err(Error::guard(
+                "original confined bridge control record is missing",
+            ));
+        }
         let mut require_existing = false;
         let mut recovered = Value::Null;
         if let Some(previous) = previous {
@@ -171,7 +190,7 @@ impl ConfinedPiSession {
         let watched = leaf.clone();
         let watchdog = std::thread::spawn(move || {
             if matches!(
-                wait.recv_timeout(Duration::from_secs(60)),
+                wait.recv_timeout(BRIDGE_WALL),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout)
             ) {
                 let _ = cgroup::rekill_and_prove(&watched, Duration::from_secs(5));
@@ -421,8 +440,17 @@ fn binding_value(binding: &RuntimeBinding) -> Value {
 }
 
 fn validate(binding: &RuntimeBinding, fixture: &str) -> Result<()> {
-    if !matches!(fixture, "answer" | "recover" | "ignore-abort")
-        || binding.generation == 0
+    if !matches!(
+        fixture,
+        "answer"
+            | "recover"
+            | "ignore-abort"
+            | "file-write"
+            | "process-fast"
+            | "process-hold"
+            | "process-cancel"
+            | "tools"
+    ) || binding.generation == 0
         || binding.generation > 9_007_199_254_740_991
         || [
             &binding.mission_id,

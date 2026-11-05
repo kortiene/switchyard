@@ -11,14 +11,51 @@ pub(crate) enum RuntimeAdapter {
     Fake(FakeRuntime),
     #[cfg(feature = "pi-contract")]
     Pi(Box<PiRuntime>),
+    #[cfg(all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    ))]
+    Confined(Box<super::confined_runtime::ConfinedRuntime>),
 }
 
 impl RuntimeAdapter {
+    pub(crate) fn is_confined(&self) -> bool {
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        {
+            matches!(self, Self::Confined(_))
+        }
+        #[cfg(not(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        )))]
+        {
+            let _ = self;
+            false
+        }
+    }
+
+    #[cfg(feature = "pi-contract")]
+    fn is_fake(&self) -> bool {
+        matches!(self, Self::Fake(_))
+    }
+
     pub(crate) fn name(&self) -> &'static str {
         match self {
             Self::Fake(_) => "fake",
             #[cfg(feature = "pi-contract")]
             Self::Pi(_) => "pi-probe-v1",
+            #[cfg(all(
+                feature = "pi-contract",
+                feature = "linux-execution",
+                target_os = "linux"
+            ))]
+            Self::Confined(_) => "pi-confined-v1",
         }
     }
 
@@ -27,6 +64,12 @@ impl RuntimeAdapter {
             Self::Fake(_) => json!({"adapter":"fake", "credentials":"none"}),
             #[cfg(feature = "pi-contract")]
             Self::Pi(runtime) => runtime.configuration(),
+            #[cfg(all(
+                feature = "pi-contract",
+                feature = "linux-execution",
+                target_os = "linux"
+            ))]
+            Self::Confined(runtime) => runtime.configuration(),
         }
     }
 
@@ -35,6 +78,12 @@ impl RuntimeAdapter {
             Self::Fake(runtime) => Some(runtime),
             #[cfg(feature = "pi-contract")]
             Self::Pi(_) => None,
+            #[cfg(all(
+                feature = "pi-contract",
+                feature = "linux-execution",
+                target_os = "linux"
+            ))]
+            Self::Confined(_) => None,
         }
     }
 
@@ -44,18 +93,21 @@ impl RuntimeAdapter {
         origin: CommandOrigin,
     ) -> Result<()> {
         #[cfg(feature = "pi-contract")]
-        if let Self::Pi(_) = self {
+        if !self.is_fake() {
             // S2-A has no trusted planning/verification/process-quiescence observer.
             // Do not expose S1 simulation inputs as facts about a child process.
-            if origin == CommandOrigin::RuntimeObservation
-                || matches!(
-                    body,
-                    CommandBody::ConfirmStopped
-                        | CommandBody::ConfirmCancelled
-                        | CommandBody::RequestVerification { .. }
-                        | CommandBody::ExplicitRecovery { .. }
-                )
-            {
+            // HostSupervisor is not a Pi observation; the private host-fact path
+            // never reaches this check.
+            if matches!(
+                origin,
+                CommandOrigin::RuntimeObservation | CommandOrigin::HostSupervisor
+            ) || matches!(
+                body,
+                CommandBody::ConfirmStopped
+                    | CommandBody::ConfirmCancelled
+                    | CommandBody::RequestVerification { .. }
+                    | CommandBody::ExplicitRecovery { .. }
+            ) {
                 return Err(crate::Error::guard(
                     "Pi probe has no mission-fact or execution-quiescence authority",
                 ));
@@ -67,7 +119,7 @@ impl RuntimeAdapter {
 
     pub(crate) fn validate_command(&self, request: &RuntimeRequest, payload: &Value) -> Result<()> {
         #[cfg(feature = "pi-contract")]
-        if let Self::Pi(_) = self {
+        if !self.is_fake() {
             return PiRuntime::validate_command(request, payload);
         }
         let _ = (request, payload);
@@ -86,6 +138,14 @@ impl RuntimeAdapter {
             }
             #[cfg(feature = "pi-contract")]
             Self::Pi(runtime) => runtime.reconcile(request, payload),
+            #[cfg(all(
+                feature = "pi-contract",
+                feature = "linux-execution",
+                target_os = "linux"
+            ))]
+            Self::Confined(_) => Err(crate::Error::guard(
+                "confined Pi dispatch must be owned by Host",
+            )),
         }
     }
 
@@ -105,6 +165,14 @@ impl RuntimeAdapter {
             }
             #[cfg(feature = "pi-contract")]
             Self::Pi(runtime) => runtime.dispatch(request, payload),
+            #[cfg(all(
+                feature = "pi-contract",
+                feature = "linux-execution",
+                target_os = "linux"
+            ))]
+            Self::Confined(_) => Err(crate::Error::guard(
+                "confined Pi dispatch must be owned by Host",
+            )),
         }
     }
 }

@@ -297,6 +297,7 @@ fn v3_inspection_and_forward_upgrade_preserve_mission_and_workspace() {
          DROP TRIGGER IF EXISTS execution_resolutions_no_delete;
          DROP TRIGGER IF EXISTS linux_resolutions_no_update;
          DROP TRIGGER IF EXISTS linux_resolutions_no_delete;
+         DROP TABLE IF EXISTS pi_host_sessions;
          DROP TABLE IF EXISTS execution_supersessions;
          DROP TRIGGER IF EXISTS linux_effect_identity_unique;
          DROP TRIGGER IF EXISTS simulated_effect_identity_unique;
@@ -325,7 +326,7 @@ fn v3_inspection_and_forward_upgrade_preserve_mission_and_workspace() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        9
+        10
     );
 }
 
@@ -704,6 +705,7 @@ fn v4_upgrade_preserves_completed_prepared_and_uncertain_effects() {
          DROP TRIGGER IF EXISTS execution_resolutions_no_delete;
          DROP TRIGGER IF EXISTS linux_resolutions_no_update;
          DROP TRIGGER IF EXISTS linux_resolutions_no_delete;
+         DROP TABLE IF EXISTS pi_host_sessions;
          DROP TABLE IF EXISTS execution_supersessions;
          DROP TRIGGER IF EXISTS linux_effect_identity_unique;
          DROP TRIGGER IF EXISTS simulated_effect_identity_unique;
@@ -748,7 +750,7 @@ fn v4_upgrade_preserves_completed_prepared_and_uncertain_effects() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        9
+        10
     );
     assert_eq!(
         conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
@@ -1079,6 +1081,7 @@ fn v5_read_only_inspection_and_upgrade_preserve_unresolved_effects() {
          DROP TRIGGER IF EXISTS execution_supersessions_no_delete;
          DROP TRIGGER IF EXISTS execution_resolutions_no_update;
          DROP TRIGGER IF EXISTS execution_resolutions_no_delete;
+         DROP TABLE IF EXISTS pi_host_sessions;
          DROP TABLE IF EXISTS execution_supersessions;
          DROP TABLE execution_resolutions; DELETE FROM schema_migrations WHERE version=6; PRAGMA user_version=5;",
     ).unwrap();
@@ -1570,7 +1573,8 @@ fn v6_upgrade_preserves_effects_and_resolutions() {
              DROP TRIGGER IF EXISTS execution_resolutions_no_delete;
              DROP TRIGGER IF EXISTS linux_resolutions_no_update;
              DROP TRIGGER IF EXISTS linux_resolutions_no_delete;
-             DROP TABLE IF EXISTS execution_supersessions;
+             DROP TABLE IF EXISTS pi_host_sessions;
+         DROP TABLE IF EXISTS execution_supersessions;
              DROP TRIGGER IF EXISTS simulated_effect_identity_unique;
              DROP TRIGGER IF EXISTS linux_effect_identity_unique;
              DROP TRIGGER IF EXISTS simulated_resolution_command_unique;
@@ -1594,7 +1598,7 @@ fn v6_upgrade_preserves_effects_and_resolutions() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
 }
 
 #[test]
@@ -1656,6 +1660,7 @@ fn v7_upgrade_preserves_receipts_and_treats_unresolved_release_as_unknown() {
     conn.execute_batch(
         "DROP TRIGGER simulated_effect_identity_unique;
          DROP TRIGGER simulated_resolution_command_unique;
+         DROP TABLE IF EXISTS pi_host_sessions;
          DROP TABLE linux_execution_resolutions;
          DROP TABLE linux_execution_effects;
          DELETE FROM schema_migrations WHERE version>=7;
@@ -3322,7 +3327,8 @@ fn v8_upgrade_preserves_abandoned_simulated_and_linux_rows() {
     Connection::open(&db)
         .unwrap()
         .execute_batch(
-            "DROP TABLE IF EXISTS execution_supersessions;
+            "DROP TABLE IF EXISTS pi_host_sessions;
+         DROP TABLE IF EXISTS execution_supersessions;
              DELETE FROM schema_migrations WHERE version>=9;
              PRAGMA user_version=8;",
         )
@@ -3377,7 +3383,7 @@ fn v8_upgrade_preserves_abandoned_simulated_and_linux_rows() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let snapshot = host.snapshot(&mission).unwrap();
     assert!(snapshot.execution_blocked);
     assert!(snapshot.execution_supersessions.is_empty());
@@ -3600,4 +3606,37 @@ fn supersede_unique_races_are_guard_errors() {
     let rows = host.snapshot(&mission).unwrap().execution_supersessions;
     assert_eq!(rows.len(), 1);
     assert!(rows[0].get("resultingRevision").is_none(), "{rows:?}");
+}
+
+#[test]
+fn v9_inspection_and_upgrade_preserve_original_effect_receipts() {
+    let (dir, mut host, request) = setup();
+    host.execute_fake_operation(&request).unwrap();
+    let before = host
+        .snapshot(&request.binding.mission_id)
+        .unwrap()
+        .to_json();
+    drop(host);
+    let db = dir.path().join("mission.sqlite");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch("DROP TABLE pi_host_sessions; DELETE FROM schema_migrations WHERE version=10; PRAGMA user_version=9;").unwrap();
+    let inspected = Host::inspect(&db, Some(&request.binding.mission_id)).unwrap()[0].to_json();
+    assert_eq!(inspected["executionEffects"], before["executionEffects"]);
+    assert_eq!(
+        conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        9
+    );
+    let host = Host::open(&db).unwrap();
+    let after = host
+        .snapshot(&request.binding.mission_id)
+        .unwrap()
+        .to_json();
+    assert_eq!(after["executionEffects"], before["executionEffects"]);
+    assert_eq!(after["piHost"], Value::Null);
+    assert_eq!(
+        conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        10
+    );
 }

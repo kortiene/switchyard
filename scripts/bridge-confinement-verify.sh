@@ -65,3 +65,6 @@ chmod 0755 target/debug/switchyard-bridge-launcher
 export SWITCHYARD_BRIDGE_LAUNCHER="$PWD/target/debug/switchyard-bridge-launcher"
 cargo test -p switchyard-core --features "pi-contract linux-execution" confined_pi_ --locked -- --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-storage.log"
 cargo test -p switchyard-confinement-probe --test bridge_lifecycle --features pi-linux-process --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-lifecycle.log"
+
+# S3-B5: Host-owned dispatch, observations, stop proofs and replay.
+cargo test -p switchyard-confinement-probe --test pi_host_dispatch --features pi-linux-process --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/pi-host-dispatch.log"

@@ -22,9 +22,10 @@ mod execution;
 mod execution_resolution;
 mod execution_supersession;
 pub(crate) mod linux_execution;
+mod pi_host;
 mod workspace;
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 const VERIFIER_JSON: &str = r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}"#;
 const ENVIRONMENT_JSON: &str = r#"{"confinement":"deferred_to_s3","host":"single"}"#;
@@ -368,6 +369,19 @@ impl Store {
             )
             .map_err(Error::storage)?;
             tx.execute_batch("PRAGMA user_version = 9;")
+                .map_err(Error::storage)?;
+            tx.commit().map_err(Error::storage)?;
+        }
+        if current < 10 {
+            let tx = self.immediate()?;
+            tx.execute_batch(include_str!("migrations/010_pi_host.sql"))
+                .map_err(Error::storage)?;
+            tx.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (10, ?1)",
+                [now_ms()],
+            )
+            .map_err(Error::storage)?;
+            tx.execute_batch("PRAGMA user_version = 10;")
                 .map_err(Error::storage)?;
             tx.commit().map_err(Error::storage)?;
         }
@@ -1788,7 +1802,7 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
             .unwrap();
         assert_eq!(foreign_keys, 1);
-        assert_eq!(user_version(&store.conn).unwrap(), 9);
+        assert_eq!(user_version(&store.conn).unwrap(), 10);
         let index: String = store
             .conn
             .query_row(

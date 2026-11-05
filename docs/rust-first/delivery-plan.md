@@ -208,3 +208,11 @@ with protected control records, no-follow storage inspection, generation fences,
 cgroup limits, a startup barrier and quiescent recovery. It remains credential-free
 and uses the fixed conformance entry point. Product Host/Pi/Linux dispatch,
 model-only egress and full S3 acceptance remain open.
+
+### S3-B5 Host-owned confined dispatch (candidate)
+
+The [Host dispatch candidate](s3-pi-host-dispatch.md) adds an explicit confined
+adapter that owns the outbox, bridge and Linux effect callbacks. The new
+`pi-host-dispatch.log` gate exercises restart and stop boundaries. Acceptance
+is pending its conformance evidence and the remaining cases listed there.
+FakeRuntime remains the CLI default; #97 and #94 remain open.

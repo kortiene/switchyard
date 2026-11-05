@@ -8,12 +8,20 @@ pub(super) use evidence::ExecutionEvidence;
 impl Host {
     pub(super) fn reconcile_execution(&mut self, mission_id: &str) -> Result<()> {
         self.store.assert_workspace_owner()?;
-        if self.store.execution_blocked(mission_id)? {
+        // A confined Host may own a live, supervised Linux process. Its
+        // reconciliation below distinguishes that from an abandoned effect.
+        let blocked = if self.runtime.is_confined() {
+            self.store.simulated_execution_blocked(mission_id)?
+        } else {
+            self.store.execution_blocked(mission_id)?
+        };
+        if blocked {
             self.store.quarantine_pending_execution(mission_id)?;
             let mission = self.store.load_mission(mission_id)?;
             // Preserve an admitted stop while retaining every execution block.
             // A delivered abort cannot authorize ConfirmStopped/ConfirmCancelled.
-            let stopping_fake = matches!(self.runtime, RuntimeAdapter::Fake(_))
+            let stopping_fake = (matches!(self.runtime, RuntimeAdapter::Fake(_))
+                || self.runtime.is_confined())
                 && matches!(mission.phase, Phase::Pausing | Phase::Cancelling);
             if !mission.phase.is_terminal() && !stopping_fake {
                 self.uncertainty(&mission, AttentionReason::ExecutionUncertain)?;

@@ -72,10 +72,11 @@ impl Host {
                     },
                 );
             }
-            // Reject a new effect off FakeRuntime: this API is the harness,
-            // not product Pi dispatch. S3 Track B under #97 lifts the gate
-            // (docs/rust-first/s3-pi-linux-write.md).
-            if self.linux.is_none() || self.runtime.fake_mut().is_none() {
+            // Only the fake harness and explicit Host-owned confined adapter
+            // may create Linux effects. The unconfined Pi probe stays denied.
+            if self.linux.is_none()
+                || (self.runtime.fake_mut().is_none() && !self.runtime.is_confined())
+            {
                 return Ok(PiEffectOutcome::Rejected);
             }
             // This check precedes entry into the backend, so semantic refusal
