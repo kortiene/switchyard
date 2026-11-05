@@ -55,13 +55,12 @@ mismatch, receipt replay, and Host SIGKILL at bridge-live, pre-ACK, prepared-eff
 and receipt barriers, including process-start/result crash cases. The existing
 B1–B4 suites remain enabled.
 
-Current acceptance blocker: the faux provider's in-memory response queue resets
-on reopen. After replaying an original tool receipt it can emit an additional,
-fresh tool call, repeating the fixture's scripted write. The no-repeat assertion
-is retained and currently fails. A proposed test-fixture correction would select
-scripted responses from durable conversation history. That requires a scoped
-TypeScript fixture change despite #148's Rust-only constraint; the PR remains
-draft pending that scope decision and successful conformance evidence.
+The faux provider selects write/process script responses from the durable
+conversation transcript. Its process-local response queue otherwise resets on
+reopen and emits a fresh tool call after the original receipt is replayed.
+This narrow TypeScript test-fixture correction is the approved exception to
+#148's Rust-only scope; the production implementation remains Rust. The
+no-repeat assertion remains intact. Full CI evidence is required for acceptance.
 
 The suite also covers Host-driven forbidden file/socket/child-process probes,
 stale and foreign effect bindings, and hung-extension stop/recovery. The negative
