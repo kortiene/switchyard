@@ -1,6 +1,6 @@
 # Delivery plan: One Recoverable, Verified Change
 
-Status: S1 implemented (#105). S2 is GO for the credential-free source-built candidate; see the [reviewed revision and evidence](s2-contract-gate.md). S3 Track A is delivered within its documented scope; Track B slices B1–B6 are delivered. S3 is not complete: bounded cleanup of retained bridge cgroup leaves (#151) and the composed S3 acceptance remain. S3-B6 is model-endpoint-only egress for the confined bridge, off unless the host sets one endpoint. S4–S8 remain planned. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md). Disposition updated 2026-11-02; see [#109](https://github.com/kortiene/switchyard/issues/109) for current disposition.
+Status: S1 implemented (#105). S2 is GO for the credential-free source-built candidate; see the [reviewed revision and evidence](s2-contract-gate.md). S3 Track A is delivered within its documented scope; Track B slices B1–B6 are delivered. S3 is not complete: the composed S3 acceptance remains. [Follow-up #151](s3-bridge-cgroup-retention.md) bounds recorded bridge leaves while preserving current recovery identities. S3-B6 is model-endpoint-only egress for the confined bridge, off unless the host sets one endpoint. S4–S8 remain planned. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md). Disposition updated 2026-11-02; see [#109](https://github.com/kortiene/switchyard/issues/109) for current disposition.
 
 ## Implementation sequence
 
@@ -217,8 +217,8 @@ and Linux effect callbacks. The `pi-host-dispatch.log` gate exercises restart
 and stop boundaries. Accepted: all 7 CI checks passed, including
 `execution-confinement` with the `pi_host_dispatch` suite, and #148 is closed.
 FakeRuntime remains the CLI default. This does not enable Pi in the product.
-Bounded cleanup of retained bridge cgroup leaves (#151) and the composed S3
-acceptance remain; #97 and #94 stay open. Model-endpoint egress is B6.
+[Follow-up #151](s3-bridge-cgroup-retention.md) bounds retained bridge leaves.
+Composed S3 acceptance remains; #97 and #94 stay open. Model-endpoint egress is B6.
 
 ### S3-B6 model-endpoint-only egress (delivered)
 
@@ -228,5 +228,6 @@ read-only Unix socket to a host proxy that splices to that pinned address.
 In-bridge tests deny every other destination and one local stub proves the
 route. Only credential-free HTTP is admitted; HTTPS fails closed until a
 reviewed TLS client exists. FakeRuntime remains the CLI default. This does not
-enable Pi, carry provider credentials, or complete S3. #151 and composed
-acceptance remain.
+enable Pi, carry provider credentials, or complete S3. Composed acceptance
+remains; [#151's retention follow-up](s3-bridge-cgroup-retention.md) handles
+recorded obsolete cgroup leaves.

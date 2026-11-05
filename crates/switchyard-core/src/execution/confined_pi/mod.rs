@@ -3,6 +3,7 @@
 mod egress;
 mod launcher;
 mod policy;
+mod retention;
 mod storage;
 
 use std::fs;
@@ -104,12 +105,12 @@ impl ConfinedPiSession {
         }
         let mut require_existing = false;
         let mut recovered = Value::Null;
-        if let Some(previous) = previous {
+        if let Some(previous) = previous.as_ref() {
             let configuration_changed = previous["configuration"] != installed;
             if previous["version"] != 1
                 || previous["identity"] != identity(&binding)
                 // Emptiness is checked after the old cgroup is proven dead.
-                || (configuration_changed && !proven_unopened_stop(&previous))
+                || (configuration_changed && !proven_unopened_stop(previous))
                 || previous["requiresExisting"].as_bool().is_none()
                 || !matches!(
                     previous["phase"].as_str(),
@@ -123,7 +124,7 @@ impl ConfinedPiSession {
                     "incompatible or stale confined bridge generation",
                 ));
             }
-            let old = recorded_leaf(&previous, &cgroup_root)?;
+            let old = recorded_leaf(previous, &cgroup_root)?;
             // Only the dead Host could place the launch barrier into this leaf.
             // The child never self-joins, so populated 0 cannot precede a late join.
             let proof = cgroup::rekill_and_prove(&old, Duration::from_secs(5))?;
@@ -136,7 +137,7 @@ impl ConfinedPiSession {
             // Quiescence first, so a live bridge cannot create session.sqlite
             // after this look. A corrected runtime may replace the recorded one
             // only when that directory is still empty.
-            if !allows_configuration(&previous, &installed, state.is_empty()?) {
+            if !allows_configuration(previous, &installed, state.is_empty()?) {
                 return Err(Error::guard(
                     "incompatible or stale confined bridge generation",
                 ));
@@ -144,7 +145,7 @@ impl ConfinedPiSession {
             // A second crash during preparation must retain the original
             // database requirement from an earlier generation. A proven stop
             // that never reached "opened" has no history to keep.
-            require_existing = require_existing_database(&previous);
+            require_existing = require_existing_database(previous);
             recovered = json!({"generation":previous["generation"],"cgroup":previous["cgroup"],
                 "proven":true,"events":proof.events});
             if configuration_changed {
@@ -161,6 +162,7 @@ impl ConfinedPiSession {
         {
             return Err(Error::guard("unowned Pi storage cannot be adopted"));
         }
+        retention::recover(&control, &cgroup_root, &binding, previous.as_ref())?;
         state.inspect_state(require_existing)?;
         let proxy = match &config.model_endpoint {
             Some(endpoint) => Some(egress::ModelProxy::start(endpoint)?),
@@ -171,12 +173,14 @@ impl ConfinedPiSession {
             &state.path,
             proxy.as_ref().map(|proxy| proxy.directory()),
         )?;
-        let leaf =
-            cgroup::create_bridge_leaf(&cgroup_root, &format!("bridge-{}", uuid::Uuid::new_v4()))?;
+        let leaf = retention::allocate(&control, &cgroup_root, &binding)?;
         let mut record = json!({"version":1,"identity":identity(&binding),"generation":binding.generation,
             "configuration":installed,"phase":"prepared","recovered":recovered,"requiresExisting":require_existing,
             "cgroup":{"path":leaf.path,"dev":leaf.dev,"ino":leaf.ino,"boot":leaf.boot_id}});
         control.write("current.json", &record)?;
+        // Only this durable handoff makes the former current leaf obsolete.
+        // Settle allocation/retirement journals before any launcher can start.
+        retention::recover(&control, &cgroup_root, &binding, Some(&record))?;
         let mut command = Command::new(&config.launcher);
         command
             .arg(std::process::id().to_string())

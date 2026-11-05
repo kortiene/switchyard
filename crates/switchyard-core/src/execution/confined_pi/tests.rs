@@ -21,6 +21,8 @@ fn confined_pi_storage_refuses_symlinks_hardlinks_and_shared_roots() {
     symlink(&sentinel, tmp.path().join("current.json")).unwrap();
     assert!(root.read("current.json").is_err());
     assert!(root.write("current.json", &json!({})).is_err());
+    assert!(root.remove("current.json").is_err());
+    assert!(tmp.path().join("current.json").is_symlink());
     let state = root.child("state").unwrap();
     symlink(&sentinel, state.path.join("session.sqlite")).unwrap();
     assert!(state.inspect_state(true).is_err());
@@ -45,6 +47,11 @@ fn confined_pi_storage_lock_and_atomic_record_retain_identity() {
     assert!(try_acquire_file(root.open_file("owner.lock", true).unwrap()).is_ok());
     assert!(root.child("../escape").is_err());
     assert!(root.child("state").unwrap().inspect_state(true).is_err());
+    root.write("journal.json", &json!({"settled":true}))
+        .unwrap();
+    root.remove("journal.json").unwrap();
+    assert!(!root.exists("journal.json").unwrap());
+    assert!(root.remove("../outside").is_err());
 }
 
 #[test]

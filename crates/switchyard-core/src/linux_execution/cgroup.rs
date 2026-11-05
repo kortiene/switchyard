@@ -114,6 +114,23 @@ pub(crate) fn observe(expected: &CgroupIdentity) -> Result<Quiescence> {
     read_state(expected, false)
 }
 
+/// Delete an obsolete leaf only after a fresh identity and emptiness check.
+/// The caller must durably authorize deletion before this call and must never
+/// supply the leaf referenced by its current recovery record.
+#[cfg(feature = "pi-contract")]
+pub(crate) fn remove_empty_leaf(expected: &CgroupIdentity) -> Result<Quiescence> {
+    let proof = observe(expected)?;
+    if !proof.proven {
+        return Err(Error::guard(format!(
+            "cgroup removal refused: {}",
+            proof.reason
+        )));
+    }
+    fs::remove_dir(&expected.path)
+        .map_err(|error| Error::guard(format!("cannot remove empty obsolete cgroup: {error}")))?;
+    Ok(proof)
+}
+
 /// Kill the recorded leaf even when it already reads empty, then require
 /// `populated 0`. A missing or replaced leaf is returned without a write.
 pub(crate) fn rekill_and_prove(expected: &CgroupIdentity, timeout: Duration) -> Result<Quiescence> {
@@ -252,7 +269,7 @@ fn read_state(expected: &CgroupIdentity, _killing: bool) -> Result<Quiescence> {
         pids_max: 0,
         oom_kill: 0,
     };
-    let meta = match fs::metadata(&expected.path) {
+    let meta = match fs::symlink_metadata(&expected.path) {
         Ok(meta) => meta,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             state.reason = "missing".into();
@@ -265,7 +282,11 @@ fn read_state(expected: &CgroupIdentity, _killing: bool) -> Result<Quiescence> {
         }
     };
     let boot = boot_id()?;
-    if meta.dev() != expected.dev || meta.ino() != expected.ino || boot != expected.boot_id {
+    if !meta.is_dir()
+        || meta.dev() != expected.dev
+        || meta.ino() != expected.ino
+        || boot != expected.boot_id
+    {
         state.reason = "mismatched".into();
         return Ok(state);
     }
@@ -314,6 +335,53 @@ pub(crate) fn within_root(root: &Path, leaf: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "pi-contract")]
+    #[test]
+    fn confined_pi_cgroup_removal_refuses_nonempty_changed_and_symlinked_leaves() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let leaf = temporary.path().join("bridge-owned");
+        std::fs::create_dir(&leaf).unwrap();
+        std::fs::write(leaf.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+        std::fs::write(leaf.join("sentinel"), "unchanged").unwrap();
+        let expected = super::identity_of(&leaf).unwrap();
+        let error = super::remove_empty_leaf(&expected).unwrap_err();
+        assert!(error.to_string().contains("nonempty"));
+        std::fs::write(leaf.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
+        for field in ["inode", "device", "boot"] {
+            let mut changed = expected.clone();
+            match field {
+                "inode" => changed.ino += 1,
+                "device" => changed.dev += 1,
+                "boot" => changed.boot_id = "another-boot".into(),
+                _ => unreachable!(),
+            }
+            assert!(
+                super::remove_empty_leaf(&changed)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("mismatched")
+            );
+        }
+        let alias = temporary.path().join("bridge-alias");
+        symlink(&leaf, &alias).unwrap();
+        let redirected = super::CgroupIdentity {
+            path: alias,
+            ..expected
+        };
+        assert!(
+            super::remove_empty_leaf(&redirected)
+                .unwrap_err()
+                .to_string()
+                .contains("mismatched")
+        );
+        assert_eq!(
+            std::fs::read_to_string(leaf.join("sentinel")).unwrap(),
+            "unchanged"
+        );
+    }
+
     #[test]
     fn leaf_name_uses_the_op_v1_hash_only() {
         let name = super::leaf_name("op-v1:0123456789abcdef0123456789abcdefaaaaaaaa").unwrap();

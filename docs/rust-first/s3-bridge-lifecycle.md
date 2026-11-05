@@ -39,8 +39,10 @@ claim protection against a compromised Host or root administrator.
 1. Validate the pinned Node/Bubblewrap runtime and trusted installation files.
 2. Reconcile any previous generation: validate its cgroup device, inode and
    boot identity; kill it and require `populated 0`; retain the proof.
-3. Inspect the original state, allocate a fresh limited cgroup, and durably
-   record prepared intent.
+3. Reconcile [allocation/retirement journals](s3-bridge-cgroup-retention.md),
+   preserving the current leaf. Inspect the original state, journal allocation
+   before creating a fresh limited cgroup, and durably record prepared intent.
+   Retire proven obsolete leaves only after that durable handoff, before launch.
 4. Spawn the trusted launcher on a supervisor thread owned by the session. The
    launcher waits on an unbuffered GO barrier. Record its PID/start identity,
    move the unreaped child into the cgroup, and persist released intent before
@@ -100,8 +102,11 @@ recovery blocking. Pi abort settlement is distinct from this bridge proof, and
 neither proves workspace effect success or mission completion. No lifecycle
 method is accepted from the public call facade.
 
-`bridge-<uuid>` cgroup leaves are not removed. Deleting them is a follow-up:
-it interacts with recovery that treats a missing leaf as an unproven stop.
+[Bounded cgroup retention](s3-bridge-cgroup-retention.md) (#151) now collects
+obsolete recorded leaves after a durable handoff. One current leaf remains
+per session, with at most one replacement during normal handoff. A missing
+current leaf still blocks; only an obsolete leaf's durable deletion
+authorization can justify its later absence. Recovery/audit evidence is kept.
 
 ## Validation and handoff
 
