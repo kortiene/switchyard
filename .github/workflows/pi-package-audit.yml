@@ -47,7 +47,7 @@ jobs:
             throw new Error('Expected observed incompatibilities; reassess the package audit without granting S2 GO');
           }
           appendFileSync(process.env.GITHUB_STEP_SUMMARY,
-            '## S2: NO-GO\n\nThe audit reproduced package/API incompatibilities. This job is not pi-bridge-contract. Issue #96 and downstream live execution remain blocked.\n');
+            '## Published package: NO-GO\n\nThe audit reproduced package/API incompatibilities. This job is not pi-bridge-contract. The published 1.4.0 package remains NO-GO. The source-built candidate is the accepted path (2026-11-02); see docs/rust-first/s2-contract-gate.md.\n');
           JS
       - uses: actions/upload-artifact@v4
         with:

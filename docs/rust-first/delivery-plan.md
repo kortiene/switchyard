@@ -1,6 +1,6 @@
 # Delivery plan: One Recoverable, Verified Change
 
-Status: S1 implemented (#105). S2 is GO for the credential-free source-built candidate; see the [reviewed revision and evidence](s2-contract-gate.md). S3 Track A is delivered within its documented scope; Track B is in progress, and S4–S8 remain planned. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md). Disposition updated 2026-11-02; see [#109](https://github.com/kortiene/switchyard/issues/109) for current disposition.
+Status: S1 implemented (#105). S2 is GO for the credential-free source-built candidate; see the [reviewed revision and evidence](s2-contract-gate.md). S3 Track A is delivered within its documented scope; Track B slices B1–B5 are delivered. S3 is not complete: model-endpoint-only egress and the composed S3 acceptance remain. S4–S8 remain planned. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md). Disposition updated 2026-11-02; see [#109](https://github.com/kortiene/switchyard/issues/109) for current disposition.
 
 ## Implementation sequence
 
@@ -209,10 +209,13 @@ cgroup limits, a startup barrier and quiescent recovery. It remains credential-f
 and uses the fixed conformance entry point. Product Host/Pi/Linux dispatch,
 model-only egress and full S3 acceptance remain open.
 
-### S3-B5 Host-owned confined dispatch (candidate)
+### S3-B5 Host-owned confined dispatch (delivered)
 
-The [Host dispatch candidate](s3-pi-host-dispatch.md) adds an explicit confined
-adapter that owns the outbox, bridge and Linux effect callbacks. The new
-`pi-host-dispatch.log` gate exercises restart and stop boundaries. Acceptance
-is pending its conformance evidence and the remaining cases listed there.
-FakeRuntime remains the CLI default; #97 and #94 remain open.
+The [Host dispatch](s3-pi-host-dispatch.md) was delivered in #150 (`fc7a9e4`,
+2026-11-04). It adds an explicit confined adapter that owns the outbox, bridge
+and Linux effect callbacks. The `pi-host-dispatch.log` gate exercises restart
+and stop boundaries. Accepted: all 7 CI checks passed, including
+`execution-confinement` with the `pi_host_dispatch` suite, and #148 is closed.
+FakeRuntime remains the CLI default. This does not enable Pi in the product.
+Model-endpoint-only egress and the composed S3 acceptance remain; #97 and #94
+stay open.
