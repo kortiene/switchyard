@@ -423,6 +423,10 @@ fn host_sigkill_reconciles_bridge_outbox_and_original_effects() {
         worker.wait().unwrap();
         let before = Host::inspect(&world.db(), Some(&world.mission)).unwrap()[0].to_json();
         let original_receipts = world.receipts();
+        // `pi-before-ack` is after submit returns and before the Host ack. The
+        // tool write may not have run yet, so absence is the pre-write crash
+        // and "once" means it already settled. Either way a second write fails.
+        let mut write_settled = false;
         if fixture == "file-write" {
             let text = output_text(&world);
             match stage {
@@ -430,14 +434,22 @@ fn host_sigkill_reconciles_bridge_outbox_and_original_effects() {
                 "bridge-live" => assert!(text.is_none(), "{stage}: write landed before the call"),
                 // Intent committed, workload not released.
                 "prepared" => assert!(text.is_none(), "{stage}: unreleased write is present"),
-                // The write already settled. A later "once" would hide a repeat,
-                // so replace it before recovery.
-                "pi-before-ack" | "receipt" => {
+                "pi-before-ack" => match text.as_deref() {
+                    None => {}
+                    Some("once") => {
+                        write_settled = true;
+                        fs::write(world.workspace.join("output.txt"), "must not repeat").unwrap();
+                    }
+                    other => panic!("{stage}: unexpected write {other:?}"),
+                },
+                // The write already settled. A later "once" would hide a repeat.
+                "receipt" => {
                     assert_eq!(
                         text.as_deref(),
                         Some("once"),
                         "{stage}: expected first write"
                     );
+                    write_settled = true;
                     fs::write(world.workspace.join("output.txt"), "must not repeat").unwrap();
                 }
                 other => panic!("unmapped file-write stage {other}"),
@@ -482,9 +494,17 @@ fn host_sigkill_reconciles_bridge_outbox_and_original_effects() {
             match stage {
                 "bridge-live" => assert_eq!(text.as_deref(), Some("once"), "{stage}"),
                 "prepared" => assert!(text.is_none(), "{stage}: recovery relaunched the write"),
-                "pi-before-ack" | "receipt" => {
+                "pi-before-ack" if write_settled => {
                     assert_eq!(text.as_deref(), Some("must not repeat"), "{stage}")
                 }
+                "pi-before-ack" => {
+                    assert_eq!(
+                        text.as_deref(),
+                        Some("once"),
+                        "{stage}: expected first write missing"
+                    )
+                }
+                "receipt" => assert_eq!(text.as_deref(), Some("must not repeat"), "{stage}"),
                 other => panic!("unmapped file-write stage {other}"),
             }
         }
@@ -492,10 +512,12 @@ fn host_sigkill_reconciles_bridge_outbox_and_original_effects() {
             assert_process_not_relaunched(&world, stage);
         }
         let after = host.snapshot(&world.mission).unwrap().to_json();
-        if stage == "bridge-live" {
+        let first_write_on_recovery =
+            stage == "bridge-live" || (stage == "pi-before-ack" && !write_settled);
+        if first_write_on_recovery {
             assert!(
                 effect_ids(&before).is_empty(),
-                "{stage}: an effect existed before the bridge call"
+                "{stage}: an effect existed before the first write"
             );
             assert_eq!(
                 effect_ids(&after).len(),

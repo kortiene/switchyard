@@ -69,7 +69,8 @@ mismatch, receipt replay, and Host SIGKILL at bridge-live, pre-ACK, prepared-eff
 and receipt barriers, including process-start/result crash cases. Each boundary
 pins its outcome: bridge-live, pre-ACK, prepared non-release, and a persisted
 receipt recover; a running process and a result captured before the receipt stay
-in `needs_attention`. Every boundary fails if a write is repeated or if
+in `needs_attention`. Pre-ACK can still be before the tool write; recovery then
+performs that write once. Every boundary fails if a write is repeated or if
 `process.marker` is missing or appended. Pause proves the workload's descendants
 stopped: the heartbeat freezes and `executionBlocked` is false. The existing
 B1–B4 suites remain enabled.
