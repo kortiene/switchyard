@@ -16,7 +16,8 @@ as FakeRuntime. `open_pi_probe` remains denied, including `enable_linux_executio
 on a fresh probe ledger, which still returns the FakeRuntime guard. Adapter
 changes on an existing ledger remain denied. The confined check is the
 `Confined` variant, not the adapter name string. No product execution command
-or network permission is added.
+or network permission is added. [S3-B6](s3-model-egress.md) can name one
+model endpoint on this same config; the product path still leaves it unset.
 
 ## Ordering and authority
 

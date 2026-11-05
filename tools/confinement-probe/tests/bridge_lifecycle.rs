@@ -29,6 +29,7 @@ fn config(root: &Path) -> ConfinedPiConfig {
         bubblewrap: path("SWITCHYARD_BWRAP"),
         launcher: path("SWITCHYARD_BRIDGE_LAUNCHER"),
         policy: path("SWITCHYARD_BRIDGE_POLICY"),
+        model_endpoint: None,
     }
 }
 

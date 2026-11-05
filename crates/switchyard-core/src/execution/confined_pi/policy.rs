@@ -63,11 +63,16 @@ pub(super) fn check(config: &ConfinedPiConfig) -> Result<Value> {
         json!({"version":1,"runtime":files,"adapter":super::super::pi_bridge::adapter_fingerprint(),
         "provenance":crate::canonical::sha256_hex(&provenance),"guard":crate::canonical::sha256_hex(&guard),
         "limits":{"memory":268435456,"pids":64,"cpu":"50000 100000","wallSeconds":super::BRIDGE_WALL.as_secs()},
-        "identity":payload_hash(&json!(files))?}),
+        "identity":payload_hash(&json!(files))?,
+        "egress":super::egress::record(config.model_endpoint.as_ref())}),
     )
 }
 
-pub(super) fn argv(config: &ConfinedPiConfig, state: &Path) -> Result<Vec<String>> {
+pub(super) fn argv(
+    config: &ConfinedPiConfig,
+    state: &Path,
+    proxy_dir: Option<&Path>,
+) -> Result<Vec<String>> {
     let source = source()?;
     let mut args: Vec<String> = [
         "/usr/bin/prlimit",
@@ -164,6 +169,15 @@ pub(super) fn argv(config: &ConfinedPiConfig, state: &Path) -> Result<Vec<String
     mount("--ro-bind", &config.policy, "/lockdown.so");
     // Only this private data directory is writable. Host control files are absent.
     mount("--bind", state, "/state");
+    match (&config.model_endpoint, proxy_dir) {
+        (None, None) => {}
+        (Some(_), Some(directory)) => args.extend(super::egress::mount_args(directory)?),
+        _ => {
+            return Err(Error::guard(
+                "model endpoint proxy does not match host configuration",
+            ));
+        }
+    }
     args.extend(
         [
             "--chdir",

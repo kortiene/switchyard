@@ -26,6 +26,7 @@ fn bridge(root: &Path) -> ConfinedPiConfig {
         bubblewrap: env_path("SWITCHYARD_BWRAP"),
         launcher: env_path("SWITCHYARD_BRIDGE_LAUNCHER"),
         policy: env_path("SWITCHYARD_BRIDGE_POLICY"),
+        model_endpoint: None,
     }
 }
 fn linux(stage: Option<&str>) -> LinuxExecutionConfig {

@@ -1,5 +1,9 @@
 # Switchyard wiki update log
 
+## 2026-11-05
+
+* **S3-B6**: Model-endpoint-only egress for the confined Pi bridge (#153). The default remains full network denial. A host-configured endpoint is reached only through a pinned proxy; in-bridge tests deny every other destination. See the [egress record](../docs/rust-first/s3-model-egress.md). FakeRuntime remains the product default. This does not enable Pi or complete S3. #151 and composed acceptance remain.
+
 ## 2026-11-04
 
 * **S3-B5**: Host-owned confined Pi dispatch is delivered in #150 (`fc7a9e4`); #148 is closed. All 7 CI checks passed, including `execution-confinement` with the `pi_host_dispatch` suite. See the [dispatch record](../docs/rust-first/s3-pi-host-dispatch.md). The slice stays credential-free and non-default; FakeRuntime remains the product default. This does not enable Pi in the product or complete S3. Model-endpoint-only egress, bounded cleanup of retained bridge cgroup leaves (#151), and the composed S3 acceptance remain.

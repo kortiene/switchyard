@@ -81,7 +81,7 @@ It does not replace `pi-bridge-contract` or enable live execution.
 
 After rebuilding/installing the pinned source, run `node runtime/pi-source/contract.mjs` from the repository root. This verifies the full credential-free S2 matrix and writes revision-bound evidence.
 
-On the declared Ubuntu 24.04 x86_64 runner, `scripts/confinement-verify.sh` and `scripts/bridge-confinement-verify.sh` exercise real OS boundaries and recovery. They require the pinned backend, namespace support and writable delegated cgroups; missing support fails. See [bridge lifecycle](../../docs/rust-first/s3-bridge-lifecycle.md).
+On the declared Ubuntu 24.04 x86_64 runner, `scripts/confinement-verify.sh` and `scripts/bridge-confinement-verify.sh` exercise real OS boundaries and recovery. They require the pinned backend, namespace support and writable delegated cgroups; missing support fails. The bridge script also runs the model-endpoint native filter checks and `bridge_egress`. See [bridge lifecycle](../../docs/rust-first/s3-bridge-lifecycle.md) and [model-endpoint egress](../../docs/rust-first/s3-model-egress.md).
 
 A read-only ruleset audit on 2026-11-02 confirmed ruleset 26316769 requires `execution-confinement` and that `pi-bridge-contract` was not yet required. A later read-only ruleset audit on 2026-11-03 confirmed `pi-bridge-contract`, `execution-confinement`, `verify (node 20.19.0)` and `verify (node 22)` are required on main. Rulesets 26316513 and 26316769 enforce them; no status names are changed by S3-B4. These checks do not grant full S3 or live-provider acceptance.
 

@@ -21,8 +21,9 @@ const _: () = assert!(CONFINED_EFFECT_DEADLINE_MS * 2 == BRIDGE_WALL.as_secs() a
 
 impl Host {
     /// Explicit credential-free conformance adapter. `fixture` is trusted Host
-    /// configuration, never a command/model parameter. All egress stays denied.
-    /// The product CLI continues to use FakeRuntime.
+    /// configuration, never a command/model parameter. Egress stays denied
+    /// unless `config.model_endpoint` names one operator endpoint. The product
+    /// CLI continues to use FakeRuntime and does not set an endpoint.
     pub fn open_confined_pi(
         db: &Path,
         config: ConfinedPiConfig,

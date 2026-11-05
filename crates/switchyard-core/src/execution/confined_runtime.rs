@@ -54,7 +54,8 @@ impl ConfinedRuntime {
     }
 
     pub(crate) fn configuration(&self) -> Value {
-        json!({"adapter":"pi-confined-v1", "credentials":"none", "network":"denied",
+        json!({"adapter":"pi-confined-v1", "credentials":"none",
+            "network":super::confined_pi::egress_network(&self.config),
             "fixture":self.fixture, "root":self.config.root, "cgroupRoot":self.config.cgroup_root,
             "node":self.config.node, "bubblewrap":self.config.bubblewrap,
             "launcher":self.config.launcher, "policy":self.config.policy,

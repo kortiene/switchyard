@@ -87,11 +87,10 @@ run, not from those local controls.
 
 ## Handoff
 
-Review this policy before extracting a product launch API. S3 still owns Pi-to-
-Linux effects/handles and replay, operator stops past blocked workspaces, shared
-revocation/quiescence and evidence-backed reuse. Model-only egress needs a separate
-OS/proxy design and positive/negative endpoint tests; this slice denies all
-networking and contains no credential broker. The native Rust agent runtime
+Review this policy before extracting a product launch API. S3 still owns composed
+acceptance. This slice denies all networking and contains no credential broker.
+[S3-B6](s3-model-egress.md) adds an optional host endpoint without changing this
+full-deny path. The native Rust agent runtime
 remains the long-term target; confinement belongs to Rust regardless of adapter.
 
 The harness bind-mounts its fresh session directory read-write, so the bridge
