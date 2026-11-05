@@ -2,6 +2,7 @@
 //! the destination: it can open only the mounted proxy socket, and this proxy
 //! splices bytes to the single address pinned when the operator configuration
 //! was parsed.
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
@@ -11,7 +12,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -155,11 +156,13 @@ pub(super) struct ModelProxy {
     splices: Arc<SpliceSet>,
 }
 
-/// Splice workers and the sockets that can shut them down. These threads run
-/// in the host, outside the bridge cgroup, so [`Drop`] must join them.
+/// In-flight splices only. A finished worker drops its sockets before it
+/// returns the permit, and the accept thread joins that handle. [`Drop`]
+/// still shuts down and joins whatever is left.
 struct SpliceSet {
-    workers: Mutex<Vec<JoinHandle<()>>>,
-    sockets: Mutex<Vec<(UnixStream, TcpStream)>>,
+    next_id: AtomicU64,
+    workers: Mutex<Vec<(u64, JoinHandle<()>)>>,
+    sockets: Mutex<HashMap<u64, (UnixStream, TcpStream)>>,
 }
 
 impl ModelProxy {
@@ -200,8 +203,9 @@ impl ModelProxy {
         let flag = Arc::clone(&stop);
         let inflight = Arc::new(AtomicUsize::new(0));
         let splices = Arc::new(SpliceSet {
+            next_id: AtomicU64::new(1),
             workers: Mutex::new(Vec::new()),
-            sockets: Mutex::new(Vec::new()),
+            sockets: Mutex::new(HashMap::new()),
         });
         let splices_for_accept = Arc::clone(&splices);
         let thread = match thread::Builder::new()
@@ -237,12 +241,12 @@ impl Drop for ModelProxy {
             let _ = thread.join();
         }
         let sockets = std::mem::take(&mut *lock_mutex(&self.splices.sockets));
-        for (client, upstream) in sockets {
+        for (_id, (client, upstream)) in sockets {
             let _ = client.shutdown(Shutdown::Both);
             let _ = upstream.shutdown(Shutdown::Both);
         }
         let workers = std::mem::take(&mut *lock_mutex(&self.splices.workers));
-        for worker in workers {
+        for (_id, worker) in workers {
             let _ = worker.join();
         }
         let socket = self.directory.join(SOCKET_NAME);
@@ -307,6 +311,7 @@ fn accept_loop(
     splices: Arc<SpliceSet>,
 ) {
     while !stop.load(Ordering::Relaxed) {
+        reap_finished(&splices);
         match listener.accept() {
             Ok((client, _)) => {
                 if inflight.fetch_add(1, Ordering::Relaxed) >= MAX_SPLICE {
@@ -317,15 +322,13 @@ fn accept_loop(
                     inflight.fetch_sub(1, Ordering::Relaxed);
                 }
             }
-            Err(error)
-                if error.kind() == io::ErrorKind::WouldBlock
-                    || error.kind() == io::ErrorKind::Interrupted =>
-            {
-                thread::sleep(Duration::from_millis(20));
-            }
-            Err(_) => break,
+            // EMFILE/ENFILE used to break this loop and retire the proxy.
+            // Every accept error is retried until stop; finished splices are
+            // reaped above so a full descriptor table can drain.
+            Err(_) => thread::sleep(Duration::from_millis(20)),
         }
     }
+    reap_finished(&splices);
 }
 
 const SPLICE_IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -364,8 +367,10 @@ fn start_splice(
     else {
         return false;
     };
-    lock_mutex(&splices.sockets).push((client, upstream));
+    let id = splices.next_id.fetch_add(1, Ordering::Relaxed);
+    lock_mutex(&splices.sockets).insert(id, (client, upstream));
     let permit = Arc::clone(inflight);
+    let splices_for_worker = Arc::clone(splices);
     let spawned = thread::Builder::new()
         .name("model-endpoint-splice".into())
         .spawn(move || {
@@ -376,20 +381,44 @@ fn start_splice(
             let _ = io::copy(&mut upstream_read, &mut client_write);
             let _ = client_write.shutdown(Shutdown::Write);
             let _ = forward.join();
+            // Close the shutdown pair before the permit returns so a finished
+            // exchange cannot pin host descriptors until Drop.
+            drop(lock_mutex(&splices_for_worker.sockets).remove(&id));
             permit.fetch_sub(1, Ordering::Relaxed);
         });
     match spawned {
         Ok(worker) => {
-            lock_mutex(&splices.workers).push(worker);
+            lock_mutex(&splices.workers).push((id, worker));
             true
         }
         Err(_) => {
-            if let Some((client, upstream)) = lock_mutex(&splices.sockets).pop() {
+            if let Some((client, upstream)) = lock_mutex(&splices.sockets).remove(&id) {
                 let _ = client.shutdown(Shutdown::Both);
                 let _ = upstream.shutdown(Shutdown::Both);
             }
             false
         }
+    }
+}
+
+/// Join workers that have already dropped their sockets. Handles are removed
+/// under the lock so [`Drop`] cannot join the same thread.
+fn reap_finished(splices: &SpliceSet) {
+    let finished = {
+        let mut workers = lock_mutex(&splices.workers);
+        let mut done = Vec::new();
+        let mut index = 0;
+        while index < workers.len() {
+            if workers[index].1.is_finished() {
+                done.push(workers.swap_remove(index).1);
+            } else {
+                index += 1;
+            }
+        }
+        done
+    };
+    for worker in finished {
+        let _ = worker.join();
     }
 }
 
@@ -501,10 +530,13 @@ fn read_headers(stream: &mut TcpStream) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::os::unix::net::UnixStream;
-    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::thread;
 
     use super::*;
 
@@ -673,5 +705,98 @@ mod tests {
             "drop left the hung splice running for {:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn confined_pi_model_proxy_reclaims_completed_splices() {
+        let stub = TcpListener::bind("127.0.0.1:0").unwrap();
+        stub.set_nonblocking(true).unwrap();
+        let port = stub.local_addr().unwrap().port();
+        let endpoint = ModelEndpoint::parse(&format!("http://127.0.0.1:{port}/v1")).unwrap();
+        let proxy = ModelProxy::start(&endpoint).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let server = thread::spawn(move || {
+            while !flag.load(Ordering::Relaxed) {
+                match stub.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = read_headers(&mut stream);
+                        let body = b"ok";
+                        let header = format!(
+                            "HTTP/1.0 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(body);
+                        let _ = stream.shutdown(Shutdown::Both);
+                    }
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            || error.kind() == io::ErrorKind::Interrupted =>
+                    {
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let before = host_fd_count();
+        for index in 0..64 {
+            let mut client = UnixStream::connect(proxy.directory().join(SOCKET_NAME)).unwrap();
+            client
+                .write_all(b"GET / HTTP/1.0\r\nHost: stub\r\n\r\n")
+                .unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).unwrap();
+            assert!(
+                response.windows(2).any(|window| window == b"ok"),
+                "exchange {index} failed: {response:?}"
+            );
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let sockets = lock_mutex(&proxy.splices.sockets).len();
+                let workers = lock_mutex(&proxy.splices.workers).len();
+                if sockets <= MAX_SPLICE && workers <= MAX_SPLICE {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "exchange {index} retained sockets={sockets} workers={workers}"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let (sockets, workers, fds) = loop {
+            let sockets = lock_mutex(&proxy.splices.sockets).len();
+            let workers = lock_mutex(&proxy.splices.workers).len();
+            let fds = host_fd_count();
+            if sockets == 0 && workers == 0 {
+                break (sockets, workers, fds);
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "finished splices still registered sockets={sockets} workers={workers} fds={fds} before={before}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(sockets, 0);
+        assert_eq!(workers, 0);
+        assert!(
+            fds <= before + 12,
+            "host descriptors grew from {before} to {fds}"
+        );
+        stop.store(true, Ordering::Relaxed);
+        server.join().unwrap();
+    }
+
+    fn host_fd_count() -> usize {
+        fs::read_dir("/proc/self/fd")
+            .map(|entries| entries.count())
+            .unwrap_or(0)
     }
 }

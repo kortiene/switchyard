@@ -46,9 +46,12 @@ host. The mount namespace contains the proxy socket and no host sockets.
 
 A host thread accepts that socket and splices each connection to the pinned
 address. It does not parse HTTP, follow redirects, speak TLS, or dial a host
-named in the request. Reads and writes on the splice time out. Closing the
-session shuts both ends down and joins the splice threads, which run in the
-host rather than in the bridge cgroup.
+named in the request. Reads and writes on the splice time out. A finished
+splice drops its host sockets before it returns its concurrency permit, and
+the accept thread joins that worker. Only in-flight splices stay registered.
+Closing the session shuts both remaining ends down and joins those threads,
+which run in the host rather than in the bridge cgroup. An accept error,
+including a full descriptor table, retries until the proxy stops.
 
 An environment allowlist or an in-process HTTP wrapper is not this boundary.
 Repository files, `case.json`, and protocol frames are not read as endpoint
