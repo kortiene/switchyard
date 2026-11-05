@@ -1,7 +1,9 @@
 # S3-B5: Host-owned confined Pi dispatch
 
-Refs #148, #97, #94. This is a credential-free conformance candidate, not live
-execution or full S3 acceptance. FakeRuntime remains the product/CLI default.
+Refs #148, #97, #94. Delivered in #150 (`fc7a9e4`, 2026-11-04). This remains a
+credential-free, non-default conformance slice, not live execution or full S3
+acceptance. Retained bridge cgroup leaves stay open in #151. FakeRuntime
+remains the product/CLI default.
 
 `Host::open_confined_pi(db, config, linux, fixture)` is available only on Linux
 with both `pi-contract` and `linux-execution`. It acquires the owner lock before
@@ -80,15 +82,18 @@ conversation transcript. Its process-local response queue otherwise resets on
 reopen and emits a fresh tool call after the original receipt is replayed.
 This narrow TypeScript test-fixture correction is the approved exception to
 #148's Rust-only scope; the production implementation remains Rust. The
-no-repeat assertion remains intact. Full CI evidence is required for acceptance.
+no-repeat assertion remains intact. Acceptance rests on the CI evidence recorded
+below.
 
 The suite also covers Host-driven forbidden file/socket/child-process probes,
 stale and foreign effect bindings, and hung-extension stop/recovery. After a
 `cancellation_timeout`, the mission stays `Cancelling` with bridge termination
 already proven until an inert reopen confirms the stop. The negative
 probe uses a test-only trusted launcher that adds two read-only fixture mounts;
-all production confinement arguments remain intact. Require successful CI
-evidence before accepting this candidate; compilation alone is insufficient.
+all production confinement arguments remain intact. Accepted in #150 (`fc7a9e4`,
+2026-11-04) after all 7 CI checks passed, including `execution-confinement` with
+the `pi_host_dispatch` suite. It stays credential-free and non-default.
+Retained bridge cgroup leaves are bounded in follow-up #151.
 
 The 60-second bridge wall deadline, 256 MiB and 64-task limits are conformance
 budgets. Production budgets belong to S4. Forwarded effects use half of that

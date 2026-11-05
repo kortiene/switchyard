@@ -1,5 +1,9 @@
 # Switchyard wiki update log
 
+## 2026-11-04
+
+* **S3-B5**: Host-owned confined Pi dispatch is delivered in #150 (`fc7a9e4`); #148 is closed. All 7 CI checks passed, including `execution-confinement` with the `pi_host_dispatch` suite. See the [dispatch record](../docs/rust-first/s3-pi-host-dispatch.md). The slice stays credential-free and non-default; FakeRuntime remains the product default. This does not enable Pi in the product or complete S3. Model-endpoint-only egress, bounded cleanup of retained bridge cgroup leaves (#151), and the composed S3 acceptance remain.
+
 ## 2026-11-03
 
 * **S2 status**: S2 is GO for the credential-free source-built Pi candidate, accepted 2026-11-02 in #96; see the [S2 acceptance record](../docs/rust-first/s2-contract-gate.md). Pages that said S2 is NO-GO now say so, or date the NO-GO to the slice that recorded it. The published 1.4.0 package NO-GO and the 2026-10-29 audit evidence are unchanged. GO does not enable Pi in the product, live effects or full S3.
