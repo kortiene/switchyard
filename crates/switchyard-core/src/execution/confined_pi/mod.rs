@@ -22,6 +22,11 @@ use storage::Directory;
 
 pub use launcher::confined_pi_launcher_main;
 
+/// Conformance wall for one bridge generation. Forwarded effects use half of
+/// this budget so a tool can settle before the watchdog fires. Production
+/// budgets belong to S4.
+pub(crate) const BRIDGE_WALL: Duration = Duration::from_secs(60);
+
 /// Trusted installation paths. `root` must already be a private (0700) directory
 /// outside workspaces; it is never mounted into the bridge. Linux x86_64 only.
 #[derive(Clone, Debug)]
@@ -185,7 +190,7 @@ impl ConfinedPiSession {
         let watched = leaf.clone();
         let watchdog = std::thread::spawn(move || {
             if matches!(
-                wait.recv_timeout(Duration::from_secs(60)),
+                wait.recv_timeout(BRIDGE_WALL),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout)
             ) {
                 let _ = cgroup::rekill_and_prove(&watched, Duration::from_secs(5));

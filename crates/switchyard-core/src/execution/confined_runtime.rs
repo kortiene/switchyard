@@ -1,15 +1,19 @@
 //! Host-owned, credential-free transport. Sessions never escape into callers.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
 use super::confined_pi::{ConfinedPiConfig, ConfinedPiSession};
+use crate::execution::RuntimeBinding;
 use crate::{Error, Result};
 
 pub(crate) struct ConfinedRuntime {
     pub(crate) config: ConfinedPiConfig,
     pub(crate) fixture: String,
     pub(crate) sessions: BTreeMap<String, ConfinedPiSession>,
+    /// Session ids proven stopped and removed in this owner generation.
+    /// A later call must not launch a replacement at the same generation.
+    released: BTreeSet<String>,
 }
 
 impl ConfinedRuntime {
@@ -30,7 +34,23 @@ impl ConfinedRuntime {
             config,
             fixture: fixture.into(),
             sessions: BTreeMap::new(),
+            released: BTreeSet::new(),
         })
+    }
+
+    pub(crate) fn open_bindings(&self) -> Vec<RuntimeBinding> {
+        self.sessions
+            .values()
+            .map(|session| session.binding().clone())
+            .collect()
+    }
+
+    pub(crate) fn is_released(&self, session_id: &str) -> bool {
+        self.released.contains(session_id)
+    }
+
+    pub(crate) fn mark_released(&mut self, session_id: &str) {
+        self.released.insert(session_id.to_string());
     }
 
     pub(crate) fn configuration(&self) -> Value {

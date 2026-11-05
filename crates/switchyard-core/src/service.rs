@@ -523,7 +523,26 @@ impl Host {
             .command_id
             .clone()
             .unwrap_or_else(|| crate::domain::new_id("c"));
-        if !host_fact {
+        if host_fact {
+            // The private door records only Rust confinement proofs, and only
+            // under the origin that distinguishes them from Pi observations.
+            if request.origin != CommandOrigin::HostSupervisor
+                || !matches!(
+                    request.body,
+                    CommandBody::DetectUncertainty { .. }
+                        | CommandBody::ConfirmStopped
+                        | CommandBody::ConfirmCancelled
+                )
+            {
+                return Err(Error::guard(
+                    "host facts are limited to supervisor stop and uncertainty proofs",
+                ));
+            }
+        } else if request.origin == CommandOrigin::HostSupervisor {
+            return Err(Error::guard(
+                "host supervisor origin is reserved for Rust confinement proofs",
+            ));
+        } else {
             self.runtime
                 .validate_admission(&request.body, request.origin)?;
         }
@@ -996,10 +1015,15 @@ impl Host {
 
     /// Drop Pi children whose attempt is terminal or has been superseded.
     /// The sqlite file stays; only the process and its lock are released.
+    /// Confined sessions get a proven `stop()` and leave the live map. The same
+    /// owner generation does not open a replacement. Pause is not terminal, so
+    /// its stopped session stays and blocks a same-generation relaunch.
     #[cfg(feature = "pi-contract")]
     fn release_finished_sessions(&mut self) -> Result<()> {
         let open = match &self.runtime {
             RuntimeAdapter::Pi(runtime) => runtime.open_bindings(),
+            #[cfg(all(feature = "linux-execution", target_os = "linux"))]
+            RuntimeAdapter::Confined(runtime) => runtime.open_bindings(),
             _ => return Ok(()),
         };
         let mut finished = Vec::new();
@@ -1018,6 +1042,78 @@ impl Host {
             for binding in &finished {
                 runtime.evict(binding);
             }
+            return Ok(());
+        }
+        self.release_confined_finished(&finished)
+    }
+
+    #[cfg(all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    ))]
+    fn release_confined_finished(&mut self, finished: &[RuntimeBinding]) -> Result<()> {
+        for binding in finished {
+            self.release_confined_session(binding)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(all(
+        feature = "pi-contract",
+        not(all(feature = "linux-execution", target_os = "linux"))
+    ))]
+    fn release_confined_finished(&mut self, finished: &[RuntimeBinding]) -> Result<()> {
+        let _ = finished;
+        Ok(())
+    }
+
+    #[cfg(all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    ))]
+    fn release_confined_session(&mut self, binding: &RuntimeBinding) -> Result<()> {
+        let mut session = match &mut self.runtime {
+            RuntimeAdapter::Confined(runtime) => {
+                let Some(existing) = runtime.sessions.get(&binding.session_id) else {
+                    return Ok(());
+                };
+                if existing.binding() != binding {
+                    return Ok(());
+                }
+                runtime
+                    .sessions
+                    .remove(&binding.session_id)
+                    .expect("session present")
+            }
+            _ => return Ok(()),
+        };
+        if let Err(error) = session.stop() {
+            if let RuntimeAdapter::Confined(runtime) = &mut self.runtime {
+                runtime.sessions.insert(binding.session_id.clone(), session);
+            }
+            return Err(error);
+        }
+        let lifecycle = session.lifecycle();
+        let observation = self
+            .store
+            .pi_host_view(&binding.attempt_id)?
+            .map(|view| view["observation"].clone())
+            .unwrap_or(Value::Null);
+        if let Err(error) = self.store.save_pi_host(
+            &binding.attempt_id,
+            binding.generation,
+            &lifecycle,
+            &observation,
+        ) {
+            if let RuntimeAdapter::Confined(runtime) = &mut self.runtime {
+                runtime.sessions.insert(binding.session_id.clone(), session);
+            }
+            return Err(error);
+        }
+        if let RuntimeAdapter::Confined(runtime) = &mut self.runtime {
+            runtime.mark_released(&binding.session_id);
         }
         Ok(())
     }
@@ -1847,8 +1943,11 @@ fn result_of(command: &NewCommand, phase: Phase, idempotent: bool) -> AdmitResul
 }
 
 fn initial_state(request: &AdmitRequest) -> CommandState {
-    if request.origin == CommandOrigin::RuntimeObservation
-        || !request.body.kind().is_runtime_bound()
+    // Supervisor proofs are ledger facts, not commands to deliver again.
+    if matches!(
+        request.origin,
+        CommandOrigin::RuntimeObservation | CommandOrigin::HostSupervisor
+    ) || !request.body.kind().is_runtime_bound()
     {
         CommandState::Reconciled
     } else {

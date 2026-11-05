@@ -157,6 +157,17 @@ impl World {
         assert!(git(&repo, &["status", "--porcelain"]).is_empty());
     }
 }
+fn command_origin(host: &Host, mission: &str, kind: &str) -> String {
+    host.snapshot(mission).unwrap().to_json()["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["kind"] == kind)
+        .unwrap_or_else(|| panic!("missing {kind}"))["origin"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
 fn admit(host: &mut Host, mission: &str, body: CommandBody) {
     host.admit(AdmitRequest {
         command_id: None,
@@ -257,6 +268,10 @@ fn host_operator_cancel_proves_both_sandboxes_empty() {
         fs::read(world.workspace.join("process.heartbeat")).unwrap(),
         heartbeat
     );
+    assert_eq!(
+        command_origin(&host, &world.mission, "confirm_cancelled"),
+        "host_supervisor"
+    );
 }
 #[test]
 fn host_forwarded_write_denies_escape_and_preserves_original() {
@@ -278,23 +293,28 @@ fn host_forwarded_write_denies_escape_and_preserves_original() {
 #[test]
 fn host_confined_refuses_forged_authority_and_adapter_switch() {
     let (world, mut host) = World::new("answer");
-    for body in [
-        CommandBody::ConfirmStopped,
-        CommandBody::ConfirmCancelled,
-        CommandBody::RequestVerification { quiescent: true },
+    for origin in [
+        CommandOrigin::RuntimeObservation,
+        CommandOrigin::HostSupervisor,
     ] {
-        assert!(
-            host.admit(AdmitRequest {
-                command_id: None,
-                mission_id: world.mission.clone(),
-                attempt_id: None,
-                expected_revision: host.snapshot(&world.mission).unwrap().revision,
-                actor: "forged".into(),
-                origin: CommandOrigin::RuntimeObservation,
-                body
-            })
-            .is_err()
-        );
+        for body in [
+            CommandBody::ConfirmStopped,
+            CommandBody::ConfirmCancelled,
+            CommandBody::RequestVerification { quiescent: true },
+        ] {
+            assert!(
+                host.admit(AdmitRequest {
+                    command_id: None,
+                    mission_id: world.mission.clone(),
+                    attempt_id: None,
+                    expected_revision: host.snapshot(&world.mission).unwrap().revision,
+                    actor: "forged".into(),
+                    origin,
+                    body,
+                })
+                .is_err()
+            );
+        }
     }
     drop(host);
     assert!(Host::open(&world.db()).is_err());
@@ -302,19 +322,70 @@ fn host_confined_refuses_forged_authority_and_adapter_switch() {
 }
 
 #[test]
+fn open_pi_probe_on_a_fresh_ledger_still_requires_fake_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("fresh.sqlite");
+    let mut host = Host::open_pi_probe(&db, &env_path("SWITCHYARD_PI_NODE")).unwrap();
+    let error = host
+        .enable_linux_execution(LinuxExecutionConfig {
+            cgroup_root: dir.path().join("cgroup"),
+            bubblewrap: dir.path().join("bwrap"),
+            helper: dir.path().join("helper"),
+            crash_at: None,
+            probe_request: None,
+            fail_launch: false,
+        })
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("requires FakeRuntime"),
+        "{error}"
+    );
+    assert!(host.runtime_mut().is_none());
+}
+
+fn output_text(world: &World) -> Option<String> {
+    fs::read_to_string(world.workspace.join("output.txt")).ok()
+}
+fn effect_ids(value: &Value) -> Vec<String> {
+    value["linuxExecutionEffects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|effect| effect["operationId"].as_str().unwrap().to_string())
+        .collect()
+}
+/// `process.marker` is appended (`echo once >>`). A missing file hides a
+/// relaunch that creates the first line; a second line is a relaunch.
+fn assert_process_not_relaunched(world: &World, stage: &str) {
+    let text = fs::read_to_string(world.workspace.join("process.marker")).unwrap_or_else(|_| {
+        panic!(
+            "{stage}: process.marker is missing; the expected first launch never happened, so a relaunch would look like the original write"
+        )
+    });
+    assert_eq!(
+        text, "once\n",
+        "{stage}: process marker changed; recovery relaunched the command"
+    );
+}
+
+#[test]
 fn host_sigkill_reconciles_bridge_outbox_and_original_effects() {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
     use std::sync::mpsc;
-    for (fixture, stage) in [
-        ("file-write", "bridge-live"),
-        ("file-write", "pi-before-ack"),
-        ("file-write", "prepared"),
-        ("file-write", "receipt"),
-        ("process-hold", "running"),
-        ("process-fast", "result"),
-        ("process-fast", "receipt"),
-    ] {
+    // Proven boundaries recover and replay. Unproven ones stay needs_attention.
+    // `recovered == true` means `Host::recover` succeeds and the mission does
+    // not land in needs_attention. #148: never repeat a write or relaunch.
+    let cases = [
+        ("file-write", "bridge-live", true),
+        ("file-write", "pi-before-ack", true),
+        ("file-write", "prepared", true),
+        ("file-write", "receipt", true),
+        ("process-hold", "running", false),
+        ("process-fast", "result", false),
+        ("process-fast", "receipt", true),
+    ];
+    for (fixture, stage, recovered) in cases {
         let (world, host) = World::new(fixture);
         drop(host);
         let mut worker = Command::new(std::env::current_exe().unwrap())
@@ -351,53 +422,108 @@ fn host_sigkill_reconciles_bridge_outbox_and_original_effects() {
         worker.kill().unwrap();
         worker.wait().unwrap();
         let before = Host::inspect(&world.db(), Some(&world.mission)).unwrap()[0].to_json();
-        let original = before["linuxExecutionEffects"].clone();
         let original_receipts = world.receipts();
-        if stage == "receipt" && fixture == "file-write" {
-            assert_eq!(
-                fs::read_to_string(world.workspace.join("output.txt")).unwrap(),
-                "once"
-            );
-            fs::write(world.workspace.join("output.txt"), "must not repeat").unwrap();
+        if fixture == "file-write" {
+            let text = output_text(&world);
+            match stage {
+                // Killed before the call. The one write happens on recovery.
+                "bridge-live" => assert!(text.is_none(), "{stage}: write landed before the call"),
+                // Intent committed, workload not released.
+                "prepared" => assert!(text.is_none(), "{stage}: unreleased write is present"),
+                // The write already settled. A later "once" would hide a repeat,
+                // so replace it before recovery.
+                "pi-before-ack" | "receipt" => {
+                    assert_eq!(
+                        text.as_deref(),
+                        Some("once"),
+                        "{stage}: expected first write"
+                    );
+                    fs::write(world.workspace.join("output.txt"), "must not repeat").unwrap();
+                }
+                other => panic!("unmapped file-write stage {other}"),
+            }
+        }
+        if fixture.starts_with("process-") {
+            assert_process_not_relaunched(&world, stage);
         }
         let mut host = world.reopen();
-        let recovered = host.recover(&world.mission);
-        if matches!(stage, "receipt" | "prepared") {
-            assert!(
-                recovered.is_ok(),
-                "settled {stage} evidence must reconcile before scheduling: {recovered:?}"
-            );
-        }
+        let outcome = host.recover(&world.mission);
         let snapshot = host.snapshot(&world.mission).unwrap().to_json();
-        assert_eq!(snapshot["piHost"]["lifecycle"]["recovered"]["proven"], true);
-        if recovered.is_ok() {
+        assert_eq!(
+            snapshot["piHost"]["lifecycle"]["recovered"]["proven"], true,
+            "{fixture}/{stage}"
+        );
+        if recovered {
+            assert!(
+                outcome.is_ok(),
+                "{fixture}/{stage} must recover: {outcome:?}"
+            );
             until(&mut host, &world.mission, |v| {
                 v["piHost"]["observation"]["runtimeIdle"] == true
             });
+            let snap = host.snapshot(&world.mission).unwrap();
+            assert_ne!(
+                snap.phase,
+                Phase::NeedsAttention,
+                "{fixture}/{stage} recovered into needs_attention"
+            );
+            assert!(!snap.execution_blocked, "{fixture}/{stage}");
+        } else {
+            assert!(
+                outcome.is_err(),
+                "{fixture}/{stage} must stay uncertain: {outcome:?}"
+            );
+            let snap = host.snapshot(&world.mission).unwrap();
+            assert_eq!(snap.phase, Phase::NeedsAttention, "{fixture}/{stage}");
+            assert!(snap.execution_blocked, "{fixture}/{stage}");
+        }
+        if fixture == "file-write" {
+            let text = output_text(&world);
+            match stage {
+                "bridge-live" => assert_eq!(text.as_deref(), Some("once"), "{stage}"),
+                "prepared" => assert!(text.is_none(), "{stage}: recovery relaunched the write"),
+                "pi-before-ack" | "receipt" => {
+                    assert_eq!(text.as_deref(), Some("must not repeat"), "{stage}")
+                }
+                other => panic!("unmapped file-write stage {other}"),
+            }
+        }
+        if fixture.starts_with("process-") {
+            assert_process_not_relaunched(&world, stage);
+        }
+        let after = host.snapshot(&world.mission).unwrap().to_json();
+        if stage == "bridge-live" {
+            assert!(
+                effect_ids(&before).is_empty(),
+                "{stage}: an effect existed before the bridge call"
+            );
+            assert_eq!(
+                effect_ids(&after).len(),
+                1,
+                "{stage}: expected the one write"
+            );
+            fs::write(world.workspace.join("output.txt"), "must not repeat").unwrap();
+            host.dispatch_pending(&world.mission).unwrap();
+            host.poll_runtime(&world.mission).unwrap();
+            assert_eq!(
+                output_text(&world).as_deref(),
+                Some("must not repeat"),
+                "{stage}: recovery wrote the file again"
+            );
+            assert_eq!(
+                effect_ids(&host.snapshot(&world.mission).unwrap().to_json()).len(),
+                1
+            );
         } else {
             assert_eq!(
-                host.snapshot(&world.mission).unwrap().phase,
-                Phase::NeedsAttention
+                effect_ids(&before),
+                effect_ids(&after),
+                "{fixture}/{stage}: effect identity changed"
             );
         }
         if stage == "receipt" && fixture == "file-write" {
-            assert_eq!(
-                fs::read_to_string(world.workspace.join("output.txt")).unwrap(),
-                "must not repeat"
-            );
-            let after = host.snapshot(&world.mission).unwrap().to_json();
-            assert_eq!(
-                original[0]["operationId"],
-                after["linuxExecutionEffects"][0]["operationId"]
-            );
             assert!(original_receipts[0].1.is_some());
             assert_eq!(original_receipts, world.receipts());
-        }
-        if fixture.starts_with("process-") && world.workspace.join("process.marker").exists() {
-            assert_eq!(
-                fs::read_to_string(world.workspace.join("process.marker")).unwrap(),
-                "once\n"
-            );
         }
         world.origin();
     }
@@ -430,6 +556,7 @@ fn host_pause_bypasses_unverified_workspace_and_stops_descendants() {
         v["linuxExecutionEffects"]
             .as_array()
             .is_some_and(|rows| rows.iter().any(|row| row["state"] == "running"))
+            && world.workspace.join("process.heartbeat").exists()
     });
     // Stops are delivered without verifying/reusing this intentionally blocked workspace.
     rusqlite::Connection::open(world.db())
@@ -438,11 +565,50 @@ fn host_pause_bypasses_unverified_workspace_and_stops_descendants() {
         .unwrap();
     admit(&mut host, &world.mission, CommandBody::Pause);
     host.dispatch_stops(&world.mission).unwrap();
-    assert_eq!(host.snapshot(&world.mission).unwrap().phase, Phase::Paused);
+    let snap = host.snapshot(&world.mission).unwrap();
+    assert_eq!(snap.phase, Phase::Paused);
+    let value = snap.to_json();
+    assert_eq!(value["piHost"]["lifecycle"]["termination"]["proven"], true);
+    assert_eq!(value["executionBlocked"], false);
+    let heartbeat = fs::read(world.workspace.join("process.heartbeat")).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
     assert_eq!(
-        host.snapshot(&world.mission).unwrap().to_json()["piHost"]["lifecycle"]["termination"]["proven"],
-        true
+        fs::read(world.workspace.join("process.heartbeat")).unwrap(),
+        heartbeat
     );
+    assert_eq!(
+        command_origin(&host, &world.mission, "confirm_stopped"),
+        "host_supervisor"
+    );
+}
+
+#[test]
+fn host_finished_confined_session_is_proven_stopped_and_not_relaunched() {
+    let (world, mut host) = World::new("answer");
+    host.dispatch_pending(&world.mission).unwrap();
+    let live = until(&mut host, &world.mission, |v| {
+        v["piHost"]["observation"]["runtimeIdle"] == true
+    });
+    assert_eq!(live["piHost"]["lifecycle"]["phase"], "opened");
+    // Terminal without stop delivery: the bridge is still the live generation.
+    rusqlite::Connection::open(world.db())
+        .unwrap()
+        .execute(
+            "UPDATE missions SET phase='cancelled' WHERE id=?1",
+            [&world.mission],
+        )
+        .unwrap();
+    host.dispatch_pending(&world.mission).unwrap();
+    let stopped = host.snapshot(&world.mission).unwrap();
+    assert_eq!(stopped.phase, Phase::Cancelled);
+    let lifecycle = stopped.to_json()["piHost"]["lifecycle"].clone();
+    assert_eq!(lifecycle["phase"], "stopped");
+    assert_eq!(lifecycle["termination"]["proven"], true);
+    host.poll_runtime(&world.mission).unwrap();
+    host.dispatch_pending(&world.mission).unwrap();
+    let again = host.snapshot(&world.mission).unwrap().to_json();
+    assert_eq!(again["piHost"]["lifecycle"], lifecycle);
+    assert_eq!(again["phase"], "cancelled");
 }
 
 #[test]

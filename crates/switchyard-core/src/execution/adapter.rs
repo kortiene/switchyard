@@ -21,7 +21,28 @@ pub(crate) enum RuntimeAdapter {
 
 impl RuntimeAdapter {
     pub(crate) fn is_confined(&self) -> bool {
-        self.name() == "pi-confined-v1"
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        {
+            matches!(self, Self::Confined(_))
+        }
+        #[cfg(not(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        )))]
+        {
+            let _ = self;
+            false
+        }
+    }
+
+    #[cfg(feature = "pi-contract")]
+    fn is_fake(&self) -> bool {
+        matches!(self, Self::Fake(_))
     }
 
     pub(crate) fn name(&self) -> &'static str {
@@ -72,18 +93,21 @@ impl RuntimeAdapter {
         origin: CommandOrigin,
     ) -> Result<()> {
         #[cfg(feature = "pi-contract")]
-        if self.name() != "fake" {
+        if !self.is_fake() {
             // S2-A has no trusted planning/verification/process-quiescence observer.
             // Do not expose S1 simulation inputs as facts about a child process.
-            if origin == CommandOrigin::RuntimeObservation
-                || matches!(
-                    body,
-                    CommandBody::ConfirmStopped
-                        | CommandBody::ConfirmCancelled
-                        | CommandBody::RequestVerification { .. }
-                        | CommandBody::ExplicitRecovery { .. }
-                )
-            {
+            // HostSupervisor is not a Pi observation; the private host-fact path
+            // never reaches this check.
+            if matches!(
+                origin,
+                CommandOrigin::RuntimeObservation | CommandOrigin::HostSupervisor
+            ) || matches!(
+                body,
+                CommandBody::ConfirmStopped
+                    | CommandBody::ConfirmCancelled
+                    | CommandBody::RequestVerification { .. }
+                    | CommandBody::ExplicitRecovery { .. }
+            ) {
                 return Err(crate::Error::guard(
                     "Pi probe has no mission-fact or execution-quiescence authority",
                 ));
@@ -95,7 +119,7 @@ impl RuntimeAdapter {
 
     pub(crate) fn validate_command(&self, request: &RuntimeRequest, payload: &Value) -> Result<()> {
         #[cfg(feature = "pi-contract")]
-        if self.name() != "fake" {
+        if !self.is_fake() {
             return PiRuntime::validate_command(request, payload);
         }
         let _ = (request, payload);

@@ -62,7 +62,7 @@ pub(super) fn check(config: &ConfinedPiConfig) -> Result<Value> {
     Ok(
         json!({"version":1,"runtime":files,"adapter":super::super::pi_bridge::adapter_fingerprint(),
         "provenance":crate::canonical::sha256_hex(&provenance),"guard":crate::canonical::sha256_hex(&guard),
-        "limits":{"memory":268435456,"pids":64,"cpu":"50000 100000","wallSeconds":60},
+        "limits":{"memory":268435456,"pids":64,"cpu":"50000 100000","wallSeconds":super::BRIDGE_WALL.as_secs()},
         "identity":payload_hash(&json!(files))?}),
     )
 }

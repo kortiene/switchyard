@@ -10,8 +10,11 @@ attempt, and enables the Linux backend. Sessions open lazily when a mission
 binding is available. The fixture is trusted Host configuration, not model input.
 
 Explicit review point: new Linux effects now allow the confined adapter as well
-as FakeRuntime. `open_pi_probe` remains denied; adapter changes on an existing
-ledger remain denied. No product execution command or network permission is added.
+as FakeRuntime. `open_pi_probe` remains denied, including `enable_linux_execution`
+on a fresh probe ledger, which still returns the FakeRuntime guard. Adapter
+changes on an existing ledger remain denied. The confined check is the
+`Confined` variant, not the adapter name string. No product execution command
+or network permission is added.
 
 ## Ordering and authority
 
@@ -30,10 +33,21 @@ Pi snapshots are diagnostic observations. `runtimeIdle` or command completion
 cannot approve a plan, request verification, confirm a stop, or certify OS
 quiescence. Public runtime-observation admission retains the Pi restrictions.
 Only the private Rust supervisor path can record stop completion, after bridge
-termination proof and settlement of all workspace effects. An operator stop
-kills supervised workspace descendants before delivering abort and stopping the
-bridge, even when workspace verification is unavailable. An interrupted effect
-without a receipt remains uncertain; killing it does not invent success.
+termination proof and settlement of all workspace effects. Those commands are
+stored as `host_supervisor` (`CommandOrigin::HostSupervisor`), not as a Pi
+`runtime_observation`. Public admission of that origin is refused, and the
+adapter still rejects forged stop, cancel, verification, and quiescence facts.
+The termination proof stays on the `piHost` lifecycle record; the origin is what
+separates that proof from a Pi observation. An operator stop kills supervised
+workspace descendants before delivering abort and stopping the bridge, even when
+workspace verification is unavailable. An interrupted effect without a receipt
+remains uncertain; killing it does not invent success.
+
+Effect callbacks accept only `file.write`, `process.start`, `process.status`,
+and `process.cancel`. Any other method is rejected before either Linux mapper
+runs. Each effect's deadline is half of the 60-second bridge wall
+(`BRIDGE_WALL` / policy `wallSeconds`, and the Linux ledger's 60-second
+ceiling), so one tool can settle inside the wall instead of racing the watchdog.
 
 Read-only `mission status` exposes `piHost` (generation, lifecycle, observation
 and observation timestamp) beside `linuxExecutionEffects`. These are last-saved
@@ -52,7 +66,12 @@ or call PiBridge directly. Planning observations/S4 are outside this slice.
 The suite covers writes and process handles, cancellation, pause with an
 unverified workspace, protected-path denial, authority rejection, adapter
 mismatch, receipt replay, and Host SIGKILL at bridge-live, pre-ACK, prepared-effect
-and receipt barriers, including process-start/result crash cases. The existing
+and receipt barriers, including process-start/result crash cases. Each boundary
+pins its outcome: bridge-live, pre-ACK, prepared non-release, and a persisted
+receipt recover; a running process and a result captured before the receipt stay
+in `needs_attention`. Every boundary fails if a write is repeated or if
+`process.marker` is missing or appended. Pause proves the workload's descendants
+stopped: the heartbeat freezes and `executionBlocked` is false. The existing
 B1–B4 suites remain enabled.
 
 The faux provider selects write/process script responses from the durable
@@ -63,15 +82,22 @@ This narrow TypeScript test-fixture correction is the approved exception to
 no-repeat assertion remains intact. Full CI evidence is required for acceptance.
 
 The suite also covers Host-driven forbidden file/socket/child-process probes,
-stale and foreign effect bindings, and hung-extension stop/recovery. The negative
+stale and foreign effect bindings, and hung-extension stop/recovery. After a
+`cancellation_timeout`, the mission stays `Cancelling` with bridge termination
+already proven until an inert reopen confirms the stop. The negative
 probe uses a test-only trusted launcher that adds two read-only fixture mounts;
 all production confinement arguments remain intact. Require successful CI
 evidence before accepting this candidate; compilation alone is insufficient.
 
 The 60-second bridge wall deadline, 256 MiB and 64-task limits are conformance
-budgets. Production budgets belong to S4. A stopped session cannot be replaced
-within the same owner generation; a later Host reopen uses a new generation.
-Cgroup leaves are retained because recovery needs their identity; each reopen
+budgets. Production budgets belong to S4. Forwarded effects use half of that
+wall. A stopped session cannot be replaced within the same owner generation; a
+later Host reopen uses a new generation.
+A finished mission (terminal phase, superseded attempt, or a binding that no
+longer matches) gets a proven `stop()` and is removed from the live session
+map. That release does not open a replacement in the same generation. Pause is
+not finished: its stopped session stays so this generation cannot start another
+bridge. Cgroup leaves are retained because recovery needs their identity; each reopen
 adds a leaf. [#151](https://github.com/kortiene/switchyard/issues/151) tracks
 bounded cleanup that preserves recovery evidence.
 The compiled source-tree lookup remains confined to this fixed conformance

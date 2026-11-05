@@ -1,9 +1,23 @@
 //! B5 composes the outbox, confined session and Linux effect ledger. Public
 //! runtime observations never acquire mission/verification/quiescence authority.
+//! Rust cgroup proofs are recorded as `CommandOrigin::HostSupervisor`.
 use super::*;
+use crate::execution::confined_pi::BRIDGE_WALL;
 use crate::execution::confined_runtime::ConfinedRuntime;
 use crate::execution::pi_runtime::{mapped, receipt_from_row};
+use crate::linux_execution::MAX_DEADLINE_MS;
 use crate::{ConfinedPiConfig, ConfinedPiSession, LinuxExecutionConfig, PiEffectOutcome};
+
+/// Absolute budget for one forwarded effect, measured from the callback.
+/// Half of [`BRIDGE_WALL`] (the 60-second bridge watchdog and policy
+/// `wallSeconds`) so the tool can settle inside that wall instead of racing
+/// it. The Linux ledger rejects anything above [`MAX_DEADLINE_MS`], which is
+/// the same 60 seconds.
+const CONFINED_EFFECT_DEADLINE_MS: i64 = BRIDGE_WALL.as_secs() as i64 * 1_000 / 2;
+
+const _: () = assert!(CONFINED_EFFECT_DEADLINE_MS > 0);
+const _: () = assert!(CONFINED_EFFECT_DEADLINE_MS <= MAX_DEADLINE_MS);
+const _: () = assert!(CONFINED_EFFECT_DEADLINE_MS * 2 == BRIDGE_WALL.as_secs() as i64 * 1_000);
 
 impl Host {
     /// Explicit credential-free conformance adapter. `fixture` is trusted Host
@@ -119,6 +133,9 @@ impl Host {
         let mission = self.store.load_mission(mission_id)?;
         let binding = self.binding(&mission);
         self.accept_runtime_binding(&binding, mission_id)?;
+        if self.confined_mut()?.is_released(&binding.session_id) {
+            return Ok(());
+        }
         if let Some(session) = self.confined_mut()?.sessions.get(&binding.session_id) {
             if session.binding() != &binding {
                 return Err(Error::guard("confined session binding mismatch"));
@@ -180,11 +197,15 @@ impl Host {
             {
                 return PiEffectOutcome::Rejected;
             }
-            let deadline = now_ms().saturating_add(30_000);
-            if effect["payload"]["method"] == "file.write" {
-                self.execute_pi_linux_write(binding, effect, deadline)
-            } else {
-                self.execute_pi_linux_process(binding, effect, deadline)
+            let deadline = now_ms().saturating_add(CONFINED_EFFECT_DEADLINE_MS);
+            match confined_effect_route(effect["payload"]["method"].as_str()) {
+                ConfinedEffectRoute::Write => {
+                    self.execute_pi_linux_write(binding, effect, deadline)
+                }
+                ConfinedEffectRoute::Process => {
+                    self.execute_pi_linux_process(binding, effect, deadline)
+                }
+                ConfinedEffectRoute::Rejected => PiEffectOutcome::Rejected,
             }
         });
         let lifecycle = session.lifecycle();
@@ -305,6 +326,14 @@ impl Host {
     }
 
     pub(super) fn dispatch_confined_work(&mut self, mission_id: &str) -> Result<usize> {
+        let count = self.dispatch_confined_work_inner(mission_id)?;
+        // Terminal and superseded bridges are proven stopped here. Pause keeps
+        // its stopped session so this generation cannot open a replacement.
+        self.release_finished_sessions()?;
+        Ok(count)
+    }
+
+    fn dispatch_confined_work_inner(&mut self, mission_id: &str) -> Result<usize> {
         let mut count = self.dispatch_confined_stops(mission_id)?;
         let mission = self.store.load_mission(mission_id)?;
         let binding = self.binding(&mission);
@@ -434,6 +463,11 @@ impl Host {
         }
         self.ensure_confined_session(mission_id)?;
         let binding = self.binding(&mission);
+        if self.confined_mut()?.is_released(&binding.session_id) {
+            return Err(Error::guard(
+                "confined bridge was already released for this generation",
+            ));
+        }
         self.stop_confined_linux_writers(mission_id)?;
         self.reconcile_execution(mission_id)?;
         self.confined_history(&mission)?;
@@ -510,6 +544,9 @@ impl Host {
                 self.confined_host_fact(&current, body)?;
             }
         }
+        // Cancel is terminal, so this drops the proven-stopped bridge. Pause is
+        // not, and its stopped session stays in this generation.
+        self.release_finished_sessions()?;
         Ok(count)
     }
 
@@ -521,11 +558,12 @@ impl Host {
             return Ok(Vec::new());
         }
         self.ensure_confined_session(mission_id)?;
-        if self
-            .confined_mut()?
-            .sessions
-            .get(&binding.session_id)
-            .is_some_and(|s| s.lifecycle()["phase"] == "stopped")
+        if self.confined_mut()?.is_released(&binding.session_id)
+            || self
+                .confined_mut()?
+                .sessions
+                .get(&binding.session_id)
+                .is_some_and(|session| session.lifecycle()["phase"] == "stopped")
         {
             return Ok(vec![unchanged(&mission)]);
         }
@@ -571,11 +609,54 @@ impl Host {
                 attempt_id: Some(mission.attempt.id.clone()),
                 expected_revision: mission.revision,
                 actor: "rust-confined-supervisor".into(),
-                origin: CommandOrigin::RuntimeObservation,
+                origin: CommandOrigin::HostSupervisor,
                 body,
             },
             None,
             true,
         )
+    }
+}
+
+enum ConfinedEffectRoute {
+    Write,
+    Process,
+    Rejected,
+}
+
+fn confined_effect_route(method: Option<&str>) -> ConfinedEffectRoute {
+    match method {
+        Some("file.write") => ConfinedEffectRoute::Write,
+        Some("process.start" | "process.status" | "process.cancel") => ConfinedEffectRoute::Process,
+        _ => ConfinedEffectRoute::Rejected,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConfinedEffectRoute;
+    use super::confined_effect_route;
+
+    #[test]
+    fn pi_linux_confined_effect_routes_known_methods_and_rejects_the_rest() {
+        assert!(matches!(
+            confined_effect_route(Some("file.write")),
+            ConfinedEffectRoute::Write
+        ));
+        for method in ["process.start", "process.status", "process.cancel"] {
+            assert!(
+                matches!(
+                    confined_effect_route(Some(method)),
+                    ConfinedEffectRoute::Process
+                ),
+                "{method}"
+            );
+        }
+        for method in [None, Some("file.read"), Some("process.kill"), Some("")] {
+            assert!(
+                matches!(confined_effect_route(method), ConfinedEffectRoute::Rejected),
+                "{method:?}"
+            );
+        }
     }
 }

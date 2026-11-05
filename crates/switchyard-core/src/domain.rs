@@ -309,6 +309,10 @@ impl FromStr for CommandState {
 pub enum CommandOrigin {
     Operator,
     RuntimeObservation,
+    /// Rust cgroup/bridge proof recorded by the confined supervisor.
+    /// Distinct from [`Self::RuntimeObservation`], which is a Pi observation.
+    /// Public admission cannot select this origin.
+    HostSupervisor,
 }
 
 impl CommandOrigin {
@@ -316,6 +320,7 @@ impl CommandOrigin {
         match self {
             Self::Operator => "operator",
             Self::RuntimeObservation => "runtime_observation",
+            Self::HostSupervisor => "host_supervisor",
         }
     }
 }
@@ -327,6 +332,7 @@ impl FromStr for CommandOrigin {
         match text {
             "operator" => Ok(Self::Operator),
             "runtime_observation" => Ok(Self::RuntimeObservation),
+            "host_supervisor" => Ok(Self::HostSupervisor),
             other => Err(Error::storage(format!("unknown command origin {other}"))),
         }
     }
