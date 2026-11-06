@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Credential-free S3-B1 through B4 gates; no fallback on missing support.
+# Credential-free S3-B1 through B6 and composed evidence; no unsupported fallback.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]]
@@ -13,6 +13,8 @@ backend="${SWITCHYARD_BWRAP:-/usr/bin/bwrap}"
 [[ "$("$backend" --version)" == 'bubblewrap 0.9.0' ]]
 cmp /usr/bin/bwrap "$backend"
 mkdir -p target/bridge-policy "${SWITCHYARD_CONFINEMENT_EVIDENCE:?set evidence directory}"
+# Never let a filtered/failed rerun reuse a preceding composed report.
+rm -f "$SWITCHYARD_CONFINEMENT_EVIDENCE/s3-composed-acceptance.json" "$SWITCHYARD_CONFINEMENT_EVIDENCE/s3-composed-evidence.json"
 cc -Wall -Wextra -Werror -O2 -shared -fPIC runtime/pi-source/confinement/lockdown.c -o target/bridge-policy/lockdown.so
 cc -Wall -Wextra -Werror -O2 -DLOCKDOWN_TEST runtime/pi-source/confinement/lockdown.c -pthread -o target/bridge-policy/lockdown-test
 cc -Wall -Wextra -Werror -O2 -DLOCKDOWN_ENDPOINT_TEST runtime/pi-source/confinement/lockdown.c -pthread -o target/bridge-policy/lockdown-endpoint-test
@@ -71,11 +73,20 @@ cargo build -p switchyard --bin switchyard-bridge-launcher --features "pi-contra
 chmod 0755 target/debug/switchyard-bridge-launcher
 export SWITCHYARD_BRIDGE_LAUNCHER="$PWD/target/debug/switchyard-bridge-launcher"
 cargo test -p switchyard-core --features "pi-contract linux-execution" confined_pi_ --locked -- --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-storage.log"
-cargo test -p switchyard-confinement-probe --test bridge_lifecycle --features pi-linux-process --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-lifecycle.log"
 
-# S3-B5: Host-owned dispatch, observations, stop proofs and replay.
+# S3-B5/C: exercise Host composition before the long B4 wall-deadline case for
+# fail-fast diagnostics. The full B4 lifecycle suite remains required below.
 cargo test -p switchyard-confinement-probe --test pi_host_dispatch --features pi-linux-process --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/pi-host-dispatch.log"
+
+# S3-B4 lifecycle, including the real wall deadline and retention/reopen cases.
+cargo test -p switchyard-confinement-probe --test bridge_lifecycle --features pi-linux-process --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-lifecycle.log"
 
 # S3-B6: one host-configured model endpoint through the session proxy.
 # Full denial remains the path exercised by the suites above.
 cargo test -p switchyard-confinement-probe --test bridge_egress --features pi-linux-process --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-egress.log"
+
+# S3-C: the Host-driven suite above must include the composed scenario. These
+# checks reject missing/filtered evidence and bind report/log/environment hashes.
+# Collection remains PENDING_REVIEW, not a product-enable or S3-GO decision.
+node --test scripts/s3-acceptance-check.test.mjs
+node scripts/s3-acceptance-check.mjs

@@ -12,7 +12,7 @@ import { Runtime } from '../src/runtime.ts';
 import { Transport } from '../src/transport.ts';
 
 const [database, bindingJson, mode] = process.argv.slice(2);
-if (!database || !bindingJson || !['answer', 'file-write', 'process-fast', 'process-wait', 'process-hold', 'process-cancel', 'tools', 'recover', 'crash-before-admission', 'crash-after-admission',
+if (!database || !bindingJson || !['answer', 'file-write', 'process-fast', 'process-wait', 'process-hold', 'process-cancel', 'tools', 's3-acceptance', 'recover', 'crash-before-admission', 'crash-after-admission',
   'crash-after-abort-recorded', 'crash-after-abort-settled', 'hold-abort', 'ignore-abort', 'cooperative-wait',
   'storage-submit', 'storage-abort-intent', 'storage-abort-cancel', 'storage-abort-settlement', 'storage-background', 'storage-close',
   'storage-background-hang', 'gated-tools',
@@ -20,14 +20,30 @@ if (!database || !bindingJson || !['answer', 'file-write', 'process-fast', 'proc
 const binding = JSON.parse(bindingJson) as Binding;
 const faux = fauxProvider();
 const waitingTool = () => fauxAssistantMessage([fauxToolCall('uncooperative', {})], { stopReason: 'toolUse' });
+const heldProcess = "echo once >> /workspace/process.marker; /usr/bin/setsid /bin/sh -c 'while true; do echo tick >> /workspace/process.heartbeat; sleep 0.05; done' >/dev/null 2>&1 & sleep 30";
 // One fresh tool turn per burst round in transport.test.ts. Abort ends the run,
 // so the next submit consumes the next queued response.
 const responses: FauxResponseStep[] = mode === 'cooperative-wait' ? Array.from({ length: 8 }, waitingTool)
   : mode === 'ignore-abort' || mode.startsWith('storage-abort-') || mode === 'storage-background-hang' ? [waitingTool()]
-  : mode.startsWith('process-') ? [
+  : mode === 's3-acceptance' ? [
+    // Trusted, credential-free acceptance script. Existing forwarding tools and
+    // durable transcript selection below remain the only effect authority.
+    fauxAssistantMessage([fauxToolCall('write_file', { path: 'output.txt', content: 'once' })], { stopReason: 'toolUse' }),
+    fauxAssistantMessage([fauxToolCall('process_start', { argv: ['/bin/sh', '-c', heldProcess] })], { stopReason: 'toolUse' }),
+    (context: Parameters<FauxResponseFactory>[0]) => {
+      const result = context.messages.findLast(message => message.role === 'toolResult');
+      const text = result?.role === 'toolResult' ? result.content.find(part => part.type === 'text') : undefined;
+      if (!text || text.type !== 'text') throw new Error('missing composed process handle');
+      const handle = JSON.parse(text.text);
+      return fauxAssistantMessage([fauxToolCall('process_status', {
+        startOperationId: handle.startOperationId, startPayloadHash: handle.startPayloadHash,
+      })], { stopReason: 'toolUse' });
+    },
+    fauxAssistantMessage('done'),
+  ] : mode.startsWith('process-') ? [
     fauxAssistantMessage([fauxToolCall('process_start', { argv: ['/bin/sh', '-c',
       mode === 'process-fast' ? 'echo once >> /workspace/process.marker; printf process-output; exit 7'
-        : "echo once >> /workspace/process.marker; /usr/bin/setsid /bin/sh -c 'while true; do echo tick >> /workspace/process.heartbeat; sleep 0.05; done' >/dev/null 2>&1 & sleep 30",
+        : heldProcess,
     ] })], { stopReason: 'toolUse' }),
     ...(mode === 'process-cancel' ? [(context: Parameters<FauxResponseFactory>[0]) => {
       const result = context.messages.findLast(message => message.role === 'toolResult');
@@ -53,7 +69,7 @@ const responses: FauxResponseStep[] = mode === 'cooperative-wait' ? Array.from({
 ] : [fauxAssistantMessage('done')];
 // The faux queue is process-local. Choose a script step from the durable
 // transcript so reopen cannot issue a second fresh start/write after replay.
-if (['file-write', 'tools', 'process-fast', 'process-wait', 'process-hold', 'process-cancel'].includes(mode)) {
+if (['file-write', 'tools', 's3-acceptance', 'process-fast', 'process-wait', 'process-hold', 'process-cancel'].includes(mode)) {
   const response: FauxResponseFactory = (context, options, state, model) => {
     const completedTurns = context.messages.filter(message =>
       message.role === 'assistant' && message.stopReason === 'toolUse').length;

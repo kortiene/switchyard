@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   # Required by the execution-confinement ruleset. Track A + bounded S3-B1 through
-  # B6 evidence. Product Pi execution and composed S3 acceptance remain separate.
+  # B6 plus composed S3 evidence. Acceptance review and product enablement stay separate.
   execution-confinement:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -49,7 +49,7 @@ jobs:
           echo "SWITCHYARD_CGROUP_ROOT=$(cat confinement-evidence/cgroup-root.txt)" >> "$GITHUB_ENV"
       - name: Prove boundaries, process-tree termination, and Linux execution
         run: ./scripts/confinement-verify.sh
-      - name: Prove bridge confinement and Pi-to-Linux write/process recovery
+      - name: Prove bridge confinement, Pi-to-Linux recovery, and composed S3 evidence
         run: ./scripts/bridge-confinement-verify.sh
       - name: Retain environment and test evidence even on failure
         if: always()
