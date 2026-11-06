@@ -79,6 +79,36 @@ validates an owned regular file, unlinks it, and fsyncs the directory.
   journal and fail closed. A reappeared path after completed retirement also
   blocks; it is not deleted as if it were the original leaf.
 
+### Operator response to an unknown-identity allocation
+
+There is deliberately **no supported in-place command** that adopts the leaf,
+forges its device/inode/boot identity, or removes the allocation journal. Do not
+`rmdir` the unknown leaf merely to make the next open succeed. A name or empty
+reading is insufficient evidence, and editing `current.json` or replacing the
+original Pi database would bypass recovery authority.
+
+1. Stop further Host opens. Preserve the mission database, the complete private
+   control directory, allocation/retirement journals, runtime configuration,
+   delegated-root identity and boot information for inspection. Do not publish,
+   verify, or reuse an uncertain workspace.
+2. If an unpublished allocation is already absent without operator deletion,
+   the normal reopen path can record its abandonment. It will still validate
+   and prove the current recovery leaf; absence does not manufacture a stop.
+3. If the unknown path exists, keep the session blocked. This API cannot safely
+   reconstruct a lost allocation identity from the current path. Restoring or
+   resolving authority requires a separately reviewed operator recovery, not a
+   hand-edited receipt or guessed inode.
+4. For disposable **conformance fixtures only**, preserve the failure artifacts,
+   stop the entire isolated fixture using its owning supervisor/delegation
+   lifecycle, and independently confirm all fixture processes are gone before
+   disposing of its resources. Then run a new fixture with a new private root
+   and fresh delegation. This is a new test, not recovery of the old attempt.
+   Do not apply fixture disposal to a real mission or an unrelated subtree.
+
+The product is not enabled and has no in-place unknown-allocation repair CLI.
+Keep that limitation explicit until a future audited operator-resolution path
+exists. Do not relax the identity gate to obtain an automatic green retry.
+
 The control-root and delegated-cgroup ancestors retain the lifecycle's existing
 trusted-Host/same-UID assumptions. This does not claim atomicity across SQLite,
 control files and cgroupfs, or power-loss, reboot, or cross-host recovery.

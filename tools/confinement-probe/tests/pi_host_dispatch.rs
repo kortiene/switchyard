@@ -13,6 +13,9 @@ use switchyard_core::{
     LinuxExecutionConfig, Phase, payload_hash,
 };
 
+#[path = "pi_host_dispatch/composed.rs"]
+mod composed;
+
 fn env_path(key: &str) -> PathBuf {
     std::env::var_os(key)
         .map(PathBuf::from)

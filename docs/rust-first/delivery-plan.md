@@ -1,6 +1,6 @@
 # Delivery plan: One Recoverable, Verified Change
 
-Status: S1 implemented (#105). S2 is GO for the credential-free source-built candidate; see the [reviewed revision and evidence](s2-contract-gate.md). S3 Track A is delivered within its documented scope; Track B slices B1–B6 are delivered. S3 is not complete: the composed S3 acceptance remains. [Follow-up #151](s3-bridge-cgroup-retention.md) bounds recorded bridge leaves while preserving current recovery identities. S3-B6 is model-endpoint-only egress for the confined bridge, off unless the host sets one endpoint. S4–S8 remain planned. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md). Disposition updated 2026-11-02; see [#109](https://github.com/kortiene/switchyard/issues/109) for current disposition.
+Status: S1 implemented (#105). S2 is GO for the credential-free source-built candidate; see the [reviewed revision and evidence](s2-contract-gate.md). S3 Track A is delivered within its documented scope; Track B slices B1–B6 are delivered. S3 is not complete: [composed S3 evidence](s3-composed-acceptance.md) (#156) is collected for explicit acceptance review, not automatic GO. [Follow-up #151](s3-bridge-cgroup-retention.md) bounds recorded bridge leaves while preserving current recovery identities. S3-B6 is model-endpoint-only egress for the confined bridge, off unless the host sets one endpoint. S4–S8 remain planned. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md). Disposition updated 2026-11-02; see [#109](https://github.com/kortiene/switchyard/issues/109) for current disposition.
 
 ## Implementation sequence
 
@@ -136,6 +136,16 @@ These are bounded engineering choices, not reasons to reopen the agreed architec
 - S7: minimal local web stack and local-session/origin protections.
 
 Record each decision with its owning implementation PR and tests. Do not let an unresolved boundary silently fall back to unconfined execution or automatic approval.
+
+## Composed S3 evidence gate
+
+[#156](s3-composed-acceptance.md) adds one credential-free Host/Pi/Linux
+scenario to the required `execution-confinement` job, combining receipt-gap
+SIGKILL/reopen, real writer stops, pinned local-stub policy and original-checkout
+preservation. The plan is seeded, responses are faux, and HTTP requests are
+startup connectivity probes rather than live model calls. Hash-bound reports
+remain `PENDING_REVIEW`; #97/#94 stay open until the exact evidence is reviewed.
+This does not enable Pi in the product or implement S4–S8.
 
 ## Definition of done
 

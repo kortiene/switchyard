@@ -1,10 +1,14 @@
 # Switchyard wiki update log
 
+## 2026-11-06
+
+* **Composed S3 evidence (#156)**: One credential-free Host/Pi/Linux scenario collects same-attempt SIGKILL/receipt recovery, real process/stop proofs, confined local-stub egress observations and original-checkout preservation. The [collection contract](../docs/rust-first/s3-composed-acceptance.md) and hash-bound artifacts remain `PENDING_REVIEW`; collection is not S3 GO or product enablement. The [retention operator guidance](../docs/rust-first/s3-bridge-cgroup-retention.md#operator-response-to-an-unknown-identity-allocation) now explicitly documents the unsupported in-place repair and safe disposable-fixture response.
+
 ## 2026-11-05
 
 * **Bridge cgroup retention (#151)**: Rust journals allocation before mkdir, preserves the current leaf, and retires obsolete recorded leaves only after durable handoff, identity checks and fresh empty proof. Interrupted deletion replays from explicit authorization; missing current or uncertain identities still block. See the [retention contract](../docs/rust-first/s3-bridge-cgroup-retention.md). Historical backlog cleanup is bounded, audit evidence stays, and FakeRuntime/full-S3 gates are unchanged.
 
-* **S3-B6**: Model-endpoint-only egress for the confined Pi bridge (#153). The default remains full network denial. A host-configured HTTP endpoint is reached only through a pinned proxy; unsupported HTTPS fails closed before DNS, and in-bridge tests deny every other destination. See the [egress record](../docs/rust-first/s3-model-egress.md). FakeRuntime remains the product default. This does not enable Pi or complete S3. #151 and composed acceptance remain.
+* **S3-B6**: Model-endpoint-only egress for the confined Pi bridge (#153). The default remains full network denial. A host-configured HTTP endpoint is reached only through a pinned proxy; unsupported HTTPS fails closed before DNS, and in-bridge tests deny every other destination. See the [egress record](../docs/rust-first/s3-model-egress.md). FakeRuntime remains the product default. This does not enable Pi or complete S3. At B6 delivery #151 and composed acceptance remained; #151 was subsequently delivered by #155, while composed acceptance still requires review.
 
 ## 2026-11-04
 
