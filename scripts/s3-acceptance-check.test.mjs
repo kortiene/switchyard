@@ -21,8 +21,9 @@ const probes = [
 
 function report() {
   const effects = ['write_file', 'exec_start', 'exec_status'].map((method, index) => ({
-    method, operationId: ids[index], simulated: false, receiptRetained: true, state: method === 'exec_start' ? 'running' : 'settled',
+    method, operationId: ids[index], simulated: false, receiptRetained: method !== 'exec_start', state: method === 'exec_start' ? 'running' : 'settled',
   }));
+  const processReceipt = { operationId: ids[1], disposition: 'cancelled', simulated: false, backend: 'linux-bubblewrap-0.9.0' };
   const original = { branch: 'refs/heads/main', head: 'c'.repeat(40), index: 'sha256:' + 'd'.repeat(64), readme: 'sha256:' + 'e'.repeat(64), status: '', diff: '' };
   return structuredClone({
     schema: 1, scenario: 'host-pi-linux-egress-recovery-stop-v1', decision: 'PENDING_REVIEW', ...expected,
@@ -31,11 +32,13 @@ function report() {
     missionId: 'm', attemptId: 'a', sessionId: 's', approvalCommandId: 'cmd-original',
     crash: { signal: 9, barrier: 'receipt', generation: 2, receipt: [ids[0], JSON.stringify({ operationId: ids[0] })] },
     recovery: { generation: 3, stableFileReceipt: true, fileNotRepeated: true, processNotRelaunched: true, staleBindingRejected: true,
-      effects, oldRetirement: { generation: 2, cgroup, removed: true, authorization: proof } },
+      effects, processObservation: { operationId: ids[2], startOperationId: ids[1], startState: 'running', startReceiptRetained: false,
+        quiescence: { proven: false }, simulated: false, backend: 'linux-bubblewrap-0.9.0' },
+      oldRetirement: { generation: 2, cgroup, removed: true, authorization: proof } },
     pause: { phase: 'paused', executionBlocked: false, origin: 'host_supervisor', bridgeTermination: proof, heartbeatStopped: true,
-      effects: effects.map(effect => ({ ...effect, quiescence: 'populated 0' })) },
+      effects: effects.map(effect => ({ ...effect, quiescence: 'populated 0', receiptRetained: true })), processReceipt },
     inertReopen: { phase: 'paused', noNewEffects: true },
-    cancel: { phase: 'cancelled', executionBlocked: false, origin: 'host_supervisor', bridgeTermination: proof },
+    cancel: { phase: 'cancelled', executionBlocked: false, origin: 'host_supervisor', bridgeTermination: proof, processReceipt },
     egress: { endpoint: 'http://127.0.0.1:12345/v1', generations: [2, 3], stubRequests: 2, decoyHits: 0,
       probes: [2, 3].map(generation => ({ generation, probes, token: 'f'.repeat(32) })) },
     receipts: { beforeCrash: 'sha256:' + '1'.repeat(64), recovered: 'sha256:' + '2'.repeat(64), final: 'sha256:' + '3'.repeat(64),
@@ -56,6 +59,9 @@ for (const [name, change] of [
   ['repeated file effect', value => { value.recovery.fileNotRepeated = false; }],
   ['changed final receipt', value => { value.receipts.finalFile[1] = 'changed'; }],
   ['no real process', value => { value.recovery.effects[1].simulated = true; }],
+  ['invented running-process exit receipt', value => { value.recovery.effects[1].receiptRetained = true; }],
+  ['wrong observed process handle', value => { value.recovery.processObservation.startOperationId = ids[0]; }],
+  ['missing cancellation receipt', value => { delete value.pause.processReceipt; }],
   ['missing status effect', value => { value.recovery.effects.pop(); }],
   ['stale generation', value => { value.recovery.generation = 2; }],
   ['unproven retirement', value => { value.recovery.oldRetirement.authorization.proven = false; }],

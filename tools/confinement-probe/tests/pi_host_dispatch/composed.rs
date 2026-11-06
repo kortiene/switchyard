@@ -244,6 +244,16 @@ fn retirement(world: &World, lifecycle: &Value) -> Value {
     audit
 }
 
+fn saved_receipt(receipts: &[(String, Option<String>)], effect: &Value) -> Option<Value> {
+    receipts
+        .iter()
+        .find(|(id, _)| id == effect["operationId"].as_str().unwrap())
+        .expect("effect has a durable ledger row")
+        .1
+        .as_deref()
+        .map(|text| serde_json::from_str(text).unwrap())
+}
+
 struct Worker(Child);
 impl Drop for Worker {
     fn drop(&mut self) {
@@ -351,7 +361,6 @@ fn s3_composed_acceptance_recovers_stops_and_enforces_egress() {
     assert_process_not_relaunched(&world, "composed recovery");
     let receipts = world.receipts();
     assert!(receipts.contains(&original_receipts[0]));
-    assert!(receipts.iter().all(|(_, receipt)| receipt.is_some()));
     let effects = recovered["linuxExecutionEffects"].as_array().unwrap();
     for method in ["write_file", "exec_start", "exec_status"] {
         assert_eq!(
@@ -363,6 +372,33 @@ fn s3_composed_acceptance_recovers_stops_and_enforces_egress() {
         );
     }
     assert!(effects.iter().all(|effect| effect["simulated"] == false));
+    let start = effects
+        .iter()
+        .find(|effect| effect["method"] == "exec_start")
+        .unwrap();
+    let status = effects
+        .iter()
+        .find(|effect| effect["method"] == "exec_status")
+        .unwrap();
+    // Start acceptance is a deterministic handle, not a terminal receipt. The
+    // status tool must have durably observed that actual still-running handle.
+    for effect in effects {
+        let terminal_or_observation = effect["method"] != "exec_start";
+        assert_eq!(
+            saved_receipt(&receipts, effect).is_some(),
+            terminal_or_observation
+        );
+        assert_eq!(effect["receiptRetained"], terminal_or_observation);
+    }
+    let process_observation = saved_receipt(&receipts, status).unwrap();
+    assert_eq!(process_observation["operationId"], status["operationId"]);
+    assert_eq!(
+        process_observation["startOperationId"],
+        start["operationId"]
+    );
+    assert_eq!(process_observation["startState"], "running");
+    assert_eq!(process_observation["startReceiptRetained"], false);
+    assert_eq!(process_observation["quiescence"]["proven"], false);
     let old_retirement = retirement(&world, &crashed["piHost"]["lifecycle"]);
     // A claimed idle model cannot establish workspace quiescence: a detached
     // writer is still running until the operator's actual stop below.
@@ -407,6 +443,15 @@ fn s3_composed_acceptance_recovers_stops_and_enforces_egress() {
             .unwrap()["quiescence"],
         "populated 0"
     );
+    let paused_process_receipt = saved_receipt(&world.receipts(), start).unwrap();
+    assert_eq!(paused_process_receipt["disposition"], "cancelled");
+    assert_eq!(paused_process_receipt["simulated"], false);
+    assert!(
+        world
+            .receipts()
+            .iter()
+            .all(|(_, receipt)| receipt.is_some())
+    );
     let stopped_ids = effect_ids(&paused);
     drop(host);
     let mut host = reopen(&world, &endpoint);
@@ -432,6 +477,8 @@ fn s3_composed_acceptance_recovers_stops_and_enforces_egress() {
     );
     let final_receipts = world.receipts();
     assert!(final_receipts.contains(&original_receipts[0]));
+    let final_process_receipt = saved_receipt(&final_receipts, start).unwrap();
+    assert_eq!(final_process_receipt, paused_process_receipt);
     assert_eq!(output_text(&world).as_deref(), Some(SENTINEL));
     assert_process_not_relaunched(&world, "terminal cancellation");
     assert_eq!(
@@ -522,11 +569,14 @@ fn s3_composed_acceptance_recovers_stops_and_enforces_egress() {
         "missionId":world.mission,"attemptId":first["attemptId"],"sessionId":first["sessionId"],"approvalCommandId":approval(&recovered),
         "crash":{"signal":9,"barrier":"receipt","generation":old_generation,"receipt":original_receipts[0]},
         "recovery":{"generation":recovered["piHost"]["lifecycle"]["generation"],"stableFileReceipt":true,"fileNotRepeated":true,
-            "processNotRelaunched":true,"staleBindingRejected":true,"effects":recovered["linuxExecutionEffects"],"oldRetirement":old_retirement},
+            "processNotRelaunched":true,"staleBindingRejected":true,"effects":recovered["linuxExecutionEffects"],
+            "processObservation":process_observation,"oldRetirement":old_retirement},
         "pause":{"phase":paused["phase"],"bridgeTermination":paused["piHost"]["lifecycle"]["termination"],"executionBlocked":false,
-            "heartbeatStopped":true,"origin":"host_supervisor","effects":paused["linuxExecutionEffects"]},
+            "heartbeatStopped":true,"origin":"host_supervisor","effects":paused["linuxExecutionEffects"],
+            "processReceipt":paused_process_receipt},
         "inertReopen":{"phase":inert["phase"],"noNewEffects":true},
-        "cancel":{"phase":cancelled["phase"],"bridgeTermination":cancelled["piHost"]["lifecycle"]["termination"],"executionBlocked":false,"origin":"host_supervisor"},
+        "cancel":{"phase":cancelled["phase"],"bridgeTermination":cancelled["piHost"]["lifecycle"]["termination"],"executionBlocked":false,
+            "origin":"host_supervisor","processReceipt":final_process_receipt},
         "egress":{"endpoint":endpoint,"generations":generations,"probes":policy,"stubRequests":requests.len(),"decoyHits":0},
         "receipts":{"beforeCrash":payload_hash(&json!(original_receipts)).unwrap(),"recovered":payload_hash(&json!(receipts)).unwrap(),
             "final":payload_hash(&json!(final_receipts)).unwrap(),

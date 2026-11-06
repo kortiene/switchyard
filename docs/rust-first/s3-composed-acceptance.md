@@ -40,10 +40,14 @@ made for network probes or future provider requests.
 4. Execute the process/status steps through the real Linux ledger. The process
    appends a launch marker and runs a detached heartbeat descendant. Require
    exactly one start and one status effect. Pi becoming idle does not imply
-   workspace quiescence: the writer must still be observed running.
+   workspace quiescence: the writer must still be observed running. Start
+   acceptance is a handle, not a terminal receipt: require its terminal receipt
+   to be absent and a retained status observation to reference the live start.
 5. Invalidate workspace verification, then admit and deliver operator Pause.
    Require host-supervisor stop authority, bridge termination proof, fresh
-   Linux writer quiescence, and a heartbeat that stays stopped.
+   Linux writer quiescence, a cancelled process receipt only after that proof,
+   and a heartbeat that stays stopped. The same cancellation receipt must
+   survive inert reopen and terminal cancellation.
 6. Reopen paused/inert, require no new effects or file/process replay, then
    cancel explicitly through the Host and require terminal stop proof.
 7. Check the old bridge leaf's exact retirement receipt, all generation-specific

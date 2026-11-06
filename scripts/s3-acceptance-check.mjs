@@ -54,9 +54,19 @@ export function validate(report, expected) {
   for (const effect of recovery.effects) {
     assert.match(effect.operationId, /^op-v1:[0-9a-f]{64}$/);
     assert.equal(effect.simulated, false);
-    assert.equal(effect.receiptRetained, true);
+    assert.equal(effect.receiptRetained, effect.method !== 'exec_start');
   }
-  assert.equal(recovery.effects.find(effect => effect.method === 'exec_start').state, 'running');
+  const start = recovery.effects.find(effect => effect.method === 'exec_start');
+  const status = recovery.effects.find(effect => effect.method === 'exec_status');
+  assert.equal(start.state, 'running');
+  const observation = recovery.processObservation;
+  assert.equal(observation?.operationId, status.operationId);
+  assert.equal(observation.startOperationId, start.operationId);
+  assert.equal(observation.startState, 'running');
+  assert.equal(observation.startReceiptRetained, false, 'a running handle is not an exit receipt');
+  assert.equal(observation.quiescence?.proven, false);
+  assert.equal(observation.simulated, false);
+  assert.equal(observation.backend, 'linux-bubblewrap-0.9.0');
   const retired = recovery.oldRetirement;
   assert.equal(retired?.removed, true);
   assert.equal(retired.generation, report.crash.generation);
@@ -72,6 +82,11 @@ export function validate(report, expected) {
   assert.equal(report.pause.heartbeatStopped, true);
   assert.deepEqual(report.pause.effects?.map(effect => effect.operationId).sort(), effectIds);
   assert.equal(report.pause.effects.find(effect => effect.method === 'exec_start')?.quiescence, 'populated 0');
+  assert.equal(report.pause.processReceipt?.operationId, start.operationId);
+  assert.equal(report.pause.processReceipt.disposition, 'cancelled');
+  assert.equal(report.pause.processReceipt.simulated, false);
+  assert.equal(report.pause.processReceipt.backend, 'linux-bubblewrap-0.9.0');
+  assert.deepEqual(report.cancel.processReceipt, report.pause.processReceipt);
   assert.deepEqual(report.inertReopen, { phase: 'paused', noNewEffects: true });
   const egress = report.egress;
   const endpoint = new URL(egress?.endpoint);
