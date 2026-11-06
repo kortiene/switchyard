@@ -118,8 +118,10 @@ export function collect(directory, root) {
   assert.equal(environment[1], expected.tree);
   const log = readFileSync(resolve(directory, 'pi-host-dispatch.log'), 'utf8').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
   assert.match(log, /test composed::s3_composed_acceptance_recovers_stops_and_enforces_egress \.\.\. ok/);
-  assert.doesNotMatch(log, /test result: FAILED/);
-  assert.match(log, /test result: ok\.[^\n]*0 failed; 0 ignored/);
+  const summaries = log.match(/^test result: .+$/gm) ?? [];
+  assert.equal(summaries.length, 1, 'expected exactly one complete Host-suite summary');
+  assert.match(summaries[0], /^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out(?:;|$)/,
+    'failed, ignored, measured-only, or filtered Host evidence is incomplete');
   const files = ['s3-composed-acceptance.json', 'pi-host-dispatch.log', 'bridge-environment.txt', 'cgroup-delegation.txt'];
   const manifest = {
     schema: 1, decision: 'PENDING_REVIEW', ...expected,

@@ -26,6 +26,7 @@ impl ConfinedRuntime {
                 | "process-hold"
                 | "process-cancel"
                 | "tools"
+                | "s3-acceptance"
                 | "ignore-abort"
         ) {
             return Err(Error::guard("unsupported credential-free Host fixture"));
@@ -60,5 +61,34 @@ impl ConfinedRuntime {
             "node":self.config.node, "bubblewrap":self.config.bubblewrap,
             "launcher":self.config.launcher, "policy":self.config.policy,
             "fingerprint":super::pi_bridge::adapter_fingerprint()})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn confined_pi_host_acceptance_fixture_is_explicit_inert_and_credential_free() {
+        let path = || PathBuf::from("/uninstalled-conformance-fixture");
+        let config = ConfinedPiConfig {
+            root: path(),
+            cgroup_root: path(),
+            node: path(),
+            bubblewrap: path(),
+            launcher: path(),
+            policy: path(),
+            model_endpoint: None,
+        };
+        let runtime = ConfinedRuntime::new(config.clone(), "s3-acceptance").unwrap();
+        assert!(runtime.sessions.is_empty());
+        let saved = runtime.configuration();
+        assert_eq!(saved["fixture"], "s3-acceptance");
+        assert_eq!(saved["credentials"], "none");
+        assert_eq!(saved["network"], "denied");
+        for forbidden in ["live", "https://model.example/v1", "../repo/extension"] {
+            assert!(ConfinedRuntime::new(config.clone(), forbidden).is_err());
+        }
     }
 }

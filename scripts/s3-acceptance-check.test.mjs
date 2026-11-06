@@ -104,6 +104,9 @@ test('collection binds exact files and rejects filtered, absent, or dirty eviden
     assert.equal(manifest.decision, 'PENDING_REVIEW');
     assert.ok(manifest.files.every(file => /^[0-9a-f]{64}$/.test(file.sha256)));
     assert.deepEqual(JSON.parse(readFileSync(join(directory, 's3-composed-evidence.json'), 'utf8')), manifest);
+    // The named composed case alone is not a complete Host-suite run.
+    writeFileSync(join(directory, 'pi-host-dispatch.log'), log.replace('0 filtered out', '30 filtered out'));
+    assert.throws(() => collect(directory, root));
     writeFileSync(join(directory, 'pi-host-dispatch.log'), 'test result: ok. 0 passed; 0 failed; 0 ignored; 1 filtered out\n');
     assert.throws(() => collect(directory, root));
     assert.throws(() => readFileSync(join(directory, 's3-composed-evidence.json')), /ENOENT/);

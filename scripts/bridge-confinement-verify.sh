@@ -73,10 +73,13 @@ cargo build -p switchyard --bin switchyard-bridge-launcher --features "pi-contra
 chmod 0755 target/debug/switchyard-bridge-launcher
 export SWITCHYARD_BRIDGE_LAUNCHER="$PWD/target/debug/switchyard-bridge-launcher"
 cargo test -p switchyard-core --features "pi-contract linux-execution" confined_pi_ --locked -- --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-storage.log"
-cargo test -p switchyard-confinement-probe --test bridge_lifecycle --features pi-linux-process --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-lifecycle.log"
 
-# S3-B5: Host-owned dispatch, observations, stop proofs and replay.
+# S3-B5/C: exercise Host composition before the long B4 wall-deadline case for
+# fail-fast diagnostics. The full B4 lifecycle suite remains required below.
 cargo test -p switchyard-confinement-probe --test pi_host_dispatch --features pi-linux-process --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/pi-host-dispatch.log"
+
+# S3-B4 lifecycle, including the real wall deadline and retention/reopen cases.
+cargo test -p switchyard-confinement-probe --test bridge_lifecycle --features pi-linux-process --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-lifecycle.log"
 
 # S3-B6: one host-configured model endpoint through the session proxy.
 # Full denial remains the path exercised by the suites above.
