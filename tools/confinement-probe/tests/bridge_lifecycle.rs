@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use switchyard_core::{ConfinedPiConfig, ConfinedPiSession, PiEffectOutcome, RuntimeBinding};
 
+#[path = "bridge_lifecycle/retention.rs"]
+mod retention;
+
 fn private_root() -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -218,11 +221,9 @@ fn confined_lifecycle_host_loss_recovers_original_session() {
     let mut recovered =
         ConfinedPiSession::open(&config(tmp.path()), binding(2), "recover").unwrap();
     assert_eq!(submit(&mut recovered), evidence["receipt"]);
-    assert!(
-        fs::read_to_string(leaf(&evidence["record"]).join("cgroup.events"))
-            .unwrap()
-            .contains("populated 0")
-    );
+    // Recovery now durably retires the obsolete leaf; its fresh empty proof
+    // and exact identity remain in the host-only retirement receipt.
+    retention::assert_retired(tmp.path(), &evidence["record"]);
     assert_eq!(recovered.lifecycle()["recovered"]["proven"], true);
     retain(
         "bridge-lifecycle-host-loss.json",

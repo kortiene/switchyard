@@ -131,6 +131,15 @@ impl Directory {
         self.file.sync_all().map_err(Error::storage)
     }
 
+    /// Remove only a validated host control record and durably settle its absence.
+    pub fn remove(&self, name: &str) -> Result<()> {
+        segment(name)?;
+        private(&self.open_file(name, false)?)?;
+        rustix::fs::unlinkat(&self.file, name, rustix::fs::AtFlags::empty())
+            .map_err(Error::storage)?;
+        self.file.sync_all().map_err(Error::storage)
+    }
+
     pub fn is_empty(&self) -> Result<bool> {
         match fs::read_dir(&self.path).map_err(Error::storage)?.next() {
             None => Ok(true),
