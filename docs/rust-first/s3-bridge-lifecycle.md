@@ -128,6 +128,7 @@ This does not claim exhaustive fault injection at every startup instruction.
 
 [S3-B5](s3-pi-host-dispatch.md) connects this API to Host dispatch.
 [S3-B6](s3-model-egress.md) is the optional model endpoint; unset, networking
-stays denied. Provider credentials stay disabled, and composed S3 acceptance
-is still required before product enablement. Preserve FakeRuntime defaults and
-the Rust-native runtime target. Do not close #97 from B4 alone.
+stays denied. Provider credentials stay disabled. Bounded composed S3
+acceptance is recorded in [the acceptance record](s3-composed-acceptance.md)
+and does not enable the product. Preserve FakeRuntime defaults and the
+Rust-native runtime target. Do not close #97 from B4 alone.

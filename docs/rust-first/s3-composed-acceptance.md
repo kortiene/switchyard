@@ -2,8 +2,10 @@
 
 Refs #156, #97, #94, after B1–B6 and cgroup retention #155 (`5874eec`). This
 adds one credential-free evidence-collection scenario. **Collection is not the
-reviewed S3 acceptance decision.** FakeRuntime stays the product default; Pi is
-not enabled in the CLI, and S4–S8/product/live acceptance remain separate.
+reviewed S3 acceptance decision.** Bounded acceptance of the collected evidence
+is recorded below, accepted 2026-11-10. FakeRuntime stays the product default;
+Pi is not enabled in the CLI, and product Pi wiring, S4–S8, and live acceptance
+remain separate.
 
 ## What is composed
 
@@ -74,19 +76,77 @@ Absent, filtered, stale, malformed or failed evidence fails the job. Old
 reports are removed before the suite. Validator tests run with
 `node --test scripts/s3-acceptance-check.test.mjs`.
 
-Both JSON files deliberately say `PENDING_REVIEW`. The supported runner must
-exercise real Git, processes, Linux namespaces/cgroups and Host SIGKILL. An
-ARM64 cross-target type/lint check or a synthetic validator fixture is not
-substitute OS evidence.
+Both JSON files deliberately say `PENDING_REVIEW`. That artifact field is not
+the reviewed decision and is not rewritten when the decision is recorded. The
+supported runner must exercise real Git, processes, Linux namespaces/cgroups
+and Host SIGKILL. An ARM64 cross-target type/lint check or a synthetic
+validator fixture is not substitute OS evidence.
 
-## Acceptance remains an explicit decision
+## Bounded acceptance — accepted 2026-11-10
 
-Review the exact source commit/tree, all required CI results, the downloaded
-artifact and manifest hashes, runtime/backend identities, and every observation
-above. Record the bounded acceptance decision in #97/#94 and the documentation
-with those evidence references; do not infer GO from a green collection job.
-After merge, use main's evidence or verify the reviewed tree matches the merge.
+**Decision: bounded S3 acceptance of the composed Host/Pi/Linux evidence,
+accepted 2026-11-10 in [#97](https://github.com/kortiene/switchyard/issues/97)
+and [#94](https://github.com/kortiene/switchyard/issues/94).** Reviewed merged
+[#157](https://github.com/kortiene/switchyard/pull/157) at
+`65a7ce7b8b91fbdc9a89308c8a52e397a17fbecc`, tree
+`45e756fae02d2a45298b33df8ea159edbfecceb8` (identical to the reviewed PR tree
+at head `bebc82a`). The post-merge
+[execution-confinement run](https://github.com/kortiene/switchyard/actions/runs/42207467133)
+(push to `main`, attempt 1,
+[job 127857594458](https://github.com/kortiene/switchyard/actions/runs/42207467133/job/127857594458)
+success) and all eight post-merge checks passed. The
+[artifact `13498690183`](https://github.com/kortiene/switchyard/actions/runs/42207467133/artifacts/13498690183)
+was downloaded independently. Its archive SHA-256
+`e848305b0863167c490ecf4654db26ea8fbe04862b2484fbc5c8434ea44918ae` matches
+GitHub's recorded digest. All four manifest bindings in
+`s3-composed-evidence.json` match:
 
-Even reviewed S3 acceptance would not enable product Pi execution, provide a
-TLS/model client or credentials, satisfy S4–S8, or authorize live-provider spend
-and GitHub publication. Those require their own implementation and approvals.
+| File | SHA-256 |
+| --- | --- |
+| `s3-composed-acceptance.json` | `0f766f0e818ecb5347094ade5b10b066e6bb726013801b88eb4e526563988b90` |
+| `pi-host-dispatch.log` | `490385eb5935c4d01f47ee44a0fcda34230e661dd38c10d6c3acbd0701876440` |
+| `bridge-environment.txt` | `a464ece28a8e0a5b0e0ce1509d1379d762c37a8d31d14d199acce0dc34d0f4f6` |
+| `cgroup-delegation.txt` | `b400be267dfbc58198b9b161c1be1e42223d44e7323ceff9750c2fdcc2e60491` |
+
+`scripts/s3-acceptance-check.mjs` at `65a7ce7` revalidated the report against
+that commit's tree and `pins.json`. The regenerated manifest is byte-identical,
+and the validator's own 24 tests pass. The artifact deliberately retains
+`PENDING_REVIEW`; this is the separate reviewed decision. **FakeRuntime remains
+the product default.**
+
+Scenario `host-pi-linux-egress-recovery-stop-v1` on ubuntu-24.04
+`linux-x86_64`. Accepted observations, all in one mission, attempt and session
+(`m-64fc964d…`, `a-06710fb4…`, `s-e62b546b…`):
+
+- The Host was killed with SIGKILL (`signal 9`) at the committed file-receipt
+  barrier in generation 2. Generation 3 recovered the original file receipt
+  without repeating the write or relaunching the process, and the stale binding
+  was rejected.
+- Exactly one `write_file`, one `exec_start` and one `exec_status` effect ran,
+  all real (`simulated: false`) on `linux-bubblewrap-0.9.0`. The start was a
+  running handle with no terminal receipt and an unproven, nonempty cgroup
+  (`populated 1`). It received a `cancelled` receipt only after the Pause proof
+  (`populated 0`), and that receipt was unchanged through terminal Cancel.
+- Pause and Cancel both had `host_supervisor` origin, proven bridge termination
+  (generations 3 and 4) and a stopped heartbeat. Inert reopen stayed `paused`
+  with no new effects.
+- The old generation-2 bridge leaf has a retirement receipt (`removed: true`,
+  `populated 0`).
+- The local startup probe passed in generations 2, 3 and 4. There were 3 stub
+  requests and 0 decoy hits, and every required denial probe is present.
+- The original checkout's branch, HEAD, index, README, status and diff were
+  unchanged.
+- The Host suite reports `16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`.
+
+**Acceptance boundary.** This accepts only the collected composed S3 evidence
+for that scenario. Its limits are in scope as stated: a seeded
+awaiting-plan-approval fixture, faux Pi model responses, and local HTTP
+startup connectivity probes. These are not live model requests, an exactly-once
+network claim, a TLS route, or S4 planning. This acceptance does not authorize
+product CLI or Pi enablement, provider credentials or live-provider spend, a
+TLS or model client, S4–S8 implementation, or full M1 / issue-to-PR acceptance.
+Frozen `adw_sdlc/`, state v1, prompts and pins are unchanged. Reboot,
+power-loss or adversarial quiescence and other platforms are not claimed. #97
+stays open for product Pi wiring, including the Pi-path operator-stop admission
+test, under its own reviewed gate. #94's S3 slice box and all milestone
+completion-evidence boxes stay unchecked.
