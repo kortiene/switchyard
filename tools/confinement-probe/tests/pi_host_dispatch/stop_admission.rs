@@ -167,6 +167,8 @@ fn refuse_forged_confirm_stopped(host: &mut Host, mission: &str) {
                 body: CommandBody::ConfirmStopped,
             })
             .unwrap_err();
+        assert_eq!(error.category(), "guard_failed", "{origin:?}: {error}");
+        assert!(error.rejected_admission().is_none(), "{origin:?}: {error}");
         assert!(
             error
                 .to_string()
@@ -375,7 +377,7 @@ fn host_busy_stop_recovers_after_drop_before_delivery() {
 }
 
 #[test]
-fn host_busy_stop_reuses_abort_after_lost_acknowledgement() {
+fn host_busy_stop_redelivers_abort_after_lost_acknowledgement() {
     for cancel in [false, true] {
         let (world, mut host, continue_id) = pending_busy_continue();
         let linux_receipts = world.receipts();
@@ -397,6 +399,12 @@ fn host_busy_stop_reuses_abort_after_lost_acknowledgement() {
         assert_ne!(value["piHost"]["lifecycle"]["termination"]["proven"], true);
         assert_eq!(row(&value, kind)["state"], "pending");
         assert!(row(&value, kind)["receiptId"].is_null());
+        // `acknowledge` writes runtime_receipt_json and state='acknowledged'
+        // in one update. fail_ack rolls both back, so no abort receipt exists
+        // to reuse. Recovery records one receipt; the next pass keeps it.
+        let (state, receipt) = command_stored(&world.db(), kind);
+        assert_eq!(state, "pending");
+        assert!(receipt.is_none(), "{receipt:?}");
         assert_eq!(row(&value, "continue")["state"], "pending");
         assert!(value["commands"].as_array().unwrap().iter().all(|command| {
             command["kind"] != "confirm_stopped" && command["kind"] != "confirm_cancelled"

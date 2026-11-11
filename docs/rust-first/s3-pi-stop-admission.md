@@ -33,16 +33,19 @@ unverified (`verified_generation` null), busy (the workspace lease is held),
 uncertain, and transient (a SQLite trigger on `verified_generation`). A healthy
 tree is re-verified by `recover_workspace`, so the unverified case applies that
 null generation again after reconcile and asserts `dispatch_stops` leaves it
-null. The other three defects fail reconcile as isolated workspace errors and
-stay failed through stop delivery.
+null. That null generation is synthetic: the CLI reconcile does not leave a
+healthy tree unverified. The other three defects fail reconcile as isolated
+workspace errors and stay failed through stop delivery.
 
-Recovery drops the Host after the stop is admitted and before delivery, and
-again after a lost stop acknowledgement (`fail_ack`). Reopen and `recover`
-reuse the abort receipt on the second pass (`dispatch_stops` returns 0). The
-busy row is superseded, not resumed. Paused or Cancelled is reached only with
-the termination proof. Linux effect receipts do not grow. `busy-once` is the
-only new confined fixture name; `crash-after-abort-settled` stays off this
-allowlist, so the test does not kill the bridge to detect a second abort.
+Recovery drops the Host after the stop is admitted and before delivery.
+Reopen and `recover` record one abort receipt; a later `dispatch_stops`
+returns 0 and keeps that receipt. A lost acknowledgement is separate.
+`acknowledge` writes the abort receipt and `state='acknowledged'` in one
+update, so `fail_ack` leaves the stop pending with no stored receipt. Reopen
+and `recover` then record one receipt and do not replace it on the next pass.
+That is re-delivery of the host acknowledgement, not proof that the bridge
+skipped a second abort. `busy-once` is the only new confined fixture name;
+`crash-after-abort-settled` stays off this allowlist.
 
 A forged `ConfirmStopped` from `Operator` or `RuntimeObservation` is still
 refused while the pause is pending. The supervisor confirmation is the one
