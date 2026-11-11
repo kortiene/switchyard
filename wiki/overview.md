@@ -4,7 +4,7 @@ title: Switchyard
 description: An agent-readable and human-readable map of the Switchyard ADW control plane.
 resource: https://github.com/kortiene/switchyard
 tags: [switchyard, adw, control-plane, overview]
-timestamp: "2026-10-30T22:00:00Z"
+timestamp: "2026-11-10T21:16:00-05:00"
 ---
 
 # Purpose

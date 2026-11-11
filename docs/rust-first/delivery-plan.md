@@ -151,19 +151,13 @@ Reviewed merged #157 at `65a7ce7b8b91fbdc9a89308c8a52e397a17fbecc`, tree
 `45e756fae02d2a45298b33df8ea159edbfecceb8` (identical to reviewed head
 `bebc82a`). Post-merge
 [run 42207467133](https://github.com/kortiene/switchyard/actions/runs/42207467133)
-(push to `main`, attempt 1, all eight checks passed) and independently
-downloaded
-[artifact 13498690183](https://github.com/kortiene/switchyard/actions/runs/42207467133/artifacts/13498690183)
-(zip SHA-256 `e848305b0863167c490ecf4654db26ea8fbe04862b2484fbc5c8434ea44918ae`,
-report SHA-256 `0f766f0e818ecb5347094ade5b10b066e6bb726013801b88eb4e526563988b90`)
-are the reviewed evidence. `scripts/s3-acceptance-check.mjs` at `65a7ce7`
-passed, and the regenerated manifest was byte-identical. That tracker decision
-is separate from the artifact field. **FakeRuntime remains the product
-default.** It does not authorize product CLI or Pi enablement, credentials,
-live-provider spend, a TLS or model client, S4–S8, or full M1. #97 and #94 stay
-open; #94's S3 slice box stays unchecked. The
-[acceptance record](s3-composed-acceptance.md) has the manifest bindings and
-observations.
+(push to `main`, attempt 1, all eight checks passed) is the reviewed run.
+That tracker decision is separate from the artifact field, which stays
+`PENDING_REVIEW`. **FakeRuntime remains the product default.** It does not
+authorize product CLI or Pi enablement, credentials, live-provider spend, a
+TLS or model client, S4–S8, or full M1. #97 and #94 stay open; #94's S3 slice
+box stays unchecked. Hash bindings, the downloaded artifact, and the accepted
+observations are in the [acceptance record](s3-composed-acceptance.md).
 
 ## Definition of done
 

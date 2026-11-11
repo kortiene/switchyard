@@ -109,8 +109,9 @@ GitHub's recorded digest. All four manifest bindings in
 | `cgroup-delegation.txt` | `b400be267dfbc58198b9b161c1be1e42223d44e7323ceff9750c2fdcc2e60491` |
 
 `scripts/s3-acceptance-check.mjs` at `65a7ce7` revalidated the report against
-that commit's tree and `pins.json`. The regenerated manifest is byte-identical,
-and the validator's own 24 tests pass. The artifact deliberately retains
+that commit's tree and `pins.json`. The regenerated manifest is byte-identical
+to the artifact's `s3-composed-evidence.json`, and the validator's own 24 tests
+pass. The artifact deliberately retains
 `PENDING_REVIEW`; this is the separate reviewed decision. **FakeRuntime remains
 the product default.**
 
@@ -139,10 +140,10 @@ Scenario `host-pi-linux-egress-recovery-stop-v1` on ubuntu-24.04
 - The Host suite reports `16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`.
 
 **Acceptance boundary.** This accepts only the collected composed S3 evidence
-for that scenario. Its limits are in scope as stated: a seeded
-awaiting-plan-approval fixture, faux Pi model responses, and local HTTP
-startup connectivity probes. These are not live model requests, an exactly-once
-network claim, a TLS route, or S4 planning. This acceptance does not authorize
+for that scenario. The acceptance is limited to a seeded awaiting-plan-approval
+fixture, faux Pi model responses, and local HTTP startup connectivity probes.
+These are not live model requests, an exactly-once network claim, a TLS route,
+or S4 planning. This acceptance does not authorize
 product CLI or Pi enablement, provider credentials or live-provider spend, a
 TLS or model client, S4–S8 implementation, or full M1 / issue-to-PR acceptance.
 Frozen `adw_sdlc/`, state v1, prompts and pins are unchanged. Reboot,
