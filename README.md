@@ -91,7 +91,7 @@ in the [package development guide](./adw_sdlc/README.md#development).
 | --- | --- |
 | **S1** [#95](https://github.com/kortiene/switchyard/issues/95) | Implemented. Mission ledger, command outbox, fake runtime. |
 | **S2** [#96](https://github.com/kortiene/switchyard/issues/96) | **GO for the credential-free source-built candidate**, accepted 2026-11-02. See the [exact revision and evidence](./docs/rust-first/s2-contract-gate.md). The published-package audit remains NO-GO. |
-| **S3** [#97](https://github.com/kortiene/switchyard/issues/97) | Track A delivers owned worktrees, effect receipts, a non-default Linux backend and evidence-backed recovery. Track B adds confined write/process recovery, the non-default [Rust-owned bridge lifecycle](./docs/rust-first/s3-bridge-lifecycle.md), and [model-endpoint egress](./docs/rust-first/s3-model-egress.md) that stays off unless the host sets one endpoint. [Bounded bridge-leaf retention](./docs/rust-first/s3-bridge-cgroup-retention.md) preserves recovery evidence. [Composed S3 evidence](./docs/rust-first/s3-composed-acceptance.md) is collected for review, not automatic acceptance. Product Pi wiring and full S3 acceptance remain open. |
+| **S3** [#97](https://github.com/kortiene/switchyard/issues/97) | Track A delivers owned worktrees, effect receipts, a non-default Linux backend and evidence-backed recovery. Track B adds confined write/process recovery, the non-default [Rust-owned bridge lifecycle](./docs/rust-first/s3-bridge-lifecycle.md), and [model-endpoint egress](./docs/rust-first/s3-model-egress.md) that stays off unless the host sets one endpoint. [Bounded bridge-leaf retention](./docs/rust-first/s3-bridge-cgroup-retention.md) preserves recovery evidence. Bounded acceptance of the [composed Host/Pi/Linux evidence](./docs/rust-first/s3-composed-acceptance.md) was recorded 2026-11-10 for the credential-free fixture collected by #157 at `65a7ce7`; the artifact stays `PENDING_REVIEW` and FakeRuntime stays the product default. Product Pi wiring and full S3 acceptance remain open. |
 | **S4–S8** [#98](https://github.com/kortiene/switchyard/issues/98)–[#102](https://github.com/kortiene/switchyard/issues/102) | Planned. Live mission execution waits on S3 integration and confinement. |
 | **Native Rust agent runtime** | Accepted long-term target (2026-10-29). Not implemented. Replacing the proof-of-concept adapter needs its own reviewed gate. |
 
@@ -107,6 +107,7 @@ Read these before changing mission, recovery, or runtime behavior:
 - [Runtime protocol](./docs/rust-first/runtime-protocol.md)
 - [S2 package audit (published package NO-GO, 2026-10-29)](./docs/rust-first/s2-feasibility.md)
 - [S2 acceptance record (source-built candidate GO, 2026-11-02)](./docs/rust-first/s2-contract-gate.md)
+- [Bounded composed S3 acceptance (credential-free fixture, 2026-11-10)](./docs/rust-first/s3-composed-acceptance.md)
 - [Decision register](./wiki/decisions/invariants.md)
 
 The product objective is one recoverable, verified change: freeze an

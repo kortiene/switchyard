@@ -1,6 +1,6 @@
 # Delivery plan: One Recoverable, Verified Change
 
-Status: S1 implemented (#105). S2 is GO for the credential-free source-built candidate; see the [reviewed revision and evidence](s2-contract-gate.md). S3 Track A is delivered within its documented scope; Track B slices B1–B6 are delivered. S3 is not complete: [composed S3 evidence](s3-composed-acceptance.md) (#156) is collected for explicit acceptance review, not automatic GO. [Follow-up #151](s3-bridge-cgroup-retention.md) bounds recorded bridge leaves while preserving current recovery identities. S3-B6 is model-endpoint-only egress for the confined bridge, off unless the host sets one endpoint. S4–S8 remain planned. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md). Disposition updated 2026-11-02; see [#109](https://github.com/kortiene/switchyard/issues/109) for current disposition.
+Status: S1 implemented (#105). S2 is GO for the credential-free source-built candidate; see the [reviewed revision and evidence](s2-contract-gate.md). S3 Track A is delivered within its documented scope; Track B slices B1–B6 are delivered. S3 is not complete: bounded acceptance of the [composed Host/Pi/Linux evidence](s3-composed-acceptance.md) (#156, delivered by #157 at `65a7ce7`) was recorded 2026-11-10 for that credential-free fixture only. FakeRuntime remains the product default, and product Pi wiring stays open. [Follow-up #151](s3-bridge-cgroup-retention.md) bounds recorded bridge leaves while preserving current recovery identities. S3-B6 is model-endpoint-only egress for the confined bridge, off unless the host sets one endpoint. S4–S8 remain planned. Tracker: [#94](https://github.com/kortiene/switchyard/issues/94). Architecture: [Rust-first prototype](README.md). Protocol: [initial v0 contract](runtime-protocol.md). Disposition updated 2026-11-02; see [#109](https://github.com/kortiene/switchyard/issues/109) for current disposition.
 
 ## Implementation sequence
 
@@ -143,9 +143,21 @@ Record each decision with its owning implementation PR and tests. Do not let an 
 scenario to the required `execution-confinement` job, combining receipt-gap
 SIGKILL/reopen, real writer stops, pinned local-stub policy and original-checkout
 preservation. The plan is seeded, responses are faux, and HTTP requests are
-startup connectivity probes rather than live model calls. Hash-bound reports
-remain `PENDING_REVIEW`; #97/#94 stay open until the exact evidence is reviewed.
-This does not enable Pi in the product or implement S4–S8.
+startup connectivity probes rather than live model calls. The artifact's
+hash-bound reports deliberately remain `PENDING_REVIEW`.
+
+**Bounded acceptance of that evidence was recorded 2026-11-10** in #97 and #94.
+Reviewed merged #157 at `65a7ce7b8b91fbdc9a89308c8a52e397a17fbecc`, tree
+`45e756fae02d2a45298b33df8ea159edbfecceb8` (identical to reviewed head
+`bebc82a`). Post-merge
+[run 42207467133](https://github.com/kortiene/switchyard/actions/runs/42207467133)
+(push to `main`, attempt 1, all eight checks passed) is the reviewed run.
+That tracker decision is separate from the artifact field, which stays
+`PENDING_REVIEW`. **FakeRuntime remains the product default.** It does not
+authorize product CLI or Pi enablement, credentials, live-provider spend, a
+TLS or model client, S4–S8, or full M1. #97 and #94 stay open; #94's S3 slice
+box stays unchecked. Hash bindings, the downloaded artifact, and the accepted
+observations are in the [acceptance record](s3-composed-acceptance.md).
 
 ## Definition of done
 
@@ -228,7 +240,8 @@ and stop boundaries. Accepted: all 7 CI checks passed, including
 `execution-confinement` with the `pi_host_dispatch` suite, and #148 is closed.
 FakeRuntime remains the CLI default. This does not enable Pi in the product.
 [Follow-up #151](s3-bridge-cgroup-retention.md) bounds retained bridge leaves.
-Composed S3 acceptance remains; #97 and #94 stay open. Model-endpoint egress is B6.
+At B5 delivery, composed S3 acceptance remained and model-endpoint egress was
+B6. The bounded acceptance is now recorded above; #97 and #94 stay open.
 
 ### S3-B6 model-endpoint-only egress (delivered)
 
@@ -238,6 +251,7 @@ read-only Unix socket to a host proxy that splices to that pinned address.
 In-bridge tests deny every other destination and one local stub proves the
 route. Only credential-free HTTP is admitted; HTTPS fails closed until a
 reviewed TLS client exists. FakeRuntime remains the CLI default. This does not
-enable Pi, carry provider credentials, or complete S3. Composed acceptance
-remains; [#151's retention follow-up](s3-bridge-cgroup-retention.md) handles
-recorded obsolete cgroup leaves.
+enable Pi, carry provider credentials, or complete S3. At B6 delivery, composed
+acceptance remained; the bounded decision is recorded above.
+[#151's retention follow-up](s3-bridge-cgroup-retention.md) handles recorded
+obsolete cgroup leaves.

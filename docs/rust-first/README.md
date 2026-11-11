@@ -1,6 +1,6 @@
 # Rust-first Switchyard prototype
 
-Status: direction accepted 2026-10-29. S1 implemented (#105). S2 is GO for the credential-free source-built candidate; see [the acceptance record](s2-contract-gate.md). S3 delivers owned workspaces, confined effects and a non-default [bridge lifecycle](s3-bridge-lifecycle.md); product integration and S4–S8 remain open. The native Rust agent runtime is the long-term target and is not implemented.
+Status: direction accepted 2026-10-29. S1 implemented (#105). S2 is GO for the credential-free source-built candidate; see [the acceptance record](s2-contract-gate.md). S3 delivers owned workspaces, confined effects and a non-default [bridge lifecycle](s3-bridge-lifecycle.md). Bounded acceptance of the [composed evidence](s3-composed-acceptance.md) was recorded 2026-11-10 for the credential-free fixture only; FakeRuntime remains the product default, and product Pi wiring and S4–S8 remain open. The native Rust agent runtime is the long-term target and is not implemented.
 
 Planning date: 2026-10-28 (America/New_York).
 
@@ -24,13 +24,13 @@ Read the [runtime protocol](runtime-protocol.md) and [delivery plan](delivery-pl
 
 ## Implementation status
 
-This table is navigation as of 2026-11-02. See [#109](https://github.com/kortiene/switchyard/issues/109) for consolidation disposition. S2 acceptance is recorded separately in [the contract gate](s2-contract-gate.md); this does not change normative transitions or record a live run.
+This table is navigation as of 2026-11-10. See [#109](https://github.com/kortiene/switchyard/issues/109) for consolidation disposition. S2 acceptance is recorded separately in [the contract gate](s2-contract-gate.md), and bounded composed S3 acceptance is recorded in [s3-composed-acceptance.md](s3-composed-acceptance.md). This does not change normative transitions or record a live run.
 
 | Work | Status |
 | --- | --- |
 | S1 ([#95](https://github.com/kortiene/switchyard/issues/95), [#105](https://github.com/kortiene/switchyard/pull/105)) | Implemented. `crates/switchyard-core/` and `crates/switchyard/` persist missions and drive them with a fake runtime. No model calls, GitHub writes, state v1 resume, or confinement. |
 | S2 ([#96](https://github.com/kortiene/switchyard/issues/96)) | **GO for the credential-free source-built candidate**, accepted 2026-11-02. See [exact revision and evidence](s2-contract-gate.md). The published-package audit remains NO-GO. |
-| S3 ([#97](https://github.com/kortiene/switchyard/issues/97)) | S3-A1 adds explicit [worktree ownership/recovery](s3-workspace-ownership.md). S3-A2 adds [simulated effect receipts](s3-execution-receipts.md). S3-A3 adds a [Linux confinement feasibility probe](s3-linux-confinement.md). S3-A4 adds a non-default [confined Linux ExecutionEnv](s3-linux-execution-contract.md) with durable quiescence evidence. S3-A5 adds [supersession of an abandoned decision](s3-execution-supersede.md) after fresh quiescence and a workspace digest. FakeRuntime stays the product adapter. Track B includes the [bridge confinement harness](s3-bridge-confinement.md) and [model-endpoint egress](s3-model-egress.md), which stays off unless the host sets one endpoint. Product Pi wiring, full S3 and reboot recovery remain open. TypeScript managed-worktree work is stopped. |
+| S3 ([#97](https://github.com/kortiene/switchyard/issues/97)) | S3-A1 adds explicit [worktree ownership/recovery](s3-workspace-ownership.md). S3-A2 adds [simulated effect receipts](s3-execution-receipts.md). S3-A3 adds a [Linux confinement feasibility probe](s3-linux-confinement.md). S3-A4 adds a non-default [confined Linux ExecutionEnv](s3-linux-execution-contract.md) with durable quiescence evidence. S3-A5 adds [supersession of an abandoned decision](s3-execution-supersede.md) after fresh quiescence and a workspace digest. FakeRuntime stays the product adapter. Track B includes the [bridge confinement harness](s3-bridge-confinement.md) and [model-endpoint egress](s3-model-egress.md), which stays off unless the host sets one endpoint. Bounded acceptance of the [composed Host/Pi/Linux evidence](s3-composed-acceptance.md) (#157 at `65a7ce7`) was recorded 2026-11-10 for that credential-free fixture only. Product Pi wiring, full S3 and reboot recovery remain open. TypeScript managed-worktree work is stopped. |
 | S4–S8 ([#98](https://github.com/kortiene/switchyard/issues/98)–[#102](https://github.com/kortiene/switchyard/issues/102)) | Planned. Live mission execution waits on S3 integration and confinement. |
 | Native Rust agent runtime | Accepted long-term target (2026-10-29). Not implemented. A published-package NO-GO does not select the TypeScript engine instead. |
 
