@@ -68,7 +68,8 @@ or call PiBridge directly. Planning observations/S4 are outside this slice.
 `execution-confinement` runs `pi_host_dispatch` and retains
 `pi-host-dispatch.log`; missing prerequisites fail without an unconfined fallback.
 The suite covers writes and process handles, cancellation, pause with an
-unverified workspace, protected-path denial, authority rejection, adapter
+unverified workspace, [operator-stop admission past a busy pending row](s3-pi-stop-admission.md),
+protected-path denial, authority rejection, adapter
 mismatch, receipt replay, and Host SIGKILL at bridge-live, pre-ACK, prepared-effect
 and receipt barriers, including process-start/result crash cases. Each boundary
 pins its outcome: bridge-live, pre-ACK, prepared non-release, and a persisted

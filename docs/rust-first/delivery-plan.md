@@ -255,3 +255,12 @@ enable Pi, carry provider credentials, or complete S3. At B6 delivery, composed
 acceptance remained; the bounded decision is recorded above.
 [#151's retention follow-up](s3-bridge-cgroup-retention.md) handles recorded
 obsolete cgroup leaves.
+
+### Confined operator-stop admission (tests only)
+
+[s3-pi-stop-admission.md](s3-pi-stop-admission.md) adds `pi_host_dispatch`
+coverage for Pause and Cancel while a busy or undelivered Continue is pending,
+including blocked-workspace defects and Host restart. The old note that
+`dispatch_stops` does not yet deliver Pi stops past a blocked workspace is
+covered on the confined path by those tests only. FakeRuntime remains the
+product default. This does not enable Pi in the CLI. #97 and #94 stay open.

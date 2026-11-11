@@ -15,6 +15,8 @@ use switchyard_core::{
 
 #[path = "pi_host_dispatch/composed.rs"]
 mod composed;
+#[path = "pi_host_dispatch/stop_admission.rs"]
+mod stop_admission;
 
 fn env_path(key: &str) -> PathBuf {
     std::env::var_os(key)
