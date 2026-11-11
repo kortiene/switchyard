@@ -485,6 +485,7 @@ fn validate(binding: &RuntimeBinding, fixture: &str) -> Result<()> {
             | "process-cancel"
             | "tools"
             | "s3-acceptance"
+            | "busy-once"
     ) || binding.generation == 0
         || binding.generation > 9_007_199_254_740_991
         || [

@@ -148,6 +148,8 @@ product CLI or Pi enablement, provider credentials or live-provider spend, a
 TLS or model client, S4–S8 implementation, or full M1 / issue-to-PR acceptance.
 Frozen `adw_sdlc/`, state v1, prompts and pins are unchanged. Reboot,
 power-loss or adversarial quiescence and other platforms are not claimed. #97
-stays open for product Pi wiring, including the Pi-path operator-stop admission
-test, under its own reviewed gate. #94's S3 slice box and all milestone
-completion-evidence boxes stay unchecked.
+stays open for product Pi wiring under its own reviewed gate. The confined
+operator-stop admission tests are recorded in
+[s3-pi-stop-admission.md](s3-pi-stop-admission.md); they do not enable Pi or
+close #97 or #94. #94's S3 slice box and all milestone completion-evidence
+boxes stay unchecked.

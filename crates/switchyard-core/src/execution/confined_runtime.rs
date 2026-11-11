@@ -28,6 +28,7 @@ impl ConfinedRuntime {
                 | "tools"
                 | "s3-acceptance"
                 | "ignore-abort"
+                | "busy-once"
         ) {
             return Err(Error::guard("unsupported credential-free Host fixture"));
         }
@@ -81,12 +82,15 @@ mod tests {
             policy: path(),
             model_endpoint: None,
         };
-        let runtime = ConfinedRuntime::new(config.clone(), "s3-acceptance").unwrap();
-        assert!(runtime.sessions.is_empty());
-        let saved = runtime.configuration();
-        assert_eq!(saved["fixture"], "s3-acceptance");
-        assert_eq!(saved["credentials"], "none");
-        assert_eq!(saved["network"], "denied");
+        for fixture in ["s3-acceptance", "busy-once"] {
+            let runtime = ConfinedRuntime::new(config.clone(), fixture).unwrap();
+            assert!(runtime.sessions.is_empty());
+            assert!(runtime.config.model_endpoint.is_none());
+            let saved = runtime.configuration();
+            assert_eq!(saved["fixture"], fixture);
+            assert_eq!(saved["credentials"], "none");
+            assert_eq!(saved["network"], "denied");
+        }
         for forbidden in ["live", "https://model.example/v1", "../repo/extension"] {
             assert!(ConfinedRuntime::new(config.clone(), forbidden).is_err());
         }
