@@ -26,11 +26,11 @@ impl Host {
         // forces the next call to see drivers added in between.
         let _filters = fs_workspace::FilterCacheScope::enter();
         self.store.assert_workspace_owner()?;
-        // A live confined writer must not stop the operator from reconciling
-        // and then admitting Pause/Cancel. Work dispatch still refuses that
-        // writer. FakeRuntime keeps the hard block so its CLI does not verify
-        // or admit over an unresolved linux effect.
-        if self.store.linux_execution_blocked(mission_id)? && !self.runtime.is_confined() {
+        // Preparation always refuses an unresolved Linux effect. Creating or
+        // re-verifying a worktree while a writer is live can fail non-transiently
+        // and quarantine the workspace. The recover path has a narrower
+        // exception that does not reach this function.
+        if self.store.linux_execution_blocked(mission_id)? {
             return Err(Error::ExecutionBlocked {
                 mission_id: mission_id.to_string(),
                 detail: "unresolved linux execution effects; workspace was not verified or reused"
@@ -156,6 +156,32 @@ impl Host {
             .view)
     }
 
+    /// True only when every blocking Linux row is an `exec_start` this host
+    /// is supervising in the current generation. Other blocked rows, including
+    /// uncertain and unsupervised ones, stay on the hard path.
+    fn recover_skips_verify_for_supervised_writer(&self, mission_id: &str) -> Result<bool> {
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        {
+            if !self.runtime.is_confined() {
+                return Ok(false);
+            }
+            self.confined_supervised_writers_only(mission_id)
+        }
+        #[cfg(not(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        )))]
+        {
+            let _ = (self, mission_id);
+            Ok(false)
+        }
+    }
+
     /// Reconcile a recorded workspace only. A mission with no reservation does
     /// not gain a workspace as a side effect of ordinary Host recovery.
     pub fn recover_workspace(&mut self, mission_id: &str) -> Result<Option<WorkspaceView>> {
@@ -164,6 +190,20 @@ impl Host {
         let Some(workspace) = self.store.load_workspace(&mission.attempt.id)? else {
             return Ok(None);
         };
+        // A writer this host is supervising is still changing the tree. Skip
+        // verify instead of marking the workspace uncertain, so Pause/Cancel
+        // can be admitted. Uncertain, abandoned, and unsupervised rows stay
+        // blocked. `prepare_workspace` does not use this exception.
+        if self.store.linux_execution_blocked(mission_id)? {
+            if self.recover_skips_verify_for_supervised_writer(mission_id)? {
+                return Ok(Some(workspace.view));
+            }
+            return Err(Error::ExecutionBlocked {
+                mission_id: mission_id.to_string(),
+                detail: "unresolved linux execution effects; workspace was not verified or reused"
+                    .into(),
+            });
+        }
         self.prepare_workspace(mission_id, &mission.attempt.id, Path::new(&workspace.root))
             .map(Some)
     }

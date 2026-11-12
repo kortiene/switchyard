@@ -1131,17 +1131,26 @@ impl Host {
         ))]
         if self.runtime.is_confined() {
             self.ensure_confined_session(mission_id)?;
+            // Settle an admitted stop before reconcile quarantines a still-running
+            // writer. Without a pending stop this does not run, so a killed host
+            // cannot dispatch the pending Continue in the same call.
+            if self.store.list_commands(mission_id)?.iter().any(|command| {
+                command.state == CommandState::Pending
+                    && matches!(command.kind, CommandKind::Pause | CommandKind::Cancel)
+            }) {
+                self.dispatch_stops(mission_id)?;
+            }
         }
         self.reconcile_execution(mission_id)?;
         if self.store.linux_execution_blocked(mission_id)? {
-            self.dispatch_stops(mission_id)?;
+            let delivered = self.dispatch_stops(mission_id)?;
             self.poll_runtime(mission_id)?;
-            // Confined stop delivery can prove a dead owner's writer empty and
-            // settle it inside the call above. Only then is the workspace safe
-            // to verify. FakeRuntime does not clear a delegated cgroup here, so
-            // it still returns the block and does not fall through.
-            let cleared =
-                self.runtime.is_confined() && !self.store.linux_execution_blocked(mission_id)?;
+            // Fall through only after this call delivered a stop and cleared
+            // the block. A block that clears with no stop stays an error, so
+            // work is not dispatched. FakeRuntime never takes this branch.
+            let cleared = self.runtime.is_confined()
+                && delivered > 0
+                && !self.store.linux_execution_blocked(mission_id)?;
             if !cleared {
                 return Err(Error::ExecutionBlocked {
                     mission_id: mission_id.to_string(),

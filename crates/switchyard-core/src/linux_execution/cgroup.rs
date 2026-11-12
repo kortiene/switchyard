@@ -383,6 +383,44 @@ mod tests {
     }
 
     #[test]
+    fn kill_and_prove_checks_identity_before_writing_cgroup_kill() {
+        let temporary = tempfile::tempdir().unwrap();
+        let leaf = temporary.path().join("reused");
+        std::fs::create_dir(&leaf).unwrap();
+        std::fs::write(leaf.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+        std::fs::write(leaf.join("cgroup.kill"), "untouched\n").unwrap();
+        let expected = super::identity_of(&leaf).unwrap();
+        let mut cases = Vec::new();
+        let mut inode = expected.clone();
+        inode.ino = inode.ino.wrapping_add(1);
+        cases.push(("inode", inode));
+        let mut device = expected.clone();
+        device.dev = device.dev.wrapping_add(1);
+        cases.push(("device", device));
+        let mut boot = expected.clone();
+        boot.boot_id = "another-boot".into();
+        cases.push(("boot", boot));
+        let mut missing = expected.clone();
+        missing.path = temporary.path().join("gone");
+        cases.push(("missing", missing));
+        for (label, changed) in cases {
+            let state =
+                super::kill_and_prove(&changed, std::time::Duration::from_millis(20)).unwrap();
+            assert!(!state.proven, "{label}");
+            assert!(
+                state.reason == "mismatched" || state.reason == "missing",
+                "{label}: {}",
+                state.reason
+            );
+            assert_eq!(
+                std::fs::read_to_string(leaf.join("cgroup.kill")).unwrap(),
+                "untouched\n",
+                "{label} wrote cgroup.kill"
+            );
+        }
+    }
+
+    #[test]
     fn leaf_name_uses_the_op_v1_hash_only() {
         let name = super::leaf_name("op-v1:0123456789abcdef0123456789abcdefaaaaaaaa").unwrap();
         assert_eq!(name, "sy-0123456789abcdef0123456789abcdef");

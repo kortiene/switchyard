@@ -452,22 +452,35 @@ fn cgroup_populated(path: &Path) -> u64 {
         })
 }
 
-fn heartbeat_advances(path: &Path) -> Vec<u8> {
-    let before = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+/// Gap between two observed heartbeat writes. The stop check waits twice this
+/// gap, so a 150ms guess is not what decides the process is frozen.
+fn heartbeat_advances(path: &Path) -> Duration {
     let deadline = Instant::now() + Duration::from_secs(2);
-    while fs::read(path).unwrap() == before {
+    let mut previous =
+        fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    while fs::read(path).unwrap() == previous {
         assert!(
             Instant::now() < deadline,
             "process heartbeat did not advance at {}",
             path.display()
         );
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(10));
     }
-    fs::read(path).unwrap()
+    let marked = Instant::now();
+    previous = fs::read(path).unwrap();
+    while fs::read(path).unwrap() == previous {
+        assert!(
+            Instant::now() < deadline,
+            "process heartbeat did not tick a second time at {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    marked.elapsed()
 }
 
-fn heartbeat_stays(path: &Path, frozen: &[u8]) {
-    std::thread::sleep(Duration::from_millis(150));
+fn heartbeat_stays(path: &Path, frozen: &[u8], interval: Duration) {
+    std::thread::sleep(interval.saturating_mul(2));
     assert_eq!(
         fs::read(path).unwrap(),
         frozen,
@@ -629,6 +642,7 @@ struct LiveStop {
     cgroup: PathBuf,
     receipts_before: Vec<(String, Option<String>)>,
     effect_ids_before: Vec<String>,
+    heartbeat_interval: Duration,
 }
 
 fn assert_live_hold_stopped(host: &Host, world: &World, expected: &LiveStop) {
@@ -704,7 +718,11 @@ fn assert_live_hold_stopped(host: &Host, world: &World, expected: &LiveStop) {
         "once\n"
     );
     let frozen = fs::read(world.workspace.join("process.heartbeat")).unwrap();
-    heartbeat_stays(&world.workspace.join("process.heartbeat"), &frozen);
+    heartbeat_stays(
+        &world.workspace.join("process.heartbeat"),
+        &frozen,
+        expected.heartbeat_interval,
+    );
     assert_one_cancellation(
         &expected.receipts_before,
         &world.receipts(),
@@ -772,7 +790,7 @@ fn host_pending_continue_cannot_block_pause_or_cancel_during_live_process_hold()
             cgroup_populated(&cgroup) > 0,
             "stop admission killed the writer"
         );
-        heartbeat_advances(&world.workspace.join("process.heartbeat"));
+        let heartbeat_interval = heartbeat_advances(&world.workspace.join("process.heartbeat"));
         assert_eq!(host.dispatch_stops(&world.mission).unwrap(), 1);
         assert_live_hold_stopped(
             &host,
@@ -784,6 +802,7 @@ fn host_pending_continue_cannot_block_pause_or_cancel_during_live_process_hold()
                 cgroup,
                 receipts_before,
                 effect_ids_before: ids_before,
+                heartbeat_interval,
             },
         );
         assert_eq!(command_stored(&world.db(), "approve_plan"), approved);
@@ -810,7 +829,8 @@ fn host_live_process_hold_stop_drop_worker() {
         return;
     };
     let mission = std::env::var("SW_HOST_MISSION").unwrap();
-    let cancel = std::env::var("SW_HOST_CANCEL").unwrap() == "1";
+    let admit_stop = std::env::var("SW_HOST_ADMIT_STOP").ok().as_deref() != Some("0");
+    let cancel = std::env::var("SW_HOST_CANCEL").unwrap_or_default() == "1";
     let mut host = Host::open_confined_pi(
         &root.join("mission.sqlite"),
         super::bridge(&root.join("bridge")),
@@ -828,16 +848,18 @@ fn host_live_process_hold_stop_drop_worker() {
     );
     let continue_id = admit_undelivered_continue(&mut host, &mission);
     assert!(cgroup_populated(&cgroup) > 0);
-    host.recover_workspace(&mission).unwrap();
-    let (body, kind, _, _) = stop_case(cancel);
-    admit(&mut host, &mission, body);
-    let admitted = host.snapshot(&mission).unwrap();
-    assert_eq!(admitted.phase, admitted_phase(cancel));
-    let value = admitted.to_json();
-    assert_ne!(value["piHost"]["lifecycle"]["termination"]["proven"], true);
-    assert_eq!(row(&value, kind)["state"], "pending");
-    assert!(row(&value, kind)["receiptId"].is_null());
-    assert_eq!(row(&value, "continue")["requestId"], continue_id);
+    if admit_stop {
+        host.recover_workspace(&mission).unwrap();
+        let (body, kind, _, _) = stop_case(cancel);
+        admit(&mut host, &mission, body);
+        let admitted = host.snapshot(&mission).unwrap();
+        assert_eq!(admitted.phase, admitted_phase(cancel));
+        let value = admitted.to_json();
+        assert_ne!(value["piHost"]["lifecycle"]["termination"]["proven"], true);
+        assert_eq!(row(&value, kind)["state"], "pending");
+        assert!(row(&value, kind)["receiptId"].is_null());
+        assert_eq!(row(&value, "continue")["requestId"], continue_id);
+    }
     assert_eq!(
         command_stored(&root.join("mission.sqlite"), "continue").0,
         "pending"
@@ -943,7 +965,7 @@ fn host_live_process_hold_stop_stops_descendants_once_after_host_kill() {
             cgroup_populated(&cgroup) > 0,
             "host death stopped the writer before recovery"
         );
-        heartbeat_advances(&world.workspace.join("process.heartbeat"));
+        let heartbeat_interval = heartbeat_advances(&world.workspace.join("process.heartbeat"));
         let receipts_before = world.receipts();
         assert!(receipts_before.iter().all(|(_, receipt)| receipt.is_none()));
         let mut host = world.reopen();
@@ -979,6 +1001,7 @@ fn host_live_process_hold_stop_stops_descendants_once_after_host_kill() {
                 cgroup: cgroup.clone(),
                 receipts_before,
                 effect_ids_before: ids_before,
+                heartbeat_interval,
             },
         );
         let (_, kind, _, _) = stop_case(cancel);
@@ -1000,4 +1023,211 @@ fn host_live_process_hold_stop_stops_descendants_once_after_host_kill() {
         crash.cgroup = None;
         crash.supervisor = None;
     }
+}
+
+#[test]
+fn prepare_workspace_refuses_a_live_writer_and_uncertain_rows_stay_blocked() {
+    let (world, mut host) = World::new("process-hold");
+    assert_eq!(host.dispatch_pending(&world.mission).unwrap(), 1);
+    let (operation, _) =
+        wait_for_live_writer(&mut host, &world.mission, &world.workspace, &world.db());
+    let attempt = host.snapshot(&world.mission).unwrap().attempt_id;
+    let root: String = rusqlite::Connection::open_with_flags(
+        world.db(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row("SELECT root FROM workspaces", [], |row| row.get(0))
+    .unwrap();
+    let before = workspace_json(&host, &world.mission);
+    let error = host
+        .prepare_workspace(&world.mission, &attempt, Path::new(&root))
+        .unwrap_err();
+    assert_eq!(error.category(), "execution_blocked", "{error}");
+    assert_eq!(workspace_json(&host, &world.mission), before);
+    // Recover of a writer this host supervises does not verify the moving tree.
+    assert!(host.recover_workspace(&world.mission).unwrap().is_some());
+    assert_eq!(workspace_json(&host, &world.mission), before);
+
+    rusqlite::Connection::open(world.db())
+        .unwrap()
+        .execute(
+            "UPDATE linux_execution_effects SET state='uncertain' WHERE operation_id=?1",
+            [&operation],
+        )
+        .unwrap();
+    let error = host.recover_workspace(&world.mission).unwrap_err();
+    assert_eq!(error.category(), "execution_blocked", "{error}");
+    assert_eq!(
+        workspace_json(&host, &world.mission),
+        before,
+        "an uncertain row was verified or quarantined"
+    );
+}
+
+fn insert_entered_start(world: &World, host: &Host, cgroup: &Path, dev: i64, ino: i64, boot: &str) {
+    let snap = host.snapshot(&world.mission).unwrap();
+    let operation = format!(
+        "op-v1:{:064x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let request = serde_json::json!({
+        "operation": {"method": "exec_start", "argv": ["/bin/true"]},
+        "scope": "linux.exec.start.v1",
+        "deadlineMs": 1,
+        "toolTaskId": "inserted",
+        "effectKey": "inserted-start"
+    });
+    rusqlite::Connection::open(world.db())
+        .unwrap()
+        .execute(
+            "INSERT INTO linux_execution_effects(
+                operation_id, mission_id, attempt_id, session_id, payload_hash, request_json,
+                started_generation, state, cgroup_path, cgroup_dev, cgroup_ino, boot_id,
+                entered_at, created_at
+             ) VALUES (?1,?2,?3,?4,'sha256:inserted',?5,?6,'entered',?7,?8,?9,?10,1,?11)",
+            rusqlite::params![
+                operation,
+                snap.mission_id,
+                snap.attempt_id,
+                snap.session_id,
+                request.to_string(),
+                host.generation(),
+                cgroup.to_str().unwrap(),
+                dev,
+                ino,
+                boot,
+                1_i64
+            ],
+        )
+        .unwrap();
+}
+
+#[test]
+fn missing_cgroup_entered_row_is_quarantined_without_refusing_the_stop() {
+    let (world, mut host) = World::new("answer");
+    assert_eq!(host.dispatch_pending(&world.mission).unwrap(), 1);
+    until(&mut host, &world.mission, |value| {
+        value["piHost"]["observation"]["runtimeIdle"] == true
+    });
+    let missing = std::env::var("SWITCHYARD_CGROUP_ROOT").unwrap();
+    let missing = PathBuf::from(missing).join("missing-entered-leaf");
+    assert!(!missing.exists());
+    insert_entered_start(&world, &host, &missing, 1, 1, "missing-boot");
+    admit(&mut host, &world.mission, CommandBody::Pause);
+    host.dispatch_stops(&world.mission).unwrap();
+    let snap = host.snapshot(&world.mission).unwrap();
+    assert_eq!(snap.phase, Phase::NeedsAttention);
+    assert!(snap.execution_blocked);
+    let value = snap.to_json();
+    let row = value["linuxExecutionEffects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|effect| effect["method"] == "exec_start")
+        .unwrap();
+    assert_eq!(row["state"], "uncertain");
+    assert_eq!(row["receiptRetained"], false);
+    assert!(
+        world
+            .receipts()
+            .iter()
+            .all(|(_, receipt)| receipt.is_none())
+    );
+    assert_eq!(row_state(&value, "pause"), "acknowledged");
+    assert!(
+        value["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|command| { command["kind"] != "confirm_stopped" })
+    );
+}
+
+fn row_state(value: &Value, kind: &str) -> String {
+    row(value, kind)["state"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn host_kill_without_a_stop_does_not_dispatch_the_pending_continue() {
+    let (world, host) = World::new("process-hold");
+    drop(host);
+    let mut worker = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "stop_admission::host_live_process_hold_stop_drop_worker",
+            "--nocapture",
+        ])
+        .env("SW_HOST_ROOT", world.dir.path())
+        .env("SW_HOST_MISSION", &world.mission)
+        .env("SW_HOST_ADMIT_STOP", "0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let stdout = worker.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if tx.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut crash = HostCrash {
+        child: Some(worker),
+        cgroup: None,
+        supervisor: None,
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(line) if line.contains("AT-live-stop") => break,
+            Ok(_) => {}
+            Err(error) => panic!("missing live continue barrier: {error}"),
+        }
+    }
+    let info: Value =
+        serde_json::from_slice(&fs::read(world.dir.path().join("live-stop.json")).unwrap())
+            .unwrap();
+    let continue_id = info["continue"].as_str().unwrap();
+    let cgroup = PathBuf::from(info["cgroup"].as_str().unwrap());
+    let supervisor = u32::try_from(info["supervisor"].as_u64().unwrap()).unwrap();
+    crash.cgroup = Some(cgroup.clone());
+    crash.supervisor = Some(supervisor);
+    signal_process(supervisor, "-STOP");
+    let child = crash.child.as_mut().unwrap();
+    child.kill().unwrap();
+    assert_eq!(child.wait().unwrap().signal(), Some(9));
+    crash.child = None;
+    assert!(cgroup_populated(&cgroup) > 0);
+    let receipts_before = world.receipts();
+    let mut host = world.reopen();
+    let error = host.recover(&world.mission).unwrap_err();
+    assert_eq!(error.category(), "execution_blocked", "{error}");
+    let value = host.snapshot(&world.mission).unwrap().to_json();
+    assert_eq!(row(&value, "continue")["state"], "pending");
+    assert_eq!(row(&value, "continue")["requestId"], continue_id);
+    assert!(row(&value, "continue")["receiptId"].is_null());
+    assert!(value["commands"].as_array().unwrap().iter().all(|command| {
+        command["kind"] != "confirm_stopped" && command["kind"] != "confirm_cancelled"
+    }));
+    assert_eq!(
+        fs::read_to_string(world.workspace.join("process.marker")).unwrap(),
+        "once\n"
+    );
+    assert_eq!(world.receipts(), receipts_before);
+    assert!(
+        value["linuxExecutionEffects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|effect| { effect["state"] != "completed" && effect["receiptRetained"] == false })
+    );
+    world.origin();
+    crash.cgroup = None;
+    crash.supervisor = None;
 }

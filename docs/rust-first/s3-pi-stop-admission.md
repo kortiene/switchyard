@@ -60,13 +60,17 @@ fixture allowlists are unchanged.
 
 The turn is running, the heartbeat advances, and the writer cgroup is
 populated before the stop. The ledger row is still `unproven` at that point.
-Confined workspace reconcile is allowed while that writer is live, which is
-what lets the CLI admit Pause or Cancel; FakeRuntime still returns
-`execution_blocked` from that check and does not admit over the effect. Work
-dispatch still refuses the writer. The Continue follows the non-stop CLI
-order and stays pending with no receipt: confined dispatch returns
-`unresolved effects block confined dispatch` before any bridge frame. It is
-not a protocol `busy` refusal, and it is not acknowledged or resent.
+`prepare_workspace` still returns `execution_blocked` for every unresolved
+Linux row, including a live writer, so it does not create or re-verify a
+worktree over that tree. `recover_workspace` skips `verify` only when every
+blocking row is an `exec_start` this generation is still supervising. It
+returns the recorded workspace and does not mark it ready again. An uncertain
+or unsupervised row is not bypassed. FakeRuntime has no supervised writer, so
+it still returns `execution_blocked`. Work dispatch still refuses the writer.
+The Continue follows the non-stop CLI order and stays pending with no receipt:
+confined dispatch returns `unresolved effects block confined dispatch` before
+any bridge frame. It is not a protocol `busy` refusal, and it is not
+acknowledged or resent.
 
 Pause and Cancel then follow reconcile, admit, `dispatch_stops`. The stop
 keeps one abort receipt. The Continue is superseded. `ConfirmStopped` /
@@ -86,12 +90,22 @@ is superseded rather than resumed. Pause/Cancel is recorded only after the
 recovered bridge termination is proven. A second `recover` keeps the same
 abort receipt and the same cancelled Linux receipt.
 
-A writer left by that dead owner is not in the new host's active set, and
-`finish_linux_identity` rejects its previous `started_generation`. Stop
-delivery proves the leaf and retains one cancelled receipt; the reconcile
-inside that stop completes it without launching the command again. If that
-clears the Linux block, confined `recover` continues and returns the
-snapshot. FakeRuntime still returns `execution_blocked` from the same check.
+A writer left `entered` or `running` by that dead owner is not in the new
+host's active set, and `finish_linux_identity` rejects its previous
+`started_generation`. `recover` delivers the admitted stop before reconcile
+can quarantine that row. Stop delivery proves the recorded leaf and retains
+one cancelled receipt; the reconcile inside that stop completes it without
+launching the command again. `kill_and_prove` checks device, inode, and boot
+id before it writes `cgroup.kill`, so a reused path is not killed. An
+uncertain row is left alone. A missing or mismatched cgroup is quarantined
+and the mission goes to `needs_attention` instead of failing the stop with a
+guard error. The heartbeat check waits two observed write intervals.
+
+Confined `recover` continues into workspace reconcile and work dispatch only
+when that call delivered a stop and the Linux block is gone. A killed host
+with a pending Continue and no admitted stop still returns `execution_blocked`
+and does not acknowledge or resend the Continue. FakeRuntime still returns
+`execution_blocked` from the same check.
 
 ## Issue wording
 

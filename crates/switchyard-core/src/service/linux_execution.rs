@@ -221,6 +221,36 @@ mod os {
                 .is_some_and(|s| s.active.contains_key(id))
         }
 
+        /// Every blocking row is a writer this generation still supervises.
+        /// An uncertain or unsupervised row makes this false.
+        #[cfg(feature = "pi-contract")]
+        pub(in crate::service) fn confined_supervised_writers_only(
+            &self,
+            mission_id: &str,
+        ) -> Result<bool> {
+            let views = self.store.linux_views(mission_id)?;
+            let blocking: Vec<_> = views
+                .iter()
+                .filter(|view| {
+                    !view.superseded
+                        && matches!(
+                            view.state.as_str(),
+                            "prepared" | "entered" | "running" | "uncertain"
+                        )
+                })
+                .collect();
+            if blocking.is_empty() {
+                return Ok(false);
+            }
+            Ok(blocking.iter().all(|view| {
+                view.method == "exec_start"
+                    && view.entered
+                    && matches!(view.state.as_str(), "entered" | "running")
+                    && view.started_generation == self.generation()
+                    && self.linux_operation_live(&view.operation_id)
+            }))
+        }
+
         pub fn execute_linux_operation(
             &mut self,
             request: &LinuxExecutionRequest,
@@ -473,11 +503,14 @@ mod os {
         fn settle_unsupervised_writer(&mut self, mission_id: &str) -> Result<()> {
             let views = self.store.linux_views(mission_id)?;
             for view in views {
+                // Uncertain rows were already quarantined. Killing them again
+                // during stop delivery would treat a previous owner's orphan as
+                // a fresh cancellation. Only entered or running rows are settled.
                 if view.method != "exec_start"
                     || view.receipt_retained
                     || view.superseded
                     || !view.entered
-                    || !matches!(view.state.as_str(), "entered" | "running" | "uncertain")
+                    || !matches!(view.state.as_str(), "entered" | "running")
                 {
                     continue;
                 }
@@ -500,9 +533,12 @@ mod os {
                 }
                 let proof = self.prove_effect(&effect)?;
                 if proof["proven"] != true {
-                    return Err(Error::guard(
-                        "confined stop could not prove a workspace writer cgroup is empty",
-                    ));
+                    // Missing or mismatched identity never reaches cgroup.kill.
+                    // Quarantine instead of failing Pause/Cancel permanently.
+                    self.store.quarantine_linux(&view.operation_id)?;
+                    let mission = self.store.load_mission(mission_id)?;
+                    self.uncertainty(&mission, crate::domain::AttentionReason::ExecutionUncertain)?;
+                    continue;
                 }
                 let receipt = cancelled_writer_receipt(&view.operation_id, &effect.payload_hash);
                 self.store
