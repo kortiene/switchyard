@@ -173,6 +173,18 @@ mod os {
         }
     }
 
+    #[cfg(feature = "pi-contract")]
+    fn cancelled_writer_receipt(id: &str, payload_hash: &str) -> serde_json::Value {
+        json!({
+            "operationId": id,
+            "payloadHash": payload_hash,
+            "simulated": false,
+            "backend": crate::linux_execution::BUBBLEWRAP_BACKEND,
+            "disposition": "cancelled",
+            "result": {"disposition": "cancelled"},
+        })
+    }
+
     impl LinuxSession {
         fn new(config: LinuxExecutionConfig) -> Self {
             Self {
@@ -207,6 +219,36 @@ mod os {
             self.linux
                 .as_ref()
                 .is_some_and(|s| s.active.contains_key(id))
+        }
+
+        /// Every blocking row is a writer this generation still supervises.
+        /// An uncertain or unsupervised row makes this false.
+        #[cfg(feature = "pi-contract")]
+        pub(in crate::service) fn confined_supervised_writers_only(
+            &self,
+            mission_id: &str,
+        ) -> Result<bool> {
+            let views = self.store.linux_views(mission_id)?;
+            let blocking: Vec<_> = views
+                .iter()
+                .filter(|view| {
+                    !view.superseded
+                        && matches!(
+                            view.state.as_str(),
+                            "prepared" | "entered" | "running" | "uncertain"
+                        )
+                })
+                .collect();
+            if blocking.is_empty() {
+                return Ok(false);
+            }
+            Ok(blocking.iter().all(|view| {
+                view.method == "exec_start"
+                    && view.entered
+                    && matches!(view.state.as_str(), "entered" | "running")
+                    && view.started_generation == self.generation()
+                    && self.linux_operation_live(&view.operation_id)
+            }))
         }
 
         pub fn execute_linux_operation(
@@ -440,10 +482,80 @@ mod os {
                     && effect.entered_at.is_some()
                     && effect.receipt_json.is_none()
                 {
-                    let receipt = json!({"operationId":id,"payloadHash":effect.payload_hash,
-                        "simulated":false,"backend":crate::linux_execution::BUBBLEWRAP_BACKEND,
-                        "disposition":"cancelled","result":{"disposition":"cancelled"}});
+                    let receipt = cancelled_writer_receipt(&id, &effect.payload_hash);
                     self.complete_start_cancelled(&id, &effect.payload_hash, &receipt, &proof)?;
+                }
+            }
+            // A host killed between admitting a stop and delivering it is not
+            // in `active`. The writer can still be populated. Prove that leaf
+            // here, before confirmation, so the pending Continue is not resumed
+            // and Pause/Cancel is not confirmed over a live descendant.
+            self.settle_unsupervised_writer(mission_id)?;
+            Ok(())
+        }
+
+        /// Record one cancellation for an entered `exec_start` this host is not
+        /// supervising. The current generation can settle immediately. A previous
+        /// owner's `started_generation` is rejected by `finish_linux_identity`;
+        /// the receipt is retained so the reconcile that follows this stop can
+        /// complete it without launching the command again.
+        #[cfg(feature = "pi-contract")]
+        fn settle_unsupervised_writer(&mut self, mission_id: &str) -> Result<()> {
+            let views = self.store.linux_views(mission_id)?;
+            for view in views {
+                // Uncertain rows were already quarantined. Killing them again
+                // during stop delivery would treat a previous owner's orphan as
+                // a fresh cancellation. Only entered or running rows are settled.
+                if view.method != "exec_start"
+                    || view.receipt_retained
+                    || view.superseded
+                    || !view.entered
+                    || !matches!(view.state.as_str(), "entered" | "running")
+                {
+                    continue;
+                }
+                if self
+                    .linux
+                    .as_ref()
+                    .is_some_and(|session| session.active.contains_key(&view.operation_id))
+                {
+                    continue;
+                }
+                let effect = self
+                    .store
+                    .linux_effect(&view.operation_id)?
+                    .ok_or(Error::NotFound)?;
+                if effect.mission_id != mission_id
+                    || effect.entered_at.is_none()
+                    || effect.receipt_json.is_some()
+                {
+                    continue;
+                }
+                let proof = self.prove_effect(&effect)?;
+                if proof["proven"] != true {
+                    // Missing or mismatched identity never reaches cgroup.kill.
+                    // Quarantine instead of failing Pause/Cancel permanently.
+                    self.store.quarantine_linux(&view.operation_id)?;
+                    let mission = self.store.load_mission(mission_id)?;
+                    self.uncertainty(&mission, crate::domain::AttentionReason::ExecutionUncertain)?;
+                    continue;
+                }
+                let receipt = cancelled_writer_receipt(&view.operation_id, &effect.payload_hash);
+                self.store
+                    .save_linux_quiescence(&view.operation_id, &proof)?;
+                if effect.started_generation == self.generation() {
+                    self.complete_start_cancelled(
+                        &view.operation_id,
+                        &effect.payload_hash,
+                        &receipt,
+                        &proof,
+                    )?;
+                } else {
+                    self.store.remember_linux_receipt(
+                        &view.operation_id,
+                        &effect.payload_hash,
+                        &receipt,
+                    )?;
                 }
             }
             Ok(())
