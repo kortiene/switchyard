@@ -26,7 +26,11 @@ impl Host {
         // forces the next call to see drivers added in between.
         let _filters = fs_workspace::FilterCacheScope::enter();
         self.store.assert_workspace_owner()?;
-        if self.store.linux_execution_blocked(mission_id)? {
+        // A live confined writer must not stop the operator from reconciling
+        // and then admitting Pause/Cancel. Work dispatch still refuses that
+        // writer. FakeRuntime keeps the hard block so its CLI does not verify
+        // or admit over an unresolved linux effect.
+        if self.store.linux_execution_blocked(mission_id)? && !self.runtime.is_confined() {
             return Err(Error::ExecutionBlocked {
                 mission_id: mission_id.to_string(),
                 detail: "unresolved linux execution effects; workspace was not verified or reused"

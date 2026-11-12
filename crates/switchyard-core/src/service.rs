@@ -1136,11 +1136,20 @@ impl Host {
         if self.store.linux_execution_blocked(mission_id)? {
             self.dispatch_stops(mission_id)?;
             self.poll_runtime(mission_id)?;
-            return Err(Error::ExecutionBlocked {
-                mission_id: mission_id.to_string(),
-                detail: "unresolved linux execution effects; workspace was not verified or reused"
-                    .into(),
-            });
+            // Confined stop delivery can prove a dead owner's writer empty and
+            // settle it inside the call above. Only then is the workspace safe
+            // to verify. FakeRuntime does not clear a delegated cgroup here, so
+            // it still returns the block and does not fall through.
+            let cleared =
+                self.runtime.is_confined() && !self.store.linux_execution_blocked(mission_id)?;
+            if !cleared {
+                return Err(Error::ExecutionBlocked {
+                    mission_id: mission_id.to_string(),
+                    detail:
+                        "unresolved linux execution effects; workspace was not verified or reused"
+                            .into(),
+                });
+            }
         }
         let workspace_error = match self.recover_workspace(mission_id) {
             Ok(_) => None,
