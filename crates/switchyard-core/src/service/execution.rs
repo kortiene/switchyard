@@ -10,7 +10,8 @@ impl Host {
         self.store.assert_workspace_owner()?;
         // A confined Host may own a live, supervised Linux process. Its
         // reconciliation below distinguishes that from an abandoned effect.
-        let blocked = if self.runtime.is_confined() {
+        let ledger = self.runtime.linux_ledger();
+        let blocked = if ledger.supervises_live_effects {
             self.store.simulated_execution_blocked(mission_id)?
         } else {
             self.store.execution_blocked(mission_id)?
@@ -20,8 +21,7 @@ impl Host {
             let mission = self.store.load_mission(mission_id)?;
             // Preserve an admitted stop while retaining every execution block.
             // A delivered abort cannot authorize ConfirmStopped/ConfirmCancelled.
-            let stopping_fake = (matches!(self.runtime, RuntimeAdapter::Fake(_))
-                || self.runtime.is_confined())
+            let stopping_fake = ledger.preserves_admitted_stop
                 && matches!(mission.phase, Phase::Pausing | Phase::Cancelling);
             if !mission.phase.is_terminal() && !stopping_fake {
                 self.uncertainty(&mission, AttentionReason::ExecutionUncertain)?;

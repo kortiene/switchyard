@@ -35,6 +35,14 @@ fn bridge(root: &Path) -> ConfinedPiConfig {
         model_endpoint: None,
     }
 }
+fn open_confined(db: &Path, config: ConfinedPiConfig, fixture: &str) -> Host {
+    let linux = linux(None);
+    if fixture == "busy-once" {
+        Host::open_confined_test_fixture(db, config, linux, fixture).unwrap()
+    } else {
+        Host::open_confined_pi(db, config, linux, fixture).unwrap()
+    }
+}
 fn linux(stage: Option<&str>) -> LinuxExecutionConfig {
     LinuxExecutionConfig {
         cgroup_root: env_path("SWITCHYARD_CGROUP_ROOT"),
@@ -88,7 +96,7 @@ impl World {
         let db = dir.path().join("mission.sqlite");
         let mut config = bridge(&root);
         configure(dir.path(), &mut config);
-        let mut host = Host::open_confined_pi(&db, config, linux(None), fixture).unwrap();
+        let mut host = open_confined(&db, config, fixture);
         let m = host
             .create_mission(CreateMission {
                 repo,
@@ -137,13 +145,11 @@ impl World {
         self.dir.path().join("mission.sqlite")
     }
     fn reopen(&self) -> Host {
-        Host::open_confined_pi(
+        open_confined(
             &self.db(),
             bridge(&self.dir.path().join("bridge")),
-            linux(None),
             &self.fixture,
         )
-        .unwrap()
     }
     fn receipts(&self) -> Vec<(String, Option<String>)> {
         let conn = rusqlite::Connection::open_with_flags(

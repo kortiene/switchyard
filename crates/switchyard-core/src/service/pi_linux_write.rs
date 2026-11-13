@@ -74,9 +74,7 @@ impl Host {
             }
             // Only the fake harness and explicit Host-owned confined adapter
             // may create Linux effects. The unconfined Pi probe stays denied.
-            if self.linux.is_none()
-                || (self.runtime.fake_mut().is_none() && !self.runtime.is_confined())
-            {
+            if self.linux.is_none() || !self.runtime.linux_ledger().admits_effects {
                 return Ok(PiEffectOutcome::Rejected);
             }
             // This check precedes entry into the backend, so semantic refusal
