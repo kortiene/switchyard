@@ -33,6 +33,15 @@ jobs:
           cd runtime/pi-source
           node build.mjs
           npm ci
+      - name: Install the confined runtime outside the checkout
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d "${RUNNER_TEMP}/pi-runtime.XXXXXX")"
+          chmod 0700 "$root"
+          cp -a runtime/pi-source/. "$root/"
+          find "$root" -xdev \( -type d -o -type f \) -exec chmod a-s,g-w,o-w {} +
+          chmod 0700 "$root"
+          echo "SWITCHYARD_PI_RUNTIME=$(readlink -f "$root")" >> "$GITHUB_ENV"
       - name: Install the reviewed backend and per-binary userns permission
         run: |
           sudo apt-get update

@@ -195,6 +195,7 @@ exec '{launcher}' "${{args[@]}}"
     let config = ConfinedPiConfig {
         root: root.into(),
         cgroup_root: env_path("SWITCHYARD_CGROUP_ROOT"),
+        runtime: env_path("SWITCHYARD_PI_RUNTIME"),
         node: env_path("SWITCHYARD_PI_NODE"),
         bubblewrap: env_path("SWITCHYARD_BWRAP"),
         launcher: wrapper,

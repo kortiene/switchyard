@@ -8,11 +8,31 @@ cd "$(dirname "$0")/.."
 [[ "$(dpkg-query -W -f='${Version}' bubblewrap)" == 0.9.0-1ubuntu0.3 ]]
 [[ "$(node --version)" == v22.23.4 ]]
 [[ "$(/usr/bin/prlimit --version)" == 'prlimit from util-linux 2.39.3' ]]
+# The confined suites mount this private copy, not the checkout path compiled
+# into an older binary. The workflow installs it; a local run creates it here.
+if [[ -z "${SWITCHYARD_PI_RUNTIME:-}" ]]; then
+  root="$(mktemp -d "${RUNNER_TEMP:?set RUNNER_TEMP}/pi-runtime.XXXXXX")"
+  chmod 0700 "$root"
+  cp -a runtime/pi-source/. "$root/"
+  find "$root" -xdev \( -type d -o -type f \) -exec chmod a-s,g-w,o-w {} +
+  chmod 0700 "$root"
+  SWITCHYARD_PI_RUNTIME="$(readlink -f "$root")"
+fi
+export SWITCHYARD_PI_RUNTIME
+[[ "$SWITCHYARD_PI_RUNTIME" = /* && ! -L "$SWITCHYARD_PI_RUNTIME" ]]
+[[ "$(stat -c %a "$SWITCHYARD_PI_RUNTIME")" == 700 ]]
+checkout="$(readlink -f runtime/pi-source)"
+[[ "$SWITCHYARD_PI_RUNTIME" != "$checkout" && "$SWITCHYARD_PI_RUNTIME" != "$checkout"/* ]]
+repo="$(readlink -f "$PWD")"
+[[ "$SWITCHYARD_PI_RUNTIME" != "$repo" && "$SWITCHYARD_PI_RUNTIME" != "$repo"/* ]]
 backend="${SWITCHYARD_BWRAP:-/usr/bin/bwrap}"
 [[ "$backend" = /* && -x "$backend" && ! -u "$backend" && ! -g "$backend" ]]
 [[ "$("$backend" --version)" == 'bubblewrap 0.9.0' ]]
 cmp /usr/bin/bwrap "$backend"
 mkdir -p target/bridge-policy "${SWITCHYARD_CONFINEMENT_EVIDENCE:?set evidence directory}"
+node scripts/runtime-root-digest.mjs "$SWITCHYARD_PI_RUNTIME" > target/bridge-policy/runtime-root-digest.txt
+runtime_digest="$(tr -d '\n' < target/bridge-policy/runtime-root-digest.txt)"
+[[ "$runtime_digest" == sha256:* ]]
 # Never let a filtered/failed rerun reuse a preceding composed report.
 rm -f "$SWITCHYARD_CONFINEMENT_EVIDENCE/s3-composed-acceptance.json" "$SWITCHYARD_CONFINEMENT_EVIDENCE/s3-composed-evidence.json"
 cc -Wall -Wextra -Werror -O2 -shared -fPIC runtime/pi-source/confinement/lockdown.c -o target/bridge-policy/lockdown.so
@@ -50,6 +70,7 @@ export SWITCHYARD_BRIDGE_POLICY="$PWD/target/bridge-policy/lockdown.so"
   done
   sha256sum /lib64/ld-linux-x86-64.so.2
   cat runtime/pi-source/.artifacts/provenance.json
+  printf 'runtime-root %s\nruntime-root-digest %s\n' "$SWITCHYARD_PI_RUNTIME" "$runtime_digest"
 } > "$SWITCHYARD_CONFINEMENT_EVIDENCE/bridge-environment.txt"
 cargo fmt --all -- --check
 cargo clippy -p switchyard-confinement-probe --all-targets --features bridge-confinement --locked -- -D warnings

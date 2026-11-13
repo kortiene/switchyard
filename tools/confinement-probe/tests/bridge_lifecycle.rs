@@ -28,6 +28,7 @@ fn config(root: &Path) -> ConfinedPiConfig {
     ConfinedPiConfig {
         root: root.into(),
         cgroup_root: path("SWITCHYARD_CGROUP_ROOT"),
+        runtime: path("SWITCHYARD_PI_RUNTIME"),
         node: path("SWITCHYARD_PI_NODE"),
         bubblewrap: path("SWITCHYARD_BWRAP"),
         launcher: path("SWITCHYARD_BRIDGE_LAUNCHER"),
