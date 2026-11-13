@@ -145,7 +145,7 @@ These are bounded engineering choices, not reasons to reopen the agreed architec
 - S3: one Linux confinement backend proven on ubuntu-24.04, bridge/agent mount layout, process-tree supervision and egress/resource policy.
 - S5: verifier-visible workspace manifest, snapshot/freeze mechanism, completeness limits and artifact retention.
 - S6: commit materialization/exclusion semantics, branch identity, target/base drift handling and GitHub credential setup.
-- S7: minimal local web stack and local-session/origin protections.
+- S7: resolved 2026-11-13 as a native Rust UI with no HTTP surface in M1; see the [decision register](../../wiki/decisions/invariants.md). The operator write path (CLI with a persisted `--command-id`, after S4) remains open in [#171](https://github.com/kortiene/switchyard/issues/171).
 
 Record each decision with its owning implementation PR and tests. Do not let an unresolved boundary silently fall back to unconfined execution or automatic approval.
 
