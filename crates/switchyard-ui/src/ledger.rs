@@ -134,7 +134,14 @@ impl MissionCard {
             reconcile_only: s.reconcile_only,
             quarantined: s.quarantined.len(),
             pending_commands: commands(&s.pending_commands),
-            commands: commands(&s.commands),
+            commands: {
+                // The ledger returns admission order (`ORDER BY seq, id`); the
+                // dashboard shows newest first, so `last` and the panel head
+                // mean what they say.
+                let mut rows = commands(&s.commands);
+                rows.reverse();
+                rows
+            },
             workspace_state: s.workspace.as_ref().map(|w| w.state.clone()),
             workspace_path: s.workspace.as_ref().map(|w| w.path.clone()),
             delivery_state: s.delivery.as_ref().map(|d| d.publication_state.clone()),
@@ -174,8 +181,12 @@ impl MissionCard {
     }
 
     /// `(completed, total)` along [`HAPPY_PATH`], or `None` when the phase is
-    /// off the forward path and the meter would be a lie.
+    /// off the forward path and the meter would be a lie. A published mission
+    /// counts as complete, not one short of it.
     pub fn progress(&self) -> Option<(usize, usize)> {
+        if self.phase == MissionPhase::Published {
+            return Some((HAPPY_PATH.len(), HAPPY_PATH.len()));
+        }
         HAPPY_PATH
             .iter()
             .position(|p| *p == self.phase)
@@ -273,17 +284,55 @@ impl Ledger {
             });
         }
 
-        for command in &card.pending_commands {
+        if !card.pending_commands.is_empty() {
+            // Pending commands are already admitted and waiting for dispatch.
+            // Echoing a fresh `mission command --kind <same>` would admit a
+            // duplicate; the honest action is `recover`, which redelivers them.
             out.push(CliEcho {
-                label: command.kind.clone(),
+                label: "recover".to_string(),
+                command: format!("switchyard mission recover --db {db} --mission {mission}"),
+                mutates: true,
+                note: Some(
+                    "takes the owner lock and redelivers the pending commands. They are \
+                     already admitted; re-admitting them would duplicate."
+                        .to_string(),
+                ),
+            });
+            return out;
+        }
+
+        // The phase-gated human decision, with exactly the flags and payload
+        // `switchyard mission command` parses: rationale lives inside the
+        // payload JSON, never as a flag.
+        let decision: Option<(&str, String)> = match card.phase {
+            MissionPhase::AwaitingPlanApproval => card
+                .plan_digest
+                .as_ref()
+                .map(|digest| ("approve_plan", format!("{{\"planDigest\":\"{digest}\"}}"))),
+            MissionPhase::AwaitingReview => Some((
+                "approve_review",
+                format!(
+                    "{{\"digest\":\"{}\",\"rationale\":\"<why>\"}}",
+                    card.content_digest
+                ),
+            )),
+            _ => None,
+        };
+        if let Some((kind, payload)) = decision {
+            out.push(CliEcho {
+                label: kind.to_string(),
                 command: format!(
-                    "switchyard mission command --db {db} --mission {mission} --kind {} --expected-revision {} --command-id <id-you-generate> --actor <operator> --rationale \"<why>\"",
-                    command.kind, card.revision
+                    "switchyard mission command --db {db} --mission {mission} --kind {kind} \
+                     --expected-revision {} --attempt {} --command-id <id-you-generate> \
+                     --actor <operator> --payload '{payload}'",
+                    card.revision, card.attempt_id
                 ),
                 mutates: true,
                 note: Some(
-                    "mutates the ledger. Generate and persist --command-id before the first \
-                     attempt, and reuse it with the same request after a lost response."
+                    "mutates the ledger. The payload binds the approval to the digest in \
+                     panel 4; replace <why> first. Generate and persist --command-id before \
+                     the first attempt, and reuse it with the same request after a lost \
+                     response."
                         .to_string(),
                 ),
             });
@@ -360,8 +409,8 @@ impl Ledger {
                 workspace_state: Some("ready".to_string()),
                 pending_commands: vec![CommandRow::new("approve_review", "pending", "operator")],
                 commands: vec![
-                    CommandRow::new("request_verification", "committed", "operator"),
                     CommandRow::new("complete_pass", "committed", "runtime"),
+                    CommandRow::new("request_verification", "committed", "operator"),
                 ],
                 ..MissionCard::blank()
             }],
@@ -476,6 +525,12 @@ mod tests {
     }
 
     #[test]
+    fn a_published_mission_counts_as_complete_not_one_short() {
+        let published = &Ledger::fixture_published().cards[0];
+        assert_eq!(published.progress(), Some((9, 9)));
+    }
+
+    #[test]
     fn uncertainty_always_needs_attention() {
         assert!(Ledger::fixture_needs_attention().cards[0].needs_attention());
         assert!(!Ledger::fixture_planning().cards[0].needs_attention());
@@ -499,10 +554,9 @@ mod tests {
     }
 
     #[test]
-    fn the_cli_echo_is_an_honest_read_and_flagged_mutations() {
+    fn pending_commands_echo_a_recover_not_a_duplicate_admit() {
         let ledger = Ledger::fixture_awaiting_review();
-        let card = &ledger.cards[0];
-        let echoes = ledger.cli_echo(card);
+        let echoes = ledger.cli_echo(&ledger.cards[0]);
 
         assert_eq!(echoes[0].label, "status");
         assert!(!echoes[0].mutates, "a status read mutates nothing");
@@ -515,19 +569,90 @@ mod tests {
         let workspace = echoes.iter().find(|e| e.label == "workspace");
         assert!(workspace.is_some_and(|e| e.mutates));
 
-        let admit = echoes.iter().find(|e| e.label == "approve_review");
-        let admit = admit.expect("the pending command is echoed");
-        assert!(admit.mutates);
-        assert!(admit.command.contains("--expected-revision 11"));
+        let recover = echoes
+            .iter()
+            .find(|e| e.label == "recover")
+            .expect("pending commands echo a recover");
+        assert!(recover.mutates);
+        assert!(recover.command.contains("mission recover --db"));
         assert!(
-            admit.command.contains("--command-id <id-you-generate>"),
-            "the idempotency discipline is visible in the command itself"
+            recover
+                .note
+                .as_deref()
+                .is_some_and(|n| n.contains("already admitted"))
         );
         assert!(
-            admit
+            echoes.iter().all(|e| !e.command.contains("--rationale ")),
+            "`mission command` has no --rationale flag"
+        );
+        assert!(
+            echoes.iter().all(|e| e.label != "approve_review"),
+            "re-admitting a pending command would duplicate it"
+        );
+    }
+
+    #[test]
+    fn a_phase_decision_echoes_flags_and_a_payload_the_cli_accepts() {
+        let review = MissionCard {
+            mission_id: "msn-x".to_string(),
+            phase: MissionPhase::AwaitingReview,
+            revision: 7,
+            attempt_id: "att-01".to_string(),
+            content_digest: "d41e".to_string(),
+            ..MissionCard::blank()
+        };
+        let ledger = Ledger {
+            source: "/tmp/x.db".to_string(),
+            cards: vec![review.clone()],
+            ..Ledger::default()
+        };
+        let approve = ledger
+            .cli_echo(&review)
+            .into_iter()
+            .find(|e| e.label == "approve_review")
+            .expect("awaiting review echoes approve_review");
+        assert!(approve.mutates);
+        assert!(approve.command.contains("--kind approve_review"));
+        assert!(approve.command.contains("--expected-revision 7"));
+        assert!(approve.command.contains("--attempt att-01"));
+        assert!(approve.command.contains("--command-id <id-you-generate>"));
+        assert!(
+            approve
+                .command
+                .contains("--payload '{\"digest\":\"d41e\",\"rationale\":\"<why>\"}'"),
+            "rationale lives in the payload, not as a flag: {}",
+            approve.command
+        );
+        assert!(!approve.command.contains("--rationale "));
+        assert!(
+            approve
                 .note
                 .as_deref()
                 .is_some_and(|n| n.contains("lost response"))
+        );
+
+        let plan = MissionCard {
+            mission_id: "msn-y".to_string(),
+            phase: MissionPhase::AwaitingPlanApproval,
+            revision: 3,
+            attempt_id: "att-02".to_string(),
+            plan_digest: Some("91af".to_string()),
+            ..MissionCard::blank()
+        };
+        let ledger = Ledger {
+            source: "/tmp/y.db".to_string(),
+            cards: vec![plan.clone()],
+            ..Ledger::default()
+        };
+        let approve_plan = ledger
+            .cli_echo(&plan)
+            .into_iter()
+            .find(|e| e.label == "approve_plan")
+            .expect("awaiting plan approval echoes approve_plan");
+        assert!(
+            approve_plan
+                .command
+                .contains("--payload '{\"planDigest\":\"91af\"}'")
         );
     }
 

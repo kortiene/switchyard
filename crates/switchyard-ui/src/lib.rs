@@ -100,6 +100,9 @@ pub struct Ui {
     pub refreshes: u32,
     /// Runtime-clock seconds at which the next read is due.
     pub next_due: f64,
+    /// A manual refresh asked for a read, independent of the auto toggle.
+    /// Consumed by `poll` when no read is in flight.
+    pub force_refresh: bool,
     /// Which mission the panels show.
     pub selected: usize,
 }
@@ -118,6 +121,7 @@ impl Default for Ui {
             auto_refresh: true,
             refreshes: 0,
             next_due: 0.0,
+            force_refresh: false,
             selected: 0,
         }
     }
@@ -132,9 +136,12 @@ impl Ui {
         }
     }
 
-    /// Ask for the next read immediately.
-    fn request_now(&mut self) {
-        self.next_due = 0.0;
+    /// The pure decision: should a read start at `clock`?
+    ///
+    /// A manual refresh is due whatever the auto toggle says; the automatic
+    /// poll is due only past `next_due`. Never while a read is in flight.
+    fn read_due(&self, clock: f64, in_flight: bool) -> bool {
+        !in_flight && (self.force_refresh || (self.auto_refresh && clock >= self.next_due))
     }
 }
 
@@ -162,16 +169,13 @@ fn poll(s: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
         changed = true;
     }
 
-    if !s.auto_refresh {
-        return changed;
-    }
-
-    if clock >= s.next_due && !s.fetch.is_pending() {
+    if s.read_due(clock, s.fetch.is_pending()) {
+        s.force_refresh = false;
         let path = s.source.clone();
         s.fetch.request(path, |p| Ledger::read(&p));
         s.next_due = clock + REFRESH.as_secs_f64();
-        tx.wake_after(REFRESH);
-    } else {
+    }
+    if s.auto_refresh {
         let wait = (s.next_due - clock).max(0.05);
         tx.wake_after(Duration::from_secs_f64(wait));
     }
@@ -182,7 +186,7 @@ fn poll(s: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
 // Handlers are plain functions: `.on_press` takes `fn(&mut Ui)`.
 
 fn refresh_now(s: &mut Ui) {
-    s.request_now();
+    s.force_refresh = true;
 }
 
 fn toggle_appearance(s: &mut Ui) {
@@ -192,7 +196,7 @@ fn toggle_appearance(s: &mut Ui) {
 fn toggle_auto(s: &mut Ui) {
     s.auto_refresh = !s.auto_refresh;
     if s.auto_refresh {
-        s.request_now();
+        s.force_refresh = true;
     }
 }
 
@@ -299,24 +303,48 @@ mod tests {
     }
 
     #[test]
-    fn a_read_is_issued_when_due_and_not_reissued_while_in_flight() {
-        let mut ui = Ui {
+    fn the_read_decision_is_manual_first_auto_second_never_in_flight() {
+        let auto = Ui {
             source: PathBuf::from("/nonexistent/switchyard.db"),
             ..Ui::default()
         };
-        // No waker is attached, so answers simply wait; the state machine is
-        // still what decides whether a read starts.
-        let tx_clock = 0.0;
-        assert!(ui.next_due <= tx_clock);
-        ui.next_due = tx_clock + REFRESH.as_secs_f64();
+        assert!(auto.read_due(0.0, false), "auto on and past due");
+        assert!(!auto.read_due(0.0, true), "never while a read is in flight");
+
+        let paused = Ui {
+            auto_refresh: false,
+            next_due: 100.0,
+            ..Ui::default()
+        };
         assert!(
-            ui.next_due > tx_clock,
-            "a read is not due again immediately"
+            !paused.read_due(50.0, false),
+            "paused and not forced stays silent"
         );
+
+        let forced = Ui {
+            auto_refresh: false,
+            next_due: 100.0,
+            force_refresh: true,
+            ..Ui::default()
+        };
+        assert!(
+            forced.read_due(50.0, false),
+            "manual refresh works while paused"
+        );
+        assert!(
+            !forced.read_due(50.0, true),
+            "but not while a read is in flight"
+        );
+
+        let scheduled = Ui {
+            next_due: 100.0,
+            ..Ui::default()
+        };
+        assert!(!scheduled.read_due(50.0, false), "auto on but not yet due");
     }
 
     #[test]
-    fn turning_auto_refresh_off_requests_a_read_when_it_returns() {
+    fn turning_auto_refresh_back_on_asks_for_an_immediate_read() {
         let mut ui = Ui {
             auto_refresh: false,
             next_due: 100.0,
@@ -324,6 +352,6 @@ mod tests {
         };
         toggle_auto(&mut ui);
         assert!(ui.auto_refresh);
-        assert_eq!(ui.next_due, 0.0);
+        assert!(ui.force_refresh, "re-enabling auto reads at once");
     }
 }

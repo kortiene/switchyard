@@ -517,10 +517,7 @@ fn pipeline_panel(p: Paint, card: &MissionCard) -> El {
             p.warn,
         ),
         Some(_) if blocked => (format!("! {} \u{00b7} blocked", card.phase.as_str()), p.bad),
-        Some((current, total)) if current + 1 == total => {
-            let _ = (current, total);
-            ("\u{2726} ALL CLEAR".to_string(), p.ok)
-        }
+        Some((current, total)) if current + 1 >= total => ("\u{2726} ALL CLEAR".to_string(), p.ok),
         Some(_) => (
             format!("\u{25c9} {}", card.phase.as_str().to_uppercase()),
             p.warn,
@@ -1166,6 +1163,24 @@ mod tests {
     }
 
     #[test]
+    fn with_nothing_pending_the_last_line_is_the_newest_history() {
+        let rt = render(Ledger::fixture_planning());
+        let last = text_of(&rt, "last-line-v").unwrap_or_default();
+        assert!(
+            last.starts_with("start_planning"),
+            "newest first, not admission order: {last}"
+        );
+    }
+
+    #[test]
+    fn a_published_mission_reads_as_complete_not_one_short() {
+        let rt = render(Ledger::fixture_published());
+        assert_eq!(text_of(&rt, "pipeline-count").as_deref(), Some("9/9"));
+        let summary = text_of(&rt, "pipeline-summary").unwrap_or_default();
+        assert!(summary.contains("ALL CLEAR"), "got: {summary}");
+    }
+
+    #[test]
     fn an_unreadable_ledger_is_reported_in_the_ui() {
         let rt = render(Ledger::fixture_unreadable());
         assert_eq!(text_of(&rt, "ledger-error-v").as_deref(), Some("not found"));
@@ -1197,17 +1212,18 @@ mod tests {
         );
         assert!(status.contains("--mission msn-7f3a1c"), "got: {status}");
 
-        let admit = text_of(&rt, "cli-2-cmd").unwrap_or_default();
-        assert!(admit.contains("--kind approve_review"), "got: {admit}");
-        assert!(admit.contains("--expected-revision 11"), "got: {admit}");
-        assert!(
-            admit.contains("--command-id <id-you-generate>"),
-            "got: {admit}"
-        );
+        let recover = text_of(&rt, "cli-2-cmd").unwrap_or_default();
+        assert!(recover.contains("mission recover --db"), "got: {recover}");
         let note = text_of(&rt, "cli-2-note").unwrap_or_default();
+        assert!(note.contains("already admitted"), "got: {note}");
+        let drawn_cmds: Vec<String> = rt
+            .elements()
+            .iter()
+            .filter_map(|e| e.text.clone())
+            .collect();
         assert!(
-            note.contains("reuse it with the same request"),
-            "got: {note}"
+            drawn_cmds.iter().all(|t| !t.contains("--rationale ")),
+            "no echoed invocation uses a flag the CLI does not have"
         );
 
         let drawn: Vec<String> = rt
@@ -1248,7 +1264,25 @@ mod tests {
         for _ in 0..3 {
             rt.frame(1.0 / 60.0);
         }
-        assert_eq!(rt.state.next_due, 0.0, "a press asks for an immediate read");
+        assert!(rt.state.force_refresh, "a press asks for an immediate read");
+    }
+
+    #[test]
+    fn a_paused_dashboard_still_takes_a_manual_refresh_into_poll() {
+        let mut ui = Ui {
+            ledger: Ledger::fixture_planning(),
+            auto_refresh: false,
+            ..Ui::default()
+        };
+        refresh_now(&mut ui);
+        assert!(
+            ui.read_due(123.0, false),
+            "a forced read is due even while paused"
+        );
+        assert!(
+            !ui.read_due(123.0, true),
+            "but never on top of an in-flight read"
+        );
     }
 
     #[test]
