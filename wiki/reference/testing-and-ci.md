@@ -3,7 +3,7 @@ type: Testing Reference
 title: Testing and CI
 description: The focused-test workflow, canonical verification chain, coverage policy, and CI execution matrix.
 tags: [reference, testing, coverage, ci, verification]
-timestamp: "2026-11-03T23:00:00Z"
+timestamp: "2026-11-13T19:15:00Z"
 ---
 
 # Canonical gate
@@ -84,6 +84,31 @@ After rebuilding/installing the pinned source, run `node runtime/pi-source/contr
 On the declared Ubuntu 24.04 x86_64 runner, `scripts/confinement-verify.sh` and `scripts/bridge-confinement-verify.sh` exercise real OS boundaries and recovery. They require the pinned backend, namespace support and writable delegated cgroups; missing support fails. The bridge script also runs the model-endpoint native filter checks and `bridge_egress`. See [bridge lifecycle](../../docs/rust-first/s3-bridge-lifecycle.md) and [model-endpoint egress](../../docs/rust-first/s3-model-egress.md).
 
 A read-only ruleset audit on 2026-11-02 confirmed ruleset 26316769 requires `execution-confinement` and that `pi-bridge-contract` was not yet required. A later read-only ruleset audit on 2026-11-03 confirmed `pi-bridge-contract`, `execution-confinement`, `verify (node 20.19.0)` and `verify (node 22)` are required on main. Rulesets 26316513 and 26316769 enforce them; no status names are changed by S3-B4. These checks do not grant full S3 or live-provider acceptance.
+
+# Check inventory
+
+Each CI check maps to a local command; local and CI agree on what the check proves. Required status reflects the 2026-11-03 read-only ruleset audit recorded above.
+
+| CI check (workflow) | Local command | What it proves | Required on main |
+| --- | --- | --- | --- |
+| `verify (node 20.19.0)`, `verify (node 22)` (`verify.yml`) | `cd adw_sdlc && npm ci && npm run verify` | Frozen TypeScript reference gate: typecheck, environment lint, prompt pack/mirror drift, wiki check, coverage thresholds, build. | Yes (rulesets 26316513 and 26316769) |
+| `rust-core` (`verify.yml`) | `./scripts/rust-verify.sh` | Default-feature Rust gate: formatting, Clippy, and `cargo test` on the committed Rust 1.99.1 toolchain. | No |
+| `pi-bridge-contract` (`pi-bridge-contract.yml`) | `node runtime/pi-source/install-npm.mjs && (cd runtime/pi-source && node build.mjs && npm ci) && node runtime/pi-source/contract.mjs` | Full credential-free S2 contract matrix with revision-bound evidence. | Yes |
+| `execution-confinement` (`execution-confinement.yml`) | `./scripts/confinement-verify.sh` and `./scripts/bridge-confinement-verify.sh` (prerequisites below) | Real OS confinement, bridge lifecycle, and model-endpoint egress on the declared Ubuntu 24.04 x86_64 runner. | Yes |
+| `pi-package-audit` (`pi-package-audit.yml`) | `cd runtime/pi && npm ci && npm run verify && npm run audit:package` | Published-package diagnostic; reproduces the historical NO-GO evidence. Not `pi-bridge-contract`. | No (diagnostic) |
+| `pi-source-candidate` (`pi-source-candidate.yml`) | `cd runtime/pi-source && node install-npm.mjs && node build.mjs && npm ci && npm run verify` | Reproducible rebuild of the pinned source candidate. | No |
+| `pi-bridge-probe` (`pi-bridge-probe.yml`) | `node runtime/pi-source/install-npm.mjs && (cd runtime/pi-source && node build.mjs && npm ci && npm run verify) && export SWITCHYARD_PI_NODE="$(command -v node)" && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --features pi-contract --locked -- -D warnings && cargo test --workspace --features pi-contract --locked` | Partial probe scope only; does not replace `pi-bridge-contract`. | No |
+
+`execution-confinement` is not a bare-checkout command. Match the steps in [execution-confinement.yml](../../.github/workflows/execution-confinement.yml) on Ubuntu 24.04 x86_64 before the two scripts:
+
+- Build the Pi source candidate: `node runtime/pi-source/install-npm.mjs`, then `node build.mjs` and `npm ci` in `runtime/pi-source` (step "Build the exact credential-free Pi source candidate").
+- Install that build into a private mode-0700 directory outside the checkout and export `SWITCHYARD_PI_RUNTIME` (step "Install the confined runtime outside the checkout", [#161](https://github.com/kortiene/switchyard/pull/161)). `scripts/bridge-confinement-verify.sh` requires that path to be absolute, not a symlink, mode 0700, and outside both `runtime/pi-source` and the repository. If the variable is unset, the script creates the same copy under `RUNNER_TEMP` from the already-built source.
+- Install `bubblewrap=0.9.0-1ubuntu0.3` and AppArmor, load `tools/confinement-probe/ci/bwrap.apparmor` as `/etc/apparmor.d/switchyard-confinement-bwrap`, and set `SWITCHYARD_BWRAP` to a root-owned mode-0755 copy of `/usr/bin/bwrap` (`/usr/local/libexec/switchyard-bwrap` in CI; step "Install the reviewed backend and per-binary userns permission"). Both scripts require package version `0.9.0-1ubuntu0.3`, a backend that prints `bubblewrap 0.9.0`, and a byte-identical `/usr/bin/bwrap`.
+- Export `SWITCHYARD_CONFINEMENT_EVIDENCE` (CI uses the workspace `confinement-evidence` directory). Delegate a cgroup v2 subtree with `sudo -E ./scripts/cgroup-delegate.sh` on the runner's own cgroup and export `SWITCHYARD_CGROUP_ROOT` from `$SWITCHYARD_CONFINEMENT_EVIDENCE/cgroup-root.txt` (step "Delegate a cgroup v2 subtree to the unprivileged runner"). `scripts/confinement-verify.sh` exits when that directory is missing or not writable.
+
+The bridge script also requires Node `v22.23.4` and `prlimit from util-linux 2.39.3`, and it refuses a dirty worktree.
+
+All `uses:` references in `.github/workflows/` are pinned to immutable commit SHAs with human-readable version comments (C6, #115). `dtolnay/rust-toolchain` publishes `stable` as a branch, not a tag; its pin records the branch head and the resolution date in the comment. Re-resolve pins deliberately; do not follow movable tags.
 
 # Wiki validation policy
 

@@ -26,7 +26,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: runtime/pi-source/.node-version
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # resolved 2026-10-30
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, resolved 2026-10-30
         id: rust-toolchain
         with:
           toolchain: 1.99.1
