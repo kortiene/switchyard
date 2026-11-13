@@ -24,15 +24,7 @@ Read the [runtime protocol](runtime-protocol.md) and [delivery plan](delivery-pl
 
 ## Implementation status
 
-This table is navigation as of 2026-11-10. See [#109](https://github.com/kortiene/switchyard/issues/109) for consolidation disposition. S2 acceptance is recorded separately in [the contract gate](s2-contract-gate.md), and bounded composed S3 acceptance is recorded in [s3-composed-acceptance.md](s3-composed-acceptance.md). This does not change normative transitions or record a live run.
-
-| Work | Status |
-| --- | --- |
-| S1 ([#95](https://github.com/kortiene/switchyard/issues/95), [#105](https://github.com/kortiene/switchyard/pull/105)) | Implemented. `crates/switchyard-core/` and `crates/switchyard/` persist missions and drive them with a fake runtime. No model calls, GitHub writes, state v1 resume, or confinement. |
-| S2 ([#96](https://github.com/kortiene/switchyard/issues/96)) | **GO for the credential-free source-built candidate**, accepted 2026-11-02. See [exact revision and evidence](s2-contract-gate.md). The published-package audit remains NO-GO. |
-| S3 ([#97](https://github.com/kortiene/switchyard/issues/97)) | S3-A1 adds explicit [worktree ownership/recovery](s3-workspace-ownership.md). S3-A2 adds [simulated effect receipts](s3-execution-receipts.md). S3-A3 adds a [Linux confinement feasibility probe](s3-linux-confinement.md). S3-A4 adds a non-default [confined Linux ExecutionEnv](s3-linux-execution-contract.md) with durable quiescence evidence. S3-A5 adds [supersession of an abandoned decision](s3-execution-supersede.md) after fresh quiescence and a workspace digest. FakeRuntime stays the product adapter. Track B includes the [bridge confinement harness](s3-bridge-confinement.md) and [model-endpoint egress](s3-model-egress.md), which stays off unless the host sets one endpoint. Bounded acceptance of the [composed Host/Pi/Linux evidence](s3-composed-acceptance.md) (#157 at `65a7ce7`) was recorded 2026-11-10 for that credential-free fixture only. Confined [operator-stop admission](s3-pi-stop-admission.md) is tested on that path only and does not enable Pi. The confined runtime root is a [relocatable, digest-pinned install](s3-pi-runtime-install.md); the compile-time source-tree lookup is retired. Product Pi wiring, full S3 and reboot recovery remain open. TypeScript managed-worktree work is stopped. |
-| S4–S8 ([#98](https://github.com/kortiene/switchyard/issues/98)–[#102](https://github.com/kortiene/switchyard/issues/102)) | Planned. Live mission execution waits on S3 integration and confinement. |
-| Native Rust agent runtime | Accepted long-term target (2026-10-29). Not implemented. A published-package NO-GO does not select the TypeScript engine instead. |
+Status for S1–S8 and the native Rust agent runtime is the [delivery-plan status table](delivery-plan.md#current-status). See [#109](https://github.com/kortiene/switchyard/issues/109) for consolidation disposition.
 
 `runtime/pi/` is the historical published-package NO-GO audit. `runtime/pi-source/` is the reproducible source candidate accepted by S2. Neither is the product runtime. See [S2 acceptance](s2-contract-gate.md) and [S3 bridge confinement](s3-bridge-confinement.md).
 
@@ -76,7 +68,7 @@ flowchart TD
     CORE --> FORGE["GitHub delivery"]
 ```
 
-Start with one Rust library crate and one executable, using modules before adding more crates. S1 adds `crates/switchyard-core/` and `crates/switchyard/`. `runtime/pi/` contains the published-package audit. `runtime/pi-source/` contains the pinned source candidate from #107 and the [partial bridge probe](s2-bridge-probe.md). The Rust client is enabled only by `pi-contract` and does not replace the CLI's fake runtime. S2 is GO for the credential-free source-built candidate; see [the acceptance record](s2-contract-gate.md). `web/` and `tests/acceptance/` remain planned paths, not packages or usable product commands.
+Start with one Rust library crate and one executable, using modules before adding more crates. S1 adds `crates/switchyard-core/` and `crates/switchyard/`. `runtime/pi/` contains the published-package audit. `runtime/pi-source/` contains the pinned source candidate from #107 and the [partial bridge probe](s2-bridge-probe.md) (retired 2026-11-13). The Rust client is enabled only by `pi-contract` and does not replace the CLI's fake runtime. S2 is GO for the credential-free source-built candidate; see [the acceptance record](s2-contract-gate.md). `web/` and `tests/acceptance/` remain planned paths, not packages or usable product commands.
 
 ## Runtime baseline
 

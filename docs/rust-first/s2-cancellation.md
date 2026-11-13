@@ -67,9 +67,9 @@ cargo clippy --workspace --all-targets --features pi-contract --locked -- -D war
 cargo test --workspace --features pi-contract --locked
 ```
 
-The existing `pi-bridge-probe` job runs these Node and feature-enabled Rust
-tests and independently rebuilds the source candidate. It remains a partial
-probe; no job is renamed to `pi-bridge-contract` here.
+The `pi-bridge-probe` job (retired 2026-11-13) ran these Node and feature-enabled Rust
+tests and independently rebuilt the source candidate. It was a partial
+probe; this slice did not rename a job to `pi-bridge-contract`.
 
 Local validation passed the default Rust gate (157 core + 9 CLI tests), the
 feature-enabled Clippy gate, all feature-enabled tests (190 core, 12 bridge
