@@ -20,6 +20,14 @@ jobs:
       SWITCHYARD_CONFINEMENT_EVIDENCE: ${{ github.workspace }}/confinement-evidence
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install the reviewed backend and per-binary userns permission
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 install -y --allow-downgrades --no-install-recommends bubblewrap=0.9.0-1ubuntu0.3 apparmor
+          sudo install -d -m 0755 /usr/local/libexec
+          sudo install -o root -g root -m 0755 /usr/bin/bwrap "$SWITCHYARD_BWRAP"
+          sudo install -m 0644 tools/confinement-probe/ci/bwrap.apparmor /etc/apparmor.d/switchyard-confinement-bwrap
+          sudo apparmor_parser -r /etc/apparmor.d/switchyard-confinement-bwrap
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: runtime/pi-source/.node-version
@@ -42,14 +50,6 @@ jobs:
           find "$root" -xdev \( -type d -o -type f \) -exec chmod a-s,g-w,o-w {} +
           chmod 0700 "$root"
           echo "SWITCHYARD_PI_RUNTIME=$(readlink -f "$root")" >> "$GITHUB_ENV"
-      - name: Install the reviewed backend and per-binary userns permission
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --allow-downgrades --no-install-recommends bubblewrap=0.9.0-1ubuntu0.3 apparmor
-          sudo install -d -m 0755 /usr/local/libexec
-          sudo install -o root -g root -m 0755 /usr/bin/bwrap "$SWITCHYARD_BWRAP"
-          sudo install -m 0644 tools/confinement-probe/ci/bwrap.apparmor /etc/apparmor.d/switchyard-confinement-bwrap
-          sudo apparmor_parser -r /etc/apparmor.d/switchyard-confinement-bwrap
       - name: Delegate a cgroup v2 subtree to the unprivileged runner
         run: |
           mkdir -p confinement-evidence

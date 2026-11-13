@@ -17,7 +17,7 @@ pub use runtime::{
     parse_notification,
 };
 
-pub(crate) use adapter::RuntimeAdapter;
+pub(crate) use adapter::{RecoveryProfile, RuntimeAdapter};
 #[cfg(feature = "pi-contract")]
 pub(crate) use pi_runtime::{AcknowledgedCheck, PiRuntime};
 

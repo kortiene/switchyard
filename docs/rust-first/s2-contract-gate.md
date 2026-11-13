@@ -137,8 +137,8 @@ tested checkout and `pullRequestHead` for the PR head. A local dirty-tree
 result does not stand in for clean CI revision evidence, and a dirty tree in
 CI fails the gate.
 
-The existing `pi-bridge-probe`, `pi-source-candidate` and package-audit jobs remain
-separate historical checks. This adds coverage and an evidence-aware gate; it
+`pi-bridge-probe` (retired 2026-11-13) was a separate historical check. The existing
+`pi-source-candidate` and package-audit jobs remain separate historical checks. This adds coverage and an evidence-aware gate; it
 does not simply rename the partial probe. Creating YAML does not install a
 required-check rule. At S2-E delivery, after the first green run, a repository
 administrator had to require the exact `pi-bridge-contract` check in the
