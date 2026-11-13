@@ -3,7 +3,7 @@ type: Testing Reference
 title: Testing and CI
 description: The focused-test workflow, canonical verification chain, coverage policy, and CI execution matrix.
 tags: [reference, testing, coverage, ci, verification]
-timestamp: "2026-11-13T14:02:00Z"
+timestamp: "2026-11-13T19:15:00Z"
 ---
 
 # Canonical gate
@@ -93,11 +93,11 @@ Each CI check maps to a local command; local and CI agree on what the check prov
 | --- | --- | --- | --- |
 | `verify (node 20.19.0)`, `verify (node 22)` (`verify.yml`) | `cd adw_sdlc && npm ci && npm run verify` | Frozen TypeScript reference gate: typecheck, environment lint, prompt pack/mirror drift, wiki check, coverage thresholds, build. | Yes (rulesets 26316513 and 26316769) |
 | `rust-core` (`verify.yml`) | `./scripts/rust-verify.sh` | Default-feature Rust gate: formatting, Clippy, and `cargo test` on the committed Rust 1.99.1 toolchain. | No |
-| `pi-bridge-contract` (`pi-bridge-contract.yml`) | Workspace fmt/Clippy/`cargo test` with `pi-contract`, then `node runtime/pi-source/contract.mjs` | Full credential-free S2 contract matrix with revision-bound evidence. | Yes |
+| `pi-bridge-contract` (`pi-bridge-contract.yml`) | `node runtime/pi-source/install-npm.mjs && (cd runtime/pi-source && node build.mjs && npm ci) && node runtime/pi-source/contract.mjs` | Full credential-free S2 contract matrix with revision-bound evidence. | Yes |
 | `execution-confinement` (`execution-confinement.yml`) | `./scripts/confinement-verify.sh` and `./scripts/bridge-confinement-verify.sh` (prerequisites below) | Real OS confinement, bridge lifecycle, and model-endpoint egress on the declared Ubuntu 24.04 x86_64 runner. | Yes |
 | `pi-package-audit` (`pi-package-audit.yml`) | `cd runtime/pi && npm ci && npm run verify && npm run audit:package` | Published-package diagnostic; reproduces the historical NO-GO evidence. Not `pi-bridge-contract`. | No (diagnostic) |
 | `pi-source-candidate` (`pi-source-candidate.yml`) | `cd runtime/pi-source && node install-npm.mjs && node build.mjs && npm ci && npm run verify` | Reproducible rebuild of the pinned source candidate. | No |
-| `pi-bridge-probe` (`pi-bridge-probe.yml`) | Feature-gated Rust transport and credential-free recovery probes | Partial probe scope only; does not replace `pi-bridge-contract`. | No |
+| `pi-bridge-probe` (`pi-bridge-probe.yml`) | `node runtime/pi-source/install-npm.mjs && (cd runtime/pi-source && node build.mjs && npm ci && npm run verify) && export SWITCHYARD_PI_NODE="$(command -v node)" && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --features pi-contract --locked -- -D warnings && cargo test --workspace --features pi-contract --locked` | Partial probe scope only; does not replace `pi-bridge-contract`. | No |
 
 `execution-confinement` is not a bare-checkout command. Match the steps in [execution-confinement.yml](../../.github/workflows/execution-confinement.yml) on Ubuntu 24.04 x86_64 before the two scripts:
 
