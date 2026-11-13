@@ -11,8 +11,8 @@ use crate::domain::{
 };
 use crate::error::{Error, Result};
 use crate::execution::{
-    FakeRuntime, OwnerLock, RuntimeAdapter, RuntimeBinding, RuntimeNotification, RuntimeReceipt,
-    RuntimeRequest, inspect_repo, operation_id, parse_notification, try_acquire,
+    FakeRuntime, OwnerLock, RecoveryProfile, RuntimeAdapter, RuntimeBinding, RuntimeNotification,
+    RuntimeReceipt, RuntimeRequest, inspect_repo, operation_id, parse_notification, try_acquire,
 };
 use crate::persistence::{CreatedMission, NewCommand, Store};
 use crate::policy::{self, Facts};
@@ -655,14 +655,8 @@ impl Host {
     /// use [`Self::dispatch_reconciled`] for any later dispatch so the
     /// workspace is not verified again.
     pub fn dispatch_pending(&mut self, mission_id: &str) -> Result<usize> {
-        #[cfg(all(
-            feature = "pi-contract",
-            feature = "linux-execution",
-            target_os = "linux"
-        ))]
-        if self.runtime.is_confined() {
-            self.ensure_confined_session(mission_id)?;
-        }
+        let profile = self.runtime.recovery_profile();
+        self.open_runtime_session(mission_id, profile)?;
         self.reconcile_execution(mission_id)?;
         if self.store.linux_execution_blocked(mission_id)? {
             // Stop delivery still runs. Git verification waits until the
@@ -1118,28 +1112,52 @@ impl Host {
         Ok(())
     }
 
+    /// Open the confined session before reconcile when `profile` requires it.
+    fn open_runtime_session(&mut self, mission_id: &str, profile: RecoveryProfile) -> Result<()> {
+        if !profile.open_session_before_reconcile {
+            return Ok(());
+        }
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        {
+            self.ensure_confined_session(mission_id)
+        }
+        #[cfg(not(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        )))]
+        {
+            // Unreachable today. Only Confined sets this flag, and that variant
+            // exists only in the cfg arm above. This guards a future variant.
+            let _ = mission_id;
+            Err(Error::guard("recovery profile requires a confined session"))
+        }
+    }
+
+    fn stop_pending(&self, mission_id: &str) -> Result<bool> {
+        Ok(self.store.list_commands(mission_id)?.iter().any(|command| {
+            command.state == CommandState::Pending
+                && matches!(command.kind, CommandKind::Pause | CommandKind::Cancel)
+        }))
+    }
+
     /// Reconcile one workspace, deliver pending commands, poll observations,
     /// and return a snapshot. An uncertain, busy, or transient workspace
     /// failure permits stop delivery, polling and the snapshot;
     /// that failure is returned after those steps. Stale generation and other
     /// host-level failures abort before either runs.
     pub fn recover(&mut self, mission_id: &str) -> Result<MissionSnapshot> {
-        #[cfg(all(
-            feature = "pi-contract",
-            feature = "linux-execution",
-            target_os = "linux"
-        ))]
-        if self.runtime.is_confined() {
-            self.ensure_confined_session(mission_id)?;
-            // Settle an admitted stop before reconcile quarantines a still-running
-            // writer. Without a pending stop this does not run, so a killed host
-            // cannot dispatch the pending Continue in the same call.
-            if self.store.list_commands(mission_id)?.iter().any(|command| {
-                command.state == CommandState::Pending
-                    && matches!(command.kind, CommandKind::Pause | CommandKind::Cancel)
-            }) {
-                self.dispatch_stops(mission_id)?;
-            }
+        let profile = self.runtime.recovery_profile();
+        self.open_runtime_session(mission_id, profile)?;
+        // Settle an admitted stop before reconcile quarantines a still-running
+        // writer. Without a pending stop this does not run, so a killed host
+        // cannot dispatch the pending Continue in the same call.
+        if profile.settle_stops_before_reconcile && self.stop_pending(mission_id)? {
+            self.dispatch_stops(mission_id)?;
         }
         self.reconcile_execution(mission_id)?;
         if self.store.linux_execution_blocked(mission_id)? {
@@ -1147,8 +1165,8 @@ impl Host {
             self.poll_runtime(mission_id)?;
             // Fall through only after this call delivered a stop and cleared
             // the block. A block that clears with no stop stays an error, so
-            // work is not dispatched. FakeRuntime never takes this branch.
-            let cleared = self.runtime.is_confined()
+            // work is not dispatched. Fake and Pi profiles never resume here.
+            let cleared = profile.resume_after_delivered_stop
                 && delivered > 0
                 && !self.store.linux_execution_blocked(mission_id)?;
             if !cleared {
@@ -1160,7 +1178,7 @@ impl Host {
                 });
             }
         }
-        let workspace_error = match self.recover_workspace(mission_id) {
+        let workspace_error = match self.recover_workspace_with(mission_id, profile) {
             Ok(_) => None,
             Err(error) if error.is_isolated_workspace_failure() => Some(error),
             Err(error) => return Err(error),

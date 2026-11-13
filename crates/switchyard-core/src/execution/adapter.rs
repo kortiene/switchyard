@@ -19,7 +19,45 @@ pub(crate) enum RuntimeAdapter {
     Confined(Box<super::confined_runtime::ConfinedRuntime>),
 }
 
+/// Recovery steps that differ by runtime. Fake and the Pi probe stay inert.
+/// Only the confined adapter opens a session, settles a stop before reconcile,
+/// resumes after that stop clears a Linux block, and skips verify for a writer
+/// it is still supervising.
+///
+/// Two dependencies hold for every variant. Skipping verify for a supervised
+/// writer implies opening the session first: the host can only know it is
+/// supervising that writer after the session is open.
+/// Resuming after a delivered stop implies settling stops before reconcile:
+/// that resume is the fall-through after the settlement clears the Linux block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(clippy::struct_excessive_bools)]
+pub(crate) struct RecoveryProfile {
+    pub(crate) open_session_before_reconcile: bool,
+    pub(crate) settle_stops_before_reconcile: bool,
+    pub(crate) resume_after_delivered_stop: bool,
+    pub(crate) skip_verify_for_supervised_writers: bool,
+}
+
 impl RuntimeAdapter {
+    pub(crate) fn recovery_profile(&self) -> RecoveryProfile {
+        match self {
+            Self::Fake(_) => RecoveryProfile::default(),
+            #[cfg(feature = "pi-contract")]
+            Self::Pi(_) => RecoveryProfile::default(),
+            #[cfg(all(
+                feature = "pi-contract",
+                feature = "linux-execution",
+                target_os = "linux"
+            ))]
+            Self::Confined(_) => RecoveryProfile {
+                open_session_before_reconcile: true,
+                settle_stops_before_reconcile: true,
+                resume_after_delivered_stop: true,
+                skip_verify_for_supervised_writers: true,
+            },
+        }
+    }
+
     pub(crate) fn is_confined(&self) -> bool {
         #[cfg(all(
             feature = "pi-contract",
@@ -173,6 +211,127 @@ impl RuntimeAdapter {
             Self::Confined(_) => Err(crate::Error::guard(
                 "confined Pi dispatch must be owned by Host",
             )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_flag_dependencies(profile: RecoveryProfile) {
+        assert!(
+            !profile.skip_verify_for_supervised_writers || profile.open_session_before_reconcile,
+            "{profile:?}"
+        );
+        assert!(
+            !profile.resume_after_delivered_stop || profile.settle_stops_before_reconcile,
+            "{profile:?}"
+        );
+    }
+
+    fn assert_inert(profile: RecoveryProfile) {
+        assert!(!profile.open_session_before_reconcile);
+        assert!(!profile.settle_stops_before_reconcile);
+        assert!(!profile.resume_after_delivered_stop);
+        assert!(!profile.skip_verify_for_supervised_writers);
+        assert_eq!(profile, RecoveryProfile::default());
+    }
+
+    #[test]
+    fn recovery_profile_fake_and_pi_probe_are_inert() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake =
+            RuntimeAdapter::Fake(FakeRuntime::open(&dir.path().join("fake-runtime.json")).unwrap());
+        assert_inert(fake.recovery_profile());
+        assert_flag_dependencies(fake.recovery_profile());
+        #[cfg(feature = "pi-contract")]
+        {
+            let node = std::env::current_exe().unwrap();
+            let pi = RuntimeAdapter::Pi(Box::new(
+                crate::execution::PiRuntime::new(&dir.path().join("ledger.sqlite"), &node).unwrap(),
+            ));
+            assert_inert(pi.recovery_profile());
+            assert_flag_dependencies(pi.recovery_profile());
+        }
+    }
+
+    #[cfg(all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn confined_pi_recovery_profile_declares_stop_settlement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = || std::path::PathBuf::from("/uninstalled-conformance-fixture");
+        let runtime = crate::execution::confined_pi::fixture_runtime(tmp.path(), "inert");
+        let config = crate::execution::confined_pi::ConfinedPiConfig {
+            root: path(),
+            cgroup_root: path(),
+            runtime,
+            node: path(),
+            bubblewrap: path(),
+            launcher: path(),
+            policy: path(),
+            model_endpoint: None,
+        };
+        let confined = RuntimeAdapter::Confined(Box::new(
+            crate::execution::confined_runtime::ConfinedRuntime::new(config, "answer").unwrap(),
+        ));
+        let profile = confined.recovery_profile();
+        assert!(profile.open_session_before_reconcile);
+        assert!(profile.settle_stops_before_reconcile);
+        assert!(profile.resume_after_delivered_stop);
+        assert!(profile.skip_verify_for_supervised_writers);
+        assert_flag_dependencies(profile);
+    }
+
+    /// Every `RuntimeAdapter` variant that this build can construct. A new
+    /// variant has to be added here so its profile is checked.
+    #[test]
+    fn recovery_profile_variants_keep_flag_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_flag_dependencies(
+            RuntimeAdapter::Fake(FakeRuntime::open(&dir.path().join("fake-runtime.json")).unwrap())
+                .recovery_profile(),
+        );
+        #[cfg(feature = "pi-contract")]
+        {
+            let node = std::env::current_exe().unwrap();
+            assert_flag_dependencies(
+                RuntimeAdapter::Pi(Box::new(
+                    crate::execution::PiRuntime::new(&dir.path().join("ledger.sqlite"), &node)
+                        .unwrap(),
+                ))
+                .recovery_profile(),
+            );
+        }
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        {
+            let path = || std::path::PathBuf::from("/uninstalled-conformance-fixture");
+            let runtime = crate::execution::confined_pi::fixture_runtime(dir.path(), "deps");
+            let config = crate::execution::confined_pi::ConfinedPiConfig {
+                root: path(),
+                cgroup_root: path(),
+                runtime,
+                node: path(),
+                bubblewrap: path(),
+                launcher: path(),
+                policy: path(),
+                model_endpoint: None,
+            };
+            assert_flag_dependencies(
+                RuntimeAdapter::Confined(Box::new(
+                    crate::execution::confined_runtime::ConfinedRuntime::new(config, "answer")
+                        .unwrap(),
+                ))
+                .recovery_profile(),
+            );
         }
     }
 }
