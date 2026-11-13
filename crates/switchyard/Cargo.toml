@@ -29,6 +29,11 @@ name = "linux_execution"
 path = "tests/linux_execution.rs"
 required-features = ["linux-execution"]
 
+[[test]]
+name = "cli_confined"
+path = "tests/cli_confined.rs"
+required-features = ["pi-contract", "linux-execution"]
+
 [dev-dependencies]
 tempfile = "3"
 rusqlite = { version = "0.37", features = ["bundled"] }

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -15,8 +15,23 @@ use switchyard_core::{
     about = "Switchyard Rust mission host. Fake runtime and owned worktrees; no model credentials or GitHub writes."
 )]
 struct Cli {
+    /// Runtime adapter. Omitted means `fake` (FakeRuntime). `confined-pi` is an
+    /// explicit opt-in for the confined Pi runtime and fails closed when its
+    /// prerequisites are missing. It is never selected from the environment.
+    #[arg(long, value_enum, global = true)]
+    runtime: Option<RuntimeSelection>,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum RuntimeSelection {
+    /// FakeRuntime. Product default when `--runtime` is omitted.
+    Fake,
+    /// Credential-free confined Pi runtime. Runs the composed `s3-acceptance`
+    /// scenario and does not select a model endpoint.
+    #[value(name = "confined-pi")]
+    ConfinedPi,
 }
 
 #[derive(Subcommand)]
@@ -238,6 +253,10 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> switchyard_core::Result<Value> {
+    let runtime = cli.runtime.unwrap_or(RuntimeSelection::Fake);
+    if runtime == RuntimeSelection::ConfinedPi {
+        ensure_confined_selectable()?;
+    }
     match cli.command {
         Command::Mission { action } => match action {
             MissionCommand::AbandonExecution {
@@ -252,7 +271,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 actor,
                 rationale,
             } => {
-                let mut host = Host::open(&db)?;
+                let mut host = open_host(&db, runtime)?;
                 let audit =
                     host.resolve_fake_execution(&switchyard_core::ExecutionResolutionRequest {
                         command_id,
@@ -289,7 +308,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 actor,
                 rationale,
             } => {
-                let mut host = Host::open(&db)?;
+                let mut host = open_host(&db, runtime)?;
                 let audit =
                     host.supersede_execution(&switchyard_core::ExecutionSupersessionRequest {
                         command_id,
@@ -323,7 +342,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 attempt,
                 root,
             } => {
-                let mut host = Host::open(&db)?;
+                let mut host = open_host(&db, runtime)?;
                 let workspace = host.prepare_workspace(&mission, &attempt, &root)?;
                 Ok(json!({"ok": true, "workspace": workspace.to_json()}))
             }
@@ -341,7 +360,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 persist_only,
                 payload,
             } => {
-                let mut host = Host::open(&db)?;
+                let mut host = open_host(&db, runtime)?;
                 let snapshot = host.create_mission(CreateMission {
                     repo,
                     issue_number: issue,
@@ -370,6 +389,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     })?;
                     if !persist_only {
                         host.dispatch_pending(&snapshot.mission_id)?;
+                        settle_confined(&mut host, &snapshot.mission_id, runtime)?;
                     }
                 }
                 Ok(json!({"ok": true, "mission": host.snapshot(&snapshot.mission_id)?.to_json()}))
@@ -393,7 +413,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 payload,
                 persist_only,
             } => {
-                let mut host = Host::open(&db)?;
+                let mut host = open_host(&db, runtime)?;
                 let body = command_body(
                     &kind,
                     &serde_json::from_str(&payload)
@@ -439,6 +459,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                         })?;
                     } else {
                         host.dispatch_reconciled(&mission)?;
+                        settle_confined(&mut host, &mission, runtime)?;
                     }
                 }
                 let snapshot = host.snapshot(&mission)?;
@@ -480,7 +501,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 }))
             }
             MissionCommand::Recover { db, mission } => {
-                let mut host = Host::open(&db)?;
+                let mut host = open_host(&db, runtime)?;
                 let snapshot = host.recover(&mission)?;
                 Ok(json!({"ok": true, "mission": snapshot.to_json()}))
             }
@@ -489,7 +510,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 mission,
                 json_body,
             } => {
-                let mut host = Host::open(&db)?;
+                let mut host = open_host(&db, runtime)?;
                 let value: Value = serde_json::from_str(&json_body)
                     .map_err(|error| Error::guard(format!("notification is not JSON: {error}")))?;
                 let outcome = host.apply_notification_json(&mission, &value)?;
@@ -501,7 +522,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 }))
             }
             MissionCommand::Lock { db } => {
-                let host = Host::open(&db)?;
+                let host = open_host(&db, runtime)?;
                 println!(
                     "{}",
                     json!({
@@ -516,7 +537,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 Ok(json!({"ok": true, "released": true, "generation": host.generation()}))
             }
             MissionCommand::Successor { db, mission, actor } => {
-                let mut host = Host::open(&db)?;
+                let mut host = open_host(&db, runtime)?;
                 let snapshot = host.create_successor(&mission, &actor)?;
                 Ok(json!({"ok": true, "mission": snapshot.to_json()}))
             }
@@ -527,13 +548,222 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 expected_revision,
                 actor,
             } => {
-                let mut host = Host::open(&db)?;
+                let mut host = open_host(&db, runtime)?;
                 let snapshot =
                     host.note_content_digest(&mission, expected_revision, &digest, &actor)?;
                 Ok(json!({"ok": true, "mission": snapshot.to_json()}))
             }
         },
     }
+}
+
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
+fn ensure_confined_selectable() -> switchyard_core::Result<()> {
+    for key in [
+        "SWITCHYARD_PI_RUNTIME",
+        "SWITCHYARD_BWRAP",
+        "SWITCHYARD_CGROUP_ROOT",
+        "SWITCHYARD_PI_NODE",
+        "SWITCHYARD_BRIDGE_LAUNCHER",
+        "SWITCHYARD_BRIDGE_POLICY",
+        "SWITCHYARD_EXECUTION_HELPER",
+    ] {
+        env_path(key)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+)))]
+fn ensure_confined_selectable() -> switchyard_core::Result<()> {
+    Err(Error::guard(
+        "confined Pi runtime requires Linux with the pi-contract and linux-execution build; refusing to fall back to FakeRuntime",
+    ))
+}
+
+fn open_host(db: &Path, runtime: RuntimeSelection) -> switchyard_core::Result<Host> {
+    match runtime {
+        RuntimeSelection::Fake => Host::open(db),
+        RuntimeSelection::ConfinedPi => open_confined(db),
+    }
+}
+
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
+fn open_confined(db: &Path) -> switchyard_core::Result<Host> {
+    use switchyard_core::{ConfinedPiConfig, LinuxExecutionConfig};
+
+    let pi_runtime = env_path("SWITCHYARD_PI_RUNTIME")?;
+    let bubblewrap = env_path("SWITCHYARD_BWRAP")?;
+    let cgroup_root = env_path("SWITCHYARD_CGROUP_ROOT")?;
+    let node = env_path("SWITCHYARD_PI_NODE")?;
+    let launcher = env_path("SWITCHYARD_BRIDGE_LAUNCHER")?;
+    let policy = env_path("SWITCHYARD_BRIDGE_POLICY")?;
+    let helper = env_path("SWITCHYARD_EXECUTION_HELPER")?;
+    let root = bridge_root(db)?;
+    // The composed scenario's trusted fixture. No model endpoint, credential,
+    // or TLS route is configured on this path.
+    Host::open_confined_pi(
+        db,
+        ConfinedPiConfig {
+            root,
+            cgroup_root: cgroup_root.clone(),
+            runtime: pi_runtime,
+            node,
+            bubblewrap: bubblewrap.clone(),
+            launcher,
+            policy,
+            model_endpoint: None,
+        },
+        LinuxExecutionConfig {
+            cgroup_root,
+            bubblewrap,
+            helper,
+            crash_at: None,
+            probe_request: None,
+            fail_launch: false,
+        },
+        "s3-acceptance",
+    )
+}
+
+#[cfg(not(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+)))]
+fn open_confined(db: &Path) -> switchyard_core::Result<Host> {
+    let _ = db;
+    Err(Error::guard(
+        "confined Pi runtime requires Linux with the pi-contract and linux-execution build; refusing to fall back to FakeRuntime",
+    ))
+}
+
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
+fn env_path(key: &str) -> switchyard_core::Result<PathBuf> {
+    let value = std::env::var(key).map_err(|_| {
+        Error::guard(format!(
+            "confined Pi runtime requires {key}; refusing to fall back to FakeRuntime"
+        ))
+    })?;
+    let path = PathBuf::from(&value);
+    if !path.is_absolute() || !path.exists() {
+        return Err(Error::guard(format!(
+            "confined Pi runtime requires {key} to be an existing absolute path; refusing to fall back to FakeRuntime"
+        )));
+    }
+    Ok(path)
+}
+
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
+fn bridge_root(db: &Path) -> switchyard_core::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = db
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !parent.exists() {
+        std::fs::create_dir_all(parent).map_err(Error::storage)?;
+    }
+    let parent = std::fs::canonicalize(parent).map_err(Error::storage)?;
+    let name = db
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::guard("database path has no UTF-8 file name"))?;
+    let root = parent.join(format!("{name}.pi-bridge"));
+    if root
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink())
+    {
+        return Err(Error::guard(
+            "confined Pi bridge root must be a real directory",
+        ));
+    }
+    if !root.exists() {
+        std::fs::create_dir(&root).map_err(Error::storage)?;
+    }
+    let meta = std::fs::symlink_metadata(&root).map_err(Error::storage)?;
+    if !meta.is_dir() {
+        return Err(Error::guard(
+            "confined Pi bridge root must be a real directory",
+        ));
+    }
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .map_err(Error::storage)?;
+    std::fs::canonicalize(&root).map_err(Error::storage)
+}
+
+fn settle_confined(
+    host: &mut Host,
+    mission: &str,
+    runtime: RuntimeSelection,
+) -> switchyard_core::Result<()> {
+    if runtime != RuntimeSelection::ConfinedPi {
+        return Ok(());
+    }
+    #[cfg(all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    ))]
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            host.poll_runtime(mission)?;
+            let value = host.snapshot(mission)?.to_json();
+            if composed_scenario_settled(&value) {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::guard(
+                    "confined Pi composed scenario did not finish; refusing to fall back to FakeRuntime",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    #[cfg(not(all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    )))]
+    {
+        let _ = (host, mission);
+        Err(Error::guard(
+            "confined Pi runtime requires Linux with the pi-contract and linux-execution build; refusing to fall back to FakeRuntime",
+        ))
+    }
+}
+
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
+fn composed_scenario_settled(value: &Value) -> bool {
+    let idle = value["piHost"]["observation"]["runtimeIdle"] == true;
+    let effects = value["linuxExecutionEffects"].as_array();
+    let has =
+        |method: &str| effects.is_some_and(|rows| rows.iter().any(|row| row["method"] == method));
+    idle && has("write_file") && has("exec_start") && has("exec_status")
 }
 
 fn command_body(kind: &str, payload: &Value) -> switchyard_core::Result<CommandBody> {

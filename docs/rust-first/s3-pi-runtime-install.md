@@ -5,11 +5,26 @@ resolved `runtime/pi-source` from `CARGO_MANIFEST_DIR`. An installed binary
 could not see that checkout. The confined bridge now uses an explicit runtime
 root on `ConfinedPiConfig`.
 
-FakeRuntime remains the product and CLI default. There is no CLI flag, no
-change to `Host::open`, and no new Cargo feature. Pi stays off unless a host
-calls `Host::open_confined_pi`. Provider credentials, live models, TLS, and
-production budgets stay out of scope. `test/bridge-child.ts` remains the
-conformance entry. This is not S4–S8 or full M1.
+FakeRuntime remains the product and CLI default. `Host::open` is unchanged,
+and there is no new Cargo feature. Pi is never selected implicitly. The CLI
+flag `--runtime confined-pi` is the explicit opt-in: it calls
+`Host::open_confined_pi` with the credential-free `s3-acceptance` fixture (the
+composed scenario) and does not set a model endpoint. Linux confinement
+prerequisites (`SWITCHYARD_PI_RUNTIME`, `SWITCHYARD_BWRAP`,
+`SWITCHYARD_CGROUP_ROOT`, `SWITCHYARD_PI_NODE`, `SWITCHYARD_BRIDGE_LAUNCHER`,
+`SWITCHYARD_BRIDGE_POLICY`, and `SWITCHYARD_EXECUTION_HELPER`) are required;
+a missing one fails closed and does not fall back to FakeRuntime. Provider
+credentials, live models, TLS, and production budgets stay out of scope.
+`test/bridge-child.ts` remains the conformance entry. This is not S4–S8 or
+full M1.
+
+The command that runs the composed scenario, after `mission create` and
+`mission workspace` were opened with the same flag and the attempt is in
+`awaiting_plan_approval`, is:
+
+```text
+switchyard mission command --runtime confined-pi --db <db> --mission <id> --kind approve_plan --expected-revision <rev> --payload '{"planDigest":"<digest>"}'
+```
 
 ## Host configuration
 
@@ -62,10 +77,14 @@ file to parse equal to it. That catches a provenance file that disagrees with
 the pins. It does not prove `node_modules` was produced by that build.
 
 `node_modules` is not compile-time pinned. Its bytes are part of the
-runtime-root digest below, so the attempt ledger refuses a later swap. Verifying
-that tree against `package-lock.json` is a follow-up, not this slice. A first
+runtime-root digest below, so the attempt ledger refuses a later swap. A first
 open of a fresh ledger therefore accepts whatever `node_modules` is present,
 then records that digest.
+
+Accepted known gap: confined Pi runtime node_modules are not verified against the lockfile.
+The runtime-root digest records the tree present at first open and refuses a later
+swap, but that digest does not prove the tree matches `package-lock.json`
+(#161 follow-up, #97).
 
 ## Runtime-root digest
 
@@ -86,8 +105,8 @@ unless the previous stop is proven, never reached `runtime.open`, and `state/`
 is empty. A later host open also refuses a different path or digest through
 the existing adapter-config comparison.
 
-That fingerprint changes for every confined attempt. No product ledger uses
-this adapter. Existing confined test ledgers will not reopen.
+That fingerprint changes for every confined attempt. FakeRuntime ledgers do
+not use this adapter. Existing confined test ledgers will not reopen.
 
 ## TOCTOU
 
@@ -102,7 +121,10 @@ root is host-private and not writable by the bridge.
 
 `execution-confinement` copies the built `runtime/pi-source` tree to a mode
 `0700` directory under `RUNNER_TEMP` and exports `SWITCHYARD_PI_RUNTIME`.
-Every confined suite uses that variable. The evidence file
+Every confined suite uses that variable. The same job runs
+`cargo test -p switchyard --test cli_confined` with `pi-contract` and
+`linux-execution`, which drives the composed `s3-acceptance` scenario through
+the CLI flag. The evidence file
 `bridge-environment.txt` records `runtime-root` and `runtime-root-digest`.
 The checkout copy stays available for the policy compile. One host test makes
 that checkout unreadable and still runs the `answer` and `process-hold`
@@ -110,7 +132,8 @@ fixtures from the relocated tree.
 
 ## Limits
 
-This does not install a production bridge, select a model endpoint, or enable
-Pi in the CLI. The native policy library remains `config.policy`. Workspace
+This does not install a production bridge or select a model endpoint. The CLI
+selects this runtime only with `--runtime confined-pi`; FakeRuntime remains
+the default. The native policy library remains `config.policy`. Workspace
 confinement is unchanged. Reboot, power-loss, and a compromised host are not
 claimed.

@@ -3,8 +3,11 @@
 Refs #156, #97, #94, after B1–B6 and cgroup retention #155 (`5874eec`). This
 adds one credential-free evidence-collection scenario. **Collection is not the
 reviewed S3 acceptance decision.** Bounded acceptance of the collected evidence
-is recorded below, accepted 2026-11-10. FakeRuntime stays the product default;
-Pi is not enabled in the CLI, and product Pi wiring, S4–S8, and live acceptance
+is recorded below, accepted 2026-11-10. FakeRuntime stays the product default.
+The same composed scenario can also be started from the CLI with the explicit
+`--runtime confined-pi` flag, which is off unless passed and fails closed
+without confinement prerequisites. That flag is not implicit product
+enablement. Product Pi wiring beyond this opt-in, S4–S8, and live acceptance
 remain separate.
 
 ## What is composed

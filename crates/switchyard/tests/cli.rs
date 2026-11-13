@@ -1074,3 +1074,99 @@ fn supersede_execution_audits_the_simulated_journal_and_refuses_linux_rows() {
         "{error}"
     );
 }
+
+#[test]
+fn default_runtime_is_fake_and_explicit_fake_matches_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+    let create = |db: &Path, extra: &[&str]| {
+        let mut args = vec![
+            "mission",
+            "create",
+            "--db",
+            db.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--issue",
+            "97",
+            "--objective",
+            "keep the fake runtime",
+            "--acceptance",
+            "no confined adapter",
+        ];
+        args.extend_from_slice(extra);
+        run(&args)
+    };
+    let omitted = tmp.path().join("omitted.sqlite");
+    let (code, stdout, error) = create(&omitted, &[]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(stdout["mission"]["runtimeAdapter"], "fake");
+    assert_eq!(stdout["mission"]["phase"], "draft");
+    let explicit = tmp.path().join("explicit.sqlite");
+    let (code, flagged, error) = create(&explicit, &["--runtime", "fake"]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(flagged["mission"]["runtimeAdapter"], "fake");
+    assert_eq!(
+        flagged["mission"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        stdout["mission"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>()
+    );
+    let stored = ledger_text(&omitted);
+    assert!(stored.contains("\"adapter\":\"fake\"") || stored.contains("\"adapter\": \"fake\""));
+    assert!(!stored.contains("pi-confined"));
+}
+
+#[test]
+fn confined_pi_flag_fails_closed_without_prerequisites() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let output = Command::new(bin())
+        .args([
+            "mission",
+            "create",
+            "--runtime",
+            "confined-pi",
+            "--db",
+            db.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--issue",
+            "97",
+            "--objective",
+            "do not fall back",
+            "--acceptance",
+            "confined prerequisites are missing",
+        ])
+        .env_remove("SWITCHYARD_PI_RUNTIME")
+        .env_remove("SWITCHYARD_BWRAP")
+        .env_remove("SWITCHYARD_CGROUP_ROOT")
+        .env_remove("SWITCHYARD_PI_NODE")
+        .env_remove("SWITCHYARD_BRIDGE_LAUNCHER")
+        .env_remove("SWITCHYARD_BRIDGE_POLICY")
+        .env_remove("SWITCHYARD_EXECUTION_HELPER")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr: Value = serde_json::from_slice(&output.stderr).unwrap();
+    let message = stderr["error"]["message"].as_str().unwrap();
+    assert_eq!(stderr["ok"], false);
+    assert_eq!(stderr["error"]["category"], "guard_failed");
+    assert!(message.contains("confined Pi runtime"), "{message}");
+    assert!(
+        message.contains("refusing to fall back to FakeRuntime"),
+        "{message}"
+    );
+    assert!(!db.exists());
+    assert!(!tmp.path().join("mission.sqlite.pi-bridge").exists());
+}

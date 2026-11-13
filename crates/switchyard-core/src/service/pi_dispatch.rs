@@ -23,7 +23,8 @@ impl Host {
     /// Explicit credential-free conformance adapter. `fixture` is trusted Host
     /// configuration, never a command/model parameter. Egress stays denied
     /// unless `config.model_endpoint` names one operator endpoint. The product
-    /// CLI continues to use FakeRuntime and does not set an endpoint.
+    /// CLI stays on FakeRuntime unless `--runtime confined-pi` is passed, and
+    /// that path does not set an endpoint.
     pub fn open_confined_pi(
         db: &Path,
         config: ConfinedPiConfig,
