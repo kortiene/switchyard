@@ -1,8 +1,10 @@
 //! Fixed, credential-free B1 policy, now owned by the Rust session lifecycle.
 //!
-//! The runtime root is host configuration. Its expected provenance is rebuilt
-//! from the reviewed `pins.json` compiled into this crate. There is no separate
-//! compiled provenance hash.
+//! The runtime root is host configuration. In-repo bridge files are pinned to
+//! the bytes compiled into this crate. `node_modules` is not: its digest is
+//! recorded on first open and a later swap is refused. Lock-integrity of that
+//! tree is a follow-up.
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -43,6 +45,48 @@ impl RuntimeInstall {
     pub(super) fn record(&self) -> Value {
         json!({"path": self.root, "digest": self.digest})
     }
+}
+
+/// In-repo files mounted into the bridge. Generated `node_modules` and
+/// `.artifacts/provenance.json` are not in this list.
+const REVIEWED_FILES: &[(&str, &[u8])] = &[
+    (
+        "confinement/guard.cjs",
+        include_bytes!("../../../../../runtime/pi-source/confinement/guard.cjs"),
+    ),
+    (
+        "package-lock.json",
+        include_bytes!("../../../../../runtime/pi-source/package-lock.json"),
+    ),
+    (
+        "package.json",
+        include_bytes!("../../../../../runtime/pi-source/package.json"),
+    ),
+    (
+        "src/forwarders.ts",
+        include_bytes!("../../../../../runtime/pi-source/src/forwarders.ts"),
+    ),
+    (
+        "src/protocol.ts",
+        include_bytes!("../../../../../runtime/pi-source/src/protocol.ts"),
+    ),
+    (
+        "src/runtime.ts",
+        include_bytes!("../../../../../runtime/pi-source/src/runtime.ts"),
+    ),
+    (
+        "src/transport.ts",
+        include_bytes!("../../../../../runtime/pi-source/src/transport.ts"),
+    ),
+    (
+        "test/bridge-child.ts",
+        include_bytes!("../../../../../runtime/pi-source/test/bridge-child.ts"),
+    ),
+];
+
+#[cfg(test)]
+pub(super) fn reviewed_files() -> &'static [(&'static str, &'static [u8])] {
+    REVIEWED_FILES
 }
 
 fn reviewed_pins() -> &'static Value {
@@ -90,6 +134,9 @@ pub(super) fn inspect_runtime(path: &Path) -> Result<RuntimeInstall> {
             "bridge runtime provenance does not match the reviewed pins",
         ));
     }
+    // Byte pins run before any runtime binary is executed. `check` calls this
+    // function before `node` or Bubblewrap.
+    verify_reviewed_bytes(&root)?;
     entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
     let mut manifest = String::new();
     for (_, line) in &entries {
@@ -106,6 +153,70 @@ pub(super) fn inspect_runtime(path: &Path) -> Result<RuntimeInstall> {
         guard_sha256: file_sha(&entries, "confinement/guard.cjs")?,
         mounts,
     })
+}
+
+fn verify_reviewed_bytes(root: &Path) -> Result<()> {
+    for (rel, expected) in REVIEWED_FILES {
+        let actual = match fs::read(root.join(rel)) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Error::guard(format!(
+                    "bridge runtime root is missing {rel}"
+                )));
+            }
+            Err(error) => return Err(Error::storage(error)),
+        };
+        if crate::canonical::sha256_hex(&actual) != crate::canonical::sha256_hex(expected) {
+            return Err(Error::guard(format!(
+                "bridge runtime {rel} does not match the reviewed bytes"
+            )));
+        }
+    }
+    let mut found = BTreeSet::new();
+    list_src_files(root, "src", &mut found)?;
+    let expected: BTreeSet<String> = REVIEWED_FILES
+        .iter()
+        .filter(|(rel, _)| rel.starts_with("src/"))
+        .map(|(rel, _)| (*rel).to_owned())
+        .collect();
+    if found != expected {
+        return Err(Error::guard(
+            "bridge runtime src does not match the reviewed file set",
+        ));
+    }
+    Ok(())
+}
+
+fn list_src_files(root: &Path, rel: &str, found: &mut BTreeSet<String>) -> Result<()> {
+    let path = root.join(rel);
+    let meta = fs::symlink_metadata(&path).map_err(Error::storage)?;
+    if meta.file_type().is_symlink() {
+        return Err(Error::guard(format!(
+            "bridge runtime component {rel} is a symlink"
+        )));
+    }
+    if meta.is_dir() {
+        if rel != "src" {
+            return Err(Error::guard(
+                "bridge runtime src does not match the reviewed file set",
+            ));
+        }
+        for entry in fs::read_dir(&path).map_err(Error::storage)? {
+            let name = entry.map_err(Error::storage)?.file_name();
+            let name = name
+                .to_str()
+                .ok_or_else(|| Error::guard("bridge runtime file name is not UTF-8"))?;
+            list_src_files(root, &format!("{rel}/{name}"), found)?;
+        }
+        return Ok(());
+    }
+    if meta.is_file() {
+        found.insert(rel.to_owned());
+        return Ok(());
+    }
+    Err(Error::guard(format!(
+        "bridge runtime component {rel} is a special file"
+    )))
 }
 
 fn file_sha(entries: &[(String, String)], rel: &str) -> Result<String> {

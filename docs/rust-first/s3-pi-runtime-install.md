@@ -1,4 +1,4 @@
-# S3: Relocatable, digest-pinned confined Pi runtime
+# S3: Relocatable confined Pi runtime install
 
 Refs #97, #94. This retires the compile-time `policy::source()` lookup that
 resolved `runtime/pi-source` from `CARGO_MANIFEST_DIR`. An installed binary
@@ -38,33 +38,53 @@ real directory, such as npm's `node_modules/.bin` links, are not followed.
 Their link text is part of the digest. A symlink that replaces one of the
 required parts is refused.
 
-## Pins and the runtime-root digest
+## What is pinned before launch
 
-The expected provenance is not a new compiled hash. `check` rebuilds the object
-written by `runtime/pi-source/build.mjs` from the reviewed `pins.json` already
-compiled into the crate:
+Two different checks run before Node or Bubblewrap is executed.
 
-- `sourceCommit`, `upstreamLockSha256`, `catalogRevision`, `node`, `npm`, and
-  `packages` come from that pins file
-- `decision` stays the build's fixed label `NEEDS-FULL-S2`
+Compile-time bytes, via `include_bytes!` in `policy.rs`. The installed file's
+SHA-256 must match those bytes, and `src/` must be exactly this set:
 
-The installed `pins.json` must parse equal to those reviewed pins. The
-installed `provenance.json` must parse equal to the rebuilt object. Either
-mismatch returns before Node, Bubblewrap, or the bridge is executed.
+- `src/forwarders.ts`, `src/protocol.ts`, `src/runtime.ts`, `src/transport.ts`
+- `test/bridge-child.ts`
+- `package.json`
+- `package-lock.json`
+- `confinement/guard.cjs`
 
-The runtime-root digest is `sha256:` plus the SHA-256 of a manifest of those
-parts. Each regular file is `f <relative-path> <sha256>\n`. Each interior
-symlink is `l <relative-path> <target>\n`. Lines are sorted by the raw relative
-path bytes. `scripts/runtime-root-digest.mjs` implements the same manifest for
-the confinement evidence file. A unit test refuses a drift between the two.
+`pins.json` must parse equal to the reviewed pins compiled into the crate.
+A mismatch in any of these returns before a runtime binary is started.
+
+`provenance.json` is not an independent build proof. `check` rebuilds the
+object `build.mjs` writes from those pins (`sourceCommit`,
+`upstreamLockSha256`, `catalogRevision`, `node`, `npm`, `packages`, plus the
+build's fixed `decision` label `NEEDS-FULL-S2`) and requires the installed
+file to parse equal to it. That catches a provenance file that disagrees with
+the pins. It does not prove `node_modules` was produced by that build.
+
+`node_modules` is not compile-time pinned. Its bytes are part of the
+runtime-root digest below, so the attempt ledger refuses a later swap. Verifying
+that tree against `package-lock.json` is a follow-up, not this slice. A first
+open of a fresh ledger therefore accepts whatever `node_modules` is present,
+then records that digest.
+
+## Runtime-root digest
+
+The runtime-root digest is `sha256:` plus the SHA-256 of a manifest of the
+required parts. Each regular file is `f <relative-path> <sha256>\n`. Each
+interior symlink is `l <relative-path> <target>\n`. Lines are sorted by the
+raw relative path bytes. `scripts/runtime-root-digest.mjs` implements the same
+manifest for the confinement evidence file. A unit test refuses a drift
+between the two.
 
 `check` stores the canonical path and digest as `runtimeRoot` on the session
 configuration. `ConfinedRuntime::configuration` stores the path as `runtime`
-and the same digest as `runtimeRoot` on the attempt ledger. An opened session
-still refuses a configuration change unless the previous stop is proven, never
-reached `runtime.open`, and `state/` is empty. A later host open refuses a
-different path or digest through the existing adapter-config comparison.
-Replacing the install under an existing confined ledger therefore fails closed.
+and the same digest as `runtimeRoot` on the attempt ledger. On a later open,
+a digest that does not match the one stored at host open is refused
+immediately after `check`, before a recovery file is written and before
+cgroup retention runs. An opened session still refuses a configuration change
+unless the previous stop is proven, never reached `runtime.open`, and `state/`
+is empty. A later host open also refuses a different path or digest through
+the existing adapter-config comparison.
 
 That fingerprint changes for every confined attempt. No product ledger uses
 this adapter. Existing confined test ledgers will not reopen.

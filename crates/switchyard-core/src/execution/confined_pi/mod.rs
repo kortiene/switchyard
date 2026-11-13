@@ -108,6 +108,12 @@ impl ConfinedPiSession {
         let owner = try_acquire_file(control.open_file("owner.lock", true)?)?;
         let state = control.child("state")?;
         let installed = policy::check(config)?;
+        // Refuse a swapped install before recovery rewrites control state.
+        if expected_digest.is_some_and(|expected| installed["runtimeRoot"]["digest"] != expected) {
+            return Err(Error::guard(
+                "runtime root does not match the host ledger pin",
+            ));
+        }
         let cgroup_root = cgroup::validate_delegation(&config.cgroup_root)?;
         let previous = control.read("current.json")?;
         if require_original && previous.is_none() {
@@ -176,11 +182,6 @@ impl ConfinedPiSession {
         }
         retention::recover(&control, &cgroup_root, &binding, previous.as_ref())?;
         state.inspect_state(require_existing)?;
-        if expected_digest.is_some_and(|expected| installed["runtimeRoot"]["digest"] != expected) {
-            return Err(Error::guard(
-                "runtime root does not match the host ledger pin",
-            ));
-        }
         let proxy = match &config.model_endpoint {
             Some(endpoint) => Some(egress::ModelProxy::start(endpoint)?),
             None => None,
@@ -561,13 +562,17 @@ pub(crate) fn fixture_runtime(parent: &Path, marker: &str) -> PathBuf {
     for directory in ["src", "test", "node_modules", "confinement", ".artifacts"] {
         fs::create_dir_all(root.join(directory)).unwrap();
     }
-    fs::write(root.join("src/marker.txt"), marker).unwrap();
-    fs::write(root.join("test/bridge-child.ts"), "export {}\n").unwrap();
-    fs::write(root.join("node_modules/keep.txt"), "keep\n").unwrap();
+    for (rel, bytes) in policy::reviewed_files() {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, bytes).unwrap();
+    }
+    // `node_modules` is not compile-time pinned. The marker keeps two fixtures
+    // distinct so a swapped tree changes the runtime-root digest.
+    fs::write(root.join("node_modules/keep.txt"), marker).unwrap();
     fs::write(root.join("pins.json"), PINS).unwrap();
-    fs::write(root.join("package.json"), "{}\n").unwrap();
-    fs::write(root.join("package-lock.json"), "{}\n").unwrap();
-    fs::write(root.join("confinement/guard.cjs"), "guard\n").unwrap();
     let pins: Value = serde_json::from_str(PINS).unwrap();
     let provenance = json!({
         "decision": "NEEDS-FULL-S2",

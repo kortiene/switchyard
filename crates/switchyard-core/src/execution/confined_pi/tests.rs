@@ -234,6 +234,121 @@ fn confined_pi_runtime_symlinked_or_writable_part_is_refused() {
 }
 
 #[test]
+fn confined_pi_runtime_tampered_guard_fails_before_launch() {
+    assert_tampered_file_fails_before_launch("confinement/guard.cjs", b"tampered guard\n");
+}
+
+#[test]
+fn confined_pi_runtime_tampered_lockfile_fails_before_launch() {
+    assert_tampered_file_fails_before_launch("package-lock.json", b"{}\n");
+}
+
+fn assert_tampered_file_fails_before_launch(rel: &str, bytes: &[u8]) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = fixture_runtime(tmp.path(), "tamper");
+    fs::write(root.join(rel), bytes).unwrap();
+    fs::set_permissions(root.join(rel), fs::Permissions::from_mode(0o644)).unwrap();
+    let config = ConfinedPiConfig {
+        root: tmp.path().into(),
+        cgroup_root: tmp.path().into(),
+        runtime: root,
+        node: PathBuf::from("/no/such/node"),
+        bubblewrap: PathBuf::from("/no/such/bwrap"),
+        launcher: PathBuf::from("/no/such/launcher"),
+        policy: PathBuf::from("/no/such/policy"),
+        model_endpoint: None,
+    };
+    let error = policy::check(&config).unwrap_err().to_string();
+    assert!(
+        error.contains(rel) && error.contains("reviewed bytes"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("untrusted bridge runtime path"),
+        "reviewed bytes must fail before a runtime binary is opened: {error}"
+    );
+}
+
+#[test]
+fn confined_pi_mismatched_runtime_digest_is_refused_before_recovery() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let runtime = fixture_runtime(tmp.path(), "digest");
+    let binding = RuntimeBinding {
+        mission_id: "digest-m".into(),
+        attempt_id: "digest-a".into(),
+        session_id: "digest-s".into(),
+        generation: 2,
+    };
+    let key = payload_hash(&json!([
+        &binding.mission_id,
+        &binding.attempt_id,
+        &binding.session_id
+    ]))
+    .unwrap();
+    let session = tmp.path().join(format!("session-{key}"));
+    fs::create_dir_all(&session).unwrap();
+    fs::set_permissions(&session, fs::Permissions::from_mode(0o700)).unwrap();
+    let current = br#"{"version":1,"phase":"opened","generation":1}"#;
+    let journal = b"untouched-retirement";
+    fs::write(session.join("current.json"), current).unwrap();
+    fs::write(session.join("leaf-retirement.json"), journal).unwrap();
+    fs::set_permissions(
+        session.join("current.json"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    fs::set_permissions(
+        session.join("leaf-retirement.json"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let tool = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| panic!("{name} is required; no fallback"))
+    };
+    let config = ConfinedPiConfig {
+        root: tmp.path().into(),
+        cgroup_root: tool("SWITCHYARD_CGROUP_ROOT"),
+        runtime,
+        node: tool("SWITCHYARD_PI_NODE"),
+        bubblewrap: tool("SWITCHYARD_BWRAP"),
+        launcher: tool("SWITCHYARD_BRIDGE_LAUNCHER"),
+        policy: tool("SWITCHYARD_BRIDGE_POLICY"),
+        model_endpoint: None,
+    };
+    let error = match ConfinedPiSession::open_required(
+        &config,
+        binding,
+        "answer",
+        false,
+        Some("sha256:not-the-installed-runtime"),
+    ) {
+        Ok(_) => panic!("a mismatched runtime digest must be refused"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("host ledger pin"), "{error}");
+    assert!(
+        session.join("owner.lock").is_file(),
+        "open did not reach the planted session directory"
+    );
+    assert_eq!(fs::read(session.join("current.json")).unwrap(), current);
+    assert_eq!(
+        fs::read(session.join("leaf-retirement.json")).unwrap(),
+        journal
+    );
+    for entry in fs::read_dir(&session).unwrap() {
+        let name = entry.unwrap().file_name();
+        let name = name.to_string_lossy();
+        assert!(
+            !name.starts_with("recovered-") && !name.starts_with("abandoned-"),
+            "recovery wrote {name}"
+        );
+    }
+}
+
+#[test]
 fn confined_pi_runtime_provenance_mismatch_fails_before_launch() {
     let tmp = tempfile::tempdir().unwrap();
     let root = fixture_runtime(tmp.path(), "provenance");
