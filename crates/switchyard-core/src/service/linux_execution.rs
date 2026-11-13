@@ -27,9 +27,9 @@ impl Host {
     }
 
     fn flag_linux_attention(&mut self, mission: &crate::domain::MissionRecord) -> Result<()> {
-        let stopping_fake = self.runtime.linux_ledger().preserves_admitted_stop
+        let preserving_stop = self.runtime.linux_ledger().preserves_admitted_stop
             && matches!(mission.phase, Phase::Pausing | Phase::Cancelling);
-        if !mission.phase.is_terminal() && !stopping_fake {
+        if !mission.phase.is_terminal() && !preserving_stop {
             self.uncertainty(mission, crate::domain::AttentionReason::ExecutionUncertain)?;
         }
         Ok(())
@@ -197,7 +197,7 @@ mod os {
         pub fn enable_linux_execution(&mut self, config: LinuxExecutionConfig) -> Result<()> {
             if !self.runtime.linux_ledger().admits_effects {
                 return Err(Error::guard(
-                    "linux execution is a non-default test backend and requires FakeRuntime",
+                    "linux execution requires an adapter that admits Linux effects",
                 ));
             }
             require_bwrap(&config.bubblewrap)?;

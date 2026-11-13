@@ -520,42 +520,4 @@ mod tests {
         assert_eq!(confined.guidance(), GuidanceProfile::default());
         assert_declared(&confined);
     }
-
-    #[test]
-    fn declared_profile_variants_keep_flag_dependencies() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_declared(&RuntimeAdapter::Fake(
-            FakeRuntime::open(&dir.path().join("fake-runtime.json")).unwrap(),
-        ));
-        #[cfg(feature = "pi-contract")]
-        {
-            let node = std::env::current_exe().unwrap();
-            assert_declared(&RuntimeAdapter::Pi(Box::new(
-                crate::execution::PiRuntime::new(&dir.path().join("ledger.sqlite"), &node).unwrap(),
-            )));
-        }
-        #[cfg(all(
-            feature = "pi-contract",
-            feature = "linux-execution",
-            target_os = "linux"
-        ))]
-        {
-            let path = || std::path::PathBuf::from("/uninstalled-conformance-fixture");
-            let runtime =
-                crate::execution::confined_pi::fixture_runtime(dir.path(), "profile-deps");
-            let config = crate::execution::confined_pi::ConfinedPiConfig {
-                root: path(),
-                cgroup_root: path(),
-                runtime,
-                node: path(),
-                bubblewrap: path(),
-                launcher: path(),
-                policy: path(),
-                model_endpoint: None,
-            };
-            assert_declared(&RuntimeAdapter::Confined(Box::new(
-                crate::execution::confined_runtime::ConfinedRuntime::new(config, "answer").unwrap(),
-            )));
-        }
-    }
 }

@@ -35,8 +35,10 @@ impl Host {
     }
 
     /// Same as [`Self::open_confined_pi`], plus the `busy-once` stop-admission
-    /// fixture. That name is not a production runtime. The confinement probe
-    /// is the caller; `cfg(test)` is not set on this library there.
+    /// fixture. Compiled only with the `test-fixtures` feature, which the
+    /// confinement probe enables from its dev-dependency. `cfg(test)` is not
+    /// set on this library when that probe builds it.
+    #[cfg(feature = "test-fixtures")]
     pub fn open_confined_test_fixture(
         db: &Path,
         config: ConfinedPiConfig,
@@ -55,10 +57,20 @@ impl Host {
     ) -> Result<Self> {
         let db = canonical_db_path(db)?;
         let mut host = Self::open_with_runtime(&db, |_| {
-            let runtime = if test_fixtures {
-                ConfinedRuntime::new_for_harness(config, fixture)?
-            } else {
+            let runtime = if !test_fixtures {
                 ConfinedRuntime::new(config, fixture)?
+            } else {
+                #[cfg(any(test, feature = "test-fixtures"))]
+                {
+                    ConfinedRuntime::new_for_harness(config, fixture)?
+                }
+                #[cfg(not(any(test, feature = "test-fixtures")))]
+                {
+                    // Unreachable. Only `open_confined_test_fixture` passes true,
+                    // and that method exists only with `test-fixtures`.
+                    let _ = (config, fixture);
+                    return Err(Error::guard("busy-once is not a production fixture"));
+                }
             };
             Ok(RuntimeAdapter::Confined(Box::new(runtime)))
         })?;

@@ -105,11 +105,17 @@ pub(crate) trait ExecutionEnv {                       // Rust-owned backends onl
 }
 
 // Host keeps a closed set: enum dispatch over trait-implementing types (no dyn, no plugins, #42 stays deferred).
-pub(crate) enum RuntimeAdapter { Fake(FakeRuntime), #[cfg(feature = "pi-contract")] Pi(Box<PiRuntime>) /*, Native(...) later */ }
+pub(crate) enum RuntimeAdapter {
+    Fake(FakeRuntime),
+    #[cfg(feature = "pi-contract")] Pi(Box<PiRuntime>),
+    #[cfg(all(feature = "pi-contract", feature = "linux-execution", target_os = "linux"))]
+    Confined(Box<ConfinedRuntime>),
+    /*, Native(...) later */
+}
 impl AgentRuntime for RuntimeAdapter { /* delegate per variant; exhaustive match */ }
 ```
 
-The trait is the contract. The enum stays the only way to construct an adapter: no `Box<dyn AgentRuntime>` from outside the crate and no project-supplied adapters. Out of process, the trait is the Host-side client of the JSONL protocol in [runtime-protocol.md](runtime-protocol.md). A native runtime that runs as its own process implements the same wire protocol.
+The declared `DispatchProfile`, `FactProfile`, `LinuxLedgerProfile`, and `GuidanceProfile` on today's closed enum are the precursor to `AuthorityProfile`. The trait is the contract. The enum stays the only way to construct an adapter: no `Box<dyn AgentRuntime>` from outside the crate and no project-supplied adapters. Out of process, the trait is the Host-side client of the JSONL protocol in [runtime-protocol.md](runtime-protocol.md). A native runtime that runs as its own process implements the same wire protocol.
 
 ### D4. Shared conformance suite
 

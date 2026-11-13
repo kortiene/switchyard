@@ -21,9 +21,9 @@ impl Host {
             let mission = self.store.load_mission(mission_id)?;
             // Preserve an admitted stop while retaining every execution block.
             // A delivered abort cannot authorize ConfirmStopped/ConfirmCancelled.
-            let stopping_fake = ledger.preserves_admitted_stop
+            let preserving_stop = ledger.preserves_admitted_stop
                 && matches!(mission.phase, Phase::Pausing | Phase::Cancelling);
-            if !mission.phase.is_terminal() && !stopping_fake {
+            if !mission.phase.is_terminal() && !preserving_stop {
                 self.uncertainty(&mission, AttentionReason::ExecutionUncertain)?;
             }
         }

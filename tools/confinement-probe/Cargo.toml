@@ -20,6 +20,8 @@ switchyard-core = { path = "../../crates/switchyard-core", features = ["pi-contr
 [dev-dependencies]
 tempfile = "3"
 rusqlite = { version = "0.37", features = ["bundled"] }
+# Test builds only. `cargo build` of this package does not enable `test-fixtures`.
+switchyard-core = { path = "../../crates/switchyard-core", features = ["pi-contract", "test-fixtures"] }
 
 [[bin]]
 name = "confinement-fixture"

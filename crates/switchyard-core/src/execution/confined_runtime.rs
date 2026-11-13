@@ -25,8 +25,10 @@ impl ConfinedRuntime {
         Self::build(config, fixture, cfg!(test))
     }
 
-    /// Accepts the production fixtures plus `busy-once`. The confinement probe
-    /// is a separate crate, so `cfg(test)` is not set on this library there.
+    /// Accepts the production fixtures plus `busy-once`. In-crate tests compile
+    /// this with `cfg(test)`. The confinement probe enables `test-fixtures`
+    /// instead, because that crate builds this library without `cfg(test)`.
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub(crate) fn new_for_harness(config: ConfinedPiConfig, fixture: &str) -> Result<Self> {
         Self::build(config, fixture, true)
     }
