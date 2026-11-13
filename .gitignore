@@ -4,6 +4,11 @@ node_modules/
 # Rust build output
 /target/
 
+# switchyard-ui (Rune dashboard): its own workspace's build output, and
+# regenerated headless snapshot evidence (see scripts/ui-verify.sh)
+/crates/switchyard-ui/target/
+/crates/switchyard-ui/artifacts/
+
 # Build output (dist/ is a build artifact; tsconfig.build.json emits it)
 dist/
 

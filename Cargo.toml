@@ -2,6 +2,14 @@
 resolver = "3"
 members = ["crates/switchyard-core", "crates/switchyard", "tools/confinement-probe"]
 
+# `crates/switchyard-ui` is its own workspace. It pulls the Rune UI stack
+# (wgpu, Parley, Taffy, resvg-free but still heavy) and needs Linux graphics
+# system libraries at build time, so it stays out of `scripts/rust-verify.sh`,
+# which runs `cargo clippy --workspace --all-targets --locked` and
+# `cargo test --workspace --locked` for the default feature set. Its gate is
+# `scripts/ui-verify.sh`.
+exclude = ["crates/switchyard-ui"]
+
 [workspace.package]
 edition = "2024"
 license = "MIT"

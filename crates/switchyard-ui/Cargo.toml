@@ -1,0 +1,60 @@
+[package]
+name = "switchyard-ui"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+rust-version = "1.99.1"
+description = "Read-only Rune mission dashboard over the Switchyard Rust ledger."
+
+# This crate is its own workspace and is excluded from the repository root
+# workspace (see /Cargo.toml `exclude`). That keeps wgpu, Parley, Taffy and the
+# rest of Rune out of `scripts/rust-verify.sh`, which runs
+# `cargo clippy --workspace --all-targets --locked` and `cargo test --workspace
+# --locked` for the default feature set. The core gate must not acquire Linux
+# graphics system libraries or a multi-minute GPU build. Use
+# `scripts/ui-verify.sh` for this crate.
+[workspace]
+
+[lib]
+name = "switchyard_ui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "switchyard-ui"
+path = "src/main.rs"
+
+[dependencies]
+# Pre-release: Rune is git-only and apps pin a rev of `dev`, which is
+# fast-forward-only and never rewritten. Do not float this.
+# Upstream takes no pull requests; file issues instead.
+rune = { git = "https://github.com/anomalyco/rune", rev = "cfd4340f700f4534bfd56af4923cde925a512682", default-features = false, features = ["embedded-fonts"] }
+switchyard-core = { path = "../switchyard-core" }
+
+# Rune's own workspace patches crates-io `wgpu-hal` with `vendor/wgpu-hal`, and
+# a dependency's `[patch]` does not apply to the workspace that depends on it.
+# The patch only adds `dx12::Instance::expose_adapter` and lazy FXC loading, so
+# Linux and macOS build unpatched. A Windows host needs the same vendored patch
+# copied into this workspace before it will build.
+
+[profile.dev]
+# Full debug info for Rune's tree measured 18-23 GB of RAM for one build; line
+# tables keep backtraces and file:line in panics at a fraction of that.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+codegen-units = 16
+incremental = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
