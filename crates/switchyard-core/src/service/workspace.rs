@@ -160,15 +160,19 @@ impl Host {
     /// is supervising in the current generation. Other blocked rows, including
     /// uncertain and unsupervised ones, stay on the hard path.
     fn recover_skips_verify_for_supervised_writer(&self, mission_id: &str) -> Result<bool> {
+        if !self
+            .runtime
+            .recovery_profile()
+            .skip_verify_for_supervised_writers
+        {
+            return Ok(false);
+        }
         #[cfg(all(
             feature = "pi-contract",
             feature = "linux-execution",
             target_os = "linux"
         ))]
         {
-            if !self.runtime.is_confined() {
-                return Ok(false);
-            }
             self.confined_supervised_writers_only(mission_id)
         }
         #[cfg(not(all(
@@ -178,7 +182,9 @@ impl Host {
         )))]
         {
             let _ = (self, mission_id);
-            Ok(false)
+            Err(Error::guard(
+                "supervised-writer verify skip requires confined Pi",
+            ))
         }
     }
 

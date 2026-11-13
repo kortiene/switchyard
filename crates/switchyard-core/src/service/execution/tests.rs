@@ -3640,3 +3640,98 @@ fn v9_inspection_and_upgrade_preserve_original_effect_receipts() {
         10
     );
 }
+
+/// Fake recovery must stay blocked after a delivered stop, even when that stop
+/// clears the Linux row. Only the confined recovery profile falls through and
+/// dispatches work. The trigger stands in for that settlement so this test
+/// fails if Fake starts resuming.
+#[test]
+fn fake_recover_after_delivered_stop_stays_blocked_and_dispatches_no_work() {
+    let (dir, mut host, request) = setup();
+    let mission = request.binding.mission_id.clone();
+    command(
+        &mut host,
+        &mission,
+        CommandBody::Continue {
+            activity: "implementing".into(),
+        },
+    );
+    Connection::open(dir.path().join("mission.sqlite"))
+        .unwrap()
+        .execute(
+            "INSERT INTO linux_execution_effects(
+                operation_id, mission_id, attempt_id, session_id, payload_hash, request_json,
+                started_generation, state, created_at
+             ) VALUES ('op-v1:recover-stop', ?1, ?2, ?3, 'sha256:row', '{}', 1, 'prepared', 1)",
+            rusqlite::params![
+                mission,
+                request.binding.attempt_id,
+                request.binding.session_id
+            ],
+        )
+        .unwrap();
+    command(&mut host, &mission, CommandBody::Pause);
+    let before = host.snapshot(&mission).unwrap();
+    assert_eq!(before.phase, Phase::Pausing);
+    assert!(before.execution_blocked);
+    let pause_request = before
+        .commands
+        .iter()
+        .find(|command| command.kind == "pause")
+        .unwrap()
+        .request_id
+        .clone();
+    drop(host);
+    Connection::open(dir.path().join("mission.sqlite"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER recover_stop_clears_linux_block
+             AFTER UPDATE OF state ON commands
+             WHEN NEW.kind = 'pause' AND NEW.state = 'acknowledged' AND OLD.state = 'pending'
+             BEGIN
+                 UPDATE linux_execution_effects
+                 SET state = 'not_applied',
+                     quiescence_json = '{\"proven\":true,\"source\":\"delivered-stop\"}'
+                 WHERE mission_id = NEW.mission_id AND state = 'prepared';
+             END;",
+        )
+        .unwrap();
+    let mut host = Host::open(&dir.path().join("mission.sqlite")).unwrap();
+    assert!(host.store.linux_execution_blocked(&mission).unwrap());
+    let loaded = host.runtime_mut().unwrap().submission_count();
+    let error = host.recover(&mission).unwrap_err();
+    assert_eq!(error.category(), "execution_blocked", "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("workspace was not verified or reused"),
+        "{error}"
+    );
+    let after = host.snapshot(&mission).unwrap();
+    assert_eq!(after.phase, Phase::Pausing);
+    assert!(!after.execution_blocked);
+    assert!(!host.store.linux_execution_blocked(&mission).unwrap());
+    assert_eq!(after.linux_execution_effects[0].state, "not_applied");
+    let state_of = |kind: &str| {
+        let command = after
+            .commands
+            .iter()
+            .find(|command| command.kind == kind)
+            .unwrap_or_else(|| panic!("missing {kind}"));
+        (command.state.as_str(), command.receipt_id.as_deref())
+    };
+    let (pause_state, pause_receipt) = state_of("pause");
+    assert_eq!(pause_state, "acknowledged");
+    assert!(pause_receipt.is_some(), "{pause_receipt:?}");
+    assert_eq!(state_of("continue"), ("pending", None));
+    assert_eq!(state_of("approve_plan"), ("pending", None));
+    assert!(
+        after
+            .commands
+            .iter()
+            .all(|command| command.kind != "confirm_stopped")
+    );
+    let runtime = host.runtime_mut().unwrap();
+    assert_eq!(runtime.submission_count(), loaded + 1);
+    assert_eq!(runtime.admission_order(), &[pause_request]);
+}
