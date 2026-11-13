@@ -2,7 +2,7 @@
 
 ## 2026-11-13
 
-* **Check inventory**: Removed `pi-bridge-probe` from [Testing and CI](reference/testing-and-ci.md). The always-on `pi-bridge-contract` job already runs those fmt, Clippy, `pi-contract` workspace, typecheck, and Node tests. `pi-bridge-probe` was not a required ruleset check. The confinement prerequisites now list the pinned Bubblewrap/AppArmor install before the Pi source build.
+* **Check inventory**: Removed `pi-bridge-probe` from [Testing and CI](reference/testing-and-ci.md). The always-on `pi-bridge-contract` job already runs those fmt, Clippy, `pi-contract` workspace, typecheck, and Node tests. `pi-bridge-probe` was not a required ruleset check. The confinement prerequisites now list the pinned Bubblewrap/AppArmor install before the Pi source build. The testing page heading is Retired bridge probe. Slice notes that named the live job now mark it retired 2026-11-13.
 
 ## 2026-11-10
 

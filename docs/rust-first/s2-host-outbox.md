@@ -188,8 +188,8 @@ cargo clippy --workspace --all-targets --features pi-contract --locked -- -D war
 cargo test --workspace --features pi-contract --locked
 ```
 
-`pi-bridge-probe` now runs the feature-enabled workspace tests, including these
-Host cases and the existing transport/tool-replay tests. It remains a partial
+`pi-bridge-probe` (retired 2026-11-13) ran the feature-enabled workspace tests, including these
+Host cases and the existing transport/tool-replay tests. It was a partial
 probe, not `pi-bridge-contract`. Missing dependencies fail rather than skip.
 
 [S2-B](s2-effect-outcomes.md) adds durable typed effect outcomes, and

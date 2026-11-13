@@ -114,8 +114,9 @@ Local validation passed formatting, standard Clippy and 157 core + 9 CLI tests;
 feature-enabled Clippy and 193 core + 12 bridge + 9 CLI tests; TypeScript
 typechecking and all 38 Node tests. No test was ignored or skipped.
 
-The existing `pi-bridge-probe` and `pi-source-candidate` workflows include these
-new tests automatically. They remain partial evidence, not `pi-bridge-contract`.
+`pi-bridge-probe` (retired 2026-11-13) included these new tests automatically.
+The existing `pi-source-candidate` workflow still includes them. That coverage
+remains partial evidence, not `pi-bridge-contract`.
 Local Node validation reuses existing locked artifacts and dependencies and
 checks their integrity/source-map agreement; CI independently rebuilds them.
 Local Linux confinement execution is not part of this slice; its existing CI

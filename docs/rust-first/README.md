@@ -68,7 +68,7 @@ flowchart TD
     CORE --> FORGE["GitHub delivery"]
 ```
 
-Start with one Rust library crate and one executable, using modules before adding more crates. S1 adds `crates/switchyard-core/` and `crates/switchyard/`. `runtime/pi/` contains the published-package audit. `runtime/pi-source/` contains the pinned source candidate from #107 and the [partial bridge probe](s2-bridge-probe.md). The Rust client is enabled only by `pi-contract` and does not replace the CLI's fake runtime. S2 is GO for the credential-free source-built candidate; see [the acceptance record](s2-contract-gate.md). `web/` and `tests/acceptance/` remain planned paths, not packages or usable product commands.
+Start with one Rust library crate and one executable, using modules before adding more crates. S1 adds `crates/switchyard-core/` and `crates/switchyard/`. `runtime/pi/` contains the published-package audit. `runtime/pi-source/` contains the pinned source candidate from #107 and the [partial bridge probe](s2-bridge-probe.md) (retired 2026-11-13). The Rust client is enabled only by `pi-contract` and does not replace the CLI's fake runtime. S2 is GO for the credential-free source-built candidate; see [the acceptance record](s2-contract-gate.md). `web/` and `tests/acceptance/` remain planned paths, not packages or usable product commands.
 
 ## Runtime baseline
 
