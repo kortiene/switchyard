@@ -25,6 +25,10 @@ use storage::Directory;
 pub use egress::ModelEndpoint;
 pub use launcher::confined_pi_launcher_main;
 
+pub(crate) fn runtime_digest(runtime: &Path) -> Result<String> {
+    Ok(policy::inspect_runtime(runtime)?.digest)
+}
+
 /// Diagnostic network field. Unset stays the string `"denied"` so a host that
 /// did not opt in does not look like it gained a route.
 pub(crate) fn egress_network(config: &ConfinedPiConfig) -> Value {
@@ -45,6 +49,11 @@ pub(crate) const BRIDGE_WALL: Duration = Duration::from_secs(60);
 pub struct ConfinedPiConfig {
     pub root: PathBuf,
     pub cgroup_root: PathBuf,
+    /// Absolute, owner-private runtime install. It must be canonical, sit
+    /// outside workspaces, and is mounted read-only: the bridge never receives
+    /// a writable path to it. Symlinked path components and setid or
+    /// group/world-writable parts are refused before launch.
+    pub runtime: PathBuf,
     pub node: PathBuf,
     pub bubblewrap: PathBuf,
     pub launcher: PathBuf,
@@ -80,7 +89,7 @@ impl ConfinedPiSession {
     /// thread that created the child. The supervisor stays parked until
     /// [`Self::stop`], so `open` may run on a thread that ends first.
     pub fn open(config: &ConfinedPiConfig, binding: RuntimeBinding, fixture: &str) -> Result<Self> {
-        Self::open_required(config, binding, fixture, false)
+        Self::open_required(config, binding, fixture, false, None)
     }
 
     pub(crate) fn open_required(
@@ -88,6 +97,9 @@ impl ConfinedPiSession {
         binding: RuntimeBinding,
         fixture: &str,
         require_original: bool,
+        // Digest recorded when the host ledger was opened. None for a direct
+        // session open that has no attempt ledger yet.
+        expected_digest: Option<&str>,
     ) -> Result<Self> {
         validate(&binding, fixture)?;
         let root = Directory::root(&config.root)?;
@@ -164,6 +176,11 @@ impl ConfinedPiSession {
         }
         retention::recover(&control, &cgroup_root, &binding, previous.as_ref())?;
         state.inspect_state(require_existing)?;
+        if expected_digest.is_some_and(|expected| installed["runtimeRoot"]["digest"] != expected) {
+            return Err(Error::guard(
+                "runtime root does not match the host ledger pin",
+            ));
+        }
         let proxy = match &config.model_endpoint {
             Some(endpoint) => Some(egress::ModelProxy::start(endpoint)?),
             None => None,
@@ -172,6 +189,7 @@ impl ConfinedPiSession {
             config,
             &state.path,
             proxy.as_ref().map(|proxy| proxy.directory()),
+            &installed,
         )?;
         let leaf = retention::allocate(&control, &cgroup_root, &binding)?;
         let mut record = json!({"version":1,"identity":identity(&binding),"generation":binding.generation,
@@ -532,6 +550,56 @@ fn recorded_leaf(record: &Value, root: &Path) -> Result<CgroupIdentity> {
             .ok_or_else(|| Error::guard("missing cgroup boot"))?
             .into(),
     })
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_runtime(parent: &Path, marker: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    const PINS: &str = include_str!("../../../../../runtime/pi-source/pins.json");
+    let root = parent.join(format!("pi-runtime-{marker}"));
+    let _ = fs::remove_dir_all(&root);
+    for directory in ["src", "test", "node_modules", "confinement", ".artifacts"] {
+        fs::create_dir_all(root.join(directory)).unwrap();
+    }
+    fs::write(root.join("src/marker.txt"), marker).unwrap();
+    fs::write(root.join("test/bridge-child.ts"), "export {}\n").unwrap();
+    fs::write(root.join("node_modules/keep.txt"), "keep\n").unwrap();
+    fs::write(root.join("pins.json"), PINS).unwrap();
+    fs::write(root.join("package.json"), "{}\n").unwrap();
+    fs::write(root.join("package-lock.json"), "{}\n").unwrap();
+    fs::write(root.join("confinement/guard.cjs"), "guard\n").unwrap();
+    let pins: Value = serde_json::from_str(PINS).unwrap();
+    let provenance = json!({
+        "decision": "NEEDS-FULL-S2",
+        "sourceCommit": pins["commit"],
+        "upstreamLockSha256": pins["lockSha256"],
+        "catalogRevision": pins["catalogRevision"],
+        "node": pins["node"],
+        "npm": pins["npm"],
+        "packages": pins["packages"],
+    });
+    fs::write(
+        root.join(".artifacts/provenance.json"),
+        serde_json::to_vec_pretty(&provenance).unwrap(),
+    )
+    .unwrap();
+    fn tighten(path: &Path, root: &Path) {
+        let meta = fs::symlink_metadata(path).unwrap();
+        if meta.file_type().is_symlink() {
+            return;
+        }
+        if meta.is_dir() {
+            let mode = if path == root { 0o700 } else { 0o755 };
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+            for entry in fs::read_dir(path).unwrap() {
+                tighten(&entry.unwrap().path(), root);
+            }
+        } else {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+    }
+    tighten(&root, &root);
+    root
 }
 
 fn start_time(pid: u32) -> Result<String> {

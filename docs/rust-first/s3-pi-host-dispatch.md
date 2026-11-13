@@ -110,10 +110,12 @@ not finished: its stopped session stays so this generation cannot start another
 bridge. The current cgroup leaf remains because recovery needs its identity.
 [Follow-up #151](s3-bridge-cgroup-retention.md) retires obsolete leaves only
 after durable handoff and fresh emptiness proof, retaining lifecycle evidence.
-The compiled source-tree lookup remains confined to this fixed conformance
-entry point; `config.policy` selects the trusted native policy library, but
-relocatable runtime/guard installation is still deferred. These APIs are not an
-installed production runtime contract.
+The compiled source-tree lookup is retired. The host passes
+`ConfinedPiConfig.runtime`, and confinement mounts that validated root.
+`config.policy` still selects the trusted native policy library. See
+[the relocatable install](s3-pi-runtime-install.md). `test/bridge-child.ts`
+remains the conformance entry. These APIs are not an installed production
+runtime contract.
 
 Local validation: Rust formatting, feature-enabled Clippy and default workspace
 tests. Real OS conformance requires CI's delegated cgroups and exact runtime pins.

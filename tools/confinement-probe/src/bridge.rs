@@ -50,9 +50,16 @@ pub fn prepare(root: &Path, policy: &Path, probe: bool) -> io::Result<BridgeSand
             "require /usr/bin/prlimit from util-linux 2.39.3",
         ));
     }
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../runtime/pi-source")
-        .canonicalize()?;
+    let source = PathBuf::from(
+        std::env::var_os("SWITCHYARD_PI_RUNTIME")
+            .ok_or_else(|| io::Error::other("SWITCHYARD_PI_RUNTIME is mandatory"))?,
+    );
+    if !source.is_absolute() {
+        return Err(io::Error::other(
+            "SWITCHYARD_PI_RUNTIME must be an absolute runtime root",
+        ));
+    }
+    let source = source.canonicalize()?;
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("bridge")
         .canonicalize()?;

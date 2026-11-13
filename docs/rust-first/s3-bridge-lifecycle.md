@@ -82,8 +82,8 @@ mission database, host control directory, credentials and sockets are absent.
 Networking stays denied unless the host sets one model endpoint
 ([S3-B6](s3-model-egress.md)). Subprocess creation remains denied; Node threads are allowed.
 The guard rejects a missing/invalid native policy before Pi opens storage.
-`policy::source()` resolves that tree from `CARGO_MANIFEST_DIR` for this
-conformance entry point. Product wiring will need a real install location.
+The runtime tree is no longer resolved from `CARGO_MANIFEST_DIR`. The host
+passes `ConfinedPiConfig.runtime`; see [the relocatable install](s3-pi-runtime-install.md).
 
 The bridge gets its own cgroup: 256 MiB memory, no swap, 64 tasks and
 `cpu.max = 50000 100000`. Existing workspace execution limits are unchanged.

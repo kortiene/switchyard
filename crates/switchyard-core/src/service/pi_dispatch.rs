@@ -144,12 +144,14 @@ impl Host {
             return Ok(());
         }
         let initialized = self.store.runtime_initialized(&binding.attempt_id)?;
+        let digest = self.confined_mut()?.runtime_digest.clone();
         let runtime = self.confined_mut()?;
         let opened = ConfinedPiSession::open_required(
             &runtime.config,
             binding.clone(),
             &runtime.fixture,
             initialized,
+            Some(&digest),
         );
         let session = match opened {
             Ok(session) => session,

@@ -10,6 +10,8 @@ use crate::{Error, Result};
 pub(crate) struct ConfinedRuntime {
     pub(crate) config: ConfinedPiConfig,
     pub(crate) fixture: String,
+    /// Digest of `config.runtime` at host open. Session launch must still match it.
+    pub(crate) runtime_digest: String,
     pub(crate) sessions: BTreeMap<String, ConfinedPiSession>,
     /// Session ids proven stopped and removed in this owner generation.
     /// A later call must not launch a replacement at the same generation.
@@ -32,9 +34,11 @@ impl ConfinedRuntime {
         ) {
             return Err(Error::guard("unsupported credential-free Host fixture"));
         }
+        let runtime_digest = super::confined_pi::runtime_digest(&config.runtime)?;
         Ok(Self {
             config,
             fixture: fixture.into(),
+            runtime_digest,
             sessions: BTreeMap::new(),
             released: BTreeSet::new(),
         })
@@ -58,7 +62,8 @@ impl ConfinedRuntime {
     pub(crate) fn configuration(&self) -> Value {
         json!({"adapter":"pi-confined-v1", "credentials":"none",
             "network":super::confined_pi::egress_network(&self.config),
-            "fixture":self.fixture, "root":self.config.root, "cgroupRoot":self.config.cgroup_root,
+            "fixture":self.fixture, "root":self.config.root, "runtime":self.config.runtime,
+            "runtimeRoot":self.runtime_digest, "cgroupRoot":self.config.cgroup_root,
             "node":self.config.node, "bubblewrap":self.config.bubblewrap,
             "launcher":self.config.launcher, "policy":self.config.policy,
             "fingerprint":super::pi_bridge::adapter_fingerprint()})
@@ -73,9 +78,12 @@ mod tests {
     #[test]
     fn confined_pi_host_acceptance_fixture_is_explicit_inert_and_credential_free() {
         let path = || PathBuf::from("/uninstalled-conformance-fixture");
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = super::super::confined_pi::fixture_runtime(tmp.path(), "inert");
         let config = ConfinedPiConfig {
             root: path(),
             cgroup_root: path(),
+            runtime,
             node: path(),
             bubblewrap: path(),
             launcher: path(),
@@ -90,6 +98,16 @@ mod tests {
             assert_eq!(saved["fixture"], fixture);
             assert_eq!(saved["credentials"], "none");
             assert_eq!(saved["network"], "denied");
+            assert_eq!(
+                saved["runtime"].as_str(),
+                Some(config.runtime.to_str().unwrap())
+            );
+            assert!(
+                saved["runtimeRoot"]
+                    .as_str()
+                    .is_some_and(|digest| digest.starts_with("sha256:")),
+                "{saved}"
+            );
         }
         for forbidden in ["live", "https://model.example/v1", "../repo/extension"] {
             assert!(ConfinedRuntime::new(config.clone(), forbidden).is_err());

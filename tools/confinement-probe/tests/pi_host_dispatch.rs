@@ -27,6 +27,7 @@ fn bridge(root: &Path) -> ConfinedPiConfig {
     ConfinedPiConfig {
         root: root.into(),
         cgroup_root: env_path("SWITCHYARD_CGROUP_ROOT"),
+        runtime: env_path("SWITCHYARD_PI_RUNTIME"),
         node: env_path("SWITCHYARD_PI_NODE"),
         bubblewrap: env_path("SWITCHYARD_BWRAP"),
         launcher: env_path("SWITCHYARD_BRIDGE_LAUNCHER"),
@@ -863,4 +864,88 @@ fn host_stop_reconciles_lost_work_ack_before_closing_bridge() {
         fs::read_to_string(world.workspace.join("output.txt")).unwrap(),
         "once"
     );
+}
+
+/// Makes the checkout's source tree unreadable for the duration of the test.
+struct HiddenCheckout {
+    path: PathBuf,
+    mode: u32,
+}
+
+impl HiddenCheckout {
+    fn new(path: &Path) -> Self {
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+        let hidden = Self {
+            path: path.to_path_buf(),
+            mode,
+        };
+        fs::set_permissions(&hidden.path, fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(
+            fs::read_dir(&hidden.path).is_err(),
+            "checkout runtime must be unreadable"
+        );
+        hidden
+    }
+}
+
+impl Drop for HiddenCheckout {
+    fn drop(&mut self) {
+        fs::set_permissions(&self.path, fs::Permissions::from_mode(self.mode)).unwrap();
+    }
+}
+
+#[test]
+fn confined_host_runs_from_relocated_runtime_outside_checkout() {
+    let runtime = env_path("SWITCHYARD_PI_RUNTIME");
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../runtime/pi-source")
+        .canonicalize()
+        .unwrap();
+    assert!(runtime.is_absolute());
+    assert!(
+        !runtime.starts_with(&checkout),
+        "relocated runtime {} must sit outside {}",
+        runtime.display(),
+        checkout.display()
+    );
+    let _hidden = HiddenCheckout::new(&checkout);
+    {
+        let (world, mut host) = World::new("answer");
+        assert_eq!(host.dispatch_pending(&world.mission).unwrap(), 1);
+        let done = until(&mut host, &world.mission, |value| {
+            value["piHost"]["observation"]["runtimeIdle"] == true
+        });
+        assert_eq!(
+            done["piHost"]["lifecycle"]["configuration"]["runtimeRoot"]["path"].as_str(),
+            runtime.to_str()
+        );
+        assert!(
+            done["piHost"]["lifecycle"]["configuration"]["runtimeRoot"]["digest"]
+                .as_str()
+                .is_some_and(|digest| digest.starts_with("sha256:")),
+            "{done}"
+        );
+        assert!(fs::read_dir(&checkout).is_err());
+    }
+    {
+        let (world, mut host) = World::new("process-hold");
+        host.dispatch_pending(&world.mission).unwrap();
+        until(&mut host, &world.mission, |value| {
+            value["linuxExecutionEffects"]
+                .as_array()
+                .is_some_and(|effects| effects.iter().any(|effect| effect["state"] == "running"))
+                && world.workspace.join("process.heartbeat").exists()
+        });
+        admit(&mut host, &world.mission, CommandBody::Cancel);
+        host.dispatch_stops(&world.mission).unwrap();
+        let snap = host.snapshot(&world.mission).unwrap();
+        assert_eq!(snap.phase, Phase::Cancelled);
+        let value = snap.to_json();
+        assert_eq!(value["piHost"]["lifecycle"]["termination"]["proven"], true);
+        assert_eq!(
+            value["piHost"]["lifecycle"]["configuration"]["runtimeRoot"]["path"].as_str(),
+            runtime.to_str()
+        );
+        assert!(fs::read_dir(&checkout).is_err());
+    }
 }
