@@ -1,5 +1,9 @@
 # Switchyard wiki update log
 
+## 2026-11-13
+
+* **Check inventory**: Removed `pi-bridge-probe` from [Testing and CI](reference/testing-and-ci.md). The always-on `pi-bridge-contract` job already runs those fmt, Clippy, `pi-contract` workspace, typecheck, and Node tests. `pi-bridge-probe` was not a required ruleset check. The confinement prerequisites now list the pinned Bubblewrap/AppArmor install before the Pi source build.
+
 ## 2026-11-10
 
 * **Bounded composed S3 acceptance**: Accepted 2026-11-10 for the credential-free Host/Pi/Linux evidence collected by #157 at `65a7ce7` (tree `45e756f`). The [acceptance record](../docs/rust-first/s3-composed-acceptance.md) binds post-merge run 42207467133 and artifact 13498690183. The artifact stays `PENDING_REVIEW`; this is the separate reviewed decision. FakeRuntime remains the product default. This does not enable product Pi, authorize credentials, a live provider, TLS, S4–S8, or full M1. #97 and #94 stay open.

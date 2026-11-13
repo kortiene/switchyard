@@ -87,13 +87,7 @@ in the [package development guide](./adw_sdlc/README.md#development).
 
 ## Where the work stands
 
-| Work | Status |
-| --- | --- |
-| **S1** [#95](https://github.com/kortiene/switchyard/issues/95) | Implemented. Mission ledger, command outbox, fake runtime. |
-| **S2** [#96](https://github.com/kortiene/switchyard/issues/96) | **GO for the credential-free source-built candidate**, accepted 2026-11-02. See the [exact revision and evidence](./docs/rust-first/s2-contract-gate.md). The published-package audit remains NO-GO. |
-| **S3** [#97](https://github.com/kortiene/switchyard/issues/97) | Track A delivers owned worktrees, effect receipts, a non-default Linux backend and evidence-backed recovery. Track B adds confined write/process recovery, the non-default [Rust-owned bridge lifecycle](./docs/rust-first/s3-bridge-lifecycle.md), and [model-endpoint egress](./docs/rust-first/s3-model-egress.md) that stays off unless the host sets one endpoint. [Bounded bridge-leaf retention](./docs/rust-first/s3-bridge-cgroup-retention.md) preserves recovery evidence. Bounded acceptance of the [composed Host/Pi/Linux evidence](./docs/rust-first/s3-composed-acceptance.md) was recorded 2026-11-10 for the credential-free fixture collected by #157 at `65a7ce7`; the artifact stays `PENDING_REVIEW` and FakeRuntime stays the product default. Product Pi wiring and full S3 acceptance remain open. |
-| **S4–S8** [#98](https://github.com/kortiene/switchyard/issues/98)–[#102](https://github.com/kortiene/switchyard/issues/102) | Planned. Live mission execution waits on S3 integration and confinement. |
-| **Native Rust agent runtime** | Accepted long-term target (2026-10-29). Not implemented. Replacing the proof-of-concept adapter needs its own reviewed gate. |
+Status for S1–S8 and the native Rust agent runtime is the [delivery-plan status table](./docs/rust-first/delivery-plan.md#current-status).
 
 Product milestone:
 [#94](https://github.com/kortiene/switchyard/issues/94).
@@ -124,7 +118,7 @@ against a model or GitHub.
 | [`docs/rust-first/`](./docs/rust-first/) | Active | Architecture, protocol, and gates. |
 | [`scripts/rust-verify.sh`](./scripts/rust-verify.sh) | Active | Rust local gate. |
 | [`wiki/`](./wiki/) | Active | OKF v0.1 map. Concepts cite canonical sources; they do not replace them. |
-| [`.github/workflows/`](./.github/workflows/) | Active | Legacy verification and the `rust-core` job in `verify.yml`; package audit, source rebuild, bridge probe, full contract, and confinement workflows. |
+| [`.github/workflows/`](./.github/workflows/) | Active | Legacy verification and the `rust-core` job in `verify.yml`; package audit, source rebuild, full contract, and confinement workflows. |
 | [`adw_sdlc/`](./adw_sdlc/) | Reference | Frozen TypeScript engine: CLI, kernel, runners, and package docs. Kept while useful. |
 | [`adw/`](./adw/) | Reference | Frozen state v1 schema and fixtures. |
 | [`.adw/`](./.adw/) | Reference | Project pack. `.adw/prompts/` is generated; `npm run pack:check` owns that drift gate. |
