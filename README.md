@@ -123,6 +123,7 @@ against a model or GitHub.
 | [`crates/switchyard-core/`](./crates/switchyard-core/), [`crates/switchyard/`](./crates/switchyard/) | Active | S1 library and `switchyard` binary. One library crate and one executable. |
 | [`docs/rust-first/`](./docs/rust-first/) | Active | Architecture, protocol, and gates. |
 | [`scripts/rust-verify.sh`](./scripts/rust-verify.sh) | Active | Rust local gate. |
+| [`scripts/ui-verify.sh`](./scripts/ui-verify.sh) | Active | Gate for `crates/switchyard-ui`: fmt, clippy, tests, and optional headless snapshots. Separate so the core gate never acquires GPU dependencies. |
 | [`wiki/`](./wiki/) | Active | OKF v0.1 map. Concepts cite canonical sources; they do not replace them. |
 | [`.github/workflows/`](./.github/workflows/) | Active | Legacy verification and the `rust-core` job in `verify.yml`; package audit, source rebuild, bridge probe, full contract, and confinement workflows. |
 | [`adw_sdlc/`](./adw_sdlc/) | Reference | Frozen TypeScript engine: CLI, kernel, runners, and package docs. Kept while useful. |
@@ -134,6 +135,7 @@ against a model or GitHub.
 | [`runtime/pi/`](./runtime/pi/) | Experimental | Published Pi Durable 1.4.0 audit. NO-GO evidence, not a runtime. |
 | [`runtime/pi-source/`](./runtime/pi-source/) | Experimental | Pinned source candidate accepted by S2; credential-free bridge and confinement policy. Not the product default. |
 | [`specs/`](./specs/) | Reference | Historical implementation specifications. |
+| [`crates/switchyard-ui/`](./crates/switchyard-ui/) | Experimental | Read-only Rune mission dashboard over the Rust ledger, in the ADW Cockpit layout. Its own workspace and gate; see its README. |
 | `web/`, `tests/acceptance/` | Deferred | Named in the plan. Not packages or commands in this checkout. |
 | [#42](https://github.com/kortiene/switchyard/issues/42), [#43](https://github.com/kortiene/switchyard/issues/43), [#44](https://github.com/kortiene/switchyard/issues/44) | Deferred | Demand-gated. No implementation in the cleanup track. |
 
