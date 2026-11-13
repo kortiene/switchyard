@@ -3,7 +3,7 @@ type: Decision Register
 title: Control-plane invariants and decision status
 description: The implemented, accepted, stopped, and deferred choices that define Switchyard's safety and extensibility boundaries.
 tags: [decisions, invariants, security, architecture]
-timestamp: "2026-10-30T22:00:00Z"
+timestamp: "2026-11-13T22:10:00Z"
 ---
 
 # Status vocabulary
@@ -23,6 +23,7 @@ timestamp: "2026-10-30T22:00:00Z"
 | Build a Rust mission core as the sole long-term engine. Pi Durable 1.4.0 behind the sandboxed TypeScript bridge is the proof-of-concept runtime; a native Rust agent runtime is the target. | Accepted (2026-10-29) | Switchyard is unreleased and has no users. [Rust-first M1](../../docs/rust-first/README.md) and [#94](https://github.com/kortiene/switchyard/issues/94) define the recovery and approval contracts. S2 gates the proof of concept only. NO-GO does not preserve a TypeScript product path. |
 | Rust mission ledger: explicit transitions, optimistic revisions, application-owned SQLite, a fake runtime, and a single-host owner lock. | Implemented | S1 ([#95](https://github.com/kortiene/switchyard/issues/95)) enforces the normative transition table in `crates/switchyard-core`. It does not resume frozen state v1, call a model, write to GitHub, or confine a Pi process. Pi Durable remains the proof-of-concept adapter. |
 | Require a reviewed source/package match before adopting the Pi Durable proof of concept. | Accepted; S2 GO for the source-built candidate (2026-11-02) | S2 is GO for the credential-free source-built candidate; see [#96](https://github.com/kortiene/switchyard/issues/96) and the [S2 acceptance record](../../docs/rust-first/s2-contract-gate.md). The published 1.4.0 package remains NO-GO ([S2 audit](../../docs/rust-first/s2-feasibility.md)). GO does not enable Pi in the product or authorize live effects. Diagnostic and candidate jobs are not `pi-bridge-contract`. Native Rust remains the target. |
+| Build the S7 operator UI as a native Rust app (Rune, `crates/switchyard-ui`, separate Cargo workspace) instead of a local web service. | Accepted (2026-11-13) | The M1 UI has no HTTP surface, so local-session authentication and origin checks are N/A unless one is added. The UI reads only through `Host::inspect` (read-only, no owner lock). Mutations go only through the `switchyard` CLI with a persisted `--command-id`, after S4 ([#98](https://github.com/kortiene/switchyard/issues/98)); the UI has no write path today. Rune is pre-release and git-pinned; the crate is excluded from the core workspace so it stays replaceable. See [#101](https://github.com/kortiene/switchyard/issues/101), [#171](https://github.com/kortiene/switchyard/issues/171) and [#177](https://github.com/kortiene/switchyard/pull/177). |
 | Freeze `runner-pi` and the TypeScript execution path as legacy. | Accepted (2026-10-29) | Fixes only. Retire them with the TypeScript engine. They are not the Pi Durable proof-of-concept bridge and not the native Rust runtime. |
 | Keep one `AgentRunner.runPhase()` seam and branch on capabilities. | Implemented | Backend details stay in adapters; the orchestrator consumes normalized requests/results. |
 | Make phase flow deterministic and keep built-in control semantics in the kernel. | Implemented | Projects may configure known/custom phases, but cannot redefine load-bearing built-in meanings. |
