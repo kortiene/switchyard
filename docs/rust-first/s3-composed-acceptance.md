@@ -6,7 +6,9 @@ reviewed S3 acceptance decision.** Bounded acceptance of the collected evidence
 is recorded below, accepted 2026-11-10. FakeRuntime stays the product default.
 The same composed scenario can also be started from the CLI with the explicit
 `--runtime confined-pi` flag, which is off unless passed and fails closed
-without confinement prerequisites. That flag is not implicit product
+without confinement prerequisites. The CLI still cannot record the plan
+observation that reaches `awaiting_plan_approval`; that seed stays outside
+the command path, as in the probe harness. That flag is not implicit product
 enablement. Product Pi wiring beyond this opt-in, S4–S8, and live acceptance
 remain separate.
 

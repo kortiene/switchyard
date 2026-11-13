@@ -254,9 +254,6 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> switchyard_core::Result<Value> {
     let runtime = cli.runtime.unwrap_or(RuntimeSelection::Fake);
-    if runtime == RuntimeSelection::ConfinedPi {
-        ensure_confined_selectable()?;
-    }
     match cli.command {
         Command::Mission { action } => match action {
             MissionCommand::AbandonExecution {
@@ -371,6 +368,9 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     max_repairs,
                     max_plan_revisions,
                 })?;
+                let schedule_scenario = runtime == RuntimeSelection::ConfinedPi
+                    && !persist_only
+                    && admit.as_deref() == Some("approve_plan");
                 if let Some(kind) = admit {
                     let body = command_body(
                         &kind,
@@ -389,10 +389,16 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     })?;
                     if !persist_only {
                         host.dispatch_pending(&snapshot.mission_id)?;
-                        settle_confined(&mut host, &snapshot.mission_id, runtime)?;
                     }
                 }
-                Ok(json!({"ok": true, "mission": host.snapshot(&snapshot.mission_id)?.to_json()}))
+                let mut created =
+                    json!({"ok": true, "mission": host.snapshot(&snapshot.mission_id)?.to_json()});
+                if schedule_scenario {
+                    created["composedScenario"] =
+                        json!(settle_approve_plan(&mut host, &snapshot.mission_id));
+                    created["mission"] = host.snapshot(&snapshot.mission_id)?.to_json();
+                }
+                Ok(created)
             }
             MissionCommand::Status { db, mission } => {
                 let snapshots = Host::inspect(&db, mission.as_deref())?;
@@ -420,6 +426,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                         .map_err(|error| Error::guard(format!("payload is not JSON: {error}")))?,
                 )?;
                 let is_stop = matches!(body, CommandBody::Pause | CommandBody::Cancel);
+                let approve_plan = matches!(body, CommandBody::ApprovePlan { .. });
                 // Reconcile once per invocation. `--persist-only` skips that
                 // and both dispatches, so it cannot create a worktree.
                 // Isolated workspace failures still allow admission and stop
@@ -459,9 +466,17 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                         })?;
                     } else {
                         host.dispatch_reconciled(&mission)?;
-                        settle_confined(&mut host, &mission, runtime)?;
                     }
                 }
+                let scenario = if runtime == RuntimeSelection::ConfinedPi
+                    && approve_plan
+                    && !persist_only
+                    && workspace_error.is_none()
+                {
+                    Some(settle_approve_plan(&mut host, &mission))
+                } else {
+                    None
+                };
                 let snapshot = host.snapshot(&mission)?;
                 let command = snapshot
                     .commands
@@ -473,7 +488,27 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 if let Some(error) = workspace_error {
                     let mission_json = snapshot.to_json();
                     let revision = mission_json["revision"].clone();
-                    return Ok(json!({
+                    return Ok(with_scenario(
+                        json!({
+                            "ok": true,
+                            "dispatched": dispatched,
+                            "idempotent": admitted.idempotent,
+                            "commandId": admitted.command_id,
+                            "requestId": admitted.request_id,
+                            "payloadHash": admitted.payload_hash,
+                            "commandState": command_state,
+                            "revision": revision,
+                            "workspaceError": {
+                                "category": error.category(),
+                                "message": error.to_string(),
+                            },
+                            "mission": mission_json,
+                        }),
+                        scenario,
+                    ));
+                }
+                Ok(with_scenario(
+                    json!({
                         "ok": true,
                         "dispatched": dispatched,
                         "idempotent": admitted.idempotent,
@@ -481,24 +516,10 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                         "requestId": admitted.request_id,
                         "payloadHash": admitted.payload_hash,
                         "commandState": command_state,
-                        "revision": revision,
-                        "workspaceError": {
-                            "category": error.category(),
-                            "message": error.to_string(),
-                        },
-                        "mission": mission_json,
-                    }));
-                }
-                Ok(json!({
-                    "ok": true,
-                    "dispatched": dispatched,
-                    "idempotent": admitted.idempotent,
-                    "commandId": admitted.command_id,
-                    "requestId": admitted.request_id,
-                    "payloadHash": admitted.payload_hash,
-                    "commandState": command_state,
-                    "mission": host.snapshot(&mission)?.to_json(),
-                }))
+                        "mission": snapshot.to_json(),
+                    }),
+                    scenario,
+                ))
             }
             MissionCommand::Recover { db, mission } => {
                 let mut host = open_host(&db, runtime)?;
@@ -557,41 +578,20 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
     }
 }
 
-#[cfg(all(
-    feature = "pi-contract",
-    feature = "linux-execution",
-    target_os = "linux"
-))]
-fn ensure_confined_selectable() -> switchyard_core::Result<()> {
-    for key in [
-        "SWITCHYARD_PI_RUNTIME",
-        "SWITCHYARD_BWRAP",
-        "SWITCHYARD_CGROUP_ROOT",
-        "SWITCHYARD_PI_NODE",
-        "SWITCHYARD_BRIDGE_LAUNCHER",
-        "SWITCHYARD_BRIDGE_POLICY",
-        "SWITCHYARD_EXECUTION_HELPER",
-    ] {
-        env_path(key)?;
-    }
-    Ok(())
-}
-
-#[cfg(not(all(
-    feature = "pi-contract",
-    feature = "linux-execution",
-    target_os = "linux"
-)))]
-fn ensure_confined_selectable() -> switchyard_core::Result<()> {
-    Err(Error::guard(
-        "confined Pi runtime requires Linux with the pi-contract and linux-execution build; refusing to fall back to FakeRuntime",
-    ))
-}
-
 fn open_host(db: &Path, runtime: RuntimeSelection) -> switchyard_core::Result<Host> {
     match runtime {
-        RuntimeSelection::Fake => Host::open(db),
+        RuntimeSelection::Fake => Host::open(db).map_err(suggest_confined_runtime),
         RuntimeSelection::ConfinedPi => open_confined(db),
+    }
+}
+
+fn suggest_confined_runtime(error: Error) -> Error {
+    if error.to_string().contains("no adapter replacement") {
+        error.with_context(
+            "pass --runtime confined-pi to reopen a confined ledger; FakeRuntime cannot replace it",
+        )
+    } else {
+        error
     }
 }
 
@@ -675,50 +675,67 @@ fn env_path(key: &str) -> switchyard_core::Result<PathBuf> {
     target_os = "linux"
 ))]
 fn bridge_root(db: &Path) -> switchyard_core::Result<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    let parent = db
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let canonical_db = if db.exists() {
+        std::fs::canonicalize(db).map_err(Error::storage)?
+    } else {
+        let parent = db
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if !parent.exists() {
+            return Err(Error::guard(
+                "database directory must already exist; the confined runtime does not create parent directories",
+            ));
+        }
+        let name = db
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Error::guard("database path has no UTF-8 file name"))?;
+        std::fs::canonicalize(parent)
+            .map_err(Error::storage)?
+            .join(name)
+    };
+    let parent = canonical_db
         .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    if !parent.exists() {
-        std::fs::create_dir_all(parent).map_err(Error::storage)?;
-    }
-    let parent = std::fs::canonicalize(parent).map_err(Error::storage)?;
-    let name = db
+        .ok_or_else(|| Error::guard("database path has no parent"))?;
+    let name = canonical_db
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| Error::guard("database path has no UTF-8 file name"))?;
     let root = parent.join(format!("{name}.pi-bridge"));
-    if root
-        .symlink_metadata()
-        .is_ok_and(|meta| meta.file_type().is_symlink())
-    {
-        return Err(Error::guard(
-            "confined Pi bridge root must be a real directory",
-        ));
+    let owner = std::fs::metadata("/proc/self")
+        .map_err(Error::storage)?
+        .uid();
+    match std::fs::symlink_metadata(&root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder.create(&root).map_err(Error::storage)?;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+                .map_err(Error::storage)?;
+        }
+        Err(error) => return Err(Error::storage(error)),
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return Err(Error::guard(
+                    "confined Pi bridge root must be a real directory",
+                ));
+            }
+            if meta.uid() != owner || meta.mode() & 0o7777 != 0o700 {
+                return Err(Error::guard(
+                    "confined Pi bridge root has an unexpected owner or mode; refusing to change it",
+                ));
+            }
+        }
     }
-    if !root.exists() {
-        std::fs::create_dir(&root).map_err(Error::storage)?;
-    }
-    let meta = std::fs::symlink_metadata(&root).map_err(Error::storage)?;
-    if !meta.is_dir() {
-        return Err(Error::guard(
-            "confined Pi bridge root must be a real directory",
-        ));
-    }
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
-        .map_err(Error::storage)?;
     std::fs::canonicalize(&root).map_err(Error::storage)
 }
 
-fn settle_confined(
-    host: &mut Host,
-    mission: &str,
-    runtime: RuntimeSelection,
-) -> switchyard_core::Result<()> {
-    if runtime != RuntimeSelection::ConfinedPi {
-        return Ok(());
-    }
+/// Wait for the composed scenario after `approve_plan` has already been
+/// admitted. A missing effect or a poll failure stays `"pending"`; this never
+/// turns a committed command into `guard_failed`.
+fn settle_approve_plan(host: &mut Host, mission: &str) -> &'static str {
     #[cfg(all(
         feature = "pi-contract",
         feature = "linux-execution",
@@ -727,15 +744,20 @@ fn settle_confined(
     {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
-            host.poll_runtime(mission)?;
-            let value = host.snapshot(mission)?.to_json();
-            if composed_scenario_settled(&value) {
-                return Ok(());
+            if host.poll_runtime(mission).is_err() {
+                return "pending";
+            }
+            let Ok(snapshot) = host.snapshot(mission) else {
+                return "pending";
+            };
+            let value = snapshot.to_json();
+            if value["piHost"]["observation"]["runtimeIdle"] == true
+                && composed_scenario_settled(&value)
+            {
+                return "complete";
             }
             if std::time::Instant::now() >= deadline {
-                return Err(Error::guard(
-                    "confined Pi composed scenario did not finish; refusing to fall back to FakeRuntime",
-                ));
+                return "pending";
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
@@ -747,10 +769,15 @@ fn settle_confined(
     )))]
     {
         let _ = (host, mission);
-        Err(Error::guard(
-            "confined Pi runtime requires Linux with the pi-contract and linux-execution build; refusing to fall back to FakeRuntime",
-        ))
+        "pending"
     }
+}
+
+fn with_scenario(mut value: Value, scenario: Option<&str>) -> Value {
+    if let Some(scenario) = scenario {
+        value["composedScenario"] = json!(scenario);
+    }
+    value
 }
 
 #[cfg(all(

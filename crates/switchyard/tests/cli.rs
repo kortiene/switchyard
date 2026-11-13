@@ -1122,6 +1122,21 @@ fn default_runtime_is_fake_and_explicit_fake_matches_it() {
     let stored = ledger_text(&omitted);
     assert!(stored.contains("\"adapter\":\"fake\"") || stored.contains("\"adapter\": \"fake\""));
     assert!(!stored.contains("pi-confined"));
+    let mission = stdout["mission"]["missionId"].as_str().unwrap();
+    let (code, status, error) = run(&[
+        "mission",
+        "status",
+        "--runtime",
+        "confined-pi",
+        "--db",
+        omitted.to_str().unwrap(),
+        "--mission",
+        mission,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(status["readOnly"], true);
+    assert_eq!(status["missions"][0]["runtimeAdapter"], "fake");
+    assert!(status.get("composedScenario").is_none());
 }
 
 #[test]

@@ -18,13 +18,26 @@ credentials, live models, TLS, and production budgets stay out of scope.
 `test/bridge-child.ts` remains the conformance entry. This is not S4–S8 or
 full M1.
 
-The command that runs the composed scenario, after `mission create` and
-`mission workspace` were opened with the same flag and the attempt is in
-`awaiting_plan_approval`, is:
+`mission command --kind approve_plan` is the command that runs the composed
+scenario. It waits until the runtime is idle and reports `composedScenario`
+as `complete` or `pending`. That field is not an error: the approval is
+already committed. Other commands do not wait for the fixture's effects.
+
+The CLI cannot itself move a confined attempt to `awaiting_plan_approval`.
+`plan_completed` is a runtime observation, and `admit` rejects it from an
+operator. A confined host also refuses fake notifications as mission facts.
+The `s3-acceptance` fixture does not plan; it is the implementation script
+that runs after approval. S4 owns planning. The probe harness and the
+`cli_confined` test therefore import the same seeded awaiting-approval row
+the Host suite uses, then call:
 
 ```text
 switchyard mission command --runtime confined-pi --db <db> --mission <id> --kind approve_plan --expected-revision <rev> --payload '{"planDigest":"<digest>"}'
 ```
+
+`mission status` stays read-only and does not select a runtime, even if
+`--runtime confined-pi` is present. Reopening a confined ledger without the
+flag fails and names `--runtime confined-pi`.
 
 ## Host configuration
 

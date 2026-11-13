@@ -112,6 +112,12 @@ fn cli_confined_pi_runs_composed_s3_acceptance_scenario() {
     assert_eq!(code, 0, "{error}");
     assert_eq!(prepared["workspace"]["state"], "ready");
     let workspace = Path::new(prepared["workspace"]["path"].as_str().unwrap());
+    // Operators cannot admit `plan_completed`: that observation must come from
+    // the runtime, and a confined host refuses fake notifications as mission
+    // facts. The s3-acceptance fixture does not plan. Reaching
+    // `awaiting_plan_approval` is the same seeded row the probe harness writes,
+    // not an S4 command. This import is what lets `approve_plan` run the
+    // composed scenario from the CLI.
     let digest = switchyard_core::payload_hash(&json!("fixture plan")).unwrap();
     rusqlite::Connection::open(&db)
         .unwrap()
@@ -157,6 +163,7 @@ fn cli_confined_pi_runs_composed_s3_acceptance_scenario() {
     let mission_json = &approved["mission"];
     assert_eq!(mission_json["runtimeAdapter"], "pi-confined-v1");
     assert_eq!(mission_json["phase"], "implementing");
+    assert_eq!(approved["composedScenario"], "complete");
     let effects = mission_json["linuxExecutionEffects"].as_array().unwrap();
     assert_eq!(effects.len(), 3, "{approved}");
     for method in ["write_file", "exec_start", "exec_status"] {
@@ -205,11 +212,7 @@ fn cli_confined_pi_runs_composed_s3_acceptance_scenario() {
     );
     let (code, _, error) = run(&["mission", "recover", "--db", db_arg, "--mission", mission]);
     assert_eq!(code, 2, "{error}");
-    assert!(
-        error["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("no adapter replacement"),
-        "{error}"
-    );
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(message.contains("no adapter replacement"), "{error}");
+    assert!(message.contains("--runtime confined-pi"), "{error}");
 }
