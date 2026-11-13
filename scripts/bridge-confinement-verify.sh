@@ -111,3 +111,7 @@ cargo test -p switchyard-confinement-probe --test bridge_egress --features pi-li
 # Collection remains PENDING_REVIEW, not a product-enable or S3-GO decision.
 node --test scripts/s3-acceptance-check.test.mjs
 node scripts/s3-acceptance-check.mjs
+
+# Opt-in CLI flag. The confined binary runs the composed s3-acceptance scenario.
+# Missing prerequisites fail the test; FakeRuntime is not a fallback.
+cargo test -p switchyard --test cli_confined --features "pi-contract linux-execution" --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/cli-confined.log"
