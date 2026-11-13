@@ -1,4 +1,5 @@
 use super::*;
+use crate::execution::RecoveryProfile;
 use crate::execution::workspace as fs_workspace;
 use crate::workspace::{WorkspaceRecord, WorkspaceView};
 
@@ -159,12 +160,12 @@ impl Host {
     /// True only when every blocking Linux row is an `exec_start` this host
     /// is supervising in the current generation. Other blocked rows, including
     /// uncertain and unsupervised ones, stay on the hard path.
-    fn recover_skips_verify_for_supervised_writer(&self, mission_id: &str) -> Result<bool> {
-        if !self
-            .runtime
-            .recovery_profile()
-            .skip_verify_for_supervised_writers
-        {
+    fn recover_skips_verify_for_supervised_writer(
+        &self,
+        mission_id: &str,
+        profile: RecoveryProfile,
+    ) -> Result<bool> {
+        if !profile.skip_verify_for_supervised_writers {
             return Ok(false);
         }
         #[cfg(all(
@@ -181,6 +182,8 @@ impl Host {
             target_os = "linux"
         )))]
         {
+            // Unreachable today. Only Confined sets this flag, and that variant
+            // exists only in the cfg arm above. This guards a future variant.
             let _ = (self, mission_id);
             Err(Error::guard(
                 "supervised-writer verify skip requires confined Pi",
@@ -191,6 +194,14 @@ impl Host {
     /// Reconcile a recorded workspace only. A mission with no reservation does
     /// not gain a workspace as a side effect of ordinary Host recovery.
     pub fn recover_workspace(&mut self, mission_id: &str) -> Result<Option<WorkspaceView>> {
+        self.recover_workspace_with(mission_id, self.runtime.recovery_profile())
+    }
+
+    pub(super) fn recover_workspace_with(
+        &mut self,
+        mission_id: &str,
+        profile: RecoveryProfile,
+    ) -> Result<Option<WorkspaceView>> {
         self.store.assert_workspace_owner()?;
         let mission = self.store.load_mission(mission_id)?;
         let Some(workspace) = self.store.load_workspace(&mission.attempt.id)? else {
@@ -201,7 +212,7 @@ impl Host {
         // can be admitted. Uncertain, abandoned, and unsupervised rows stay
         // blocked. `prepare_workspace` does not use this exception.
         if self.store.linux_execution_blocked(mission_id)? {
-            if self.recover_skips_verify_for_supervised_writer(mission_id)? {
+            if self.recover_skips_verify_for_supervised_writer(mission_id, profile)? {
                 return Ok(Some(workspace.view));
             }
             return Err(Error::ExecutionBlocked {

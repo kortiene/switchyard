@@ -11,8 +11,8 @@ use crate::domain::{
 };
 use crate::error::{Error, Result};
 use crate::execution::{
-    FakeRuntime, OwnerLock, RuntimeAdapter, RuntimeBinding, RuntimeNotification, RuntimeReceipt,
-    RuntimeRequest, inspect_repo, operation_id, parse_notification, try_acquire,
+    FakeRuntime, OwnerLock, RecoveryProfile, RuntimeAdapter, RuntimeBinding, RuntimeNotification,
+    RuntimeReceipt, RuntimeRequest, inspect_repo, operation_id, parse_notification, try_acquire,
 };
 use crate::persistence::{CreatedMission, NewCommand, Store};
 use crate::policy::{self, Facts};
@@ -655,7 +655,8 @@ impl Host {
     /// use [`Self::dispatch_reconciled`] for any later dispatch so the
     /// workspace is not verified again.
     pub fn dispatch_pending(&mut self, mission_id: &str) -> Result<usize> {
-        self.open_runtime_session(mission_id)?;
+        let profile = self.runtime.recovery_profile();
+        self.open_runtime_session(mission_id, profile)?;
         self.reconcile_execution(mission_id)?;
         if self.store.linux_execution_blocked(mission_id)? {
             // Stop delivery still runs. Git verification waits until the
@@ -1111,15 +1112,9 @@ impl Host {
         Ok(())
     }
 
-    /// Open the confined session before reconcile when this adapter's recovery
-    /// profile requires it. A profile that asks for that session without a
-    /// confined runtime fails closed.
-    fn open_runtime_session(&mut self, mission_id: &str) -> Result<()> {
-        if !self
-            .runtime
-            .recovery_profile()
-            .open_session_before_reconcile
-        {
+    /// Open the confined session before reconcile when `profile` requires it.
+    fn open_runtime_session(&mut self, mission_id: &str, profile: RecoveryProfile) -> Result<()> {
+        if !profile.open_session_before_reconcile {
             return Ok(());
         }
         #[cfg(all(
@@ -1136,6 +1131,8 @@ impl Host {
             target_os = "linux"
         )))]
         {
+            // Unreachable today. Only Confined sets this flag, and that variant
+            // exists only in the cfg arm above. This guards a future variant.
             let _ = mission_id;
             Err(Error::guard("recovery profile requires a confined session"))
         }
@@ -1155,7 +1152,7 @@ impl Host {
     /// host-level failures abort before either runs.
     pub fn recover(&mut self, mission_id: &str) -> Result<MissionSnapshot> {
         let profile = self.runtime.recovery_profile();
-        self.open_runtime_session(mission_id)?;
+        self.open_runtime_session(mission_id, profile)?;
         // Settle an admitted stop before reconcile quarantines a still-running
         // writer. Without a pending stop this does not run, so a killed host
         // cannot dispatch the pending Continue in the same call.
@@ -1181,7 +1178,7 @@ impl Host {
                 });
             }
         }
-        let workspace_error = match self.recover_workspace(mission_id) {
+        let workspace_error = match self.recover_workspace_with(mission_id, profile) {
             Ok(_) => None,
             Err(error) if error.is_isolated_workspace_failure() => Some(error),
             Err(error) => return Err(error),
