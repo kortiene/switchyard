@@ -1,0 +1,298 @@
+name: AI review (advisory)
+
+# Trial advisory review. Not a required check. execution-confinement stays the
+# merge gate. pull_request only: pull_request_target would expose secrets to
+# fork code, and this job must skip when the placeholder secret is absent.
+#
+# Events are opened, ready_for_review, and labeled. synchronize is omitted so
+# a later push does not send the diff again. labeled runs only when the label
+# is ai-review, which is the opt-in re-run. Draft pull requests are skipped.
+# An unconfigured run emits a ::notice and does not post a pull request comment.
+#
+# OpenCodeReview v1.13.9 (commit 0e9060da66af36a96a15516e76a001953095318b).
+# The composite action posts inline review comments, so this job installs the
+# CLI and posts one sticky summary instead. It does not use MCP, delegation,
+# or agent-skill mode.
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ai-review-advisory-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ai-review-advisory:
+    name: ai-review-advisory
+    if: >-
+      github.event.pull_request.draft == false &&
+      (github.event.action != 'labeled' || github.event.label.name == 'ai-review')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    env:
+      # Placeholders. The owner chooses the model and sets these; until then
+      # the job skips. OCR_MODEL is exported as OCR_LLM_MODEL and passed to
+      # --model. v1.13.9 needs a complete URL/token/model triple, so OCR_LLM_URL
+      # is required too. When OCR_LLM_PROTOCOL is empty the CLI defaults the
+      # protocol to anthropic; the gate waits for an explicit protocol instead
+      # of sending a diff under that default. The API key stays on the steps
+      # that read it (secret OCR_API_KEY, exported as OCR_LLM_TOKEN).
+      OCR_MODEL: ${{ vars.OCR_MODEL }}
+      OCR_LLM_URL: ${{ vars.OCR_LLM_URL }}
+      OCR_LLM_PROTOCOL: ${{ vars.OCR_LLM_PROTOCOL }}
+      # Optional provider headers. OpenCode Go uses
+      # x-opencode-session={ocr_session_key}, expanded per conversation by OCR.
+      OCR_LLM_EXTRA_HEADERS: ${{ vars.OCR_LLM_EXTRA_HEADERS }}
+      # v1.13.9 treats 0 as unlimited. 80000 is the trial cap.
+      OCR_MAX_TOKENS_BUDGET: "80000"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Skip unless the owner has set the placeholder secret and variables
+        id: gate
+        env:
+          # Placeholder secret. Empty includes fork PRs, where secrets are unavailable.
+          OCR_API_KEY: ${{ secrets.OCR_API_KEY }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "${OCR_API_KEY}" ] || missing+=("secret OCR_API_KEY")
+          [ -n "${OCR_MODEL}" ] || missing+=("variable OCR_MODEL")
+          [ -n "${OCR_LLM_URL}" ] || missing+=("variable OCR_LLM_URL")
+          [ -n "${OCR_LLM_PROTOCOL}" ] || missing+=("variable OCR_LLM_PROTOCOL")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            printf -v joined '%s, ' "${missing[@]}"
+            joined="${joined%, }"
+            echo "::notice title=Advisory OCR review skipped::${joined} unset. No diff was sent to a model. This check is advisory and does not block merge."
+            exit 0
+          fi
+          if [[ ! "$BASE_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ ! "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::pull request base ref or head sha is not usable"
+            exit 1
+          fi
+          git rev-parse --verify --quiet "origin/${BASE_REF}^{commit}" >/dev/null
+          git rev-parse --verify --quiet "${HEAD_SHA}^{commit}" >/dev/null
+          {
+            echo "configured=true"
+            echo "base_ref=${BASE_REF}"
+            echo "head_sha=${HEAD_SHA}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: success() && steps.gate.outputs.configured == 'true'
+        with:
+          node-version: "22"
+
+      - name: Install OpenCodeReview 1.13.9
+        if: success() && steps.gate.outputs.configured == 'true'
+        env:
+          # Keep the npm pin. The launcher must not replace it mid-run.
+          OCR_NO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          # @alibaba-group/open-code-review@1.13.9
+          # alibaba/open-code-review@0e9060da66af36a96a15516e76a001953095318b # v1.13.9
+          npm i -g @alibaba-group/open-code-review@1.13.9
+          version_line="$(ocr version | head -n 1)"
+          printf '%s\n' "$version_line"
+          case "$version_line" in
+            "open-code-review v1.13.9"*|"open-code-review 1.13.9"*) ;;
+            *)
+              echo "::error::expected open-code-review 1.13.9, got: ${version_line}"
+              exit 1
+              ;;
+          esac
+
+      - name: Review the pull request range
+        id: review
+        if: success() && steps.gate.outputs.configured == 'true'
+        env:
+          OCR_NO_UPDATE: "1"
+          # Placeholder secret OCR_API_KEY, mapped to the v1.13.9 token variable.
+          OCR_LLM_TOKEN: ${{ secrets.OCR_API_KEY }}
+          OCR_LLM_MODEL: ${{ vars.OCR_MODEL }}
+          BASE_REF: ${{ steps.gate.outputs.base_ref }}
+          HEAD_SHA: ${{ steps.gate.outputs.head_sha }}
+          OCR_RESULT_PATH: ${{ runner.temp }}/ocr-review.json
+        run: |
+          set -euo pipefail
+          if [[ ! "$OCR_MAX_TOKENS_BUDGET" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::OCR_MAX_TOKENS_BUDGET must be a positive base-10 integer"
+            exit 1
+          fi
+          case "$OCR_LLM_PROTOCOL" in
+            anthropic|openai|openai-responses) ;;
+            *)
+              echo "::error::OCR_LLM_PROTOCOL must be anthropic, openai, or openai-responses"
+              exit 1
+              ;;
+          esac
+          export OCR_LLM_URL OCR_LLM_PROTOCOL OCR_LLM_TOKEN OCR_LLM_MODEL OCR_LLM_EXTRA_HEADERS
+          ocr review \
+            --from "origin/${BASE_REF}" \
+            --to "${HEAD_SHA}" \
+            --format json \
+            --audience agent \
+            --effort low \
+            --max-tokens-budget "${OCR_MAX_TOKENS_BUDGET}" \
+            --model "${OCR_MODEL}" \
+            --output "${OCR_RESULT_PATH}"
+
+      - name: Upload the review JSON
+        if: success() && steps.gate.outputs.configured == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ocr-advisory-review
+          path: ${{ runner.temp }}/ocr-review.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Post or update the sticky summary comment
+        if: always() && steps.gate.outputs.configured == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          OCR_REVIEW_OUTCOME: ${{ steps.review.outcome }}
+          OCR_RESULT_PATH: ${{ runner.temp }}/ocr-review.json
+        with:
+          script: |
+            const fs = require("fs");
+            const marker = "<!-- ocr-advisory-review -->";
+
+            function neutralize(value) {
+              let text = String(value ?? "");
+              text = text.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1");
+              text = text.replace(/https?:\/\//gi, (match) =>
+                match.toLowerCase().startsWith("https://") ? "hxxps://" : "hxxp://"
+              );
+              text = text.replace(/`/g, "\\`");
+              text = text.replace(/@/g, "@\u200b");
+              return text;
+            }
+
+            function assertNeutralize() {
+              const sample = "Ping @octocat, see [docs](https://example.com/x) and ![pic](https://cdn.example/a.png) plus https://bare.example and http://evil.test and `code`";
+              const out = neutralize(sample);
+              if (out.includes("@octocat")) throw new Error("mention was not broken");
+              if (!out.includes("@\u200boctocat")) throw new Error("zero-width space missing after @");
+              if (/https?:\/\//i.test(out)) throw new Error("bare url survived");
+              if (!out.includes("hxxps://bare.example")) throw new Error("https url was not defanged");
+              if (!out.includes("hxxp://evil.test")) throw new Error("http url was not defanged");
+              if (out.includes("](") || out.includes("example.com/x") || out.includes("cdn.example")) throw new Error("markdown link was not reduced to its text");
+              if (!out.includes("docs") || !out.includes("pic")) throw new Error("link text was dropped");
+              if (!out.includes("\\`code\\`")) throw new Error("backticks were not escaped");
+            }
+
+            assertNeutralize();
+
+            function oneLine(value, max) {
+              const clean = neutralize(value).replace(/\s+/g, " ").trim();
+              if (clean.length <= max) return clean;
+              return clean.slice(0, max - 1) + "...";
+            }
+
+            function count(value) {
+              return typeof value === "number" && Number.isFinite(value) ? String(value) : "unreported";
+            }
+
+            function lineNo(value) {
+              return Number.isInteger(value) ? String(value) : "?";
+            }
+
+            function summaryBody() {
+              if (process.env.OCR_REVIEW_OUTCOME !== "success" || !fs.existsSync(process.env.OCR_RESULT_PATH)) {
+                return [
+                  marker,
+                  "## Advisory AI review (open-code-review)",
+                  "",
+                  "The advisory review did not finish (" + (process.env.OCR_REVIEW_OUTCOME || "unknown") + "). No inline comments were posted. This check does not block merge.",
+                ].join("\n");
+              }
+              let report;
+              try {
+                report = JSON.parse(fs.readFileSync(process.env.OCR_RESULT_PATH, "utf8"));
+              } catch (error) {
+                return [
+                  marker,
+                  "## Advisory AI review (open-code-review)",
+                  "",
+                  "The review JSON could not be parsed (" + oneLine(error.message, 200) + "). The raw artifact is `ocr-advisory-review`. No inline comments were posted.",
+                ].join("\n");
+              }
+              const summary = report && report.summary ? report.summary : {};
+              const llm = report && report.llm ? report.llm : {};
+              const comments = Array.isArray(report && report.comments) ? report.comments : [];
+              const warnings = Array.isArray(report && report.warnings) ? report.warnings : [];
+              const lines = [
+                marker,
+                "## Advisory AI review (open-code-review)",
+                "",
+                "Advisory only. This is not a required check, and no inline comments were posted. `execution-confinement` remains the merge gate.",
+                "",
+                "- Status: " + oneLine(report.status || "unknown", 80),
+                "- Model: " + oneLine(llm.model || "unreported", 120),
+                "- Provider: " + oneLine(llm.provider || "unreported", 80),
+                "- Files reviewed: " + count(summary.files_reviewed),
+                "- Findings: " + comments.length,
+                "- Tokens: " + count(summary.total_tokens) + " total (input " + count(summary.input_tokens) + ", output " + count(summary.output_tokens) + ")",
+                "- Elapsed: " + oneLine(summary.elapsed || "unreported", 40),
+                "- Token cap (`OCR_MAX_TOKENS_BUDGET`): " + oneLine(process.env.OCR_MAX_TOKENS_BUDGET, 20),
+                "- Warnings: " + warnings.length,
+              ];
+              if (report.message) lines.push("", oneLine(report.message, 500));
+              if (comments.length === 0) {
+                lines.push("", "No findings.");
+              } else {
+                lines.push("", "### Findings");
+                const shown = comments.slice(0, 12);
+                for (const comment of shown) {
+                  lines.push("- " + oneLine(comment.path || "unknown", 200) + ":" + lineNo(comment.start_line) + "-" + lineNo(comment.end_line) + " — " + oneLine(comment.content, 220));
+                }
+                if (comments.length > shown.length) {
+                  lines.push("- " + (comments.length - shown.length) + " more finding(s) are in the `ocr-advisory-review` artifact.");
+                }
+              }
+              lines.push("", "The diff was sent to the configured model provider. Full JSON is in the `ocr-advisory-review` artifact.");
+              return lines.join("\n").slice(0, 65000);
+            }
+
+            const body = summaryBody();
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            try {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner,
+                repo,
+                issue_number,
+                per_page: 100,
+              });
+              const existing = comments.find((comment) => typeof comment.body === "string" && comment.body.startsWith(marker));
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner,
+                  repo,
+                  comment_id: existing.id,
+                  body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number,
+                  body,
+                });
+              }
+            } catch (error) {
+              const detail = error && (error.status || error.message) ? (error.status || error.message) : "unknown error";
+              core.notice("Advisory review summary comment was not posted (" + detail + "). The check stays non-blocking.");
+            }
