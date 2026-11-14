@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use switchyard_core::{
     AdmitRequest, CommandBody, CommandOrigin, ConfinedPiConfig, CreateMission, Host,
-    LinuxExecutionConfig, Phase,
+    LinuxExecutionConfig, Phase, payload_hash,
 };
 
 #[path = "pi_host_dispatch/composed.rs"]
