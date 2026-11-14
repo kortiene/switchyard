@@ -550,7 +550,7 @@ impl Host {
                 binding: self.binding(&mission),
                 request_id: format!("{attempt_id}:{command_id}"),
                 payload_hash: hash.clone(),
-                method: runtime_method(request.body.kind()),
+                method: RuntimeAdapter::runtime_method(request.body.kind()),
             };
             self.runtime.validate_command(&runtime_request, &payload)?;
         }
@@ -730,7 +730,7 @@ impl Host {
                                 binding: binding.clone(),
                                 request_id: c.request_id.clone(),
                                 payload_hash: c.payload_hash.clone(),
-                                method: runtime_method(c.kind),
+                                method: RuntimeAdapter::runtime_method(c.kind),
                             },
                             payload: serde_json::from_str(&c.payload_canonical)
                                 .map_err(Error::storage)?,
@@ -866,7 +866,7 @@ impl Host {
                             binding: binding.clone(),
                             request_id: command.request_id.clone(),
                             payload_hash: command.payload_hash.clone(),
-                            method: runtime_method(command.kind),
+                            method: RuntimeAdapter::runtime_method(command.kind),
                         },
                         payload: serde_json::from_str(&command.payload_canonical)
                             .map_err(Error::storage)?,
@@ -882,7 +882,7 @@ impl Host {
                 binding: binding.clone(),
                 request_id: command.request_id.clone(),
                 payload_hash: command.payload_hash.clone(),
-                method: runtime_method(command.kind),
+                method: RuntimeAdapter::runtime_method(command.kind),
             };
             let payload: Value =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
@@ -980,7 +980,7 @@ impl Host {
             binding,
             request_id: command.request_id.clone(),
             payload_hash: command.payload_hash.clone(),
-            method: runtime_method(command.kind),
+            method: RuntimeAdapter::runtime_method(command.kind),
         };
         let payload: Value =
             serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
@@ -1252,18 +1252,11 @@ impl Host {
             return self.poll_host_owned(mission_id);
         }
         let mut outcomes = Vec::new();
-        while let Some(note) = self
-            .runtime
-            .fake_mut()
-            .and_then(FakeRuntime::pop_notification)
-        {
+        while let Some(note) = self.runtime.pop_observation()? {
             match self.apply_notification(mission_id, note.clone()) {
                 Ok(outcome) => outcomes.push(outcome),
                 Err(error) if error.is_transient() => {
-                    self.runtime
-                        .fake_mut()
-                        .expect("notification was popped from FakeRuntime")
-                        .requeue_front(note);
+                    self.runtime.requeue_observation(note)?;
                     return Err(error);
                 }
                 Err(error) => {
@@ -1274,10 +1267,7 @@ impl Host {
                         &error.to_string(),
                         &frame,
                     ) {
-                        self.runtime
-                            .fake_mut()
-                            .expect("notification was popped from FakeRuntime")
-                            .requeue_front(note);
+                        self.runtime.requeue_observation(note)?;
                         return Err(storage);
                     }
                 }
@@ -2173,14 +2163,6 @@ fn host_supervisor_fact(body: &CommandBody) -> bool {
             | CommandBody::ConfirmStopped
             | CommandBody::ConfirmCancelled
     )
-}
-
-fn runtime_method(kind: CommandKind) -> &'static str {
-    match kind {
-        CommandKind::Pause | CommandKind::Cancel => "abort",
-        CommandKind::Steer => "steer",
-        _ => "submit",
-    }
 }
 
 fn rejection_json(category: &str, adapter: &str) -> String {

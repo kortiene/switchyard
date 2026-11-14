@@ -1,5 +1,4 @@
 use super::*;
-use crate::execution_env::ExecutionEnv;
 use std::collections::BTreeMap;
 
 /// The only Host path to apply: absence proof cannot outlive backend entry.
@@ -30,10 +29,7 @@ impl ExecutionEvidence {
         // Remove even stale absence evidence before any backend call. An error
         // after this point remains unknown; it never restores absence proof.
         self.observations.remove(&id);
-        let receipt = runtime
-            .fake_mut()
-            .ok_or_else(|| Error::guard("simulated execution requires FakeRuntime"))?
-            .apply(request)?;
+        let receipt = runtime.apply_simulated(request)?;
         self.observations.insert(id, Some(receipt.clone()));
         Ok(receipt)
     }

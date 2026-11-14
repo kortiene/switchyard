@@ -1,6 +1,6 @@
 # Runtime adapter contract and native Rust runtime gate
 
-Status: **proposed**. Not accepted. D1 and D2 describe how the code already works, except for the variant-specific gaps named in Context, and lock that shape. The `AgentRuntime` trait, the `ExecutionEnv` move and the conformance suite (D3–D6) are not implemented. This ADR does not change the FakeRuntime default, does not enable Pi, and does not authorize a live run.
+Status: **proposed**. Not accepted. D1 and D2 describe how the code already works. The five gaps named in Context now go through declared profiles and exhaustive matches ([#185](https://github.com/kortiene/switchyard/issues/185)). The `AgentRuntime` trait, moving `ExecutionEnv` off `FakeRuntime`, the typed `RuntimeMethod` enum, and the conformance suite (D3–D6) are not implemented. This ADR does not change the FakeRuntime default, does not enable Pi, and does not authorize a live run.
 
 S2 is **GO for the credential-free source-built candidate** and **NO-GO for the published npm package**. See [#96](https://github.com/kortiene/switchyard/issues/96), [s2-contract-gate.md](s2-contract-gate.md), and [s2-feasibility.md](s2-feasibility.md).
 
@@ -24,9 +24,11 @@ Proposed register row for [`wiki/decisions/invariants.md`](../../wiki/decisions/
   - `DispatchProfile.host_owned`: whether the Host routes stops, work and observation polling itself.
   - `FactProfile.uncertainty_is_host_fact`: whether uncertainty is recorded as a supervisor fact instead of a runtime observation.
   - `LinuxLedgerProfile`: whether Linux effects are admitted, an admitted stop is kept, and live effects are supervised.
-  - `GuidanceProfile`: operator status text.
+  - `GuidanceProfile`: operator status text. A recorded adapter name resolves through a table of the names `name()` publishes, paired with that variant's `guidance()` value. Unknown names stay inert.
+  - `AuthorityProfile`: whether the adapter may certify mission facts and quiescence, and which command check it declared (`Simulated` or `PiProtocol`). `validate_admission` and `validate_command` read this profile.
+  - `ExecutionProfile.simulated`: whether the in-process simulated `ExecutionEnv` is available. Only Fake sets it.
 - `Host::recover` runs one recovery sequence parameterized by `RecoveryProfile`.
-- Still decided by variant rather than declared: `validate_admission` and `validate_command` (`!is_fake()`), observation intake for non-host-owned adapters (`fake_mut().pop_notification()` with an `expect` on requeue), and `ExecutionEnv`, which only `FakeRuntime` implements and the Host reaches through `fake_mut()`. Method mapping still falls through to submit (`runtime_method`: `_ => "submit"`). Operator guidance for a recorded adapter name still compares against the Fake adapter's name (`guidance_for_recorded_name` vs `FAKE_ADAPTER_NAME`).
+- The five decisions that used to special-case Fake are closed on the enum ([#185](https://github.com/kortiene/switchyard/issues/185)). Non-host-owned observation intake is `pop_observation` / `requeue_observation`, both `Result`s, with no `expect`. `runtime_method` matches every `CommandKind` and has no `_` arm; kinds that are not pause, cancel, or steer still map to submit. Simulated apply is `RuntimeAdapter::apply_simulated`. Pi and Confined still refuse it with `simulated execution requires FakeRuntime` and do not execute. `ExecutionEnv` is still implemented by `FakeRuntime`. The trait, the typed `RuntimeMethod` enum, and an unknown-method `unsupported_capability` error (A8) are not extracted.
 
 Without a written contract, three things stay unspecified: what a native runtime must satisfy, whether a Pi fix is "enough", and whether a new adapter is safe by default.
 
@@ -42,7 +44,7 @@ Without a written contract, three things stay unspecified: what a native runtime
 ### D2. Sealed adapter set with declared profiles (normative now)
 
 1. The adapter set is closed: `RuntimeAdapter { Fake, Pi, Confined }`, with enum dispatch. There is no public `Box<dyn AgentRuntime>` and no project-supplied adapter. This follows the bundled-trusted-adapter rule ([README: Scope and deferred work](README.md#scope-and-deferred-work)) and keeps [#42](https://github.com/kortiene/switchyard/issues/42) deferred.
-2. Every adapter difference that the Host acts on is a declared profile (`RecoveryProfile`, `DispatchProfile`, `FactProfile`, `LinuxLedgerProfile`, `GuidanceProfile`), not a branch on the variant. The named exceptions are the variant-specific decisions listed in Context (`validate_admission`/`validate_command` on `!is_fake()`, observation intake, the submit fallthrough and `guidance_for_recorded_name`). Removing them is target work (D8). Each profile function is an exhaustive match, so a new variant must declare each profile explicitly. The defaults are inert.
+2. Every adapter difference that the Host acts on is a declared profile (`RecoveryProfile`, `DispatchProfile`, `FactProfile`, `LinuxLedgerProfile`, `GuidanceProfile`, `AuthorityProfile`, `ExecutionProfile`), not a branch on the variant. The five Context gaps are closed: admission and command checks read `AuthorityProfile`, observation intake and simulated apply are adapter methods, `runtime_method` is exhaustive over `CommandKind`, and recorded guidance is a name lookup. Each profile function is an exhaustive match, so a new variant must declare each profile explicitly. The defaults are inert. `AuthorityProfile` has no `Default`; every variant sets both of its fields. Trait extraction remains D8.
 3. There is one effect journal and one recovery sequence, parameterized by `RecoveryProfile`. The Host has no `is_confined()` branches.
 4. Uncertainty and replay semantics stay host facts (`FactProfile.uncertainty_is_host_fact`). An adapter never owns them, and a host-owned dispatcher must record uncertainty as a host fact.
 5. FakeRuntime is the product default. Pi is the proof-of-concept runtime. The native Rust runtime is the committed long-term target, and it is the only planned additional adapter.
@@ -67,16 +69,18 @@ At extraction, `ExecutionEnv` moves off `FakeRuntime` into its own Host componen
 | Inspect | `inspect(id)` returns **Known**(receipt), **Absent** (proven not admitted), or **Unknown**. Only Known and Absent may settle an outbox row. |
 | Abort | `abort` returns **Accepted** (request durably delivered) or **Settled** (work ended), with typed timeout or failure. Accepted is not quiescence ([runtime-protocol.md](runtime-protocol.md#completion-and-cancellation)). |
 | Quiescence | `quiescence()` reports runtime idle separately from execution quiescent. Only the Rust supervisor and the ExecutionEnv can assert execution quiescence. An adapter cannot satisfy `ConfirmStopped`, `ConfirmCancelled` or `RequestVerification` by itself. |
-| Observation-only reports | Adapters emit phase-free observations through one adapter-neutral channel that replaces `fake_mut().pop_notification()`. Which observations an adapter may certify is a declared profile (`AuthorityProfile`) with a default of none, replacing the `!is_fake()` check. |
+| Observation-only reports | Adapters emit phase-free observations through one adapter-neutral channel (`pop_observation` / `requeue_observation`). Which observations an adapter may certify is `AuthorityProfile.certifies_mission_facts`. Fake certifies them. Pi and Confined do not, and `validate_admission` still returns the existing guard. The trait method in the D5 sketch is not extracted. |
 | Tool-effect identity | Runtime tool calls reach the ExecutionEnv with a durable `tool_task_id` and semantic `effect_key`. The Host derives `op-v1`. On replay the same key returns the original receipt or the uncertainty. It never re-executes. |
 | Errors and uncertainty | Use the protocol's stable categories ([runtime-protocol.md](runtime-protocol.md#errors-compatibility-and-tests)). Every error answers "admitted, rejected, or uncertain?". Uncertainty moves a nonterminal mission to `needs_attention` and is never retried as a new operation. |
 | Versioning | `hello()` returns adapter kind, protocol version, source/package fingerprint and capabilities, frozen into `attempts.runtime_config_json`. An incompatible reopen is an explicit block. |
 
 ### D5. Rust sketch (host side, illustrative)
 
+This trait is still the extraction target. [#185](https://github.com/kortiene/switchyard/issues/185) landed `AuthorityProfile`, `pop_observation` / `requeue_observation`, and `apply_simulated` on the sealed enum. It did not add `contract.rs`, this trait, or typed `RuntimeMethod`.
+
 ```rust
 // crates/switchyard-core/src/execution/contract.rs (proposed; pub(crate); extracted with the native runtime)
-pub(crate) enum RuntimeMethod { Submit, Steer, Abort, Continue }   // replaces &'static str + `_ => submit`
+pub(crate) enum RuntimeMethod { Submit, Steer, Abort, Continue }   // replaces &'static str; unknown method is unsupported_capability (A8)
 
 pub(crate) enum Admission  { Admitted(RuntimeReceipt), Rejected { category: String }, Uncertain { detail: String } }
 pub(crate) enum Inspection { Known(RuntimeReceipt), Absent, Unknown { detail: String } }
@@ -181,8 +185,8 @@ Gate evidence is recorded in a dedicated issue, as #96 does. The proposed check 
 ### D8. Sequencing
 
 1. Adopt D1 and D2 as written. This is documentation only, with no code change.
-2. S4–S8 build the thin issue-to-PR path on the current enum and profiles.
-3. When native runtime work starts (not before the thin path works), extract D3–D5 in one behavior-preserving step: move `ExecutionEnv` off `FakeRuntime`, add the typed `RuntimeMethod` (A8 becomes an explicit error), and add `AuthorityProfile`. Coordinate with C3 [#112](https://github.com/kortiene/switchyard/issues/112), which owns `service.rs` extraction.
+2. Close the five Context gaps on the current enum before S4 grows ([#185](https://github.com/kortiene/switchyard/issues/185)). No trait extraction. S4–S8 build the thin issue-to-PR path on these profiles. Planning admission ([#172](https://github.com/kortiene/switchyard/issues/172)) should read `AuthorityProfile` through `validate_admission` / `validate_command`. Plan approval stays a Host operation; this ADR adds no second planning flag.
+3. When native runtime work starts (not before the thin path works), extract D3–D5 in one behavior-preserving step: move `ExecutionEnv` off `FakeRuntime` into its own Host component, and replace the `&'static str` method with typed `RuntimeMethod` so an unknown method is `unsupported_capability` (A8) rather than submit. `AuthorityProfile` already exists as declared data. Coordinate with C3 [#112](https://github.com/kortiene/switchyard/issues/112), which owns `service.rs` extraction.
 4. The conformance harness passes on FakeRuntime, then runs against Pi. Rows Pi fails are recorded as evidence, not waived.
 5. Open the native gate issue.
 
@@ -194,8 +198,7 @@ Gate evidence is recorded in a dedicated issue, as #96 does. The proposed check 
   - Pi fixes and native work are judged by the same evidence.
   - The thin path is not blocked on a refactor.
 - **Negative / cost:**
-  - Until extraction, admission authority, observation intake, the submit fallthrough and `guidance_for_recorded_name` stay variant-specific.
-  - Extraction touches `adapter.rs`, `service.rs` and `service/execution.rs`, which overlap with #112 and #114.
+  - The five Context gaps are closed on the enum. Extraction still touches `adapter.rs`, `service.rs` and `service/execution.rs`, which overlap with #112 and #114: the trait, moving `ExecutionEnv` off `FakeRuntime`, and typed `RuntimeMethod` / A8.
   - FakeRuntime grows a durable effect store.
 - **Unchanged:**
   - FakeRuntime stays the product default, and Pi stays opt-in.
@@ -215,5 +218,5 @@ Gate evidence is recorded in a dedicated issue, as #96 does. The proposed check 
 
 1. **Process boundary for the native runtime.** In process with the Host, or a separate supervised process? The README puts model credentials in a confined runtime domain. In process would put them in the Host's trust domain.
 2. **First provider.** Which model provider and API does the native runtime target first? This fixes the egress row and credential handling. Related: [#166](https://github.com/kortiene/switchyard/issues/166).
-3. **Tracking and checks.** Where should the conformance suite and `AuthorityProfile` be tracked when extraction starts, and should `rust-core` become a required check before `native-runtime-contract`?
+3. **Tracking and checks.** `AuthorityProfile` now exists as declared data on the enum. Where should the conformance suite be tracked when extraction starts, and should `rust-core` become a required check before `native-runtime-contract`?
 4. **Publish-time digest binding.** The README already binds approval to a digest of the attempt snapshot, reviewed workspace and evidence, rechecked at approval and publication. #167 requires publication approval for the current review digest. What that digest covers, and how it is computed, belongs to the S6/S8 decisions ([#170](https://github.com/kortiene/switchyard/issues/170), [#102](https://github.com/kortiene/switchyard/issues/102)). Hashing a raw diff would give false mismatches from line endings, generated files and mode bits, so the digest needs to be defined over a normalized tree, consistent with #170's delivery manifest and exclusion ledger.

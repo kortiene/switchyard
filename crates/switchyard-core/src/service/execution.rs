@@ -59,7 +59,7 @@ impl Host {
                 _ => PiEffectOutcome::Uncertain,
             };
         }
-        if self.runtime.fake_mut().is_none() {
+        if !self.runtime.execution_profile().simulated {
             return PiEffectOutcome::Rejected;
         }
         let result = self.execute_fake_operation(request);
@@ -83,8 +83,8 @@ impl Host {
     ) -> Result<crate::PiEffectOutcome> {
         use crate::PiEffectOutcome;
         debug_assert!(
-            matches!(&self.runtime, RuntimeAdapter::Fake(_)),
-            "runtime is RuntimeAdapter::Fake: fake_effect_outcome classifies the simulated journal only; do not reuse it for the Linux backend"
+            self.runtime.execution_profile().simulated,
+            "simulated execution profile: fake_effect_outcome classifies the simulated journal only; do not reuse it for the Linux backend"
         );
         // A stale owner cannot read receipts or turn a post-effect error into
         // a definite rejection. Failed evidence reads also remain uncertain.
@@ -156,7 +156,7 @@ impl Host {
         mut now: impl FnMut() -> i64,
     ) -> Result<ExecutionReceipt> {
         self.accept_runtime_binding(&request.binding, &request.binding.mission_id)?;
-        if self.runtime.fake_mut().is_none() {
+        if !self.runtime.execution_profile().simulated {
             return Err(Error::guard("simulated execution requires FakeRuntime"));
         }
         let id = request.operation_id()?;
