@@ -72,6 +72,10 @@ jobs:
           cache: npm
           cache-dependency-path: adw_sdlc/package-lock.json
 
+      - name: Advisory OCR summary script
+        working-directory: ${{ github.workspace }}
+        run: node --test scripts/ocr-summary.test.mjs
+
       # Reproducible install from the committed lockfile. Optional SDK deps
       # (claude/codex/opencode/pi) install too; the test suite is fully mocked,
       # so no API keys or network are needed. On the 20.19.0 leg the pi

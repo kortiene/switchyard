@@ -56,7 +56,8 @@ jobs:
       # GitHub-hosted runners use an OpenAI API key, independent of Pi's
       # local openai-codex OAuth session. Keep a separate secret so the old
       # OpenCode Go key cannot accidentally be sent to OpenAI.
-      OCR_MODEL: ${{ vars.OCR_OPENAI_MODEL || 'gpt-6.1-sol' }}
+      # No model default: an unset OCR_OPENAI_MODEL skips at the gate.
+      OCR_MODEL: ${{ vars.OCR_OPENAI_MODEL }}
       OCR_LLM_URL: https://api.openai.com/v1/responses
       OCR_LLM_PROTOCOL: openai-responses
       OCR_LLM_EXTRA_HEADERS: ""
@@ -87,6 +88,7 @@ jobs:
           head_sha="$(jq -r '.headRefOid' <<<"$view")"
           cross="$(jq -r '.isCrossRepository' <<<"$view")"
           head_repo="$(jq -r '.headRepository.nameWithOwner // empty' <<<"$view")"
+          # Belt and braces: isCrossRepository and head.repo.fork are both checked below.
           fork="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq 'if .head.repo == null then "missing" elif .head.repo.fork == true then "true" else "false" end')"
           if [ "$number" != "$PR_NUMBER" ]; then
             echo "::error::pull request #${PR_NUMBER} was not found"
@@ -152,6 +154,7 @@ jobs:
           missing=()
           [ -n "${OCR_API_KEY}" ] || missing+=("secret OCR_OPENAI_API_KEY")
           [ -n "${OCR_MODEL}" ] || missing+=("variable OCR_MODEL")
+          # Hardcoded URL and protocol cannot fail these checks; kept so re-enabling them as variables still skips when unset.
           [ -n "${OCR_LLM_URL}" ] || missing+=("variable OCR_LLM_URL")
           [ -n "${OCR_LLM_PROTOCOL}" ] || missing+=("variable OCR_LLM_PROTOCOL")
           if [ "${#missing[@]}" -gt 0 ]; then
@@ -205,7 +208,7 @@ jobs:
           OCR_NO_UPDATE: "1"
           # OpenAI API key, mapped to the v1.13.9 token variable.
           OCR_LLM_TOKEN: ${{ secrets.OCR_OPENAI_API_KEY }}
-          OCR_LLM_MODEL: ${{ vars.OCR_OPENAI_MODEL || 'gpt-6.1-sol' }}
+          OCR_LLM_MODEL: ${{ vars.OCR_OPENAI_MODEL }}
           BASE_REF: ${{ steps.gate.outputs.base_ref }}
           HEAD_SHA: ${{ steps.gate.outputs.head_sha }}
           OCR_RESULT_PATH: ${{ runner.temp }}/ocr-review.json
@@ -216,6 +219,7 @@ jobs:
             echo "::error::OCR_MAX_TOKENS_BUDGET must be a positive base-10 integer"
             exit 1
           fi
+          # Hardcoded protocol cannot fail this check; kept so a variable-based protocol is still validated.
           case "$OCR_LLM_PROTOCOL" in
             anthropic|openai|openai-responses) ;;
             *)

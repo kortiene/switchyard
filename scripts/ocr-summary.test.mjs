@@ -3,9 +3,54 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const workflow = readFileSync(new URL('../.github/workflows/ai-review-advisory.yml', import.meta.url), 'utf8');
-const script = workflow.split('          script: |\n')[1]
-  .split('\n').map((line) => line.replace(/^            /, '')).join('\n');
+
+function extractGithubScript(source) {
+  const lines = source.split('\n');
+  const scripts = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*script:\s*\|\s*$/.test(lines[i])) continue;
+    const keyIndent = lines[i].match(/^\s*/)[0].length;
+    const body = [];
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      if (line.trim() === '') {
+        body.push('');
+        continue;
+      }
+      if (line.match(/^\s*/)[0].length <= keyIndent) break;
+      body.push(line);
+    }
+    const nonempty = body.filter((line) => line.trim() !== '');
+    if (nonempty.length === 0) continue;
+    const common = Math.min(...nonempty.map((line) => line.match(/^\s*/)[0].length));
+    const script = body.map((line) => (line.trim() === '' ? '' : line.slice(common))).join('\n');
+    if (script.includes('function summaryBody')) scripts.push(script);
+  }
+  if (scripts.length !== 1) {
+    throw new Error(`github-script block not found in .github/workflows/ai-review-advisory.yml (found ${scripts.length} script blocks containing summaryBody)`);
+  }
+  return scripts[0];
+}
+
+const script = extractGithubScript(workflow);
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+
+test('script extraction strips the block indent and fails clearly when the block is missing', () => {
+  const yaml = [
+    'jobs:',
+    '  steps:',
+    '    - uses: actions/github-script@v9',
+    '      with:',
+    '        script: |',
+    '          function summaryBody() { return 1; }',
+    '          const indented = true;',
+    '    - name: next',
+  ].join('\n');
+  const extracted = extractGithubScript(yaml);
+  assert.match(extracted, /^function summaryBody\(\)/);
+  assert.match(extracted, /^const indented = true;$/m);
+  assert.throws(() => extractGithubScript('name: none\n'), /github-script block not found/);
+});
 const execute = new AsyncFunction('require', 'process', 'github', 'context', 'core', script);
 
 async function render(report, outcome = 'success', existingComments = [], extra = {}) {
