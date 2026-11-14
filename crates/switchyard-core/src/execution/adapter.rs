@@ -79,14 +79,17 @@ impl GuidanceProfile {
 }
 
 /// What an adapter may certify, and which command check it declared.
-/// Each variant sets both fields in [`RuntimeAdapter::authority`]. There is
-/// no `Default`: a forgotten variant must fail to compile, not inherit a
-/// permissive check.
+/// [`RuntimeAdapter::authority`] matches every variant, so a forgotten
+/// variant fails to compile. This struct has no `Default`, which blocks
+/// `..Default::default()` as a permissive fallback. [`GuidanceProfile`] and
+/// [`ExecutionProfile`] still derive `Default` because their zero value is
+/// the inert profile those variants already use.
 ///
-/// `certifies_mission_facts` is the admission hook for observations and
-/// quiescence proofs. S4-A planning admission (#172) should read it from
-/// [`RuntimeAdapter::validate_admission`] instead of adding a runtime-identity
-/// check. Plan approval itself stays a Host operation.
+/// `certifies_mission_facts` is an authority gate only. It does not check
+/// plan shape, digest, or freeze. Those stay in Host admission. S4-A (#172)
+/// should read this flag from [`RuntimeAdapter::validate_admission`] instead
+/// of adding a runtime-identity check. Plan approval itself stays a Host
+/// operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AuthorityProfile {
     pub(crate) certifies_mission_facts: bool,
@@ -320,6 +323,9 @@ impl RuntimeAdapter {
         body: &CommandBody,
         origin: CommandOrigin,
     ) -> Result<()> {
+        // Authority gate only. A certifying adapter, Fake today, passes every
+        // body and origin, including PlanCompleted. Plan shape, digest, and
+        // freeze checks stay in Host admission (#172).
         if self.authority().certifies_mission_facts {
             return Ok(());
         }
@@ -357,12 +363,15 @@ impl RuntimeAdapter {
     }
 
     /// Next queued observation. `Ok(None)` means this adapter's queue is empty.
-    /// The Pi probe has no queue, which is what non-host-owned polling already
-    /// observed. Confined intake is host-owned; calling this is the same guard
-    /// as confined dispatch.
     pub(crate) fn pop_observation(&mut self) -> Result<Option<RuntimeNotification>> {
         match self {
             Self::Fake(runtime) => Ok(runtime.pop_notification()),
+            // The Pi probe has no queue. A non-host-owned poll used to see
+            // `fake_mut()` as empty and drain nothing, so this stays `Ok(None)`.
+            // Confined does not: it returns the host-owned guard. That stricter
+            // result is intentional. `DispatchProfile.host_owned` routes Confined
+            // before this method, and a direct call must not look like Pi's
+            // empty drain.
             #[cfg(feature = "pi-contract")]
             Self::Pi(_) => Ok(None),
             #[cfg(all(

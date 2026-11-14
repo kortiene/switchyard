@@ -1256,8 +1256,7 @@ impl Host {
             match self.apply_notification(mission_id, note.clone()) {
                 Ok(outcome) => outcomes.push(outcome),
                 Err(error) if error.is_transient() => {
-                    self.runtime.requeue_observation(note)?;
-                    return Err(error);
+                    return Err(restore_observation(&mut self.runtime, note, error));
                 }
                 Err(error) => {
                     let frame = note.frame_json().to_string();
@@ -1267,8 +1266,7 @@ impl Host {
                         &error.to_string(),
                         &frame,
                     ) {
-                        self.runtime.requeue_observation(note)?;
-                        return Err(storage);
+                        return Err(restore_observation(&mut self.runtime, note, storage));
                     }
                 }
             }
@@ -2165,6 +2163,19 @@ fn host_supervisor_fact(body: &CommandBody) -> bool {
     )
 }
 
+/// Put a popped observation back. The apply or quarantine error stays
+/// primary. A requeue failure is context on that error, not a replacement.
+fn restore_observation(
+    runtime: &mut RuntimeAdapter,
+    note: RuntimeNotification,
+    original: Error,
+) -> Error {
+    match runtime.requeue_observation(note) {
+        Ok(()) => original,
+        Err(requeue) => original.with_context(requeue.to_string()),
+    }
+}
+
 fn rejection_json(category: &str, adapter: &str) -> String {
     json!({
         "admission": "rejected",
@@ -2225,6 +2236,69 @@ mod host_fact_tests {
         assert!(!host_supervisor_fact(&CommandBody::Steer {
             content: "later".into(),
         }));
+    }
+}
+
+#[cfg(test)]
+mod requeue_tests {
+    use super::restore_observation;
+    use crate::Error;
+    use crate::execution::{FakeRuntime, RuntimeAdapter, RuntimeNotification};
+
+    #[test]
+    fn successful_requeue_returns_the_original_error_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime =
+            RuntimeAdapter::Fake(FakeRuntime::open(&dir.path().join("fake-runtime.json")).unwrap());
+        let restored = restore_observation(
+            &mut runtime,
+            RuntimeNotification::Idle,
+            Error::storage("notification apply lost the disk"),
+        );
+        assert_eq!(restored.category(), "storage_failed");
+        assert!(restored.is_transient(), "{restored}");
+        assert_eq!(
+            restored.to_string(),
+            Error::storage("notification apply lost the disk").to_string()
+        );
+        assert_eq!(
+            runtime.pop_observation().unwrap(),
+            Some(RuntimeNotification::Idle)
+        );
+    }
+}
+
+/// Pi's requeue already fails. That is the only current way to see a failed
+/// restore without a test-only seam. Fake requeue always succeeds.
+#[cfg(all(test, feature = "pi-contract"))]
+mod requeue_failure_tests {
+    use super::restore_observation;
+    use crate::Error;
+    use crate::execution::{RuntimeAdapter, RuntimeNotification};
+
+    #[test]
+    fn failed_requeue_keeps_the_original_error_primary() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = std::env::current_exe().unwrap();
+        let mut runtime = RuntimeAdapter::Pi(Box::new(
+            crate::execution::PiRuntime::new(&dir.path().join("ledger.sqlite"), &node).unwrap(),
+        ));
+        let restored = restore_observation(
+            &mut runtime,
+            RuntimeNotification::Idle,
+            Error::storage("notification apply lost the disk"),
+        );
+        assert_eq!(restored.category(), "storage_failed", "{restored}");
+        assert!(restored.is_transient(), "{restored}");
+        let text = restored.to_string();
+        assert!(
+            text.starts_with("storage failed: notification apply lost the disk"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Pi probe has no observation queue to restore"),
+            "{text}"
+        );
     }
 }
 
