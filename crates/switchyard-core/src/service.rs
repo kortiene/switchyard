@@ -550,7 +550,7 @@ impl Host {
                 binding: self.binding(&mission),
                 request_id: format!("{attempt_id}:{command_id}"),
                 payload_hash: hash.clone(),
-                method: runtime_method(request.body.kind()),
+                method: RuntimeAdapter::runtime_method(request.body.kind()),
             };
             self.runtime.validate_command(&runtime_request, &payload)?;
         }
@@ -730,7 +730,7 @@ impl Host {
                                 binding: binding.clone(),
                                 request_id: c.request_id.clone(),
                                 payload_hash: c.payload_hash.clone(),
-                                method: runtime_method(c.kind),
+                                method: RuntimeAdapter::runtime_method(c.kind),
                             },
                             payload: serde_json::from_str(&c.payload_canonical)
                                 .map_err(Error::storage)?,
@@ -866,7 +866,7 @@ impl Host {
                             binding: binding.clone(),
                             request_id: command.request_id.clone(),
                             payload_hash: command.payload_hash.clone(),
-                            method: runtime_method(command.kind),
+                            method: RuntimeAdapter::runtime_method(command.kind),
                         },
                         payload: serde_json::from_str(&command.payload_canonical)
                             .map_err(Error::storage)?,
@@ -882,7 +882,7 @@ impl Host {
                 binding: binding.clone(),
                 request_id: command.request_id.clone(),
                 payload_hash: command.payload_hash.clone(),
-                method: runtime_method(command.kind),
+                method: RuntimeAdapter::runtime_method(command.kind),
             };
             let payload: Value =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
@@ -980,7 +980,7 @@ impl Host {
             binding,
             request_id: command.request_id.clone(),
             payload_hash: command.payload_hash.clone(),
-            method: runtime_method(command.kind),
+            method: RuntimeAdapter::runtime_method(command.kind),
         };
         let payload: Value =
             serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
@@ -1252,19 +1252,11 @@ impl Host {
             return self.poll_host_owned(mission_id);
         }
         let mut outcomes = Vec::new();
-        while let Some(note) = self
-            .runtime
-            .fake_mut()
-            .and_then(FakeRuntime::pop_notification)
-        {
+        while let Some(note) = self.runtime.pop_observation()? {
             match self.apply_notification(mission_id, note.clone()) {
                 Ok(outcome) => outcomes.push(outcome),
                 Err(error) if error.is_transient() => {
-                    self.runtime
-                        .fake_mut()
-                        .expect("notification was popped from FakeRuntime")
-                        .requeue_front(note);
-                    return Err(error);
+                    return Err(restore_observation(&mut self.runtime, note, error));
                 }
                 Err(error) => {
                     let frame = note.frame_json().to_string();
@@ -1274,11 +1266,7 @@ impl Host {
                         &error.to_string(),
                         &frame,
                     ) {
-                        self.runtime
-                            .fake_mut()
-                            .expect("notification was popped from FakeRuntime")
-                            .requeue_front(note);
-                        return Err(storage);
+                        return Err(restore_observation(&mut self.runtime, note, storage));
                     }
                 }
             }
@@ -2175,11 +2163,16 @@ fn host_supervisor_fact(body: &CommandBody) -> bool {
     )
 }
 
-fn runtime_method(kind: CommandKind) -> &'static str {
-    match kind {
-        CommandKind::Pause | CommandKind::Cancel => "abort",
-        CommandKind::Steer => "steer",
-        _ => "submit",
+/// Put a popped observation back. The apply or quarantine error stays
+/// primary. A requeue failure is context on that error, not a replacement.
+fn restore_observation(
+    runtime: &mut RuntimeAdapter,
+    note: RuntimeNotification,
+    original: Error,
+) -> Error {
+    match runtime.requeue_observation(note) {
+        Ok(()) => original,
+        Err(requeue) => original.with_context(requeue.to_string()),
     }
 }
 
@@ -2243,6 +2236,69 @@ mod host_fact_tests {
         assert!(!host_supervisor_fact(&CommandBody::Steer {
             content: "later".into(),
         }));
+    }
+}
+
+#[cfg(test)]
+mod requeue_tests {
+    use super::restore_observation;
+    use crate::Error;
+    use crate::execution::{FakeRuntime, RuntimeAdapter, RuntimeNotification};
+
+    #[test]
+    fn successful_requeue_returns_the_original_error_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime =
+            RuntimeAdapter::Fake(FakeRuntime::open(&dir.path().join("fake-runtime.json")).unwrap());
+        let restored = restore_observation(
+            &mut runtime,
+            RuntimeNotification::Idle,
+            Error::storage("notification apply lost the disk"),
+        );
+        assert_eq!(restored.category(), "storage_failed");
+        assert!(restored.is_transient(), "{restored}");
+        assert_eq!(
+            restored.to_string(),
+            Error::storage("notification apply lost the disk").to_string()
+        );
+        assert_eq!(
+            runtime.pop_observation().unwrap(),
+            Some(RuntimeNotification::Idle)
+        );
+    }
+}
+
+/// Pi's requeue already fails. That is the only current way to see a failed
+/// restore without a test-only seam. Fake requeue always succeeds.
+#[cfg(all(test, feature = "pi-contract"))]
+mod requeue_failure_tests {
+    use super::restore_observation;
+    use crate::Error;
+    use crate::execution::{RuntimeAdapter, RuntimeNotification};
+
+    #[test]
+    fn failed_requeue_keeps_the_original_error_primary() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = std::env::current_exe().unwrap();
+        let mut runtime = RuntimeAdapter::Pi(Box::new(
+            crate::execution::PiRuntime::new(&dir.path().join("ledger.sqlite"), &node).unwrap(),
+        ));
+        let restored = restore_observation(
+            &mut runtime,
+            RuntimeNotification::Idle,
+            Error::storage("notification apply lost the disk"),
+        );
+        assert_eq!(restored.category(), "storage_failed", "{restored}");
+        assert!(restored.is_transient(), "{restored}");
+        let text = restored.to_string();
+        assert!(
+            text.starts_with("storage failed: notification apply lost the disk"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Pi probe has no observation queue to restore"),
+            "{text}"
+        );
     }
 }
 

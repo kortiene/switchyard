@@ -344,7 +344,7 @@ impl Host {
                 binding: binding.clone(),
                 request_id: command.request_id.clone(),
                 payload_hash: command.payload_hash.clone(),
-                method: runtime_method(command.kind),
+                method: RuntimeAdapter::runtime_method(command.kind),
             };
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
@@ -408,7 +408,7 @@ impl Host {
                 binding: binding.clone(),
                 request_id: command.request_id.clone(),
                 payload_hash: command.payload_hash.clone(),
-                method: runtime_method(command.kind),
+                method: RuntimeAdapter::runtime_method(command.kind),
             };
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
@@ -477,7 +477,7 @@ impl Host {
                     binding,
                     request_id: command.request_id.clone(),
                     payload_hash: command.payload_hash.clone(),
-                    method: runtime_method(command.kind),
+                    method: RuntimeAdapter::runtime_method(command.kind),
                 };
                 let payload =
                     serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
@@ -543,7 +543,7 @@ impl Host {
                 binding: binding.clone(),
                 request_id: command.request_id.clone(),
                 payload_hash: command.payload_hash.clone(),
-                method: runtime_method(command.kind),
+                method: RuntimeAdapter::runtime_method(command.kind),
             };
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
