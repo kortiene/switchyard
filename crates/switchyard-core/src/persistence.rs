@@ -15,6 +15,7 @@ use crate::domain::{
 };
 use crate::error::{Error, Result};
 use crate::execution::OwnerLock;
+use crate::freeze::frozen_canonical;
 use crate::policy::TransitionPlan;
 use crate::verification::NewVerification;
 
@@ -25,7 +26,7 @@ pub(crate) mod linux_execution;
 mod pi_host;
 mod workspace;
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 const VERIFIER_JSON: &str = r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}"#;
 const ENVIRONMENT_JSON: &str = r#"{"confinement":"deferred_to_s3","host":"single"}"#;
@@ -50,6 +51,26 @@ pub struct NewCommand {
     pub actor: String,
     pub rationale: String,
     pub decision_digest: Option<String>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AttemptInputPatch {
+    pub objective: Option<String>,
+    pub acceptance_criteria: Option<String>,
+    pub base_sha: Option<String>,
+    pub issue_title: Option<String>,
+    pub max_repairs: Option<u32>,
+    pub max_plan_revisions: Option<u32>,
+    pub verifier_json: Option<String>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StoredDecision {
+    pub action: String,
+    pub digest: Option<String>,
+    pub command_id: Option<String>,
 }
 
 pub struct CreatedMission {
@@ -149,6 +170,10 @@ impl Store {
 
     pub fn bind_owner_generation(&mut self, generation: u64) {
         self.owner_generation = Some(generation);
+    }
+
+    pub(crate) fn bound_owner_generation(&self) -> Option<u64> {
+        self.owner_generation
     }
 
     /// A ledger never silently changes adapters, source pins, or adapter code.
@@ -385,6 +410,28 @@ impl Store {
                 .map_err(Error::storage)?;
             tx.commit().map_err(Error::storage)?;
         }
+        if current < 11 {
+            let tx = self.immediate()?;
+            let frozen_column: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('attempts') WHERE name = 'frozen_inputs_json'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Error::storage)?;
+            if frozen_column == 0 {
+                tx.execute_batch(include_str!("migrations/011_attempt_freeze.sql"))
+                    .map_err(Error::storage)?;
+            }
+            tx.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (11, ?1)",
+                [now_ms()],
+            )
+            .map_err(Error::storage)?;
+            tx.execute_batch("PRAGMA user_version = 11;")
+                .map_err(Error::storage)?;
+            tx.commit().map_err(Error::storage)?;
+        }
         Ok(())
     }
 
@@ -533,38 +580,17 @@ impl Store {
     }
 
     pub fn load_mission(&self, mission_id: &str) -> Result<MissionRecord> {
+        let version = user_version(&self.conn)?;
+        let freeze = if version >= 11 {
+            "a.frozen_inputs_json, a.owner_generation"
+        } else {
+            "NULL, NULL"
+        };
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT
-                    m.id, m.revision, m.phase, m.objective, m.repo_identity_json, m.source_issue_json,
-                    m.resume_target, m.prior_phase, m.attention_reason, m.permitted_recovery_target,
-                    m.reconcile_only, m.content_digest, m.plan_digest, m.plan_body, m.reviewed_digest,
-                    m.successor_of_mission_id, m.created_at, m.updated_at,
-                    t.id, t.acceptance_criteria,
-                    a.id, a.task_id, a.base_sha, a.session_id, a.runtime_config_json, a.policy_json,
-                    a.policy_hash, a.verifier_json, a.repair_count, a.max_repairs,
-                    a.plan_revision_count, a.max_plan_revisions, a.successor_of
-                 FROM missions m
-                 JOIN tasks t ON t.mission_id = m.id AND t.root = 1
-                 JOIN attempts a ON a.mission_id = m.id AND a.active = 1
-                 WHERE m.id = ?1",
-            )
+            .prepare(&mission_sql(freeze))
             .map_err(Error::storage)?;
-        let rows = stmt
-            .query_map(params![mission_id], map_mission)
-            .map_err(Error::storage)?;
-        let mut missions = Vec::new();
-        for row in rows {
-            missions.push(row.map_err(Error::storage)?);
-        }
-        match missions.len() {
-            0 => Err(Error::NotFound),
-            1 => Ok(missions.remove(0)),
-            _ => Err(Error::Storage {
-                detail: "mission has more than one active attempt or root task".into(),
-            }),
-        }
+        collect_mission(&mut stmt, mission_id)
     }
 
     pub fn list_mission_ids(&self) -> Result<Vec<String>> {
@@ -580,6 +606,165 @@ impl Store {
             ids.push(row.map_err(Error::storage)?);
         }
         Ok(ids)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn list_decisions(&self, mission_id: &str) -> Result<Vec<StoredDecision>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT action, digest, command_id FROM decisions
+                 WHERE mission_id = ?1 ORDER BY created_at, id",
+            )
+            .map_err(Error::storage)?;
+        let rows = stmt
+            .query_map(params![mission_id], |row| {
+                Ok(StoredDecision {
+                    action: row.get(0)?,
+                    digest: row.get(1)?,
+                    command_id: row.get(2)?,
+                })
+            })
+            .map_err(Error::storage)?;
+        let mut decisions = Vec::new();
+        for row in rows {
+            decisions.push(row.map_err(Error::storage)?);
+        }
+        Ok(decisions)
+    }
+
+    /// Update attempt inputs while they are still unfrozen. After
+    /// `draft → planning` every field in the patch is refused.
+    #[cfg(test)]
+    pub(crate) fn revise_attempt_inputs(
+        &mut self,
+        mission_id: &str,
+        patch: &AttemptInputPatch,
+    ) -> Result<()> {
+        if let Some(objective) = &patch.objective {
+            require_patch_text(objective, "objective")?;
+        }
+        if let Some(acceptance) = &patch.acceptance_criteria {
+            require_patch_text(acceptance, "acceptance criteria")?;
+        }
+        if let Some(base_sha) = &patch.base_sha {
+            require_patch_text(base_sha, "base SHA")?;
+        }
+        if let Some(title) = &patch.issue_title {
+            require_patch_text(title, "issue snapshot")?;
+        }
+        if let Some(verifier) = &patch.verifier_json {
+            crate::freeze::parse_object(verifier, "verifier definition")?;
+        }
+        let tx = self.immediate()?;
+        let frozen: Option<String> = tx
+            .query_row(
+                "SELECT frozen_inputs_json FROM attempts WHERE mission_id = ?1 AND active = 1",
+                params![mission_id],
+                |row| row.get(0),
+            )
+            .map_err(Error::storage)?;
+        if frozen.is_some() {
+            return Err(Error::guard("frozen attempt inputs are immutable"));
+        }
+        if let Some(objective) = &patch.objective {
+            let changed = tx
+                .execute(
+                    "UPDATE missions SET objective = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![objective, now_ms(), mission_id],
+                )
+                .map_err(Error::storage)?;
+            if changed != 1 {
+                return Err(Error::NotFound);
+            }
+        }
+        if let Some(title) = &patch.issue_title {
+            let raw: String = tx
+                .query_row(
+                    "SELECT source_issue_json FROM missions WHERE id = ?1",
+                    params![mission_id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| Error::NotFound)?;
+            let mut issue: Value = serde_json::from_str(&raw).map_err(Error::storage)?;
+            issue["title"] = json!(title);
+            tx.execute(
+                "UPDATE missions SET source_issue_json = ?1, updated_at = ?2 WHERE id = ?3",
+                params![
+                    serde_json::to_string(&issue).map_err(Error::storage)?,
+                    now_ms(),
+                    mission_id
+                ],
+            )
+            .map_err(Error::storage)?;
+        }
+        if let Some(acceptance) = &patch.acceptance_criteria {
+            tx.execute(
+                "UPDATE tasks SET acceptance_criteria = ?1 WHERE mission_id = ?2 AND root = 1",
+                params![acceptance, mission_id],
+            )
+            .map_err(Error::storage)?;
+        }
+        if let Some(base_sha) = &patch.base_sha {
+            tx.execute(
+                "UPDATE attempts SET base_sha = ?1 WHERE mission_id = ?2 AND active = 1",
+                params![base_sha, mission_id],
+            )
+            .map_err(Error::storage)?;
+        }
+        if let Some(verifier) = &patch.verifier_json {
+            tx.execute(
+                "UPDATE attempts SET verifier_json = ?1 WHERE mission_id = ?2 AND active = 1",
+                params![verifier, mission_id],
+            )
+            .map_err(Error::storage)?;
+        }
+        if patch.max_repairs.is_some() || patch.max_plan_revisions.is_some() {
+            let (policy_json, max_repairs, max_plan_revisions): (String, i64, i64) = tx
+                .query_row(
+                    "SELECT policy_json, max_repairs, max_plan_revisions FROM attempts
+                     WHERE mission_id = ?1 AND active = 1",
+                    params![mission_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(|_| Error::NotFound)?;
+            let repairs = patch
+                .max_repairs
+                .unwrap_or(u32::try_from(max_repairs).unwrap_or(0));
+            let revisions = patch
+                .max_plan_revisions
+                .unwrap_or(u32::try_from(max_plan_revisions).unwrap_or(0));
+            let mut policy: Value = serde_json::from_str(&policy_json).map_err(Error::storage)?;
+            if let Some(object) = policy.as_object_mut() {
+                object.insert("maxRepairs".into(), json!(repairs));
+                object.insert("maxPlanRevisions".into(), json!(revisions));
+            }
+            let canonical = canonicalize(&policy)?;
+            let hash = payload_hash(&policy)?;
+            tx.execute(
+                "UPDATE attempts SET max_repairs = ?1, max_plan_revisions = ?2, policy_json = ?3, policy_hash = ?4
+                 WHERE mission_id = ?5 AND active = 1 AND frozen_inputs_json IS NULL",
+                params![repairs, revisions, canonical, hash, mission_id],
+            )
+            .map_err(Error::storage)?;
+        }
+        tx.commit().map_err(Error::storage)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tamper_attempt_base_sha(
+        &mut self,
+        mission_id: &str,
+        base_sha: &str,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE attempts SET base_sha = ?1 WHERE mission_id = ?2 AND active = 1",
+                params![base_sha, mission_id],
+            )
+            .map_err(Error::storage)?;
+        Ok(())
     }
 
     pub fn find_command(&self, command_id: &str) -> Result<Option<CommandRecord>> {
@@ -622,6 +807,7 @@ impl Store {
         continuation: Option<&NewCommand>,
     ) -> Result<()> {
         let tx = self.immediate()?;
+        enforce_attempt_freeze(&tx, command, plan)?;
         if let Some(verification) = verification {
             insert_verification(&tx, &command.mission_id, &command.attempt_id, verification)?;
         }
@@ -1380,6 +1566,106 @@ fn insert_decision(tx: &Transaction<'_>, decision: DecisionWrite<'_>) -> Result<
     Ok(())
 }
 
+fn mission_sql(freeze_columns: &str) -> String {
+    format!(
+        "SELECT
+            m.id, m.revision, m.phase, m.objective, m.repo_identity_json, m.source_issue_json,
+            m.resume_target, m.prior_phase, m.attention_reason, m.permitted_recovery_target,
+            m.reconcile_only, m.content_digest, m.plan_digest, m.plan_body, m.reviewed_digest,
+            m.successor_of_mission_id, m.created_at, m.updated_at,
+            t.id, t.acceptance_criteria,
+            a.id, a.task_id, a.base_sha, a.session_id, a.runtime_config_json, a.policy_json,
+            a.policy_hash, a.verifier_json, a.repair_count, a.max_repairs,
+            a.plan_revision_count, a.max_plan_revisions, a.successor_of, a.environment_json,
+            {freeze_columns}
+         FROM missions m
+         JOIN tasks t ON t.mission_id = m.id AND t.root = 1
+         JOIN attempts a ON a.mission_id = m.id AND a.active = 1
+         WHERE m.id = ?1"
+    )
+}
+
+fn collect_mission(stmt: &mut rusqlite::Statement<'_>, mission_id: &str) -> Result<MissionRecord> {
+    let rows = stmt
+        .query_map(params![mission_id], map_mission)
+        .map_err(Error::storage)?;
+    let mut missions = Vec::new();
+    for row in rows {
+        missions.push(row.map_err(Error::storage)?);
+    }
+    match missions.len() {
+        0 => Err(Error::NotFound),
+        1 => Ok(missions.remove(0)),
+        _ => Err(Error::Storage {
+            detail: "mission has more than one active attempt or root task".into(),
+        }),
+    }
+}
+
+fn mission_in_tx(tx: &Transaction<'_>, mission_id: &str) -> Result<MissionRecord> {
+    let sql = mission_sql("a.frozen_inputs_json, a.owner_generation");
+    let mut stmt = tx.prepare(&sql).map_err(Error::storage)?;
+    collect_mission(&mut stmt, mission_id)
+}
+
+fn enforce_attempt_freeze(
+    tx: &Transaction<'_>,
+    command: &NewCommand,
+    plan: &TransitionPlan,
+) -> Result<()> {
+    let mission = mission_in_tx(tx, &command.mission_id)?;
+    if command.kind == CommandKind::StartPlanning {
+        let current = frozen_canonical(&mission)?;
+        let owner = plan
+            .owner_generation
+            .ok_or_else(|| Error::guard("start planning requires exclusive host ownership"))?;
+        let expected = plan
+            .frozen_inputs_json
+            .as_deref()
+            .ok_or_else(|| Error::guard("start planning did not freeze attempt inputs"))?;
+        if expected != current {
+            return Err(Error::guard(
+                "frozen attempt inputs do not match the attempt",
+            ));
+        }
+        if mission.attempt.frozen_inputs_json.is_some() {
+            return Err(Error::guard("frozen attempt inputs are immutable"));
+        }
+        let changed = tx
+            .execute(
+                "UPDATE attempts SET frozen_inputs_json = ?1, owner_generation = ?2
+                 WHERE id = ?3 AND frozen_inputs_json IS NULL",
+                params![current, i64_from_u64(owner)?, command.attempt_id],
+            )
+            .map_err(Error::storage)?;
+        if changed != 1 {
+            return Err(Error::guard("frozen attempt inputs are immutable"));
+        }
+        tx.execute(
+            "UPDATE tasks SET frozen = 1 WHERE id = ?1",
+            params![mission.task_id],
+        )
+        .map_err(Error::storage)?;
+        return Ok(());
+    }
+    if let Some(stored) = &mission.attempt.frozen_inputs_json {
+        let current = frozen_canonical(&mission)?;
+        if stored != &current {
+            return Err(Error::guard("frozen attempt inputs are immutable"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn require_patch_text(value: &str, label: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        Err(Error::guard(format!("{label} is required")))
+    } else {
+        Ok(())
+    }
+}
+
 fn map_mission(row: &rusqlite::Row<'_>) -> rusqlite::Result<MissionRecord> {
     let repo_json: String = row.get(4)?;
     let issue_json: String = row.get(5)?;
@@ -1420,14 +1706,18 @@ fn map_mission(row: &rusqlite::Row<'_>) -> rusqlite::Result<MissionRecord> {
             base_sha: row.get(22)?,
             session_id: row.get(23)?,
             runtime_adapter: adapter,
+            runtime_config_json: runtime_json,
             policy_json: row.get(25)?,
             policy_hash: row.get(26)?,
             verifier_json: row.get(27)?,
+            environment_json: row.get(33)?,
             repair_count: u32_col(row.get(28)?)?,
             max_repairs: u32_col(row.get(29)?)?,
             plan_revision_count: u32_col(row.get(30)?)?,
             max_plan_revisions: u32_col(row.get(31)?)?,
             successor_of: row.get(32)?,
+            frozen_inputs_json: row.get(34)?,
+            owner_generation: row.get::<_, Option<i64>>(35)?.map(u64_col).transpose()?,
         },
     })
 }
@@ -1802,7 +2092,7 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
             .unwrap();
         assert_eq!(foreign_keys, 1);
-        assert_eq!(user_version(&store.conn).unwrap(), 10);
+        assert_eq!(user_version(&store.conn).unwrap(), 11);
         let index: String = store
             .conn
             .query_row(

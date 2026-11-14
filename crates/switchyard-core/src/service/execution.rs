@@ -207,6 +207,10 @@ impl Host {
                 detail: "unresolved generic S1 operations; this request was not attempted".into(),
             });
         }
+        if mission.phase == Phase::Planning {
+            self.runtime
+                .admit_planning_tool(crate::execution::ToolEffect::Write)?;
+        }
         if mission.phase != Phase::Implementing {
             return Err(Error::guard(
                 "new execution requires an implementing mission",

@@ -767,14 +767,20 @@ pub struct AttemptRecord {
     pub base_sha: String,
     pub session_id: String,
     pub runtime_adapter: String,
+    pub runtime_config_json: String,
     pub policy_json: String,
     pub policy_hash: String,
     pub verifier_json: String,
+    pub environment_json: String,
     pub repair_count: u32,
     pub max_repairs: u32,
     pub plan_revision_count: u32,
     pub max_plan_revisions: u32,
     pub successor_of: Option<String>,
+    /// Canonical frozen inputs. Absent until `draft → planning`.
+    pub frozen_inputs_json: Option<String>,
+    /// Host generation that held the exclusive lock when planning started.
+    pub owner_generation: Option<u64>,
 }
 
 #[derive(Clone, Debug)]

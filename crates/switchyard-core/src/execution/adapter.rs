@@ -86,10 +86,9 @@ impl GuidanceProfile {
 /// the inert profile those variants already use.
 ///
 /// `certifies_mission_facts` is an authority gate only. It does not check
-/// plan shape, digest, or freeze. Those stay in Host admission. S4-A (#172)
-/// should read this flag from [`RuntimeAdapter::validate_admission`] instead
-/// of adding a runtime-identity check. Plan approval itself stays a Host
-/// operation.
+/// plan shape, digest, or freeze. Those stay in Host admission. Planning
+/// tool admission reads [`PlanningToolProfile`], not this flag and not the
+/// adapter name. Plan approval itself stays a Host operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AuthorityProfile {
     pub(crate) certifies_mission_facts: bool,
@@ -112,6 +111,31 @@ pub(crate) enum CommandCheck {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct ExecutionProfile {
     pub(crate) simulated: bool,
+}
+
+/// Tools admitted while the mission is planning.
+///
+/// `admits_writes` is false on every sealed adapter. This struct has no
+/// `Default`, so a new variant cannot inherit a write. The host calls
+/// [`RuntimeAdapter::admit_planning_tool`] and does not branch on the variant,
+/// the adapter name, or [`AuthorityProfile`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlanningToolProfile {
+    pub(crate) admits_writes: bool,
+}
+
+/// Effect class a planning tool would apply. Reads are admitted. Writes are
+/// refused by every current [`PlanningToolProfile`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolEffect {
+    /// Admitted by the planning profile. A planning read is not dispatched in
+    /// this slice; the Linux feature constructs this variant for that check.
+    #[cfg_attr(
+        not(all(feature = "linux-execution", target_os = "linux")),
+        allow(dead_code)
+    )]
+    Read,
+    Write,
 }
 
 impl RuntimeAdapter {
@@ -276,6 +300,37 @@ impl RuntimeAdapter {
         }
     }
 
+    pub(crate) fn planning_tools(&self) -> PlanningToolProfile {
+        match self {
+            Self::Fake(_) => PlanningToolProfile {
+                admits_writes: false,
+            },
+            #[cfg(feature = "pi-contract")]
+            Self::Pi(_) => PlanningToolProfile {
+                admits_writes: false,
+            },
+            #[cfg(all(
+                feature = "pi-contract",
+                feature = "linux-execution",
+                target_os = "linux"
+            ))]
+            Self::Confined(_) => PlanningToolProfile {
+                admits_writes: false,
+            },
+        }
+    }
+
+    /// Planning admission for one tool effect. Writes are refused when the
+    /// declared profile does not admit them. This does not read
+    /// `certifies_mission_facts`.
+    pub(crate) fn admit_planning_tool(&self, effect: ToolEffect) -> Result<()> {
+        match effect {
+            ToolEffect::Read => Ok(()),
+            ToolEffect::Write if self.planning_tools().admits_writes => Ok(()),
+            ToolEffect::Write => Err(crate::Error::guard("planning tools are read-only")),
+        }
+    }
+
     pub(crate) fn name(&self) -> &'static str {
         match self {
             Self::Fake(_) => Self::FAKE_ADAPTER_NAME,
@@ -345,7 +400,7 @@ impl RuntimeAdapter {
                 | CommandBody::ExplicitRecovery { .. }
         ) {
             return Err(crate::Error::guard(
-                "Pi probe has no mission-fact or execution-quiescence authority",
+                "adapter has no mission-fact or execution-quiescence authority",
             ));
         }
         Ok(())
@@ -662,6 +717,19 @@ mod tests {
             RuntimeAdapter::guidance_for_recorded_name(adapter.name()),
             "{}",
             adapter.name()
+        );
+        assert!(
+            !adapter.planning_tools().admits_writes,
+            "planning tools are read-only: {}",
+            adapter.name()
+        );
+        adapter.admit_planning_tool(ToolEffect::Read).unwrap();
+        let refused = adapter
+            .admit_planning_tool(ToolEffect::Write)
+            .expect_err("planning refuses writes");
+        assert!(
+            refused.to_string().contains("planning tools are read-only"),
+            "{refused}"
         );
     }
 
