@@ -683,6 +683,131 @@ fn tampered_plan_body_routes_to_plan_digest_mismatch_and_cancel_still_works() {
     );
 }
 
+fn awaiting_plan(host: &mut crate::Host, mission: &str) -> crate::MissionSnapshot {
+    admit(host, mission, CommandBody::StartPlanning);
+    deliver(host, mission);
+    let note = plan_note("plan");
+    notify(host, mission, note);
+    host.snapshot(mission).unwrap()
+}
+
+#[test]
+fn missing_plan_body_with_a_stored_digest_is_plan_digest_mismatch() {
+    let world = open_world();
+    let mut host = crate::Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    let stored = awaiting_plan(&mut host, &created.mission_id);
+    rusqlite::Connection::open(&world.db)
+        .unwrap()
+        .execute(
+            "UPDATE attempts SET plan_body = NULL WHERE id = ?1",
+            [&stored.attempt_id],
+        )
+        .unwrap();
+    let refused = approve(
+        &mut host,
+        &created.mission_id,
+        stored.plan_digest.as_deref().unwrap(),
+        "operator",
+    )
+    .unwrap_err();
+    assert_eq!(refused.category(), "guard_failed");
+    let attention = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(attention.phase, Phase::NeedsAttention);
+    assert_eq!(
+        attention.attention_reason.as_deref(),
+        Some("plan_digest_mismatch")
+    );
+    assert!(attention.plan_body.is_none());
+    assert_eq!(attention.plan_digest, stored.plan_digest);
+}
+
+#[test]
+fn reject_from_awaiting_plan_approval_is_admitted_on_a_tampered_plan_body() {
+    let world = open_world();
+    let mut host = crate::Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    let stored = awaiting_plan(&mut host, &created.mission_id);
+    assert!(crate::freeze::drift_exit(
+        Phase::AwaitingPlanApproval,
+        crate::CommandKind::Reject
+    ));
+    rusqlite::Connection::open(&world.db)
+        .unwrap()
+        .execute(
+            "UPDATE attempts SET plan_body = 'tampered plan' WHERE id = ?1",
+            [&stored.attempt_id],
+        )
+        .unwrap();
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::Reject {
+            rationale: "the plan body no longer matches".into(),
+        },
+    );
+    let rejected = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(rejected.phase, Phase::Rejected);
+    let decision = host
+        .decisions(&created.mission_id)
+        .unwrap()
+        .into_iter()
+        .find(|decision| decision.action == "reject")
+        .unwrap();
+    assert_eq!(decision.actor, "operator");
+    assert_eq!(decision.digest.as_deref(), stored.plan_digest.as_deref());
+}
+
+#[test]
+fn reject_after_plan_digest_mismatch_is_refused_through_drift_exit() {
+    let world = open_world();
+    let mut host = crate::Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    let stored = awaiting_plan(&mut host, &created.mission_id);
+    rusqlite::Connection::open(&world.db)
+        .unwrap()
+        .execute(
+            "UPDATE attempts SET plan_body = 'tampered plan' WHERE id = ?1",
+            [&stored.attempt_id],
+        )
+        .unwrap();
+    approve(
+        &mut host,
+        &created.mission_id,
+        stored.plan_digest.as_deref().unwrap(),
+        "operator",
+    )
+    .unwrap_err();
+    let attention = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(attention.phase, Phase::NeedsAttention);
+    assert!(!crate::freeze::drift_exit(
+        Phase::NeedsAttention,
+        crate::CommandKind::Reject
+    ));
+    let refused = admit_expect(
+        &mut host,
+        &created.mission_id,
+        CommandBody::Reject {
+            rationale: "too late".into(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(refused.category(), "guard_failed");
+    assert!(
+        refused.to_string().contains("does not match the plan body"),
+        "{refused}"
+    );
+    let still = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(still.phase, Phase::NeedsAttention);
+    assert_eq!(still.revision, attention.revision);
+    assert!(
+        still
+            .commands
+            .iter()
+            .all(|command| command.kind != "reject")
+    );
+}
+
 #[test]
 fn reject_outside_plan_approval_records_no_plan_digest() {
     let world = open_world();
