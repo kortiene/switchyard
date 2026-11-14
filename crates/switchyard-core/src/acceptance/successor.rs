@@ -187,36 +187,55 @@ fn active_mission_exists_blocks_a_successor() {
 }
 
 #[test]
-fn source_changed_during_create_keeps_the_written_successor() {
+fn source_changed_during_create_writes_nothing() {
     let world = open_world();
     let mut host = Host::open(&world.db).unwrap();
     let created = create(&mut host, &world.repo, 2);
     cancel_to_terminal(&mut host, &created.mission_id);
     let revision = host.snapshot(&created.mission_id).unwrap().revision;
+    let decisions_before: i64 = rusqlite::Connection::open(&world.db)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM decisions", [], |row| row.get(0))
+        .unwrap();
     host.tamper_source_on_next_successor();
     let changed = host
         .create_successor(&created.mission_id, "operator")
         .unwrap_err();
     assert_eq!(changed.category(), "source_changed_during_create");
-    assert!(changed.to_string().contains("inspect"), "{changed}");
+    assert!(
+        changed.to_string().contains("nothing was written"),
+        "{changed}"
+    );
+    assert!(changed.to_string().contains("retry"), "{changed}");
     let source = host.snapshot(&created.mission_id).unwrap();
     assert_eq!(source.phase, Phase::Cancelled);
     assert_eq!(source.revision, revision + 1);
-    let written = successor_mission(&world.db, &created.attempt_id).expect("written successor");
-    let successor = host.snapshot(&written).unwrap();
-    assert_eq!(successor.phase, Phase::Draft);
-    assert_eq!(
-        successor.successor_of_mission_id.as_deref(),
-        Some(created.mission_id.as_str())
-    );
-    let retry = host
+    assert!(successor_mission(&world.db, &created.attempt_id).is_none());
+    let conn = rusqlite::Connection::open(&world.db).unwrap();
+    let missions: i64 = conn
+        .query_row("SELECT COUNT(*) FROM missions", [], |row| row.get(0))
+        .unwrap();
+    let attempts: i64 = conn
+        .query_row("SELECT COUNT(*) FROM attempts", [], |row| row.get(0))
+        .unwrap();
+    let decisions: i64 = conn
+        .query_row("SELECT COUNT(*) FROM decisions", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(missions, 1);
+    assert_eq!(attempts, 1);
+    assert_eq!(decisions, decisions_before);
+    let successor = host
         .create_successor(&created.mission_id, "operator")
-        .unwrap_err();
-    assert_eq!(retry.category(), "successor_exists");
-    assert!(retry.to_string().contains(&written), "{retry}");
+        .unwrap();
+    assert_eq!(successor.phase, Phase::Draft);
+    assert_ne!(successor.mission_id, created.mission_id);
     assert_eq!(
         host.snapshot(&created.mission_id).unwrap().phase,
         Phase::Cancelled
+    );
+    assert_eq!(
+        successor_mission(&world.db, &created.attempt_id).as_deref(),
+        Some(successor.mission_id.as_str())
     );
 }
 
@@ -412,7 +431,7 @@ fn overrides_land_in_the_fresh_freeze_and_the_create_decision() {
         )
         .unwrap();
     let source_revision = host.snapshot(&created.mission_id).unwrap().revision;
-    let verifier = r#"{"id":"switchyard.verifier.successor","frozen":true,"executes":false}"#;
+    let verifier = r#"{"id":"switchyard.verifier.v1","frozen":true,"executes":false}"#;
     let successor = host
         .create_successor_with(
             &created.mission_id,
@@ -448,7 +467,7 @@ fn overrides_land_in_the_fresh_freeze_and_the_create_decision() {
     assert!(!runtime.contains("stale"), "{runtime}");
     assert_eq!(
         stored_verifier,
-        r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.successor"}"#
+        r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}"#
     );
     let decision = create_decision(&host, &successor.mission_id);
     assert_eq!(decision.actor, "sam");
@@ -473,7 +492,7 @@ fn overrides_land_in_the_fresh_freeze_and_the_create_decision() {
     assert_eq!(document["baseSha"], head);
     assert_eq!(document["executionLimits"]["maxRepairs"], 9);
     assert_eq!(document["executionLimits"]["maxPlanRevisions"], 11);
-    assert_eq!(document["verifier"]["id"], "switchyard.verifier.successor");
+    assert_eq!(document["verifier"]["id"], "switchyard.verifier.v1");
     assert_eq!(document["runtimeConfig"]["adapter"], "fake");
     assert!(document["runtimeConfig"].get("stale").is_none());
     assert_eq!(document["issueSnapshot"]["number"], 95);
@@ -572,6 +591,101 @@ fn drift_then_cancel_then_successor() {
         host.snapshot(&successor.mission_id).unwrap().phase,
         Phase::AwaitingPlanApproval
     );
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().phase,
+        Phase::Cancelled
+    );
+}
+
+#[test]
+fn override_refusals_write_nothing() {
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    cancel_to_terminal(&mut host, &created.mission_id);
+    let decisions_before: i64 = rusqlite::Connection::open(&world.db)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM decisions", [], |row| row.get(0))
+        .unwrap();
+    let cases = [
+        (
+            SuccessorChanges {
+                objective: Some(String::new()),
+                ..SuccessorChanges::default()
+            },
+            "guard_failed",
+            "objective",
+        ),
+        (
+            SuccessorChanges {
+                objective: Some("   ".into()),
+                ..SuccessorChanges::default()
+            },
+            "guard_failed",
+            "objective",
+        ),
+        (
+            SuccessorChanges {
+                acceptance: Some(String::new()),
+                ..SuccessorChanges::default()
+            },
+            "guard_failed",
+            "acceptance",
+        ),
+        (
+            SuccessorChanges {
+                verifier_json: Some("[]".into()),
+                ..SuccessorChanges::default()
+            },
+            "guard_failed",
+            "JSON object",
+        ),
+        (
+            SuccessorChanges {
+                verifier_json: Some("not-json".into()),
+                ..SuccessorChanges::default()
+            },
+            "guard_failed",
+            "JSON",
+        ),
+        (
+            SuccessorChanges {
+                verifier_json: Some(
+                    r#"{"executes":true,"frozen":true,"id":"switchyard.verifier.v1"}"#.into(),
+                ),
+                ..SuccessorChanges::default()
+            },
+            "verifier_not_supported",
+            "switchyard.verifier.v1",
+        ),
+        (
+            SuccessorChanges {
+                verifier_json: Some(
+                    r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.other"}"#.into(),
+                ),
+                ..SuccessorChanges::default()
+            },
+            "verifier_not_supported",
+            "switchyard.verifier.v1",
+        ),
+    ];
+    for (changes, category, message) in cases {
+        let error = host
+            .create_successor_with(&created.mission_id, "operator", &changes)
+            .unwrap_err();
+        assert_eq!(error.category(), category, "{error}");
+        assert!(error.to_string().contains(message), "{error}");
+        assert!(successor_mission(&world.db, &created.attempt_id).is_none());
+        let conn = rusqlite::Connection::open(&world.db).unwrap();
+        let missions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM missions", [], |row| row.get(0))
+            .unwrap();
+        let decisions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM decisions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(missions, 1, "{error}");
+        assert_eq!(decisions, decisions_before, "{error}");
+    }
     assert_eq!(
         host.snapshot(&created.mission_id).unwrap().phase,
         Phase::Cancelled

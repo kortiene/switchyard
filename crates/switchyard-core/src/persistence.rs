@@ -29,6 +29,13 @@ mod workspace;
 const SCHEMA_VERSION: i64 = 12;
 
 const VERIFIER_JSON: &str = r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}"#;
+
+/// Verifier documents this host can freeze, as RFC 8785 JSON.
+///
+/// A new verifier is another entry here. Callers match the canonical text.
+pub(crate) fn supported_verifier_documents() -> &'static [&'static str] {
+    &[VERIFIER_JSON]
+}
 const ENVIRONMENT_JSON: &str = r#"{"confinement":"deferred_to_s3","host":"single"}"#;
 
 pub struct Store {
@@ -96,6 +103,15 @@ pub struct CreatedMission {
     pub verifier_json: Option<String>,
     /// `None` stores the ordinary "mission created" rationale.
     pub decision_rationale: Option<String>,
+    /// Set for a successor. Compared inside the insert transaction before any write.
+    pub expected_source: Option<ExpectedSource>,
+}
+
+/// Source row a successor must still match when its insert transaction starts.
+pub struct ExpectedSource {
+    pub mission_id: String,
+    pub revision: u64,
+    pub phase: String,
 }
 
 impl Store {
@@ -513,6 +529,21 @@ impl Store {
 
     pub fn create_mission(&mut self, created: CreatedMission) -> Result<()> {
         let tx = self.immediate()?;
+        // `attempts.successor_of` has no UNIQUE index. Refusing a second row
+        // here keeps the chain linear; a unique index would be a migration.
+        if let Some(source_attempt) = &created.successor_of_attempt_id {
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT mission_id FROM attempts WHERE successor_of = ?1",
+                    [source_attempt],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(Error::storage)?;
+            if let Some(mission_id) = existing {
+                return Err(Error::SuccessorExists { mission_id });
+            }
+        }
         let active: i64 = tx
             .query_row(
                 "SELECT COUNT(*) FROM missions WHERE phase NOT IN ('published', 'rejected', 'cancelled')",
@@ -522,6 +553,22 @@ impl Store {
             .map_err(Error::storage)?;
         if active > 0 {
             return Err(Error::ActiveMissionExists);
+        }
+        if let Some(expected) = &created.expected_source {
+            let current: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT revision, phase FROM missions WHERE id = ?1",
+                    [&expected.mission_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(Error::storage)?;
+            let unchanged = current.is_some_and(|(revision, phase)| {
+                u64::try_from(revision).ok() == Some(expected.revision) && phase == expected.phase
+            });
+            if !unchanged {
+                return Err(Error::SourceChangedDuringCreate);
+            }
         }
         let now = now_ms();
         let policy_value = json!({
@@ -1194,7 +1241,9 @@ impl Store {
     ///
     /// This lookup is part of the default build. `mission successor` refuses a
     /// second successor and names this id. The Pi session release uses the same
-    /// row to drop a superseded child.
+    /// row to drop a superseded child. `attempts.successor_of` has no UNIQUE
+    /// index; the successor guard keeps the chain to one row. A unique index
+    /// would be a migration.
     pub fn successor_mission_id(&self, attempt_id: &str) -> Result<Option<String>> {
         self.conn
             .query_row(
@@ -2435,6 +2484,7 @@ mod tests {
             successor_of_attempt_id: None,
             verifier_json: None,
             decision_rationale: None,
+            expected_source: None,
         }
     }
 }

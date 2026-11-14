@@ -483,6 +483,7 @@ fn confined_pi_changed_runtime_root_on_existing_ledger_is_refused() {
             successor_of_attempt_id: None,
             verifier_json: None,
             decision_rationale: None,
+            expected_source: None,
         })
         .unwrap();
     store.require_runtime_config(&saved).unwrap();

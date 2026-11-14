@@ -220,7 +220,9 @@ pub(crate) enum MissionCommand {
         #[arg(long)]
         objective: Option<String>,
         /// Replace acceptance criteria. Repeat the flag, or pass `@path` to
-        /// read one value from a file. Values are joined with newlines.
+        /// read one value from a file. A value that starts with `@` is read
+        /// as a file path. Empty values are refused. Values are joined with
+        /// newlines.
         #[arg(long)]
         acceptance: Vec<String>,
         /// Replace the source repair limit.
@@ -229,7 +231,8 @@ pub(crate) enum MissionCommand {
         /// Replace the source plan-revision limit.
         #[arg(long)]
         max_plan_revisions: Option<u32>,
-        /// Replace the source verifier definition. Must be a JSON object.
+        /// Replace the source verifier. A supported verifier document; today
+        /// only `switchyard.verifier.v1`.
         #[arg(long)]
         verifier: Option<String>,
     },

@@ -14,7 +14,7 @@ use crate::execution::{
     FakeRuntime, OwnerLock, RecoveryProfile, RuntimeAdapter, RuntimeBinding, RuntimeNotification,
     RuntimeReceipt, RuntimeRequest, inspect_repo, operation_id, parse_notification, try_acquire,
 };
-use crate::persistence::{CreatedMission, NewCommand, Store};
+use crate::persistence::{CreatedMission, ExpectedSource, NewCommand, Store};
 use crate::policy::{self, Facts};
 use crate::transitions::target_spec;
 use crate::verification::NewVerification;
@@ -487,6 +487,7 @@ impl Host {
             successor_of_attempt_id: None,
             verifier_json: None,
             decision_rationale: None,
+            expected_source: None,
         };
         let id = created.id.clone();
         self.store.create_mission(created)?;
@@ -525,8 +526,6 @@ impl Host {
             return Err(Error::SuccessorExists { mission_id });
         }
         let resolved = resolve_successor(&source, actor, changes)?;
-        let before_revision = source.revision;
-        let before_phase = source.phase;
         let repo = inspect_repo(Path::new(&source.repo.toplevel))?;
         let created = CreatedMission {
             runtime_config: canonicalize(&self.runtime.configuration())?,
@@ -546,17 +545,20 @@ impl Host {
             successor_of_attempt_id: Some(source.attempt.id.clone()),
             verifier_json: Some(resolved.verifier_json),
             decision_rationale: Some(resolved.decision_rationale),
+            expected_source: Some(ExpectedSource {
+                mission_id: source.id.clone(),
+                revision: source.revision,
+                phase: source.phase.as_str().to_string(),
+            }),
         };
-        let id = created.id.clone();
-        self.store.create_mission(created)?;
+        // Test seam only: change the source after the expected revision is
+        // captured and before the insert transaction reads it.
         #[cfg(test)]
         if tamper_source {
             self.store.bump_revision_for_test(source_mission_id)?;
         }
-        let unchanged = self.store.load_mission(source_mission_id)?;
-        if unchanged.revision != before_revision || unchanged.phase != before_phase {
-            return Err(Error::SourceChangedDuringCreate);
-        }
+        let id = created.id.clone();
+        self.store.create_mission(created)?;
         #[cfg(feature = "pi-contract")]
         self.release_finished_sessions()?;
         self.snapshot(&id)
@@ -2103,7 +2105,28 @@ fn require_override(value: &str, label: &str) -> Result<()> {
 
 fn canonical_verifier(raw: &str) -> Result<String> {
     let value = crate::freeze::parse_object(raw, "verifier definition")?;
-    canonicalize(&value)
+    let canonical = canonicalize(&value)?;
+    if crate::persistence::supported_verifier_documents()
+        .iter()
+        .any(|allowed| *allowed == canonical)
+    {
+        return Ok(canonical);
+    }
+    Err(Error::VerifierNotSupported {
+        supported: supported_verifier_ids(),
+    })
+}
+
+fn supported_verifier_ids() -> String {
+    crate::persistence::supported_verifier_documents()
+        .iter()
+        .filter_map(|document| {
+            serde_json::from_str::<Value>(document)
+                .ok()
+                .and_then(|value| value.get("id").and_then(Value::as_str).map(str::to_string))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn resolve_successor(

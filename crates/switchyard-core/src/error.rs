@@ -83,11 +83,14 @@ pub enum Error {
     #[error("a successor already exists ({mission_id}); continue with that mission")]
     SuccessorExists { mission_id: String },
 
-    /// The source revision or phase changed after the successor row was committed.
-    #[error(
-        "the source mission changed while the successor was created; inspect the source and any written successor before retrying"
-    )]
+    /// The source revision or phase changed before the successor insert.
+    /// The transaction rolls back, so nothing is written.
+    #[error("the source mission changed during successor creation; nothing was written; retry")]
     SourceChangedDuringCreate,
+
+    /// `--verifier` was not an exact canonical match for a document this host can run.
+    #[error("verifier is not supported by this host; supported: {supported}")]
+    VerifierNotSupported { supported: String },
 
     /// Pi refused to admit the command and the protocol marks that refusal as
     /// definite. Transport loss and `admission: uncertain` stay [`Self::GuardFailed`]
@@ -148,6 +151,7 @@ impl Error {
             Self::SuccessorSourceNotTerminal => "successor_source_not_terminal",
             Self::SuccessorExists { .. } => "successor_exists",
             Self::SourceChangedDuringCreate => "source_changed_during_create",
+            Self::VerifierNotSupported { .. } => "verifier_not_supported",
             Self::AdmissionRejected { .. } => "admission_rejected",
             Self::GuardFailed { .. } => "guard_failed",
             Self::UnknownNotification { .. } => "unknown_notification",

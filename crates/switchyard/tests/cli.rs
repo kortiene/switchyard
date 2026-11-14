@@ -1283,7 +1283,7 @@ fn successor_flags_copy_overrides_and_refuse_a_live_source() {
         "--max-plan-revisions",
         "7",
         "--verifier",
-        r#"{"id":"switchyard.verifier.successor","frozen":true,"executes":false}"#,
+        r#"{"id":"switchyard.verifier.v1","frozen":true,"executes":false}"#,
     ]);
     assert_eq!(code, 0, "{error}");
     let mission_json = &successor["mission"];
@@ -1297,10 +1297,7 @@ fn successor_flags_copy_overrides_and_refuse_a_live_source() {
     assert_eq!(mission_json["successorOfMissionId"], mission);
     assert_eq!(mission_json["runtimeAdapter"], "fake");
     assert_eq!(mission_json["baseSha"], head(&repo));
-    assert_eq!(
-        mission_json["verifier"]["id"],
-        "switchyard.verifier.successor"
-    );
+    assert_eq!(mission_json["verifier"]["id"], "switchyard.verifier.v1");
     let successor_id = mission_json["missionId"].as_str().unwrap();
     let attempt_id = mission_json["attemptId"].as_str().unwrap();
     let conn = rusqlite::Connection::open(&db).unwrap();
@@ -1341,7 +1338,7 @@ fn successor_flags_copy_overrides_and_refuse_a_live_source() {
         .unwrap();
     assert_eq!(
         verifier,
-        r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.successor"}"#
+        r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}"#
     );
     let (code, _, error) = run(&[
         "mission",
@@ -1360,4 +1357,126 @@ fn successor_flags_copy_overrides_and_refuse_a_live_source() {
             .contains(successor_id),
         "{error}"
     );
+}
+
+#[test]
+fn successor_rejects_empty_acceptance_parts_and_bad_verifier_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "172",
+        "--objective",
+        "original objective",
+        "--acceptance",
+        "original acceptance",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let (code, cancelled, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--kind",
+        "cancel",
+        "--expected-revision",
+        "1",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let revision = cancelled["mission"]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let (code, confirmed, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--kind",
+        "confirm_cancelled",
+        "--expected-revision",
+        &revision,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(confirmed["mission"]["phase"], "cancelled");
+
+    let refuse = |extra: &[&str], category: &str, message: &str| {
+        let mut args = vec![
+            "mission",
+            "successor",
+            "--db",
+            db.to_str().unwrap(),
+            "--mission",
+            mission,
+        ];
+        args.extend_from_slice(extra);
+        let (code, _, error) = run(&args);
+        assert_eq!(code, 2, "{error}");
+        assert_eq!(error["error"]["category"], category, "{error}");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(message),
+            "{error}"
+        );
+    };
+    refuse(
+        &["--objective", ""],
+        "guard_failed",
+        "objective is required",
+    );
+    refuse(
+        &["--acceptance", ""],
+        "guard_failed",
+        "acceptance criteria is required",
+    );
+    refuse(
+        &["--acceptance", "", "--acceptance", "still empty first"],
+        "guard_failed",
+        "acceptance criteria is required",
+    );
+    refuse(
+        &["--acceptance", "@"],
+        "guard_failed",
+        "acceptance file path is empty",
+    );
+    let missing = tmp.path().join("no-such-acceptance.txt");
+    let missing_arg = format!("@{}", missing.display());
+    refuse(
+        &["--acceptance", &missing_arg],
+        "guard_failed",
+        "could not be read",
+    );
+    refuse(
+        &["--verifier", "[]"],
+        "guard_failed",
+        "must be a JSON object",
+    );
+    refuse(
+        &[
+            "--verifier",
+            r#"{"executes":true,"frozen":true,"id":"switchyard.verifier.v1"}"#,
+        ],
+        "verifier_not_supported",
+        "switchyard.verifier.v1",
+    );
+    let missions: i64 = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM missions", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(missions, 1);
 }

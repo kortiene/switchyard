@@ -1851,6 +1851,7 @@ fn simulated_no_row_error_is_transient(error: &Error) -> bool {
         | Error::SuccessorSourceNotTerminal
         | Error::SuccessorExists { .. }
         | Error::SourceChangedDuringCreate
+        | Error::VerifierNotSupported { .. }
         | Error::AdmissionRejected { .. }
         | Error::GuardFailed { .. }
         | Error::UnknownNotification { .. }
@@ -1929,6 +1930,9 @@ fn execute_fake_operation_pins_is_transient_for_every_error_it_can_return() {
             mission_id: "m-existing".into(),
         },
         Error::SourceChangedDuringCreate,
+        Error::VerifierNotSupported {
+            supported: "switchyard.verifier.v1".into(),
+        },
         Error::AdmissionRejected {
             category: "busy".into(),
         },

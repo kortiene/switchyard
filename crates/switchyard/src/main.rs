@@ -622,12 +622,20 @@ fn acceptance_override(values: &[String]) -> switchyard_core::Result<Option<Stri
                 .strip_suffix("\r\n")
                 .or_else(|| text.strip_suffix('\n'))
                 .unwrap_or(&text);
-            parts.push(text.to_string());
+            push_acceptance(&mut parts, text)?;
         } else {
-            parts.push(value.clone());
+            push_acceptance(&mut parts, value)?;
         }
     }
     Ok(Some(parts.join("\n")))
+}
+
+fn push_acceptance(parts: &mut Vec<String>, text: &str) -> switchyard_core::Result<()> {
+    if text.trim().is_empty() {
+        return Err(Error::guard("acceptance criteria is required"));
+    }
+    parts.push(text.to_string());
+    Ok(())
 }
 
 fn command_body(kind: &str, payload: &Value) -> switchyard_core::Result<CommandBody> {
