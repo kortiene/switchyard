@@ -280,7 +280,10 @@ fn button_with_state(
         .key(key)
         .role("button")
         .label(&accessible_label)
-        .focusable(enabled)
+        .disabled(!enabled)
+        // Rune disables focus by default; retain it at mission boundaries.
+        // Unavailable controls have no press handler.
+        .focusable(true)
         .h(24.0)
         .px(space::S2)
         .center()
@@ -598,8 +601,8 @@ fn mission_panel(p: Paint, s: &Ui, card: Option<&MissionCard>) -> El {
                 "attempt",
                 "attempt",
                 &format!(
-                    "{} \u{00b7} rev {} \u{00b7} {}",
-                    card.attempt_id, card.revision, card.runtime_adapter
+                    "rev {} \u{00b7} {} \u{00b7} {}",
+                    card.revision, card.runtime_adapter, card.attempt_id
                 ),
                 p.dim,
             ),
@@ -607,7 +610,7 @@ fn mission_panel(p: Paint, s: &Ui, card: Option<&MissionCard>) -> El {
                 p,
                 "change",
                 "base \u{2192} head",
-                &format!("{} \u{2192} {}", card.base_sha, card.head_sha),
+                &format!("{:.12} \u{2192} {:.12}", card.base_sha, card.head_sha),
                 p.dim,
             ),
         ],
@@ -716,6 +719,9 @@ fn phase_grid(p: Paint, card: &MissionCard) -> El {
             .radius(4.0)
             .fill(dot_color)
             .motion(motion::SNAPPY);
+        if state == Dot::Unknown {
+            dot = dot.fill(Color::TRANSPARENT).border(p.hair, dot_color);
+        }
         if state == Dot::Current {
             dot = dot.border(p.hair * 2.0, p.t.text);
         }
@@ -723,6 +729,17 @@ fn phase_grid(p: Paint, card: &MissionCard) -> El {
         grid = grid.child(
             row()
                 .key(format!("cell-{i}"))
+                .label(format!(
+                    "{}: {}",
+                    phase.as_str(),
+                    match state {
+                        Dot::Unknown => "unknown (off the forward path)",
+                        Dot::Pending => "pending",
+                        Dot::Done => "complete",
+                        Dot::Current => "current",
+                        Dot::Blocked => "blocked",
+                    }
+                ))
                 .gap(4.0)
                 .center_y()
                 .min_w(150.0)
@@ -888,9 +905,6 @@ fn commands_panel(p: Paint, card: &MissionCard) -> El {
     for (i, command) in card.pending_commands.iter().take(4).enumerate() {
         rows.push(command_row(p, &format!("pending-{i}"), command, p.warn));
     }
-    for (i, command) in card.commands.iter().take(8).enumerate() {
-        rows.push(command_row(p, &format!("command-{i}"), command, p.t.text));
-    }
     let hidden_pending = card.pending_commands.len().saturating_sub(4);
     if hidden_pending > 0 {
         rows.push(kv(
@@ -900,6 +914,9 @@ fn commands_panel(p: Paint, card: &MissionCard) -> El {
             &format!("+{hidden_pending} pending not shown"),
             p.warn,
         ));
+    }
+    for (i, command) in card.commands.iter().take(8).enumerate() {
+        rows.push(command_row(p, &format!("command-{i}"), command, p.t.text));
     }
     let hidden_history = card.commands.len().saturating_sub(8);
     if hidden_history > 0 {
@@ -1315,6 +1332,20 @@ mod tests {
     }
 
     #[test]
+    fn real_sha_lengths_and_long_attempts_keep_the_important_details_first() {
+        let mut ledger = Ledger::fixture_planning();
+        ledger.cards[0].base_sha = "1234567890abcdef1234567890abcdef12345678".into();
+        ledger.cards[0].head_sha = "abcdef1234567890abcdef1234567890abcdef12".into();
+        ledger.cards[0].attempt_id = "attempt-with-a-very-long-identifier".into();
+        let rt = render_at(ledger, 760.0, 520.0);
+        assert_eq!(
+            text_of(&rt, "change-v").as_deref(),
+            Some("1234567890ab → abcdef123456")
+        );
+        assert!(text_of(&rt, "attempt-v").unwrap().starts_with("rev 4 · "));
+    }
+
+    #[test]
     fn kv_rows_keep_the_dim_key_and_colon_shape() {
         let rt = render(Ledger::fixture_planning());
         assert_eq!(text_of(&rt, "mission-phase-k").as_deref(), Some("phase"));
@@ -1336,6 +1367,10 @@ mod tests {
             .count();
         assert_eq!(names, HAPPY_PATH.len(), "every dot carries its phase name");
         assert_eq!(text_of(&rt, "dot-1-name").as_deref(), Some("planning"));
+        assert_eq!(
+            label_of(&rt, "cell-2").as_deref(),
+            Some("awaiting_plan_approval: pending")
+        );
     }
 
     #[test]
@@ -1367,6 +1402,11 @@ mod tests {
         let rt = render(Ledger::fixture_needs_attention());
         let summary = text_of(&rt, "pipeline-summary").unwrap_or_default();
         assert!(summary.contains("off the forward path"), "got: {summary}");
+        assert!(
+            label_of(&rt, "cell-1")
+                .unwrap()
+                .contains("unknown (off the forward path)")
+        );
     }
 
     #[test]
@@ -1470,6 +1510,51 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_navigation_keeps_focus_at_the_last_mission() {
+        let mut ledger = Ledger::fixture_planning();
+        ledger
+            .cards
+            .push(Ledger::fixture_needs_attention().cards.remove(0));
+        let mut rt = render(ledger);
+        for _ in 0..5 {
+            rt.key(rune::KeyEvent {
+                key: rune::Key::Tab,
+                mods: rune::Mods::default(),
+            });
+            rt.frame(1.0 / 60.0);
+            if rt
+                .elements()
+                .iter()
+                .any(|e| e.key.as_deref() == Some("next") && e.focused)
+            {
+                break;
+            }
+        }
+        assert!(
+            rt.elements()
+                .iter()
+                .any(|e| e.key.as_deref() == Some("next") && e.focused)
+        );
+        for expected in [1, 1] {
+            rt.key(rune::KeyEvent {
+                key: rune::Key::Text(" ".into()),
+                mods: rune::Mods::default(),
+            });
+            rt.key_up(rune::KeyEvent {
+                key: rune::Key::Text(" ".into()),
+                mods: rune::Mods::default(),
+            });
+            rt.frame(1.0 / 60.0);
+            assert_eq!(rt.state.selected, expected);
+            assert!(
+                rt.elements()
+                    .iter()
+                    .any(|e| e.key.as_deref() == Some("next") && e.focused)
+            );
+        }
+    }
+
+    #[test]
     fn capped_command_lists_disclose_the_number_hidden() {
         let mut card = MissionCard::blank();
         card.pending_commands = (0..5)
@@ -1489,6 +1574,11 @@ mod tests {
         let mut ledger = Ledger::fixture_planning();
         ledger.cards = vec![card];
         let rt = render(ledger);
+        let keys: Vec<_> = rt.elements().iter().filter_map(|e| e.key.clone()).collect();
+        assert!(
+            keys.iter().position(|k| *k == "pending-more").unwrap()
+                < keys.iter().position(|k| *k == "command-0").unwrap()
+        );
         assert_eq!(
             text_of(&rt, "pending-more-v").as_deref(),
             Some("+1 pending not shown")
