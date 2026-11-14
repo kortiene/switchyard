@@ -44,7 +44,7 @@ if [[ "${SWITCHYARD_UI_SNAP:-0}" == "1" ]]; then
   bin="$UI/target/release/switchyard-ui"
   out="$UI/artifacts"
   mkdir -p "$out"
-  for scene in unread planning awaiting-review needs-attention published empty; do
+  for scene in unread unreadable planning awaiting-review needs-attention published empty; do
     "$bin" --snap "$out/$scene.png" --scene "$scene" --theme dark --size 1180x1000 --scale 2
   done
   "$bin" --snap "$out/planning-light.png" --scene planning --theme light --size 1180x1000 --scale 2

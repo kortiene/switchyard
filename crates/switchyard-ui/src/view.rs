@@ -4,13 +4,14 @@
 //! (`.pi/extensions/adw-cockpit/index.ts`, `renderDashboard`) line for line,
 //! translated from terminal box-drawing to Rune primitives:
 //!
-//! - a heading line: bold accent name at the left, `updated HH:MM:SS UTC  ● live`
-//!   at the right;
+//! - a heading line: bold accent name at the left, with the last completed read
+//!   and a separate polling/read-state indicator at the right;
 //! - a top band of two equal panels side by side — `1. OVERVIEW` and
 //!   `2. MISSION` (the cockpit's `2. LATEST RUN`) — stacking when the window is
 //!   too narrow, exactly as the cockpit stacks below 84 columns;
-//! - `3. PIPELINE`: a segmented completion meter with `done/total` and a
-//!   current-phase tail, over a wrapping grid of named status dots
+//! - `3. ATTENTION`: operator needs before detail, followed by `4. PIPELINE`'s
+//!   segmented completion meter with `done/total` and a current-phase tail over
+//!   a wrapping grid of named status dots
 //!   (done / current / pending), the cockpit's `phaseGrid`;
 //! - numbered, titled, sharp-cornered boxes with a right-aligned tag in the
 //!   title row;
@@ -71,6 +72,7 @@ enum Dot {
     Current,
     Pending,
     Blocked,
+    Unknown,
 }
 
 pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
@@ -118,30 +120,41 @@ fn panels(p: Paint, s: &Ui) -> Vec<El> {
     let mut out = vec![band];
     match card {
         Some(card) => {
+            out.push(attention_panel(p, card));
             out.push(pipeline_panel(p, card));
             out.push(limits_panel(p, card));
             out.push(workspace_panel(p, card));
             out.push(commands_panel(p, card));
-            out.push(attention_panel(p, card));
             out.push(cli_echo_panel(p, s, card));
             out.push(last_line(p, card));
         }
-        None => out.push(last_line_empty(p)),
+        None => out.push(no_mission_last_line(p, &s.ledger)),
     }
     out
 }
 
 // ---------------------------------------------------------------- chrome
 
-/// `SWITCHYARD COCKPIT ............ updated HH:MM:SS UTC  ● live`
+/// `SWITCHYARD COCKPIT ............ updated HH:MM:SS UTC  ● polling`
+///
+/// Polling, an in-flight read, a failed read, and an initial unread state are
+/// different facts. The header names them instead of presenting auto-refresh
+/// as proof of liveness.
 fn heading(p: Paint, s: &Ui) -> El {
     let updated = s
         .ledger
         .read_at_utc
-        .clone()
-        .unwrap_or_else(|| "--:--:--".to_string());
-    let (live, live_color) = if s.auto_refresh {
-        ("live", p.ok)
+        .as_ref()
+        .map(|time| format!("updated {time} UTC"))
+        .unwrap_or_else(|| "no completed read".to_string());
+    let (read_state, state_color) = if s.fetch.is_pending() {
+        ("reading", p.info)
+    } else if s.ledger.error.is_some() {
+        ("read failed", p.bad)
+    } else if s.ledger.read_at_utc.is_none() {
+        ("not read", p.warn)
+    } else if s.auto_refresh {
+        ("polling", p.ok)
     } else {
         ("paused", p.dim)
     };
@@ -165,23 +178,23 @@ fn heading(p: Paint, s: &Ui) -> El {
                 .gap(space::S2)
                 .center_y()
                 .child(
-                    text(format!("updated {updated} UTC"))
+                    text(updated)
                         .key("updated")
                         .font(type_::MONO_CAPTION.mono())
                         .color(p.dim),
                 )
                 .child(
-                    el().key("live-dot")
+                    el().key("read-state-dot")
                         .size(7.0, 7.0)
                         .radius(3.5)
-                        .fill(live_color)
+                        .fill(state_color)
                         .motion(motion::SNAPPY),
                 )
                 .child(
-                    text(live)
-                        .key("live-label")
+                    text(read_state)
+                        .key("read-state-label")
                         .font(type_::MONO_CAPTION.mono())
-                        .color(p.dim),
+                        .color(state_color),
                 )
                 .child(badge(p, "readonly-badge", "READ-ONLY", p.ok)),
         )
@@ -189,7 +202,9 @@ fn heading(p: Paint, s: &Ui) -> El {
 
 fn toolbar(p: Paint, s: &Ui) -> El {
     let count = s.ledger.cards.len();
-    let position = if count == 0 {
+    let position = if s.ledger.read_at_utc.is_none() || s.ledger.error.is_some() {
+        "\u{2014}".to_string()
+    } else if count == 0 {
         "0/0".to_string()
     } else {
         format!("{}/{}", s.selected + 1, count)
@@ -226,33 +241,65 @@ fn toolbar(p: Paint, s: &Ui) -> El {
                 .font(type_::MONO_CAPTION.mono())
                 .color(p.dim),
         )
-        .child(button(p, "prev", "<", select_prev))
-        .child(button(p, "next", ">", select_next))
+        .child(button_with_state(
+            p,
+            "prev",
+            "\u{2039}",
+            "previous mission",
+            select_prev,
+            s.selected > 0,
+        ))
+        .child(button_with_state(
+            p,
+            "next",
+            "\u{203a}",
+            "next mission",
+            select_next,
+            s.selected + 1 < count,
+        ))
 }
 
 fn button(p: Paint, key: &str, label: &str, action: fn(&mut Ui)) -> El {
-    el().key(key)
+    button_with_state(p, key, label, label, action, true)
+}
+
+fn button_with_state(
+    p: Paint,
+    key: &str,
+    caption: &str,
+    accessible_label: &str,
+    action: fn(&mut Ui),
+    enabled: bool,
+) -> El {
+    let accessible_label = if enabled {
+        accessible_label.to_string()
+    } else {
+        format!("{accessible_label} (unavailable)")
+    };
+    let mut control = el()
+        .key(key)
         .role("button")
-        .label(label)
-        .focusable(true)
-        .h(20.0)
+        .label(&accessible_label)
+        .focusable(enabled)
+        .h(24.0)
         .px(space::S2)
         .center()
-        .border(p.hair, p.border)
-        .hover(p.t.hover)
-        .press(p.t.press)
-        .motion(motion::SNAPPY)
-        .on_press(action)
-        .child(
-            text(label)
-                .font(type_::MONO_CAPTION.mono())
-                .color(p.dim)
-                .a11y_hidden(),
-        )
+        .border(p.hair, if enabled { p.border } else { p.t.control_track })
+        .motion(motion::SNAPPY);
+    if enabled {
+        control = control.hover(p.t.hover).press(p.t.press).on_press(action);
+    }
+    control.child(
+        text(caption)
+            .font(type_::MONO_CAPTION.mono())
+            .color(if enabled { p.dim } else { p.t.control_off })
+            .a11y_hidden(),
+    )
 }
 
 fn badge(p: Paint, key: &str, label: &str, color: Color) -> El {
     el().key(key)
+        .label(label)
         .px(space::S1)
         .center()
         .border(p.hair, color)
@@ -267,6 +314,17 @@ fn badge(p: Paint, key: &str, label: &str, color: Color) -> El {
 /// The bottom status bar: the cockpit's footer, carrying where the truth came
 /// from and how fresh it is.
 fn status_bar(p: Paint, s: &Ui) -> El {
+    let missions = if s.ledger.read_at_utc.is_none() || s.ledger.error.is_some() {
+        "missions —".to_string()
+    } else {
+        let count = s.ledger.cards.len();
+        format!("{count} mission{}", if count == 1 { "" } else { "s" })
+    };
+    let read = if s.ledger.error.is_some() {
+        format!("read failed · #{}", s.refreshes)
+    } else {
+        format!("read #{}", s.refreshes)
+    };
     row()
         .key("status-bar")
         .w_full()
@@ -285,14 +343,14 @@ fn status_bar(p: Paint, s: &Ui) -> El {
                 .truncate(),
         )
         .child(
-            text(format!(
-                "{} missions · read #{}",
-                s.ledger.cards.len(),
-                s.refreshes
-            ))
-            .key("status-count")
-            .font(type_::MONO_CAPTION.mono())
-            .color(p.dim),
+            text(format!("{missions} · {read}"))
+                .key("status-count")
+                .font(type_::MONO_CAPTION.mono())
+                .color(if s.ledger.error.is_some() {
+                    p.bad
+                } else {
+                    p.dim
+                }),
         )
 }
 
@@ -363,6 +421,34 @@ fn kv(p: Paint, key: &str, k: &str, value: &str, color: Color) -> El {
         )
 }
 
+/// A `key : value` row for prose that must remain readable rather than being
+/// silently clipped. IDs, paths, and digests stay in the compact `kv` form.
+fn kv_wrapped(p: Paint, key: &str, k: &str, value: &str, color: Color) -> El {
+    row()
+        .key(key)
+        .w_full()
+        .center_y()
+        .child(
+            text(k.to_string())
+                .key(format!("{key}-k"))
+                .font(type_::MONO_CAPTION.mono())
+                .color(p.dim)
+                .w(KEY_W)
+                .shrink()
+                .truncate(),
+        )
+        .child(text(": ").font(type_::MONO_CAPTION.mono()).color(p.dim))
+        .child(
+            text(value.to_string())
+                .key(format!("{key}-v"))
+                .font(type_::MONO_CAPTION.mono())
+                .color(color)
+                .grow(1.0)
+                .min_w(0.0)
+                .wrap(),
+        )
+}
+
 fn kv_opt(p: Paint, key: &str, k: &str, value: Option<&str>, color: Color) -> El {
     match value {
         Some(v) if !v.is_empty() => kv(p, key, k, v, color),
@@ -390,26 +476,58 @@ fn bar(p: Paint, key: &str, done: usize, total: usize, color: Color) -> El {
 
 // ---------------------------------------------------------------- band
 
+/// Keep the aggregate count and the selected mission's panel on the same rule.
+fn has_operator_attention(card: &MissionCard) -> bool {
+    card.needs_attention() || card.quarantined > 0 || card.reconcile_only
+}
+
 fn overview_panel(p: Paint, s: &Ui) -> El {
-    let readable = s.ledger.error.is_none();
+    let data_known = s.ledger.read_at_utc.is_some() && s.ledger.error.is_none();
+    let attention = s
+        .ledger
+        .cards
+        .iter()
+        .filter(|card| has_operator_attention(card))
+        .count();
+    let mission_count = if data_known {
+        s.ledger.cards.len().to_string()
+    } else {
+        "\u{2014}".to_string()
+    };
+    let attention_label = if !data_known {
+        "\u{2014}".to_string()
+    } else if attention == 0 {
+        "clear".to_string()
+    } else {
+        attention.to_string()
+    };
     let mut rows = vec![
         kv(p, "ov-db", "database", &s.ledger.source, p.t.text),
+        kv(p, "ov-missions", "missions", &mission_count, p.t.text),
         kv(
             p,
-            "ov-missions",
-            "missions",
-            &s.ledger.cards.len().to_string(),
-            p.t.text,
+            "ov-attention",
+            "attention",
+            &attention_label,
+            if !data_known {
+                p.dim
+            } else if attention > 0 {
+                p.bad
+            } else {
+                p.ok
+            },
         ),
         kv(p, "ov-lock", "owner lock", "not taken (read-only)", p.ok),
     ];
     if let Some(error) = &s.ledger.error {
-        rows.push(kv(p, "ledger-error", "read error", error, p.bad));
+        rows.push(kv_wrapped(p, "ledger-error", "read error", error, p.bad));
     }
-    let ov_tag = if readable {
-        tag("ov-tag", "ledger \u{2713}", p.ok)
+    let ov_tag = if s.ledger.error.is_some() {
+        tag("ov-tag", "read failed", p.bad)
+    } else if s.ledger.read_at_utc.is_none() {
+        tag("ov-tag", "not read", p.warn)
     } else {
-        tag("ov-tag", "ledger !", p.bad)
+        tag("ov-tag", "ledger \u{2713}", p.ok)
     };
     panel(p, 1, "overview", "Overview", Some(ov_tag), rows)
 }
@@ -417,7 +535,16 @@ fn overview_panel(p: Paint, s: &Ui) -> El {
 fn mission_panel(p: Paint, s: &Ui, card: Option<&MissionCard>) -> El {
     let Some(card) = card else {
         let (label, detail, color) = match &s.ledger.error {
-            Some(error) => ("ledger unreadable", error.clone(), p.bad),
+            Some(_) => (
+                "ledger unreadable",
+                "Correct the database path or permissions, then refresh.".to_string(),
+                p.bad,
+            ),
+            None if s.ledger.read_at_utc.is_none() => (
+                "waiting for first read",
+                "Use refresh to inspect the ledger; the owner lock is not taken.".to_string(),
+                p.warn,
+            ),
             None => (
                 "no missions",
                 "switchyard mission create starts one".to_string(),
@@ -432,7 +559,7 @@ fn mission_panel(p: Paint, s: &Ui, card: Option<&MissionCard>) -> El {
             None,
             vec![
                 kv(p, "no-mission-label", "status", label, color),
-                kv(p, "no-mission-detail", "detail", &detail, p.dim),
+                kv_wrapped(p, "no-mission-detail", "detail", &detail, p.dim),
             ],
         );
     };
@@ -445,7 +572,8 @@ fn mission_panel(p: Paint, s: &Ui, card: Option<&MissionCard>) -> El {
         p.info
     };
     let pr_tag = match card.delivery_state.as_deref() {
-        Some(state) => tag("mission-tag", state, p.ok),
+        Some(state @ "published") => tag("mission-tag", state, p.ok),
+        Some(state) => tag("mission-tag", state, p.info),
         None => tag("mission-tag", "no pr", p.dim),
     };
 
@@ -464,18 +592,24 @@ fn mission_panel(p: Paint, s: &Ui, card: Option<&MissionCard>) -> El {
                 card.phase.as_str(),
                 phase_color,
             ),
+            kv_wrapped(p, "objective", "objective", &card.objective, p.t.text),
             kv(
                 p,
-                "revision",
-                "revision",
-                &card.revision.to_string(),
-                p.t.text,
+                "attempt",
+                "attempt",
+                &format!(
+                    "{} \u{00b7} rev {} \u{00b7} {}",
+                    card.attempt_id, card.revision, card.runtime_adapter
+                ),
+                p.dim,
             ),
-            kv(p, "objective", "objective", &card.objective, p.t.text),
-            kv(p, "attempt", "attempt", &card.attempt_id, p.dim),
-            kv(p, "runtime", "runner", &card.runtime_adapter, p.dim),
-            kv(p, "base-sha", "base", &card.base_sha, p.dim),
-            kv(p, "head-sha", "head", &card.head_sha, p.dim),
+            kv(
+                p,
+                "change",
+                "base \u{2192} head",
+                &format!("{} \u{2192} {}", card.base_sha, card.head_sha),
+                p.dim,
+            ),
         ],
     )
 }
@@ -487,7 +621,13 @@ fn pipeline_panel(p: Paint, card: &MissionCard) -> El {
     let blocked = card.execution_blocked;
     let (done, total) = progress.unwrap_or((0, HAPPY_PATH.len()));
 
-    let meter_color = if blocked { p.bad } else { p.ok };
+    let meter_color = if blocked {
+        p.bad
+    } else if progress.is_none() {
+        p.dim
+    } else {
+        p.ok
+    };
     let mut meter_row = row()
         .key("pipeline-meter-row")
         .w_full()
@@ -510,14 +650,14 @@ fn pipeline_panel(p: Paint, card: &MissionCard) -> El {
                 .color(p.t.text),
         );
 
-    // The tail: `· ◉ CURRENT`, `· ✦ ALL CLEAR`, or the off-path admission.
+    // The tail: `· ◉ CURRENT`, `· ✓ COMPLETE`, or the off-path admission.
     let (tail, tail_color) = match progress {
         None => (
             format!("! {} \u{00b7} off the forward path", card.phase.as_str()),
             p.warn,
         ),
         Some(_) if blocked => (format!("! {} \u{00b7} blocked", card.phase.as_str()), p.bad),
-        Some((current, total)) if current + 1 >= total => ("\u{2726} ALL CLEAR".to_string(), p.ok),
+        Some((current, total)) if current + 1 >= total => ("\u{2713} COMPLETE".to_string(), p.ok),
         Some(_) => (
             format!("\u{25c9} {}", card.phase.as_str().to_uppercase()),
             p.warn,
@@ -535,7 +675,7 @@ fn pipeline_panel(p: Paint, card: &MissionCard) -> El {
 
     panel(
         p,
-        3,
+        4,
         "pipeline",
         "Pipeline",
         Some(tag("pipeline-tag", &format!("{done}/{total}"), p.dim)),
@@ -557,16 +697,16 @@ fn phase_grid(p: Paint, card: &MissionCard) -> El {
 
     for (i, phase) in HAPPY_PATH.iter().enumerate() {
         let state = match progress {
-            None => Dot::Blocked,
-            Some(_) if blocked => Dot::Blocked,
+            None => Dot::Unknown,
             Some((current, _)) if i < current => Dot::Done,
+            Some((current, _)) if blocked && i == current => Dot::Blocked,
             Some((current, _)) if i == current => Dot::Current,
             Some(_) => Dot::Pending,
         };
         let (dot_color, name_color) = match state {
             Dot::Done => (p.ok, p.t.text),
             Dot::Current => (p.warn, p.info),
-            Dot::Pending => (p.t.control_off, p.dim),
+            Dot::Pending | Dot::Unknown => (p.t.control_off, p.dim),
             Dot::Blocked => (p.bad, p.bad),
         };
 
@@ -622,7 +762,7 @@ fn limits_panel(p: Paint, card: &MissionCard) -> El {
 
     panel(
         p,
-        4,
+        5,
         "limits",
         "Limits & Digests",
         None,
@@ -688,9 +828,14 @@ fn workspace_panel(p: Paint, card: &MissionCard) -> El {
         Some(_) => p.warn,
         None => p.dim,
     };
+    let publication_color = match card.delivery_state.as_deref() {
+        Some("published") => p.ok,
+        Some(_) => p.info,
+        None => p.dim,
+    };
     panel(
         p,
-        5,
+        6,
         "workspace",
         "Workspace & Delivery",
         None,
@@ -714,7 +859,7 @@ fn workspace_panel(p: Paint, card: &MissionCard) -> El {
                 "delivery-state",
                 "publication",
                 card.delivery_state.as_deref(),
-                p.ok,
+                publication_color,
             ),
             kv_opt(
                 p,
@@ -746,6 +891,26 @@ fn commands_panel(p: Paint, card: &MissionCard) -> El {
     for (i, command) in card.commands.iter().take(8).enumerate() {
         rows.push(command_row(p, &format!("command-{i}"), command, p.t.text));
     }
+    let hidden_pending = card.pending_commands.len().saturating_sub(4);
+    if hidden_pending > 0 {
+        rows.push(kv(
+            p,
+            "pending-more",
+            "more",
+            &format!("+{hidden_pending} pending not shown"),
+            p.warn,
+        ));
+    }
+    let hidden_history = card.commands.len().saturating_sub(8);
+    if hidden_history > 0 {
+        rows.push(kv(
+            p,
+            "commands-more",
+            "history",
+            &format!("+{hidden_history} older not shown"),
+            p.dim,
+        ));
+    }
     if card.pending_commands.is_empty() && card.commands.is_empty() {
         rows.push(kv(
             p,
@@ -756,7 +921,7 @@ fn commands_panel(p: Paint, card: &MissionCard) -> El {
         ));
     }
 
-    panel(p, 6, "commands", "Commands", None, rows)
+    panel(p, 7, "commands", "Commands", None, rows)
 }
 
 fn command_row(p: Paint, key: &str, command: &crate::ledger::CommandRow, color: Color) -> El {
@@ -795,10 +960,10 @@ fn command_row(p: Paint, key: &str, command: &crate::ledger::CommandRow, color: 
 }
 
 fn attention_panel(p: Paint, card: &MissionCard) -> El {
-    if !card.needs_attention() && card.quarantined == 0 && !card.reconcile_only {
+    if !has_operator_attention(card) {
         return panel(
             p,
-            7,
+            3,
             "attention",
             "Attention",
             None,
@@ -814,10 +979,10 @@ fn attention_panel(p: Paint, card: &MissionCard) -> El {
 
     let mut rows = Vec::new();
     if let Some(reason) = &card.attention_reason {
-        rows.push(kv(p, "attention-reason", "reason", reason, p.bad));
+        rows.push(kv_wrapped(p, "attention-reason", "reason", reason, p.bad));
     }
     if card.execution_blocked {
-        rows.push(kv(
+        rows.push(kv_wrapped(
             p,
             "attention-blocked",
             "execution",
@@ -844,10 +1009,16 @@ fn attention_panel(p: Paint, card: &MissionCard) -> El {
         ));
     }
     if rows.is_empty() {
-        rows.push(kv(p, "attention-clear", "status", "clear", p.ok));
+        rows.push(kv(
+            p,
+            "attention-unspecified",
+            "status",
+            "attention required \u{00b7} no detail recorded",
+            p.bad,
+        ));
     }
 
-    panel(p, 7, "attention", "Attention", None, rows)
+    panel(p, 3, "attention", "Attention", None, rows)
 }
 
 /// Panel 8: the cockpit's "insert, not execute" move. Every invocation is
@@ -950,6 +1121,20 @@ fn last_line(p: Paint, card: &MissionCard) -> El {
 }
 
 fn last_line_empty(p: Paint) -> El {
+    last_line_message(p, "no commands recorded")
+}
+
+fn no_mission_last_line(p: Paint, ledger: &crate::ledger::Ledger) -> El {
+    if ledger.error.is_some() {
+        last_line_message(p, "read failed \u{00b7} mission data unavailable")
+    } else if ledger.read_at_utc.is_none() {
+        last_line_message(p, "waiting for first ledger read")
+    } else {
+        last_line_empty(p)
+    }
+}
+
+fn last_line_message(p: Paint, message: &str) -> El {
     row()
         .key("last-line")
         .w_full()
@@ -957,7 +1142,7 @@ fn last_line_empty(p: Paint) -> El {
         .center_y()
         .child(text("last  ").font(type_::MONO_CAPTION.mono()).color(p.dim))
         .child(
-            text("no commands recorded")
+            text(message.to_string())
                 .key("last-line-v")
                 .font(type_::MONO_CAPTION.mono())
                 .color(p.dim),
@@ -971,15 +1156,19 @@ mod tests {
     use super::*;
     use crate::ledger::Ledger;
 
-    fn render(ledger: Ledger) -> rune::Runtime<Ui> {
+    fn render_at(ledger: Ledger, width: f32, height: f32) -> rune::Runtime<Ui> {
         let state = Ui {
             ledger,
             auto_refresh: false,
             ..Ui::default()
         };
-        let mut rt = rune::Runtime::new(state, view, (1080.0, 780.0), rune::Env::new(true, 2.0));
+        let mut rt = rune::Runtime::new(state, view, (width, height), rune::Env::new(true, 2.0));
         rt.frame(0.0);
         rt
+    }
+
+    fn render(ledger: Ledger) -> rune::Runtime<Ui> {
+        render_at(ledger, 1080.0, 780.0)
     }
 
     /// The text an element shows, looked up by key.
@@ -1024,11 +1213,11 @@ mod tests {
         assert_eq!(text_of(&rt, "mission-title").as_deref(), Some("2. MISSION"));
         assert_eq!(
             text_of(&rt, "pipeline-title").as_deref(),
-            Some("3. PIPELINE")
+            Some("4. PIPELINE")
         );
         assert_eq!(
             text_of(&rt, "attention-title").as_deref(),
-            Some("7. ATTENTION")
+            Some("3. ATTENTION")
         );
     }
 
@@ -1059,7 +1248,7 @@ mod tests {
     }
 
     #[test]
-    fn the_heading_carries_the_updated_time_and_the_live_dot() {
+    fn the_heading_separates_read_time_from_polling_state() {
         let rt = render(Ledger::fixture_planning());
         let updated = text_of(&rt, "updated").unwrap_or_default();
         assert!(updated.starts_with("updated "), "got: {updated}");
@@ -1067,8 +1256,62 @@ mod tests {
             updated.ends_with(" UTC"),
             "the clock is labeled UTC, got: {updated}"
         );
-        assert!(has(&rt, "live-dot"));
-        assert!(has(&rt, "readonly-badge"));
+        assert!(has(&rt, "read-state-dot"));
+        assert_eq!(text_of(&rt, "read-state-label").as_deref(), Some("paused"));
+        assert_eq!(
+            label_of(&rt, "readonly-badge").as_deref(),
+            Some("READ-ONLY")
+        );
+    }
+
+    #[test]
+    fn the_initial_unread_state_does_not_claim_a_healthy_empty_ledger() {
+        let rt = render(Ledger::unread(std::path::Path::new("switchyard.db")));
+        assert_eq!(
+            text_of(&rt, "updated").as_deref(),
+            Some("no completed read")
+        );
+        assert_eq!(
+            text_of(&rt, "read-state-label").as_deref(),
+            Some("not read")
+        );
+        assert_eq!(text_of(&rt, "ov-tag").as_deref(), Some("not read"));
+        assert_eq!(
+            text_of(&rt, "mission-position").as_deref(),
+            Some("mission —")
+        );
+        assert_eq!(text_of(&rt, "ov-missions-v").as_deref(), Some("—"));
+        assert_eq!(text_of(&rt, "ov-attention-v").as_deref(), Some("—"));
+        assert_eq!(
+            text_of(&rt, "no-mission-label-v").as_deref(),
+            Some("waiting for first read")
+        );
+        assert_eq!(
+            text_of(&rt, "status-count").as_deref(),
+            Some("missions — · read #0")
+        );
+        assert_eq!(
+            text_of(&rt, "last-line-v").as_deref(),
+            Some("waiting for first ledger read")
+        );
+    }
+
+    #[test]
+    fn an_in_flight_read_is_visible_even_when_polling_is_paused() {
+        let mut ui = Ui {
+            source: std::path::PathBuf::from("/nonexistent/switchyard-ui-reading.db"),
+            fetch: rune::Latest::default().debounce(std::time::Duration::from_secs(3600)),
+            auto_refresh: false,
+            force_refresh: true,
+            ..Ui::default()
+        };
+        let mut tx = rune::Tx::default();
+        assert!(crate::poll(&mut ui, 50.0, &mut tx));
+        assert!(ui.fetch.is_pending());
+
+        let mut rt = rune::Runtime::new(ui, view, (1080.0, 780.0), rune::Env::new(true, 2.0));
+        rt.frame(0.0);
+        assert_eq!(text_of(&rt, "read-state-label").as_deref(), Some("reading"));
     }
 
     #[test]
@@ -1076,7 +1319,9 @@ mod tests {
         let rt = render(Ledger::fixture_planning());
         assert_eq!(text_of(&rt, "mission-phase-k").as_deref(), Some("phase"));
         assert_eq!(text_of(&rt, "mission-phase-v").as_deref(), Some("planning"));
-        assert_eq!(text_of(&rt, "revision-v").as_deref(), Some("4"));
+        let attempt = text_of(&rt, "attempt-v").unwrap_or_default();
+        assert!(attempt.contains("rev 4"), "got: {attempt}");
+        assert!(attempt.contains("att-01"), "got: {attempt}");
     }
 
     #[test]
@@ -1144,6 +1389,117 @@ mod tests {
     }
 
     #[test]
+    fn needs_attention_without_detail_never_reads_as_clear() {
+        let mut card = MissionCard::blank();
+        card.phase = switchyard_core::Phase::NeedsAttention;
+        let mut ledger = Ledger::fixture_planning();
+        ledger.cards = vec![card];
+        let rt = render(ledger);
+        assert_eq!(
+            text_of(&rt, "attention-unspecified-v").as_deref(),
+            Some("attention required · no detail recorded")
+        );
+        assert!(!has(&rt, "attention-clear"));
+    }
+
+    #[test]
+    fn quarantine_counts_as_attention_even_without_an_explicit_reason() {
+        let mut card = MissionCard::blank();
+        card.quarantined = 1;
+        let mut ledger = Ledger::fixture_planning();
+        ledger.cards = vec![card];
+        let rt = render(ledger);
+        assert_eq!(text_of(&rt, "ov-attention-v").as_deref(), Some("1"));
+        assert_eq!(
+            text_of(&rt, "attention-quarantined-v").as_deref(),
+            Some("1")
+        );
+        assert!(!has(&rt, "attention-clear"));
+    }
+
+    #[test]
+    fn attention_prose_wraps_at_the_minimum_window_width() {
+        let short = render_at(Ledger::fixture_needs_attention(), 760.0, 520.0);
+        let mut long_ledger = Ledger::fixture_needs_attention();
+        long_ledger.cards[0].attention_reason = Some(
+            "uncertain external effect; inspect the receipt before any recovery or retry "
+                .repeat(8),
+        );
+        let long = render_at(long_ledger, 760.0, 520.0);
+        let short_height = short
+            .presented("attention-reason-v")
+            .map(|(rect, _)| rect[3])
+            .unwrap_or_default();
+        let long_height = long
+            .presented("attention-reason-v")
+            .map(|(rect, _)| rect[3])
+            .unwrap_or_default();
+        assert!(
+            long_height > short_height,
+            "the reason wraps to additional lines: {long_height} vs {short_height}"
+        );
+    }
+
+    #[test]
+    fn overview_counts_attention_on_unselected_missions_and_navigation_has_boundaries() {
+        let mut ledger = Ledger::fixture_planning();
+        ledger
+            .cards
+            .push(Ledger::fixture_needs_attention().cards.remove(0));
+        let mut rt = render(ledger);
+        assert_eq!(text_of(&rt, "ov-missions-v").as_deref(), Some("2"));
+        assert_eq!(text_of(&rt, "ov-attention-v").as_deref(), Some("1"));
+        assert_eq!(
+            label_of(&rt, "prev").as_deref(),
+            Some("previous mission (unavailable)")
+        );
+        assert_eq!(label_of(&rt, "next").as_deref(), Some("next mission"));
+
+        let (x, y) = rt.find("next").expect("next is laid out");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        for _ in 0..3 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert_eq!(rt.state.selected, 1);
+        assert_eq!(text_of(&rt, "mission-id-v").as_deref(), Some("msn-2b8e44"));
+        assert_eq!(
+            label_of(&rt, "next").as_deref(),
+            Some("next mission (unavailable)")
+        );
+    }
+
+    #[test]
+    fn capped_command_lists_disclose_the_number_hidden() {
+        let mut card = MissionCard::blank();
+        card.pending_commands = (0..5)
+            .map(|i| crate::ledger::CommandRow {
+                kind: format!("pending_{i}"),
+                state: "pending".to_string(),
+                origin: "operator".to_string(),
+            })
+            .collect();
+        card.commands = (0..10)
+            .map(|i| crate::ledger::CommandRow {
+                kind: format!("committed_{i}"),
+                state: "committed".to_string(),
+                origin: "runtime".to_string(),
+            })
+            .collect();
+        let mut ledger = Ledger::fixture_planning();
+        ledger.cards = vec![card];
+        let rt = render(ledger);
+        assert_eq!(
+            text_of(&rt, "pending-more-v").as_deref(),
+            Some("+1 pending not shown")
+        );
+        assert_eq!(
+            text_of(&rt, "commands-more-v").as_deref(),
+            Some("+2 older not shown")
+        );
+    }
+
+    #[test]
     fn a_digest_that_drifted_from_the_approval_is_called_out() {
         let rt = render(Ledger::fixture_needs_attention());
         assert_eq!(
@@ -1181,7 +1537,7 @@ mod tests {
         let rt = render(Ledger::fixture_published());
         assert_eq!(text_of(&rt, "pipeline-count").as_deref(), Some("9/9"));
         let summary = text_of(&rt, "pipeline-summary").unwrap_or_default();
-        assert!(summary.contains("ALL CLEAR"), "got: {summary}");
+        assert!(summary.contains("COMPLETE"), "got: {summary}");
     }
 
     #[test]
@@ -1191,6 +1547,23 @@ mod tests {
         assert_eq!(
             text_of(&rt, "no-mission-label-v").as_deref(),
             Some("ledger unreadable")
+        );
+        assert_eq!(
+            text_of(&rt, "read-state-label").as_deref(),
+            Some("read failed")
+        );
+        assert_eq!(text_of(&rt, "ov-missions-v").as_deref(), Some("—"));
+        assert_eq!(
+            text_of(&rt, "mission-position").as_deref(),
+            Some("mission —")
+        );
+        assert_eq!(
+            text_of(&rt, "no-mission-detail-v").as_deref(),
+            Some("Correct the database path or permissions, then refresh.")
+        );
+        assert_eq!(
+            text_of(&rt, "status-count").as_deref(),
+            Some("missions — · read failed · #0")
         );
     }
 
@@ -1202,6 +1575,8 @@ mod tests {
             detail.contains("switchyard mission create"),
             "got: {detail}"
         );
+        assert_eq!(text_of(&rt, "ov-missions-v").as_deref(), Some("0"));
+        assert_eq!(text_of(&rt, "ov-attention-v").as_deref(), Some("clear"));
     }
 
     #[test]
@@ -1236,6 +1611,8 @@ mod tests {
             .filter_map(|e| e.text.clone())
             .collect();
         assert!(drawn.iter().any(|t| t == "MUTATES"), "mutations are badged");
+        assert_eq!(label_of(&rt, "cli-0-flag").as_deref(), Some("READ-ONLY"));
+        assert_eq!(label_of(&rt, "cli-1-flag").as_deref(), Some("MUTATES"));
     }
 
     #[test]
