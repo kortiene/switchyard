@@ -33,6 +33,7 @@ jobs:
       github.event.pull_request.draft == false &&
       (github.event.action != 'labeled' || github.event.label.name == 'ai-review')
     runs-on: ubuntu-24.04
+    # Serial review groups can time out on larger PRs; keep this trial bounded.
     timeout-minutes: 20
     continue-on-error: true
     env:
@@ -253,18 +254,40 @@ jobs:
                 "- Token cap (`OCR_MAX_TOKENS_BUDGET`): " + oneLine(process.env.OCR_MAX_TOKENS_BUDGET, 20),
                 "- Warnings: " + warnings.length,
               ];
-              if (summary.budget_exceeded) {
-                lines.push("", "**Token budget exhausted; review coverage is incomplete.** Zero token usage means OCR rejected the estimated group cost before making a model call.");
+              // v1.13.9 uses omitempty: an absent budget_exceeded means false.
+              // With a manifest, status is its terminal_state (complete/partial/failed).
+              if (summary.budget_exceeded === true) {
+                lines.push("", "**Token budget exhausted; findings may be incomplete.**");
               }
               if (process.env.OCR_REVIEW_OUTCOME !== "success") {
                 lines.push("", "**The review step failed. See the workflow log and JSON artifact for details.**");
+              }
+              const failedItems = report.manifest?.coverage?.failed;
+              if (Array.isArray(failedItems)) {
+                for (const item of failedItems.filter((item) => item && typeof item === "object").slice(0, 8)) {
+                  lines.push("", "Failed item: " + oneLine(item.path || "unknown", 200) + " — " + oneLine(item.classification || "unknown", 80) + ": " + oneLine(item.reason || "unreported", 300));
+                }
+              }
+              const requests = report.retry_report?.requests;
+              if (Array.isArray(requests)) {
+                const failedRequests = requests.filter((request) => request && request.outcome === "failed").slice(0, 8);
+                for (const request of failedRequests) {
+                  const attempts = Array.isArray(request.attempts) ? request.attempts : [];
+                  const attempt = attempts.filter((attempt) => attempt && attempt.outcome === "error").at(-1);
+                  if (attempt) {
+                    lines.push("", "Request failure: " + oneLine(attempt.error_class || "unknown", 80) + " during " + oneLine(attempt.failure_phase || "unknown", 80) + "; HTTP " + lineNo(attempt.status_code));
+                    if (attempt.status_code === 402) {
+                      lines.push("", "The provider returned HTTP 402 (Payment Required). Check the configured provider account's billing or quota before retrying; increasing the token budget will not resolve this response.");
+                    }
+                  }
+                }
               }
               for (const warning of warnings.slice(0, 8)) {
                 lines.push("", "Warning: " + oneLine(typeof warning === "string" ? warning : JSON.stringify(warning), 500));
               }
               if (report.message) lines.push("", oneLine(report.message, 500));
               if (comments.length === 0) {
-                lines.push("", report.status === "complete" && !summary.budget_exceeded ? "No findings." : "No findings were returned; this does not establish a clean review.");
+                lines.push("", process.env.OCR_REVIEW_OUTCOME === "success" && report.status === "complete" && !summary.budget_exceeded ? "No findings." : "No findings were returned; this does not establish a clean review.");
               } else {
                 lines.push("", "### Findings");
                 const shown = comments.slice(0, 12);
@@ -275,7 +298,12 @@ jobs:
                   lines.push("- " + (comments.length - shown.length) + " more finding(s) are in the `ocr-advisory-review` artifact.");
                 }
               }
-              lines.push("", "The diff was sent to the configured model provider. Full JSON is in the `ocr-advisory-review` artifact.");
+              if (typeof summary.total_tokens === "number" && summary.total_tokens > 0) {
+                lines.push("", "The configured model provider reported token usage for this review.");
+              } else {
+                lines.push("", "No model token usage was reported; this does not confirm a completed model review.");
+              }
+              lines.push("", "Full JSON is in the `ocr-advisory-review` artifact.");
               return lines.join("\n").slice(0, 65000);
             }
 
