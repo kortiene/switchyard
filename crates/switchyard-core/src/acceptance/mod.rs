@@ -11,4 +11,5 @@ mod publication;
 mod recovery_outbox;
 mod recovery_regressions;
 mod runtime_authority;
+mod successor;
 mod verification_approval;

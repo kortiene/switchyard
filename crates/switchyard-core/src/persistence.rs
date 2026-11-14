@@ -29,6 +29,13 @@ mod workspace;
 const SCHEMA_VERSION: i64 = 12;
 
 const VERIFIER_JSON: &str = r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}"#;
+
+/// Verifier documents this host can freeze, as RFC 8785 JSON.
+///
+/// A new verifier is another entry here. Callers match the canonical text.
+pub(crate) fn supported_verifier_documents() -> &'static [&'static str] {
+    &[VERIFIER_JSON]
+}
 const ENVIRONMENT_JSON: &str = r#"{"confinement":"deferred_to_s3","host":"single"}"#;
 
 pub struct Store {
@@ -72,6 +79,7 @@ pub(crate) struct StoredDecision {
     pub digest: Option<String>,
     pub command_id: Option<String>,
     pub actor: String,
+    pub rationale: String,
     pub invalidated: bool,
 }
 
@@ -91,6 +99,19 @@ pub struct CreatedMission {
     pub successor_of_mission_id: Option<String>,
     pub successor_of_attempt_id: Option<String>,
     pub content_digest: String,
+    /// `None` stores the built-in verifier definition.
+    pub verifier_json: Option<String>,
+    /// `None` stores the ordinary "mission created" rationale.
+    pub decision_rationale: Option<String>,
+    /// Set for a successor. Compared inside the insert transaction before any write.
+    pub expected_source: Option<ExpectedSource>,
+}
+
+/// Source row a successor must still match when its insert transaction starts.
+pub struct ExpectedSource {
+    pub mission_id: String,
+    pub revision: u64,
+    pub phase: String,
 }
 
 impl Store {
@@ -508,6 +529,21 @@ impl Store {
 
     pub fn create_mission(&mut self, created: CreatedMission) -> Result<()> {
         let tx = self.immediate()?;
+        // `attempts.successor_of` has no UNIQUE index. Refusing a second row
+        // here keeps the chain linear; a unique index would be a migration.
+        if let Some(source_attempt) = &created.successor_of_attempt_id {
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT mission_id FROM attempts WHERE successor_of = ?1",
+                    [source_attempt],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(Error::storage)?;
+            if let Some(mission_id) = existing {
+                return Err(Error::SuccessorExists { mission_id });
+            }
+        }
         let active: i64 = tx
             .query_row(
                 "SELECT COUNT(*) FROM missions WHERE phase NOT IN ('published', 'rejected', 'cancelled')",
@@ -518,6 +554,22 @@ impl Store {
         if active > 0 {
             return Err(Error::ActiveMissionExists);
         }
+        if let Some(expected) = &created.expected_source {
+            let current: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT revision, phase FROM missions WHERE id = ?1",
+                    [&expected.mission_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(Error::storage)?;
+            let unchanged = current.is_some_and(|(revision, phase)| {
+                u64::try_from(revision).ok() == Some(expected.revision) && phase == expected.phase
+            });
+            if !unchanged {
+                return Err(Error::SourceChangedDuringCreate);
+            }
+        }
         let now = now_ms();
         let policy_value = json!({
             "maxRepairs": created.max_repairs,
@@ -527,6 +579,11 @@ impl Store {
         });
         let policy_json = canonicalize(&policy_value)?;
         let policy_hash = payload_hash(&policy_value)?;
+        let verifier_json = created.verifier_json.as_deref().unwrap_or(VERIFIER_JSON);
+        let rationale = created
+            .decision_rationale
+            .as_deref()
+            .unwrap_or("mission created");
         let repo_json = serde_json::to_string(&json!({
             "toplevel": created.repo.toplevel,
             "headSha": created.repo.head_sha,
@@ -581,7 +638,7 @@ impl Store {
                 created.runtime_config,
                 policy_json,
                 policy_hash,
-                VERIFIER_JSON,
+                verifier_json,
                 ENVIRONMENT_JSON,
                 created.successor_of_attempt_id,
                 created.max_repairs,
@@ -597,7 +654,7 @@ impl Store {
                 attempt_id: &created.attempt_id,
                 actor: &created.actor,
                 action: "create",
-                rationale: "mission created",
+                rationale,
                 digest: Some(&created.content_digest),
                 command_id: None,
             },
@@ -650,7 +707,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT action, digest, command_id, actor, invalidated FROM decisions
+                "SELECT action, digest, command_id, actor, rationale, invalidated FROM decisions
                  WHERE mission_id = ?1 ORDER BY created_at, id",
             )
             .map_err(Error::storage)?;
@@ -661,7 +718,8 @@ impl Store {
                     digest: row.get(1)?,
                     command_id: row.get(2)?,
                     actor: row.get(3)?,
-                    invalidated: row.get::<_, i64>(4)? != 0,
+                    rationale: row.get(4)?,
+                    invalidated: row.get::<_, i64>(5)? != 0,
                 })
             })
             .map_err(Error::storage)?;
@@ -788,6 +846,21 @@ impl Store {
             .map_err(Error::storage)?;
         }
         tx.commit().map_err(Error::storage)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bump_revision_for_test(&mut self, mission_id: &str) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE missions SET revision = revision + 1, updated_at = ?1 WHERE id = ?2",
+                params![now_ms(), mission_id],
+            )
+            .map_err(Error::storage)?;
+        if changed != 1 {
+            return Err(Error::NotFound);
+        }
         Ok(())
     }
 
@@ -1164,17 +1237,22 @@ impl Store {
         Ok(())
     }
 
-    #[cfg(feature = "pi-contract")]
-    pub fn attempt_has_successor(&self, attempt_id: &str) -> Result<bool> {
-        let count: i64 = self
-            .conn
+    /// Mission id of the attempt that records `successor_of = attempt_id`.
+    ///
+    /// This lookup is part of the default build. `mission successor` refuses a
+    /// second successor and names this id. The Pi session release uses the same
+    /// row to drop a superseded child. `attempts.successor_of` has no UNIQUE
+    /// index; the successor guard keeps the chain to one row. A unique index
+    /// would be a migration.
+    pub fn successor_mission_id(&self, attempt_id: &str) -> Result<Option<String>> {
+        self.conn
             .query_row(
-                "SELECT COUNT(*) FROM attempts WHERE successor_of = ?1",
+                "SELECT mission_id FROM attempts WHERE successor_of = ?1",
                 [attempt_id],
                 |row| row.get(0),
             )
-            .map_err(Error::storage)?;
-        Ok(count > 0)
+            .optional()
+            .map_err(Error::storage)
     }
 
     pub fn observe_content(
@@ -2404,6 +2482,9 @@ mod tests {
             max_plan_revisions: 3,
             successor_of_mission_id: None,
             successor_of_attempt_id: None,
+            verifier_json: None,
+            decision_rationale: None,
+            expected_source: None,
         }
     }
 }

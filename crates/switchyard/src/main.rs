@@ -14,7 +14,7 @@ use cli::{Cli, Command, MissionCommand, RuntimeSelection};
 use serde_json::{Value, json};
 use switchyard_core::{
     AdmitRequest, CommandBody, CommandKind, CommandOrigin, CreateMission, EffectProof, Error, Host,
-    Phase,
+    Phase, SuccessorChanges,
 };
 
 fn main() -> ExitCode {
@@ -350,9 +350,28 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut ignored);
                 Ok(json!({"ok": true, "released": true, "generation": host.generation()}))
             }
-            MissionCommand::Successor { db, mission, actor } => {
+            MissionCommand::Successor {
+                db,
+                mission,
+                actor,
+                objective,
+                acceptance,
+                max_repairs,
+                max_plan_revisions,
+                verifier,
+            } => {
                 let mut host = open_host(&db, runtime)?;
-                let snapshot = host.create_successor(&mission, &actor)?;
+                let snapshot = host.create_successor_with(
+                    &mission,
+                    &actor,
+                    &SuccessorChanges {
+                        objective,
+                        acceptance: acceptance_override(&acceptance)?,
+                        max_repairs,
+                        max_plan_revisions,
+                        verifier_json: verifier,
+                    },
+                )?;
                 Ok(json!({"ok": true, "mission": snapshot.to_json()}))
             }
             MissionCommand::Content {
@@ -584,6 +603,39 @@ fn composed_scenario_settled(value: &Value) -> bool {
     let has =
         |method: &str| effects.is_some_and(|rows| rows.iter().any(|row| row["method"] == method));
     idle && has("write_file") && has("exec_start") && has("exec_status")
+}
+
+fn acceptance_override(values: &[String]) -> switchyard_core::Result<Option<String>> {
+    if values.is_empty() {
+        return Ok(None);
+    }
+    let mut parts = Vec::with_capacity(values.len());
+    for value in values {
+        if let Some(path) = value.strip_prefix('@') {
+            if path.is_empty() {
+                return Err(Error::guard("acceptance file path is empty"));
+            }
+            let text = std::fs::read_to_string(path).map_err(|error| {
+                Error::guard(format!("acceptance file {path} could not be read: {error}"))
+            })?;
+            let text = text
+                .strip_suffix("\r\n")
+                .or_else(|| text.strip_suffix('\n'))
+                .unwrap_or(&text);
+            push_acceptance(&mut parts, text)?;
+        } else {
+            push_acceptance(&mut parts, value)?;
+        }
+    }
+    Ok(Some(parts.join("\n")))
+}
+
+fn push_acceptance(parts: &mut Vec<String>, text: &str) -> switchyard_core::Result<()> {
+    if text.trim().is_empty() {
+        return Err(Error::guard("acceptance criteria is required"));
+    }
+    parts.push(text.to_string());
+    Ok(())
 }
 
 fn command_body(kind: &str, payload: &Value) -> switchyard_core::Result<CommandBody> {

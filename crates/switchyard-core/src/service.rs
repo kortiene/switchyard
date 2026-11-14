@@ -14,7 +14,7 @@ use crate::execution::{
     FakeRuntime, OwnerLock, RecoveryProfile, RuntimeAdapter, RuntimeBinding, RuntimeNotification,
     RuntimeReceipt, RuntimeRequest, inspect_repo, operation_id, parse_notification, try_acquire,
 };
-use crate::persistence::{CreatedMission, NewCommand, Store};
+use crate::persistence::{CreatedMission, ExpectedSource, NewCommand, Store};
 use crate::policy::{self, Facts};
 use crate::transitions::target_spec;
 use crate::verification::NewVerification;
@@ -53,6 +53,10 @@ pub struct Host {
     ledger_path: PathBuf,
     // Process-local, Host-observed proof; never reconstructed from operator claims.
     execution_evidence: execution::ExecutionEvidence,
+    /// Test seam: after a successor insert, bump the source revision so the
+    /// post-write check returns `source_changed_during_create`.
+    #[cfg(test)]
+    successor_source_tamper: bool,
     #[cfg(all(feature = "linux-execution", target_os = "linux"))]
     linux: Option<linux_execution::LinuxSession>,
 }
@@ -66,6 +70,20 @@ pub struct CreateMission {
     pub actor: String,
     pub max_repairs: u32,
     pub max_plan_revisions: u32,
+}
+
+/// Fields a successor copies from the source unless the caller supplies them.
+///
+/// Base SHA and runtime configuration are not fields here. The host re-reads
+/// both for every successor.
+#[derive(Clone, Debug, Default)]
+pub struct SuccessorChanges {
+    pub objective: Option<String>,
+    pub acceptance: Option<String>,
+    pub max_repairs: Option<u32>,
+    pub max_plan_revisions: Option<u32>,
+    /// JSON object. Stored in canonical form when supplied.
+    pub verifier_json: Option<String>,
 }
 
 pub struct AdmitRequest {
@@ -397,6 +415,8 @@ impl Host {
             lock,
             ledger_path: db_path.to_path_buf(),
             execution_evidence: Default::default(),
+            #[cfg(test)]
+            successor_source_tamper: false,
             #[cfg(all(feature = "linux-execution", target_os = "linux"))]
             linux: None,
         })
@@ -465,6 +485,9 @@ impl Host {
             max_plan_revisions: request.max_plan_revisions,
             successor_of_mission_id: None,
             successor_of_attempt_id: None,
+            verifier_json: None,
+            decision_rationale: None,
+            expected_source: None,
         };
         let id = created.id.clone();
         self.store.create_mission(created)?;
@@ -476,14 +499,33 @@ impl Host {
         source_mission_id: &str,
         actor: &str,
     ) -> Result<MissionSnapshot> {
+        self.create_successor_with(source_mission_id, actor, &SuccessorChanges::default())
+    }
+
+    /// New mission and attempt linked to a terminal source.
+    ///
+    /// Omitted fields in `changes` are copied from the source. Base SHA and
+    /// runtime configuration are always re-read from the host. The source row
+    /// is not reopened and its freeze is not rewritten.
+    pub fn create_successor_with(
+        &mut self,
+        source_mission_id: &str,
+        actor: &str,
+        changes: &SuccessorChanges,
+    ) -> Result<MissionSnapshot> {
+        #[cfg(test)]
+        let tamper_source = std::mem::replace(&mut self.successor_source_tamper, false);
         let source = self.store.load_mission(source_mission_id)?;
         if !source.phase.is_terminal() {
-            return Err(Error::guard(
-                "a successor attempt requires a terminal mission and a new identity",
-            ));
+            return Err(Error::SuccessorSourceNotTerminal);
         }
-        let before_revision = source.revision;
-        let before_phase = source.phase;
+        // Name an existing successor before the active-mission check. A retry
+        // after a crash must return `successor_exists` and this mission id,
+        // including while that successor is still open.
+        if let Some(mission_id) = self.store.successor_mission_id(&source.attempt.id)? {
+            return Err(Error::SuccessorExists { mission_id });
+        }
+        let resolved = resolve_successor(&source, actor, changes)?;
         let repo = inspect_repo(Path::new(&source.repo.toplevel))?;
         let created = CreatedMission {
             runtime_config: canonicalize(&self.runtime.configuration())?,
@@ -491,28 +533,40 @@ impl Host {
             task_id: crate::domain::new_id("t"),
             attempt_id: crate::domain::new_id("a"),
             session_id: crate::domain::new_id("s"),
-            objective: source.objective.clone(),
-            acceptance: source.acceptance_criteria.clone(),
+            objective: resolved.objective,
+            acceptance: resolved.acceptance,
             content_digest: repo.head_sha.clone(),
             repo,
             issue: source.source_issue.clone(),
             actor: actor.to_string(),
-            max_repairs: source.attempt.max_repairs,
-            max_plan_revisions: source.attempt.max_plan_revisions,
+            max_repairs: resolved.max_repairs,
+            max_plan_revisions: resolved.max_plan_revisions,
             successor_of_mission_id: Some(source.id.clone()),
             successor_of_attempt_id: Some(source.attempt.id.clone()),
+            verifier_json: Some(resolved.verifier_json),
+            decision_rationale: Some(resolved.decision_rationale),
+            expected_source: Some(ExpectedSource {
+                mission_id: source.id.clone(),
+                revision: source.revision,
+                phase: source.phase.as_str().to_string(),
+            }),
         };
+        // Test seam only: change the source after the expected revision is
+        // captured and before the insert transaction reads it.
+        #[cfg(test)]
+        if tamper_source {
+            self.store.bump_revision_for_test(source_mission_id)?;
+        }
         let id = created.id.clone();
         self.store.create_mission(created)?;
-        let unchanged = self.store.load_mission(source_mission_id)?;
-        if unchanged.revision != before_revision || unchanged.phase != before_phase {
-            return Err(Error::storage(
-                "successor creation modified the terminal mission",
-            ));
-        }
         #[cfg(feature = "pi-contract")]
         self.release_finished_sessions()?;
         self.snapshot(&id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tamper_source_on_next_successor(&mut self) {
+        self.successor_source_tamper = true;
     }
 
     pub fn admit(&mut self, request: AdmitRequest) -> Result<AdmitResult> {
@@ -1083,7 +1137,10 @@ impl Host {
         let mut finished = Vec::new();
         for binding in open {
             let mission = self.store.load_mission(&binding.mission_id)?;
-            let superseded = self.store.attempt_has_successor(&binding.attempt_id)?;
+            let superseded = self
+                .store
+                .successor_mission_id(&binding.attempt_id)?
+                .is_some();
             if mission.phase.is_terminal()
                 || superseded
                 || mission.attempt.id != binding.attempt_id
@@ -2027,6 +2084,109 @@ impl Host {
             generation: self.lock.generation,
         }
     }
+}
+
+struct ResolvedSuccessor {
+    objective: String,
+    acceptance: String,
+    max_repairs: u32,
+    max_plan_revisions: u32,
+    verifier_json: String,
+    decision_rationale: String,
+}
+
+fn require_override(value: &str, label: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        Err(Error::guard(format!("{label} is required")))
+    } else {
+        Ok(())
+    }
+}
+
+fn canonical_verifier(raw: &str) -> Result<String> {
+    let value = crate::freeze::parse_object(raw, "verifier definition")?;
+    let canonical = canonicalize(&value)?;
+    if crate::persistence::supported_verifier_documents()
+        .iter()
+        .any(|allowed| *allowed == canonical)
+    {
+        return Ok(canonical);
+    }
+    Err(Error::VerifierNotSupported {
+        supported: supported_verifier_ids(),
+    })
+}
+
+fn supported_verifier_ids() -> String {
+    crate::persistence::supported_verifier_documents()
+        .iter()
+        .filter_map(|document| {
+            serde_json::from_str::<Value>(document)
+                .ok()
+                .and_then(|value| value.get("id").and_then(Value::as_str).map(str::to_string))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn resolve_successor(
+    source: &MissionRecord,
+    actor: &str,
+    changes: &SuccessorChanges,
+) -> Result<ResolvedSuccessor> {
+    let objective = match &changes.objective {
+        Some(value) => {
+            require_override(value, "objective")?;
+            value.clone()
+        }
+        None => source.objective.clone(),
+    };
+    let acceptance = match &changes.acceptance {
+        Some(value) => {
+            require_override(value, "acceptance criteria")?;
+            value.clone()
+        }
+        None => source.acceptance_criteria.clone(),
+    };
+    let max_repairs = changes.max_repairs.unwrap_or(source.attempt.max_repairs);
+    let max_plan_revisions = changes
+        .max_plan_revisions
+        .unwrap_or(source.attempt.max_plan_revisions);
+    let verifier_json = match &changes.verifier_json {
+        Some(raw) => canonical_verifier(raw)?,
+        None => source.attempt.verifier_json.clone(),
+    };
+    // Alphabetical names. Canonical JSON does not sort array elements.
+    let mut overridden = Vec::new();
+    if changes.acceptance.is_some() {
+        overridden.push("acceptanceCriteria");
+    }
+    if changes.max_plan_revisions.is_some() {
+        overridden.push("maxPlanRevisions");
+    }
+    if changes.max_repairs.is_some() {
+        overridden.push("maxRepairs");
+    }
+    if changes.objective.is_some() {
+        overridden.push("objective");
+    }
+    if changes.verifier_json.is_some() {
+        overridden.push("verifier");
+    }
+    let decision_rationale = canonicalize(&json!({
+        "actor": actor,
+        "overridden": overridden,
+        "sourceAttemptId": source.attempt.id,
+        "sourceMissionId": source.id,
+    }))?;
+    Ok(ResolvedSuccessor {
+        objective,
+        acceptance,
+        max_repairs,
+        max_plan_revisions,
+        verifier_json,
+        decision_rationale,
+    })
 }
 
 fn snapshot_from(

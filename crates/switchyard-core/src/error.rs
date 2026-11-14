@@ -75,6 +75,23 @@ pub enum Error {
     #[error("plan revision limit reached ({count}/{max}); a higher cap needs a successor attempt")]
     PlanRevisionLimitReached { count: u32, max: u32 },
 
+    /// `mission successor` on a source that is not published, rejected, or cancelled.
+    #[error("successor requires a terminal source; cancel, then confirm_cancelled")]
+    SuccessorSourceNotTerminal,
+
+    /// This source attempt already has a successor. The id is the existing mission.
+    #[error("a successor already exists ({mission_id}); continue with that mission")]
+    SuccessorExists { mission_id: String },
+
+    /// The source revision or phase changed before the successor insert.
+    /// The transaction rolls back, so nothing is written.
+    #[error("the source mission changed during successor creation; nothing was written; retry")]
+    SourceChangedDuringCreate,
+
+    /// `--verifier` was not an exact canonical match for a document this host can run.
+    #[error("verifier is not supported by this host; supported: {supported}")]
+    VerifierNotSupported { supported: String },
+
     /// Pi refused to admit the command and the protocol marks that refusal as
     /// definite. Transport loss and `admission: uncertain` stay [`Self::GuardFailed`]
     /// or [`Self::Storage`]. Effect outcomes use `PiEffectOutcome` separately
@@ -131,6 +148,10 @@ impl Error {
             Self::FrozenInputsMissing => "frozen_inputs_missing",
             Self::StalePlanDigest => "stale_plan_digest",
             Self::PlanRevisionLimitReached { .. } => "plan_revision_limit_reached",
+            Self::SuccessorSourceNotTerminal => "successor_source_not_terminal",
+            Self::SuccessorExists { .. } => "successor_exists",
+            Self::SourceChangedDuringCreate => "source_changed_during_create",
+            Self::VerifierNotSupported { .. } => "verifier_not_supported",
             Self::AdmissionRejected { .. } => "admission_rejected",
             Self::GuardFailed { .. } => "guard_failed",
             Self::UnknownNotification { .. } => "unknown_notification",
