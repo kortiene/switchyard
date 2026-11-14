@@ -49,8 +49,10 @@ jobs:
       # Optional provider headers. OpenCode Go uses
       # x-opencode-session={ocr_session_key}, expanded per conversation by OCR.
       OCR_LLM_EXTRA_HEADERS: ${{ vars.OCR_LLM_EXTRA_HEADERS }}
-      # v1.13.9 treats 0 as unlimited. 80000 is the trial cap.
-      OCR_MAX_TOKENS_BUDGET: "80000"
+      # v1.13.9 rejects a group before calling the model when its estimated
+      # cost exceeds this budget. 80K rejected ordinary UI diffs at zero usage.
+      # This dispatch budget is not a strict billing ceiling.
+      OCR_MAX_TOKENS_BUDGET: "200000"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -145,17 +147,18 @@ jobs:
             --format json \
             --audience agent \
             --effort low \
+            --concurrency 1 \
             --max-tokens-budget "${OCR_MAX_TOKENS_BUDGET}" \
             --model "${OCR_MODEL}" \
             --output "${OCR_RESULT_PATH}"
 
       - name: Upload the review JSON
-        if: success() && steps.gate.outputs.configured == 'true'
+        if: always() && steps.gate.outputs.configured == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ocr-advisory-review
           path: ${{ runner.temp }}/ocr-review.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Post or update the sticky summary comment
@@ -210,7 +213,7 @@ jobs:
             }
 
             function summaryBody() {
-              if (process.env.OCR_REVIEW_OUTCOME !== "success" || !fs.existsSync(process.env.OCR_RESULT_PATH)) {
+              if (!fs.existsSync(process.env.OCR_RESULT_PATH)) {
                 return [
                   marker,
                   "## Advisory AI review (open-code-review)",
@@ -229,9 +232,10 @@ jobs:
                   "The review JSON could not be parsed (" + oneLine(error.message, 200) + "). The raw artifact is `ocr-advisory-review`. No inline comments were posted.",
                 ].join("\n");
               }
-              const summary = report && report.summary ? report.summary : {};
+              report = report && typeof report === "object" && !Array.isArray(report) ? report : {};
+              const summary = report.summary && typeof report.summary === "object" ? report.summary : {};
               const llm = report && report.llm ? report.llm : {};
-              const comments = Array.isArray(report && report.comments) ? report.comments : [];
+              const comments = Array.isArray(report && report.comments) ? report.comments.filter((comment) => comment && typeof comment === "object" && !Array.isArray(comment)) : [];
               const warnings = Array.isArray(report && report.warnings) ? report.warnings : [];
               const lines = [
                 marker,
@@ -249,9 +253,18 @@ jobs:
                 "- Token cap (`OCR_MAX_TOKENS_BUDGET`): " + oneLine(process.env.OCR_MAX_TOKENS_BUDGET, 20),
                 "- Warnings: " + warnings.length,
               ];
+              if (summary.budget_exceeded) {
+                lines.push("", "**Token budget exhausted; review coverage is incomplete.** Zero token usage means OCR rejected the estimated group cost before making a model call.");
+              }
+              if (process.env.OCR_REVIEW_OUTCOME !== "success") {
+                lines.push("", "**The review step failed. See the workflow log and JSON artifact for details.**");
+              }
+              for (const warning of warnings.slice(0, 8)) {
+                lines.push("", "Warning: " + oneLine(typeof warning === "string" ? warning : JSON.stringify(warning), 500));
+              }
               if (report.message) lines.push("", oneLine(report.message, 500));
               if (comments.length === 0) {
-                lines.push("", "No findings.");
+                lines.push("", report.status === "complete" && !summary.budget_exceeded ? "No findings." : "No findings were returned; this does not establish a clean review.");
               } else {
                 lines.push("", "### Findings");
                 const shown = comments.slice(0, 12);
@@ -276,7 +289,7 @@ jobs:
                 issue_number,
                 per_page: 100,
               });
-              const existing = comments.find((comment) => typeof comment.body === "string" && comment.body.startsWith(marker));
+              const existing = comments.find((comment) => comment.user?.login === "github-actions[bot]" && typeof comment.body === "string" && comment.body.startsWith(marker));
               if (existing) {
                 await github.rest.issues.updateComment({
                   owner,
