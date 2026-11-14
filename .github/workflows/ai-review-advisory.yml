@@ -2,7 +2,7 @@ name: AI review (advisory)
 
 # Trial advisory review. Not a required check. execution-confinement stays the
 # merge gate. pull_request only: pull_request_target would expose secrets to
-# fork code, and this job must skip when the placeholder secret is absent.
+# fork code, and this job must skip when the OpenAI API secret is absent.
 #
 # Events are opened, ready_for_review, and labeled. synchronize is omitted so
 # a later push does not send the diff again. labeled runs only when the label
@@ -37,19 +37,13 @@ jobs:
     timeout-minutes: 20
     continue-on-error: true
     env:
-      # Placeholders. The owner chooses the model and sets these; until then
-      # the job skips. OCR_MODEL is exported as OCR_LLM_MODEL and passed to
-      # --model. v1.13.9 needs a complete URL/token/model triple, so OCR_LLM_URL
-      # is required too. When OCR_LLM_PROTOCOL is empty the CLI defaults the
-      # protocol to anthropic; the gate waits for an explicit protocol instead
-      # of sending a diff under that default. The API key stays on the steps
-      # that read it (secret OCR_API_KEY, exported as OCR_LLM_TOKEN).
-      OCR_MODEL: ${{ vars.OCR_MODEL }}
-      OCR_LLM_URL: ${{ vars.OCR_LLM_URL }}
-      OCR_LLM_PROTOCOL: ${{ vars.OCR_LLM_PROTOCOL }}
-      # Optional provider headers. OpenCode Go uses
-      # x-opencode-session={ocr_session_key}, expanded per conversation by OCR.
-      OCR_LLM_EXTRA_HEADERS: ${{ vars.OCR_LLM_EXTRA_HEADERS }}
+      # GitHub-hosted runners use an OpenAI API key, independent of Pi's
+      # local openai-codex OAuth session. Keep a separate secret so the old
+      # OpenCode Go key cannot accidentally be sent to OpenAI.
+      OCR_MODEL: ${{ vars.OCR_OPENAI_MODEL || 'gpt-6.1-sol' }}
+      OCR_LLM_URL: https://api.openai.com/v1/responses
+      OCR_LLM_PROTOCOL: openai-responses
+      OCR_LLM_EXTRA_HEADERS: ""
       # v1.13.9 rejects a group before calling the model when its estimated
       # cost exceeds this budget. 80K rejected ordinary UI diffs at zero usage.
       # This dispatch budget is not a strict billing ceiling.
@@ -59,17 +53,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Skip unless the owner has set the placeholder secret and variables
+      - name: Skip unless the OpenAI API key is configured
         id: gate
         env:
-          # Placeholder secret. Empty includes fork PRs, where secrets are unavailable.
-          OCR_API_KEY: ${{ secrets.OCR_API_KEY }}
+          # Empty includes fork PRs, where secrets are unavailable.
+          OCR_API_KEY: ${{ secrets.OCR_OPENAI_API_KEY }}
           BASE_REF: ${{ github.base_ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           missing=()
-          [ -n "${OCR_API_KEY}" ] || missing+=("secret OCR_API_KEY")
+          [ -n "${OCR_API_KEY}" ] || missing+=("secret OCR_OPENAI_API_KEY")
           [ -n "${OCR_MODEL}" ] || missing+=("variable OCR_MODEL")
           [ -n "${OCR_LLM_URL}" ] || missing+=("variable OCR_LLM_URL")
           [ -n "${OCR_LLM_PROTOCOL}" ] || missing+=("variable OCR_LLM_PROTOCOL")
@@ -122,9 +116,9 @@ jobs:
         if: success() && steps.gate.outputs.configured == 'true'
         env:
           OCR_NO_UPDATE: "1"
-          # Placeholder secret OCR_API_KEY, mapped to the v1.13.9 token variable.
-          OCR_LLM_TOKEN: ${{ secrets.OCR_API_KEY }}
-          OCR_LLM_MODEL: ${{ vars.OCR_MODEL }}
+          # OpenAI API key, mapped to the v1.13.9 token variable.
+          OCR_LLM_TOKEN: ${{ secrets.OCR_OPENAI_API_KEY }}
+          OCR_LLM_MODEL: ${{ vars.OCR_OPENAI_MODEL || 'gpt-6.1-sol' }}
           BASE_REF: ${{ steps.gate.outputs.base_ref }}
           HEAD_SHA: ${{ steps.gate.outputs.head_sha }}
           OCR_RESULT_PATH: ${{ runner.temp }}/ocr-review.json
