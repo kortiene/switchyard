@@ -89,14 +89,14 @@ A read-only ruleset audit on 2026-11-02 confirmed ruleset 26316769 requires `exe
 
 # Check inventory
 
-Each CI check maps to a local command; local and CI agree on what the check proves. Required status reflects the 2026-11-03 read-only ruleset audit recorded above.
+Each CI check maps to a local command; local and CI agree on what the check proves. Required status reflects the 2026-11-13 read-only ruleset audit recorded above.
 
 | CI check (workflow) | Local command | What it proves | Required on main |
 | --- | --- | --- | --- |
 | `verify (node 20.19.0)`, `verify (node 22)` (`verify.yml`) | `cd adw_sdlc && npm ci && npm run verify` | Frozen TypeScript reference gate: typecheck, environment lint, prompt pack/mirror drift, wiki check, coverage thresholds, build. | Yes (ruleset 26316513) |
 | `rust-core` (`verify.yml`) | `./scripts/rust-verify.sh` | Default-feature Rust gate: formatting, Clippy, and `cargo test` on the committed Rust 1.99.1 toolchain. | No |
-| `pi-bridge-contract` (`pi-bridge-contract.yml`) | `node runtime/pi-source/install-npm.mjs && (cd runtime/pi-source && node build.mjs && npm ci) && node runtime/pi-source/contract.mjs` | Full credential-free S2 contract matrix with revision-bound evidence. | Yes |
-| `execution-confinement` (`execution-confinement.yml`) | `./scripts/confinement-verify.sh` and `./scripts/bridge-confinement-verify.sh` (prerequisites below) | Real OS confinement, bridge lifecycle, and model-endpoint egress on the declared Ubuntu 24.04 x86_64 runner. | Yes |
+| `pi-bridge-contract` (`pi-bridge-contract.yml`) | `node runtime/pi-source/install-npm.mjs && (cd runtime/pi-source && node build.mjs && npm ci) && node runtime/pi-source/contract.mjs` | Full credential-free S2 contract matrix with revision-bound evidence. | Yes (ruleset 26316513) |
+| `execution-confinement` (`execution-confinement.yml`) | `./scripts/confinement-verify.sh` and `./scripts/bridge-confinement-verify.sh` (prerequisites below) | Real OS confinement, bridge lifecycle, and model-endpoint egress on the declared Ubuntu 24.04 x86_64 runner. | Yes (ruleset 26316769) |
 | `pi-package-audit` (`pi-package-audit.yml`) | `cd runtime/pi && npm ci && npm run verify && npm run audit:package` | Published-package diagnostic; reproduces the historical NO-GO evidence. Not `pi-bridge-contract`. | No (diagnostic) |
 | `pi-source-candidate` (`pi-source-candidate.yml`) | `cd runtime/pi-source && node install-npm.mjs && node build.mjs && npm ci && npm run verify` | Reproducible rebuild of the pinned source candidate. | No |
 
