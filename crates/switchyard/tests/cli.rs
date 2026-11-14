@@ -1182,3 +1182,182 @@ fn confined_pi_flag_fails_closed_without_prerequisites() {
     assert!(!db.exists());
     assert!(!tmp.path().join("mission.sqlite.pi-bridge").exists());
 }
+
+#[test]
+fn successor_flags_copy_overrides_and_refuse_a_live_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "172",
+        "--objective",
+        "original objective",
+        "--acceptance",
+        "original acceptance",
+        "--max-repairs",
+        "2",
+        "--max-plan-revisions",
+        "3",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let (code, _, error) = run(&[
+        "mission",
+        "successor",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+    ]);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(error["error"]["category"], "successor_source_not_terminal");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("confirm_cancelled"),
+        "{error}"
+    );
+
+    let (code, cancelled, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--kind",
+        "cancel",
+        "--expected-revision",
+        "1",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(cancelled["mission"]["phase"], "cancelling");
+    let revision = cancelled["mission"]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let (code, confirmed, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--kind",
+        "confirm_cancelled",
+        "--expected-revision",
+        &revision,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(confirmed["mission"]["phase"], "cancelled");
+
+    let acceptance = tmp.path().join("acceptance.txt");
+    std::fs::write(&acceptance, "from file\n").unwrap();
+    let file_arg = format!("@{}", acceptance.display());
+    let (code, successor, error) = run(&[
+        "mission",
+        "successor",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--actor",
+        "sam",
+        "--objective",
+        "replaced objective",
+        "--acceptance",
+        &file_arg,
+        "--acceptance",
+        "inline criterion",
+        "--max-repairs",
+        "4",
+        "--max-plan-revisions",
+        "7",
+        "--verifier",
+        r#"{"id":"switchyard.verifier.successor","frozen":true,"executes":false}"#,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission_json = &successor["mission"];
+    assert_eq!(mission_json["phase"], "draft");
+    assert_eq!(mission_json["objective"], "replaced objective");
+    assert_eq!(mission_json["maxRepairs"], 4);
+    assert_eq!(mission_json["maxPlanRevisions"], 7);
+    assert_eq!(mission_json["planRevisionCount"], 0);
+    assert_eq!(mission_json["repairCount"], 0);
+    assert!(mission_json["planDigest"].is_null());
+    assert_eq!(mission_json["successorOfMissionId"], mission);
+    assert_eq!(mission_json["runtimeAdapter"], "fake");
+    assert_eq!(mission_json["baseSha"], head(&repo));
+    assert_eq!(
+        mission_json["verifier"]["id"],
+        "switchyard.verifier.successor"
+    );
+    let successor_id = mission_json["missionId"].as_str().unwrap();
+    let attempt_id = mission_json["attemptId"].as_str().unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let acceptance_text: String = conn
+        .query_row(
+            "SELECT acceptance_criteria FROM tasks WHERE mission_id = ?1 AND root = 1",
+            [successor_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(acceptance_text, "from file\ninline criterion");
+    let rationale: String = conn
+        .query_row(
+            "SELECT rationale FROM decisions WHERE mission_id = ?1 AND action = 'create'",
+            [successor_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let payload: Value = serde_json::from_str(&rationale).unwrap();
+    assert_eq!(payload["actor"], "sam");
+    assert_eq!(payload["sourceMissionId"], mission);
+    assert_eq!(
+        payload["overridden"],
+        serde_json::json!([
+            "acceptanceCriteria",
+            "maxPlanRevisions",
+            "maxRepairs",
+            "objective",
+            "verifier"
+        ])
+    );
+    let verifier: String = conn
+        .query_row(
+            "SELECT verifier_json FROM attempts WHERE id = ?1",
+            [attempt_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        verifier,
+        r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.successor"}"#
+    );
+    let (code, _, error) = run(&[
+        "mission",
+        "successor",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+    ]);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(error["error"]["category"], "successor_exists");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(successor_id),
+        "{error}"
+    );
+}

@@ -60,7 +60,7 @@ pub use freeze::bound_plan_digest;
 pub use service::read_attempt_freeze;
 pub use service::{
     AdmitRequest, AdmitResult, CommandView, CreateMission, DeliveryView, Host, MissionSnapshot,
-    NotifyOutcome, journal_path,
+    NotifyOutcome, SuccessorChanges, journal_path,
 };
 
 #[cfg(test)]

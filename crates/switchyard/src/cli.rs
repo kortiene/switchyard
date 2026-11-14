@@ -204,6 +204,11 @@ pub(crate) enum MissionCommand {
         db: PathBuf,
     },
     /// Create a new mission after a terminal one. The source mission stays terminal.
+    ///
+    /// Omitted overrides are copied from the source. Base SHA and runtime
+    /// configuration are always re-read from the host. A drifted or mismatched
+    /// source must `cancel`, then `confirm_cancelled`, first. A source refused
+    /// with `frozen_inputs_missing` must `reject` or `cancel`, then successor.
     Successor {
         #[arg(long)]
         db: PathBuf,
@@ -211,6 +216,22 @@ pub(crate) enum MissionCommand {
         mission: String,
         #[arg(long, default_value = "operator")]
         actor: String,
+        /// Replace the source objective.
+        #[arg(long)]
+        objective: Option<String>,
+        /// Replace acceptance criteria. Repeat the flag, or pass `@path` to
+        /// read one value from a file. Values are joined with newlines.
+        #[arg(long)]
+        acceptance: Vec<String>,
+        /// Replace the source repair limit.
+        #[arg(long)]
+        max_repairs: Option<u32>,
+        /// Replace the source plan-revision limit.
+        #[arg(long)]
+        max_plan_revisions: Option<u32>,
+        /// Replace the source verifier definition. Must be a JSON object.
+        #[arg(long)]
+        verifier: Option<String>,
     },
     /// Record a content digest. Review-gated phases enter needs_attention.
     Content {

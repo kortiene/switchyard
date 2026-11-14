@@ -348,7 +348,7 @@ pub enum AttentionReason {
     FailedStop,
     ExecutionUncertain,
     /// Stored attempt inputs no longer match the freeze. The snapshot is not
-    /// rewritten; a successor attempt is a later slice.
+    /// rewritten. Leave with cancel, then confirm_cancelled, then a successor.
     FrozenInputDrift,
     /// `attempts.plan_digest` does not match the digest recomputed from
     /// `attempts.plan_body` and the stored freeze. The freeze is not rewritten.

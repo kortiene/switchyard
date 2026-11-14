@@ -1848,6 +1848,9 @@ fn simulated_no_row_error_is_transient(error: &Error) -> bool {
         | Error::FrozenInputsMissing
         | Error::StalePlanDigest
         | Error::PlanRevisionLimitReached { .. }
+        | Error::SuccessorSourceNotTerminal
+        | Error::SuccessorExists { .. }
+        | Error::SourceChangedDuringCreate
         | Error::AdmissionRejected { .. }
         | Error::GuardFailed { .. }
         | Error::UnknownNotification { .. }
@@ -1921,6 +1924,11 @@ fn execute_fake_operation_pins_is_transient_for_every_error_it_can_return() {
         Error::FrozenInputsMissing,
         Error::StalePlanDigest,
         Error::PlanRevisionLimitReached { count: 1, max: 1 },
+        Error::SuccessorSourceNotTerminal,
+        Error::SuccessorExists {
+            mission_id: "m-existing".into(),
+        },
+        Error::SourceChangedDuringCreate,
         Error::AdmissionRejected {
             category: "busy".into(),
         },

@@ -75,6 +75,20 @@ pub enum Error {
     #[error("plan revision limit reached ({count}/{max}); a higher cap needs a successor attempt")]
     PlanRevisionLimitReached { count: u32, max: u32 },
 
+    /// `mission successor` on a source that is not published, rejected, or cancelled.
+    #[error("successor requires a terminal source; cancel, then confirm_cancelled")]
+    SuccessorSourceNotTerminal,
+
+    /// This source attempt already has a successor. The id is the existing mission.
+    #[error("a successor already exists ({mission_id}); continue with that mission")]
+    SuccessorExists { mission_id: String },
+
+    /// The source revision or phase changed after the successor row was committed.
+    #[error(
+        "the source mission changed while the successor was created; inspect the source and any written successor before retrying"
+    )]
+    SourceChangedDuringCreate,
+
     /// Pi refused to admit the command and the protocol marks that refusal as
     /// definite. Transport loss and `admission: uncertain` stay [`Self::GuardFailed`]
     /// or [`Self::Storage`]. Effect outcomes use `PiEffectOutcome` separately
@@ -131,6 +145,9 @@ impl Error {
             Self::FrozenInputsMissing => "frozen_inputs_missing",
             Self::StalePlanDigest => "stale_plan_digest",
             Self::PlanRevisionLimitReached { .. } => "plan_revision_limit_reached",
+            Self::SuccessorSourceNotTerminal => "successor_source_not_terminal",
+            Self::SuccessorExists { .. } => "successor_exists",
+            Self::SourceChangedDuringCreate => "source_changed_during_create",
             Self::AdmissionRejected { .. } => "admission_rejected",
             Self::GuardFailed { .. } => "guard_failed",
             Self::UnknownNotification { .. } => "unknown_notification",
