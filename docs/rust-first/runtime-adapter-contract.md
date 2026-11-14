@@ -181,6 +181,8 @@ Gate evidence is recorded in a dedicated issue, as #96 does. The proposed check 
    - `awaiting_plan_approval → implementing` (approve plan): "authorized actor confirms the current plan digest; implementation policy is unchanged."
    - "Plan drift invalidates approval; approval targets the current plan digest only."
    - "Changing scope or policy requires a successor attempt and never inherits an old approval."
+   - 172a freezes inputs at `draft → planning`. An attempt that left draft before ledger v11 has `frozen_inputs_json` NULL. 172b `approve_plan` will refuse that attempt. Continuing requires a successor attempt. This slice does not re-freeze it.
+   - The 172b plan digest is `payload_hash` of `{schema, attemptId, frozenInputsDigest, plan}` with schema `switchyard.plan-digest.v1`. `frozenInputsDigest` is the hash of the whole `switchyard.attempt-freeze.v1` document.
 2. **Workspace.** Each attempt runs in a Host-owned worktree created from an exact base commit, with its lifecycle owned by S3 in Rust ([README: Workspace and trust boundary](README.md#workspace-and-trust-boundary)). This ADR records that as the model and opens no new workspace work.
 3. Binding publication to a reviewed-content digest is out of scope here. See open question 4.
 

@@ -686,10 +686,11 @@ mod os {
                 | LinuxOperation::ListDirectory { .. } => crate::execution::ToolEffect::Read,
                 LinuxOperation::WriteFile { .. }
                 | LinuxOperation::EditFile { .. }
-                | LinuxOperation::ExecStart { .. } => crate::execution::ToolEffect::Write,
-                LinuxOperation::ExecStatus { .. } | LinuxOperation::ExecCancel { .. } => {
-                    crate::execution::ToolEffect::Read
-                }
+                | LinuxOperation::ExecStart { .. }
+                // Status and cancel return before this function. ExecCancel is
+                // a write-class effect, so a direct call does not treat it as a read.
+                | LinuxOperation::ExecCancel { .. } => crate::execution::ToolEffect::Write,
+                LinuxOperation::ExecStatus { .. } => crate::execution::ToolEffect::Read,
             }
         }
 

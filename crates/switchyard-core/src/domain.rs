@@ -347,6 +347,9 @@ pub enum AttentionReason {
     ExhaustedLimits,
     FailedStop,
     ExecutionUncertain,
+    /// Stored attempt inputs no longer match the freeze. The snapshot is not
+    /// rewritten; a successor attempt is a later slice.
+    FrozenInputDrift,
 }
 
 impl AttentionReason {
@@ -359,6 +362,7 @@ impl AttentionReason {
             Self::ExhaustedLimits => "exhausted_limits",
             Self::FailedStop => "failed_stop",
             Self::ExecutionUncertain => "execution_uncertain",
+            Self::FrozenInputDrift => "frozen_input_drift",
         }
     }
 }
@@ -381,6 +385,7 @@ impl FromStr for AttentionReason {
             "exhausted_limits" => Ok(Self::ExhaustedLimits),
             "failed_stop" => Ok(Self::FailedStop),
             "execution_uncertain" => Ok(Self::ExecutionUncertain),
+            "frozen_input_drift" => Ok(Self::FrozenInputDrift),
             other => Err(Error::guard(format!("unknown attention reason {other}"))),
         }
     }

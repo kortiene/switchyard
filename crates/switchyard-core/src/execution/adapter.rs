@@ -386,9 +386,9 @@ impl RuntimeAdapter {
         }
         // S2-A has no trusted planning/verification/process-quiescence observer.
         // Do not expose S1 simulation inputs as facts about a child process.
-        // HostSupervisor is not a Pi observation; the private host-fact path
-        // never reaches this check. Planning admission (#172) should keep
-        // reading `certifies_mission_facts` instead of naming a variant.
+        // The private host-fact path never reaches this check. This flag is an
+        // authority gate only. Plan shape, digest, and freeze stay in Host
+        // admission. Planning tool admission reads PlanningToolProfile.
         if matches!(
             origin,
             CommandOrigin::RuntimeObservation | CommandOrigin::HostSupervisor

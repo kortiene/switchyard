@@ -15,7 +15,7 @@ use crate::domain::{
 };
 use crate::error::{Error, Result};
 use crate::execution::OwnerLock;
-use crate::freeze::frozen_canonical;
+use crate::freeze::{drift_exit, frozen_canonical};
 use crate::policy::TransitionPlan;
 use crate::verification::NewVerification;
 
@@ -1650,7 +1650,7 @@ fn enforce_attempt_freeze(
     }
     if let Some(stored) = &mission.attempt.frozen_inputs_json {
         let current = frozen_canonical(&mission)?;
-        if stored != &current {
+        if stored != &current && !drift_exit(mission.phase, command.kind) {
             return Err(Error::guard("frozen attempt inputs are immutable"));
         }
     }

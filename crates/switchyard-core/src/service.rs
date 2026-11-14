@@ -596,6 +596,16 @@ impl Host {
                 actual: mission.revision,
             });
         }
+        if self.frozen_input_drifted(&mission)?
+            && !crate::freeze::drift_exit(mission.phase, request.body.kind())
+        {
+            if mission.phase != Phase::NeedsAttention && !mission.phase.is_terminal() {
+                self.record_frozen_input_drift(&mission)?;
+            }
+            return Err(Error::guard(
+                "frozen attempt inputs drifted; the command was not applied",
+            ));
+        }
         if is_runtime_observation(request.body.kind())
             && request.origin != CommandOrigin::RuntimeObservation
         {
@@ -1564,6 +1574,33 @@ impl Host {
             origin: CommandOrigin::RuntimeObservation,
             body,
         })
+    }
+
+    fn frozen_input_drifted(&self, mission: &MissionRecord) -> Result<bool> {
+        let Some(stored) = &mission.attempt.frozen_inputs_json else {
+            return Ok(false);
+        };
+        Ok(stored != &crate::freeze::frozen_canonical(mission)?)
+    }
+
+    /// Legal `detect_uncertainty` edge. The freeze snapshot is left unchanged.
+    fn record_frozen_input_drift(&mut self, mission: &MissionRecord) -> Result<AdmitResult> {
+        self.admit_checked(
+            AdmitRequest {
+                command_id: None,
+                mission_id: mission.id.clone(),
+                attempt_id: Some(mission.attempt.id.clone()),
+                expected_revision: mission.revision,
+                actor: "host".into(),
+                origin: CommandOrigin::HostSupervisor,
+                body: CommandBody::DetectUncertainty {
+                    reason: AttentionReason::FrozenInputDrift,
+                    content_digest: None,
+                },
+            },
+            None,
+            true,
+        )
     }
 
     fn uncertainty(

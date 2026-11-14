@@ -2,11 +2,14 @@
 //!
 //! This is not an adapter authority check. `AuthorityProfile.certifies_mission_facts`
 //! does not decide whether these inputs are complete, canonical, or unchanged.
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::canonical::{canonicalize, payload_hash};
-use crate::domain::MissionRecord;
+use crate::domain::{CommandKind, MissionRecord, Phase};
 use crate::error::{Error, Result};
+
+pub(crate) const ATTEMPT_FREEZE_SCHEMA: &str = "switchyard.attempt-freeze.v1";
+pub(crate) const PLAN_DIGEST_SCHEMA: &str = "switchyard.plan-digest.v1";
 
 /// Canonical frozen-input document for one attempt.
 ///
@@ -39,8 +42,29 @@ pub(crate) fn frozen_document(mission: &MissionRecord) -> Result<Value> {
             &mission.attempt.environment_json,
             &mission.attempt.policy_json,
         )?,
+        "schema": ATTEMPT_FREEZE_SCHEMA,
         "verifier": parse_object(&mission.attempt.verifier_json, "verifier definition")?,
     }))
+}
+
+/// Commands that may still be admitted after the frozen inputs drift.
+///
+/// The normative table keeps cancel available from every nonterminal phase
+/// except `cancelling`, and reject from `awaiting_plan_approval`,
+/// `awaiting_review`, and `approved`. `confirm_cancelled` stays open so that
+/// cancellation can settle. `detect_uncertainty` is the edge into
+/// `needs_attention`. Nothing here rewrites the freeze.
+pub(crate) fn drift_exit(phase: Phase, kind: CommandKind) -> bool {
+    match kind {
+        CommandKind::Cancel => !phase.is_terminal() && phase != Phase::Cancelling,
+        CommandKind::ConfirmCancelled => phase == Phase::Cancelling,
+        CommandKind::Reject => matches!(
+            phase,
+            Phase::AwaitingPlanApproval | Phase::AwaitingReview | Phase::Approved
+        ),
+        CommandKind::DetectUncertainty => !phase.is_terminal() && phase != Phase::NeedsAttention,
+        _ => false,
+    }
 }
 
 pub(crate) fn frozen_canonical(mission: &MissionRecord) -> Result<String> {
@@ -49,24 +73,38 @@ pub(crate) fn frozen_canonical(mission: &MissionRecord) -> Result<String> {
 
 /// Body the following slice will hash as the plan digest.
 ///
-/// Not stored or checked by plan approval in this slice. The hash is
-/// `payload_hash` (RFC 8785, then `sha256:` plus hex SHA-256) of this object:
-/// the plan text plus the frozen base SHA, sandbox policy, verifier, and
-/// execution limits. The unit test is the caller until that slice lands.
+/// Not stored or checked by plan approval in this slice. The object is
+/// `{schema, attemptId, frozenInputsDigest, plan}`. `frozenInputsDigest` is
+/// `payload_hash` of the whole frozen-input document, so one field binds all
+/// eight inputs. There is no separate sandbox digest.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn plan_digest_document(plan: &str, frozen: &Value) -> Value {
-    json!({
-        "baseSha": frozen.get("baseSha").cloned().unwrap_or(Value::Null),
-        "executionLimits": frozen.get("executionLimits").cloned().unwrap_or(Value::Null),
+pub(crate) fn plan_digest_document(
+    plan: &str,
+    attempt_id: &str,
+    frozen_inputs_digest: &str,
+) -> Result<Value> {
+    require_text(plan, "plan")?;
+    require_text(attempt_id, "attempt id")?;
+    require_text(frozen_inputs_digest, "frozen inputs digest")?;
+    Ok(json!({
+        "attemptId": attempt_id,
+        "frozenInputsDigest": frozen_inputs_digest,
         "plan": plan,
-        "sandboxPolicy": frozen.get("sandboxPolicy").cloned().unwrap_or(Value::Null),
-        "verifier": frozen.get("verifier").cloned().unwrap_or(Value::Null),
-    })
+        "schema": PLAN_DIGEST_SCHEMA,
+    }))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn plan_digest_hash(plan: &str, frozen: &Value) -> Result<String> {
-    payload_hash(&plan_digest_document(plan, frozen))
+pub(crate) fn plan_digest_hash(
+    plan: &str,
+    attempt_id: &str,
+    frozen_inputs_digest: &str,
+) -> Result<String> {
+    payload_hash(&plan_digest_document(
+        plan,
+        attempt_id,
+        frozen_inputs_digest,
+    )?)
 }
 
 fn runtime_configuration(raw: &str) -> Result<Value> {
@@ -79,22 +117,15 @@ fn runtime_configuration(raw: &str) -> Result<Value> {
 
 fn sandbox_policy(environment_json: &str, policy_json: &str) -> Result<Value> {
     let environment = parse_object(environment_json, "sandbox policy")?;
-    let policy = parse_object(policy_json, "sandbox policy")?;
-    let mut sandbox = Map::new();
-    if let Some(object) = environment.as_object() {
-        for (key, value) in object {
-            sandbox.insert(key.clone(), value.clone());
-        }
+    let mut policy = parse_object(policy_json, "sandbox policy")?;
+    if let Some(object) = policy.as_object_mut() {
+        object.remove("maxRepairs");
+        object.remove("maxPlanRevisions");
     }
-    if let Some(object) = policy.as_object() {
-        for (key, value) in object {
-            if key == "maxRepairs" || key == "maxPlanRevisions" {
-                continue;
-            }
-            sandbox.insert(key.clone(), value.clone());
-        }
-    }
-    Ok(Value::Object(sandbox))
+    Ok(json!({
+        "environment": environment,
+        "policy": policy,
+    }))
 }
 
 pub(crate) fn parse_object(raw: &str, label: &str) -> Result<Value> {
@@ -108,9 +139,7 @@ pub(crate) fn parse_object(raw: &str, label: &str) -> Result<Value> {
 
 fn require_text(value: &str, label: &str) -> Result<()> {
     if value.trim().is_empty() {
-        Err(Error::guard(format!(
-            "{label} is required to start planning"
-        )))
+        Err(Error::guard(format!("{label} is required")))
     } else {
         Ok(())
     }
@@ -193,18 +222,43 @@ mod tests {
     }
 
     #[test]
-    fn plan_digest_document_binds_the_plan_to_frozen_limits_not_the_plan_text_alone() {
+    fn plan_digest_document_binds_the_plan_to_the_frozen_input_digest() {
         let frozen = frozen_document(&mission()).unwrap();
-        let canonical = canonicalize(&plan_digest_document("do the work", &frozen)).unwrap();
+        let inputs = payload_hash(&frozen).unwrap();
+        let canonical =
+            canonicalize(&plan_digest_document("do the work", "a-test", &inputs).unwrap()).unwrap();
         assert_eq!(
             canonical,
-            concat!(
-                r#"{"baseSha":"abc","executionLimits":{"maxPlanRevisions":3,"maxRepairs":2},"plan":"do the work","sandboxPolicy":{"#,
-                r#""confinement":"deferred_to_s3","credentials":"none","host":"single","planningTools":"read-only"},"verifier":{"#,
-                r#""executes":false,"frozen":true,"id":"switchyard.verifier.v1"}}"#
+            format!(
+                r#"{{"attemptId":"a-test","frozenInputsDigest":"{inputs}","plan":"do the work","schema":"{PLAN_DIGEST_SCHEMA}"}}"#
             )
         );
-        let digest = plan_digest_hash("do the work", &frozen).unwrap();
+        let digest = plan_digest_hash("do the work", "a-test", &inputs).unwrap();
         assert_ne!(digest, plan_digest_for("do the work").unwrap());
+        assert!(plan_digest_document("  ", "a-test", &inputs).is_err());
+        assert!(plan_digest_document("do the work", "", &inputs).is_err());
+        assert!(plan_digest_document("do the work", "a-test", "").is_err());
+    }
+
+    #[test]
+    fn sandbox_policy_keeps_environment_and_policy_apart() {
+        let document = frozen_document(&mission()).unwrap();
+        assert_eq!(document["schema"], ATTEMPT_FREEZE_SCHEMA);
+        assert_eq!(document["sandboxPolicy"]["environment"]["host"], "single");
+        assert_eq!(
+            document["sandboxPolicy"]["policy"]["planningTools"],
+            "read-only"
+        );
+        assert!(
+            document["sandboxPolicy"]["policy"]
+                .get("maxRepairs")
+                .is_none()
+        );
+        assert!(
+            document["sandboxPolicy"]["policy"]
+                .get("maxPlanRevisions")
+                .is_none()
+        );
+        assert!(document["sandboxPolicy"].get("host").is_none());
     }
 }

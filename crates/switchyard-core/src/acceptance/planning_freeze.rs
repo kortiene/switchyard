@@ -1,5 +1,5 @@
 //! S4-A slice 172a: freeze attempt inputs on draft -> planning.
-use super::fixtures::{admit, admit_expect, create, open_world};
+use super::fixtures::{admit, admit_expect, create, notify, open_world, plan_note};
 use crate::canonical::payload_hash;
 use crate::persistence::AttemptInputPatch;
 use crate::{
@@ -110,9 +110,19 @@ fn start_planning_freezes_inputs_and_refuses_later_writes() {
         Some(3)
     );
     assert_eq!(document["verifier"]["id"], "switchyard.verifier.v1");
+    assert_eq!(document["schema"], "switchyard.attempt-freeze.v1");
     assert_eq!(
-        document["sandboxPolicy"]["planningTools"].as_str(),
+        document["sandboxPolicy"]["policy"]["planningTools"].as_str(),
         Some("read-only")
+    );
+    assert_eq!(
+        document["sandboxPolicy"]["environment"]["host"].as_str(),
+        Some("single")
+    );
+    assert!(
+        document["sandboxPolicy"]["policy"]
+            .get("maxRepairs")
+            .is_none()
     );
     assert!(document.get("sessionInitialized").is_none());
     assert!(
@@ -175,21 +185,97 @@ fn start_planning_freezes_inputs_and_refuses_later_writes() {
 }
 
 #[test]
-fn tampered_frozen_inputs_block_the_next_transition() {
+fn tampered_frozen_inputs_route_to_needs_attention_and_still_cancel() {
     let world = open_world();
     let mut host = crate::Host::open(&world.db).unwrap();
     let created = create(&mut host, &world.repo, 2);
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
     let frozen = host.snapshot(&created.mission_id).unwrap();
+    let snapshot = frozen.frozen_inputs_json.clone();
     host.tamper_attempt_base_sha(&created.mission_id, "deadbeef")
         .unwrap();
-    let error = admit_expect(&mut host, &created.mission_id, CommandBody::Pause).unwrap_err();
+
+    let error = admit_expect(
+        &mut host,
+        &created.mission_id,
+        CommandBody::Steer {
+            content: "keep going".into(),
+        },
+    )
+    .unwrap_err();
     assert_eq!(error.category(), "guard_failed");
-    assert!(error.to_string().contains("immutable"), "{error}");
-    let after = host.snapshot(&created.mission_id).unwrap();
-    assert_eq!(after.phase.as_str(), "planning");
-    assert_eq!(after.revision, frozen.revision);
-    assert_eq!(after.base_sha, "deadbeef");
+    assert!(error.to_string().contains("was not applied"), "{error}");
+    let attention = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(attention.phase.as_str(), "needs_attention");
+    assert_eq!(
+        attention.attention_reason.as_deref(),
+        Some("frozen_input_drift")
+    );
+    assert_eq!(attention.frozen_inputs_json, snapshot);
+    assert_eq!(attention.base_sha, "deadbeef");
+    assert!(
+        attention
+            .commands
+            .iter()
+            .all(|command| command.kind != "steer")
+    );
+    assert!(
+        attention
+            .commands
+            .iter()
+            .any(|command| command.kind == "detect_uncertainty")
+    );
+
+    admit(&mut host, &created.mission_id, CommandBody::Cancel);
+    let cancelling = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(cancelling.phase.as_str(), "cancelling");
+    assert_eq!(cancelling.frozen_inputs_json, snapshot);
+    assert_eq!(cancelling.base_sha, "deadbeef");
+}
+
+#[test]
+fn tampered_frozen_inputs_still_admit_cancel_and_in_table_reject() {
+    let world = open_world();
+    let mut host = crate::Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    host.dispatch_pending(&created.mission_id).unwrap();
+    let frozen = host.snapshot(&created.mission_id).unwrap();
+    host.tamper_attempt_base_sha(&created.mission_id, "deadbeef")
+        .unwrap();
+    admit(&mut host, &created.mission_id, CommandBody::Cancel);
+    let cancelling = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(cancelling.phase.as_str(), "cancelling");
+    assert_eq!(cancelling.frozen_inputs_json, frozen.frozen_inputs_json);
+    assert_eq!(cancelling.base_sha, "deadbeef");
+
+    let world = open_world();
+    let mut host = crate::Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    host.dispatch_pending(&created.mission_id).unwrap();
+    assert_eq!(
+        notify(
+            &mut host,
+            &created.mission_id,
+            plan_note("implement the ledger")
+        ),
+        crate::Phase::AwaitingPlanApproval
+    );
+    let frozen = host.snapshot(&created.mission_id).unwrap();
+    host.tamper_attempt_base_sha(&created.mission_id, "cafebabe")
+        .unwrap();
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::Reject {
+            rationale: "inputs drifted".into(),
+        },
+    );
+    let rejected = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(rejected.phase.as_str(), "rejected");
+    assert_eq!(rejected.frozen_inputs_json, frozen.frozen_inputs_json);
+    assert_eq!(rejected.base_sha, "cafebabe");
 }
 
 #[test]
