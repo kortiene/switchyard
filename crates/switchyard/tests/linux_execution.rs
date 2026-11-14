@@ -181,20 +181,12 @@ fn implementing(world: &mut World) -> (Host, String) {
     };
     admit(&mut host, &mission.mission_id, CommandBody::StartPlanning);
     host.dispatch_pending(&mission.mission_id).unwrap();
-    let snap = host.snapshot(&mission.mission_id).unwrap();
-    let digest = switchyard_core::bound_plan_digest(
-        "plan",
-        &snap.attempt_id,
-        snap.frozen_inputs_json.as_deref().unwrap(),
-    )
-    .unwrap();
     host.apply_notification(
         &mission.mission_id,
         parse_notification(&json!({
             "kind": "plan_completed",
             "plan": "plan",
-            "quiescent": true,
-            "digest": digest
+            "quiescent": true
         }))
         .unwrap(),
     )

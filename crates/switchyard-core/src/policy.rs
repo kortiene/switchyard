@@ -73,20 +73,12 @@ pub fn authorize(mission: &MissionRecord, body: &CommandBody, facts: &Facts) -> 
             // Shape and completeness live here, not on the adapter profile.
             frozen_document(mission).map(|_| ())
         }
-        CommandBody::PlanCompleted {
-            plan,
-            digest,
-            quiescent,
-        } => {
+        CommandBody::PlanCompleted { plan, quiescent } => {
             if !quiescent || facts.ops_blocked {
                 return Err(blocked());
             }
             let frozen = require_frozen_inputs(mission)?;
-            let actual = bound_plan_digest(plan, &mission.attempt.id, frozen)?;
-            if actual != digest.as_str() {
-                return Err(Error::guard("plan digest does not match the plan body"));
-            }
-            Ok(())
+            bound_plan_digest(plan, &mission.attempt.id, frozen).map(|_| ())
         }
         CommandBody::RequestRevisedPlan { feedback } => {
             require_nonempty(feedback, "feedback")?;
@@ -104,8 +96,11 @@ pub fn authorize(mission: &MissionRecord, body: &CommandBody, facts: &Facts) -> 
             let Some(body) = mission.plan_body.as_deref() else {
                 return Err(Error::StalePlanDigest);
             };
+            // A stored digest that does not match this recomputation is an
+            // integrity failure. Host admission routes that to
+            // `plan_digest_mismatch` before this check.
             let current = bound_plan_digest(body, &mission.attempt.id, frozen)?;
-            if mission.plan_digest.as_deref() != Some(current.as_str()) || plan_digest != &current {
+            if plan_digest != &current {
                 return Err(Error::StalePlanDigest);
             }
             Ok(())
@@ -271,6 +266,11 @@ pub fn authorize(mission: &MissionRecord, body: &CommandBody, facts: &Facts) -> 
             if validated == Phase::Paused {
                 require_pause_settled(facts)?;
             }
+            if validated == Phase::AwaitingPlanApproval && !stored_plan_matches(mission)? {
+                return Err(Error::guard(
+                    "recovery to plan approval requires a plan digest that matches the frozen plan",
+                ));
+            }
             Ok(())
         }
         CommandBody::Continue { activity } => {
@@ -321,9 +321,9 @@ fn revalidate_resume(mission: &MissionRecord, facts: &Facts, target: Phase) -> R
         }
         require_pass(mission, facts)?;
     }
-    if target == Phase::AwaitingPlanApproval && mission.plan_digest.is_none() {
+    if target == Phase::AwaitingPlanApproval && !stored_plan_matches(mission)? {
         return Err(Error::guard(
-            "resume to plan approval requires the frozen plan",
+            "resume to plan approval requires a plan digest that matches the frozen plan",
         ));
     }
     if target == Phase::Approved
@@ -371,6 +371,21 @@ fn require_repair_allowance(attempt: &AttemptRecord) -> Result<()> {
         })
     } else {
         Ok(())
+    }
+}
+
+/// True only when the stored attempt digest is the digest of the stored
+/// plan body and the freeze. A digest with no body, or a body with no
+/// digest, does not match.
+fn stored_plan_matches(mission: &MissionRecord) -> Result<bool> {
+    let Some(frozen) = mission.attempt.frozen_inputs_json.as_deref() else {
+        return Ok(false);
+    };
+    match (mission.plan_body.as_deref(), mission.plan_digest.as_deref()) {
+        (Some(body), Some(stored)) => {
+            Ok(bound_plan_digest(body, &mission.attempt.id, frozen)? == stored)
+        }
+        _ => Ok(false),
     }
 }
 
@@ -480,7 +495,9 @@ pub fn project(
             plan.decision_digest = Some(plan_digest.clone());
         }
         CommandBody::Reject { .. } => {
-            plan.decision_digest = mission.plan_digest.clone();
+            if mission.phase == Phase::AwaitingPlanApproval {
+                plan.decision_digest = mission.plan_digest.clone();
+            }
         }
         CommandBody::AuthorizeBoundedRepair { .. } | CommandBody::RequestChanges { .. } => {
             plan.repair_count = mission.attempt.repair_count.saturating_add(1);

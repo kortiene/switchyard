@@ -93,7 +93,7 @@ fn revised_plan_resume_ignores_prior_planning_acknowledgment() {
     let mission = &created.mission_id;
     admit(&mut host, mission, CommandBody::StartPlanning);
     deliver(&mut host, mission);
-    let first = plan_note(&host, mission, "first plan");
+    let first = plan_note("first plan");
     notify(&mut host, mission, first);
     let revised = admit(
         &mut host,
@@ -140,7 +140,7 @@ fn second_repair_resume_ignores_prior_repair_acknowledgment() {
     let mission = &created.mission_id;
     admit(&mut host, mission, CommandBody::StartPlanning);
     deliver(&mut host, mission);
-    let note = plan_note(&host, mission, "plan");
+    let note = plan_note("plan");
     notify(&mut host, mission, note);
     let digest = stored_plan_digest(&host, mission);
     admit(

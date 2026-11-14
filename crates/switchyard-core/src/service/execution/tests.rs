@@ -49,22 +49,15 @@ fn setup() -> (tempfile::TempDir, Host, ExecutionRequest) {
         .unwrap();
     command(&mut host, &m.mission_id, CommandBody::StartPlanning);
     host.dispatch_pending(&m.mission_id).unwrap();
-    let snap = host.snapshot(&m.mission_id).unwrap();
-    let digest = crate::bound_plan_digest(
-        "plan",
-        &snap.attempt_id,
-        snap.frozen_inputs_json.as_deref().unwrap(),
-    )
-    .unwrap();
     host.apply_notification(
         &m.mission_id,
         RuntimeNotification::PlanCompleted {
             plan: "plan".into(),
-            digest: digest.clone(),
             quiescent: true,
         },
     )
     .unwrap();
+    let digest = host.snapshot(&m.mission_id).unwrap().plan_digest.unwrap();
     command(
         &mut host,
         &m.mission_id,

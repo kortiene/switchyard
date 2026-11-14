@@ -1,6 +1,9 @@
 //! S4-A slice 172b: persist the bound plan digest and admit approval against it.
-use super::fixtures::{admit, admit_expect, create, deliver, notify, open_world, plan_note};
+use super::fixtures::{
+    admit, admit_expect, create, deliver, notify, open_world, pass_note, plan_note,
+};
 use crate::canonical::payload_hash;
+use crate::execution::RuntimeNotification;
 use crate::{AdmitRequest, CommandBody, CommandOrigin, EffectProof, Phase};
 use serde_json::Value;
 
@@ -70,7 +73,7 @@ fn plan_completed_stores_the_bound_digest_on_the_attempt() {
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
     let frozen = host.snapshot(&created.mission_id).unwrap();
     let plan = "implement the ledger";
-    let note = plan_note(&host, &created.mission_id, plan);
+    let note = plan_note(plan);
     assert_eq!(
         notify(&mut host, &created.mission_id, note),
         Phase::AwaitingPlanApproval
@@ -93,6 +96,7 @@ fn plan_completed_stores_the_bound_digest_on_the_attempt() {
     let (body, attempt_digest) = attempt_plan(&world.db, &stored.attempt_id);
     assert_eq!(body.as_deref(), Some(plan));
     assert_eq!(attempt_digest.as_deref(), Some(digest.as_str()));
+    assert_eq!(legacy_mission_plan(&world.db, &created.mission_id), None);
     assert_eq!(stored.frozen_inputs_json, frozen.frozen_inputs_json);
     assert_eq!(stored.max_plan_revisions, 3);
     assert_eq!(stored.revision, before.revision + 2);
@@ -281,7 +285,7 @@ fn revised_plan_invalidates_the_previous_digest() {
     let created = create(&mut host, &world.repo, 2);
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
     deliver(&mut host, &created.mission_id);
-    let first = plan_note(&host, &created.mission_id, "first plan");
+    let first = plan_note("first plan");
     notify(&mut host, &created.mission_id, first);
     let old = host
         .snapshot(&created.mission_id)
@@ -316,7 +320,7 @@ fn revised_plan_invalidates_the_previous_digest() {
     assert_eq!(decision.digest.as_deref(), Some(old.as_str()));
     assert_eq!(attempt_plan(&world.db, &revised.attempt_id), (None, None));
 
-    let second = plan_note(&host, &created.mission_id, "second plan");
+    let second = plan_note("second plan");
     notify(&mut host, &created.mission_id, second);
     let current = host
         .snapshot(&created.mission_id)
@@ -345,7 +349,7 @@ fn revision_cap_is_exactly_the_frozen_max_and_the_other_exits_remain() {
         admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
         deliver(&mut host, &created.mission_id);
         for n in 1..=3 {
-            let note = plan_note(&host, &created.mission_id, &format!("plan {n}"));
+            let note = plan_note(&format!("plan {n}"));
             notify(&mut host, &created.mission_id, note);
             admit(
                 &mut host,
@@ -361,7 +365,7 @@ fn revision_cap_is_exactly_the_frozen_max_and_the_other_exits_remain() {
                 n
             );
         }
-        let note = plan_note(&host, &created.mission_id, "final plan");
+        let note = plan_note("final plan");
         notify(&mut host, &created.mission_id, note);
         let at_cap = host.snapshot(&created.mission_id).unwrap();
         assert_eq!(at_cap.plan_revision_count, 3);
@@ -428,7 +432,7 @@ fn revise_replay_after_restart_does_not_double_count() {
     let mission = created.mission_id.clone();
     admit(&mut host, &mission, CommandBody::StartPlanning);
     deliver(&mut host, &mission);
-    let note = plan_note(&host, &mission, "plan");
+    let note = plan_note("plan");
     notify(&mut host, &mission, note);
     let revision = host.snapshot(&mission).unwrap().revision;
     let command_id = "c-revise-once".to_string();
@@ -541,7 +545,7 @@ fn approve_and_recovery_stay_refused_after_frozen_input_drift() {
     let created = create(&mut host, &world.repo, 2);
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
     deliver(&mut host, &created.mission_id);
-    let note = plan_note(&host, &created.mission_id, "plan");
+    let note = plan_note("plan");
     notify(&mut host, &created.mission_id, note);
     let digest = host
         .snapshot(&created.mission_id)
@@ -583,4 +587,166 @@ fn approve_and_recovery_stay_refused_after_frozen_input_drift() {
     let still = host.snapshot(&created.mission_id).unwrap();
     assert_eq!(still.phase, Phase::NeedsAttention);
     assert_eq!(still.revision, attention.revision);
+}
+
+#[test]
+fn plan_completed_stores_the_host_digest_and_ignores_the_observation_digest() {
+    let world = open_world();
+    let mut host = crate::Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    host.apply_notification_json(
+        &created.mission_id,
+        &serde_json::json!({
+            "kind": "plan_completed",
+            "plan": "do the work",
+            "digest": "sha256:not-a-gate",
+            "quiescent": true
+        }),
+    )
+    .unwrap();
+    let stored = host.snapshot(&created.mission_id).unwrap();
+    let digest = crate::bound_plan_digest(
+        "do the work",
+        &stored.attempt_id,
+        stored.frozen_inputs_json.as_deref().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored.plan_digest.as_deref(), Some(digest.as_str()));
+    assert_ne!(stored.plan_digest.as_deref(), Some("sha256:not-a-gate"));
+    assert_eq!(legacy_mission_plan(&world.db, &created.mission_id), None);
+}
+
+#[test]
+fn tampered_plan_body_routes_to_plan_digest_mismatch_and_cancel_still_works() {
+    let world = open_world();
+    let mut host = crate::Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    deliver(&mut host, &created.mission_id);
+    let note = plan_note("plan");
+    notify(&mut host, &created.mission_id, note);
+    let stored = host.snapshot(&created.mission_id).unwrap();
+    rusqlite::Connection::open(&world.db)
+        .unwrap()
+        .execute(
+            "UPDATE attempts SET plan_body = 'tampered plan' WHERE id = ?1",
+            [&stored.attempt_id],
+        )
+        .unwrap();
+    let refused = approve(
+        &mut host,
+        &created.mission_id,
+        stored.plan_digest.as_deref().unwrap(),
+        "operator",
+    )
+    .unwrap_err();
+    assert_eq!(refused.category(), "guard_failed");
+    assert_ne!(refused.category(), "stale_plan_digest");
+    let attention = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(attention.phase, Phase::NeedsAttention);
+    assert_eq!(
+        attention.attention_reason.as_deref(),
+        Some("plan_digest_mismatch")
+    );
+    assert!(
+        attention
+            .commands
+            .iter()
+            .all(|command| command.kind != "approve_plan")
+    );
+    let recovery = admit_expect(
+        &mut host,
+        &created.mission_id,
+        CommandBody::ExplicitRecovery {
+            expected_target: attention.permitted_recovery_target.unwrap(),
+            ownership_proven: true,
+            effects: EffectProof::Reconciled,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(recovery.category(), "guard_failed");
+    assert!(
+        recovery
+            .to_string()
+            .contains("does not match the plan body"),
+        "{recovery}"
+    );
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().phase,
+        Phase::NeedsAttention
+    );
+    admit(&mut host, &created.mission_id, CommandBody::Cancel);
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().phase,
+        Phase::Cancelling
+    );
+}
+
+#[test]
+fn reject_outside_plan_approval_records_no_plan_digest() {
+    let world = open_world();
+    let mut host = crate::Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    deliver(&mut host, &created.mission_id);
+    let note = plan_note("plan");
+    notify(&mut host, &created.mission_id, note);
+    let plan_digest = host
+        .snapshot(&created.mission_id)
+        .unwrap()
+        .plan_digest
+        .unwrap();
+    approve(&mut host, &created.mission_id, &plan_digest, "operator").unwrap();
+    assert_eq!(
+        notify(
+            &mut host,
+            &created.mission_id,
+            RuntimeNotification::ImplementationSettled { quiescent: true }
+        ),
+        Phase::Verifying
+    );
+    let during_verification = admit_expect(
+        &mut host,
+        &created.mission_id,
+        CommandBody::Reject {
+            rationale: "not from verification".into(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(during_verification.category(), "illegal_transition");
+    assert!(
+        host.decisions(&created.mission_id)
+            .unwrap()
+            .iter()
+            .all(|decision| decision.action != "reject")
+    );
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().phase,
+        Phase::Verifying
+    );
+
+    let content = host.snapshot(&created.mission_id).unwrap().content_digest;
+    assert_eq!(
+        notify(&mut host, &created.mission_id, pass_note(&content)),
+        Phase::AwaitingReview
+    );
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::Reject {
+            rationale: "review says no".into(),
+        },
+    );
+    let rejected = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(rejected.phase, Phase::Rejected);
+    let decision = host
+        .decisions(&created.mission_id)
+        .unwrap()
+        .into_iter()
+        .find(|decision| decision.action == "reject")
+        .unwrap();
+    assert_eq!(decision.digest, None);
+    assert_ne!(decision.digest.as_deref(), Some(plan_digest.as_str()));
+    assert_eq!(decision.actor, "operator");
 }

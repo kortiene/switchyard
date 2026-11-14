@@ -613,9 +613,11 @@ impl Store {
         } else {
             "NULL, NULL"
         };
-        // v12 plan columns are authoritative and are not backfilled. Older
-        // ledgers still expose the mission columns, which may hold a
-        // plan-text hash. That hash is not an approval target.
+        // v12 reads the attempt only. `missions.plan_digest` and
+        // `missions.plan_body` stay in the schema and are deprecated: this
+        // host does not read or write them. A ledger that has not been
+        // migrated yet has no attempt columns, so inspection still sees the
+        // historical mission values.
         let plan = if version >= 12 {
             "a.plan_digest, a.plan_body"
         } else {
@@ -859,11 +861,9 @@ impl Store {
                     permitted_recovery_target = ?6,
                     reconcile_only = ?7,
                     content_digest = ?8,
-                    plan_digest = CASE WHEN ?9 THEN ?10 ELSE plan_digest END,
-                    plan_body = CASE WHEN ?9 THEN ?11 ELSE plan_body END,
-                    reviewed_digest = ?12,
-                    updated_at = ?13
-                 WHERE id = ?14 AND revision = ?15",
+                    reviewed_digest = ?9,
+                    updated_at = ?10
+                 WHERE id = ?11 AND revision = ?12",
                 params![
                     i64_from_u64(command.resulting_revision)?,
                     plan.next.as_str(),
@@ -874,9 +874,6 @@ impl Store {
                     opt_phase(plan.permitted_recovery_target),
                     i64::from(plan.reconcile_only),
                     plan.content_digest,
-                    i64::from(plan.writes_plan),
-                    plan.plan_digest,
-                    plan.plan_body,
                     plan.reviewed_digest,
                     now_ms(),
                     command.mission_id,

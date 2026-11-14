@@ -88,7 +88,7 @@ fn needs_attention_recovery_repair_limits_and_terminal_identity() {
     let attempt = created.attempt_id.clone();
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
     host.dispatch_pending(&created.mission_id).unwrap();
-    let note = plan_note(&host, &created.mission_id, "plan");
+    let note = plan_note("plan");
     notify(&mut host, &created.mission_id, note);
     let digest = stored_plan_digest(&host, &created.mission_id);
     admit(
@@ -372,7 +372,7 @@ fn resume_enqueues_a_runtime_continuation_for_withheld_work() {
     let created = create(&mut host, &world.repo, 2);
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
     deliver(&mut host, &created.mission_id);
-    let note = plan_note(&host, &created.mission_id, "plan");
+    let note = plan_note("plan");
     notify(&mut host, &created.mission_id, note);
     let digest = stored_plan_digest(&host, &created.mission_id);
     admit(
@@ -406,7 +406,7 @@ fn resume_enqueues_a_runtime_continuation_for_withheld_work() {
     let created = create(&mut host, &world.repo, 2);
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
     deliver(&mut host, &created.mission_id);
-    let note = plan_note(&host, &created.mission_id, "plan");
+    let note = plan_note("plan");
     notify(&mut host, &created.mission_id, note);
     let digest = stored_plan_digest(&host, &created.mission_id);
     admit(

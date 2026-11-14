@@ -122,8 +122,8 @@ fn cli_confined_pi_runs_composed_s3_acceptance_scenario() {
     let digest = switchyard_core::bound_plan_digest("fixture plan", attempt, &frozen).unwrap();
     let conn = rusqlite::Connection::open(&db).unwrap();
     conn.execute(
-        "UPDATE missions SET phase='awaiting_plan_approval', plan_body='fixture plan', plan_digest=?1 WHERE id=?2",
-        rusqlite::params![digest, mission],
+        "UPDATE missions SET phase='awaiting_plan_approval' WHERE id=?1",
+        [mission],
     )
     .unwrap();
     conn.execute(

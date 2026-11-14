@@ -114,20 +114,14 @@ impl World {
             .unwrap();
         admit(&mut host, &mission_id, CommandBody::StartPlanning);
         host.dispatch_pending(&mission_id).unwrap();
-        let snap = host.snapshot(&mission_id).unwrap();
-        let digest = switchyard_core::bound_plan_digest(
-            "plan",
-            &snap.attempt_id,
-            snap.frozen_inputs_json.as_deref().unwrap(),
-        )
-        .unwrap();
         host.apply_notification(
             &mission_id,
             parse_notification(&json!({"kind":"plan_completed",
-            "plan":"plan","digest":digest,"quiescent":true}))
+            "plan":"plan","quiescent":true}))
             .unwrap(),
         )
         .unwrap();
+        let digest = host.snapshot(&mission_id).unwrap().plan_digest.unwrap();
         admit(
             &mut host,
             &mission_id,

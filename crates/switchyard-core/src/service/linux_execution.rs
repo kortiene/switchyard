@@ -1716,22 +1716,19 @@ mod os {
         };
         admit(&mut host, crate::CommandBody::StartPlanning);
         host.dispatch_pending(&created.mission_id).unwrap();
-        let snap = host.snapshot(&created.mission_id).unwrap();
-        let digest = crate::bound_plan_digest(
-            "plan",
-            &snap.attempt_id,
-            snap.frozen_inputs_json.as_deref().unwrap(),
-        )
-        .unwrap();
         host.apply_notification(
             &created.mission_id,
             RuntimeNotification::PlanCompleted {
                 plan: "plan".into(),
-                digest: digest.clone(),
                 quiescent: true,
             },
         )
         .unwrap();
+        let digest = host
+            .snapshot(&created.mission_id)
+            .unwrap()
+            .plan_digest
+            .unwrap();
         admit(
             &mut host,
             crate::CommandBody::ApprovePlan {
@@ -2108,22 +2105,19 @@ mod os {
         };
         admit(&mut host, crate::CommandBody::StartPlanning);
         host.dispatch_pending(&created.mission_id).unwrap();
-        let snap = host.snapshot(&created.mission_id).unwrap();
-        let digest = crate::bound_plan_digest(
-            "plan",
-            &snap.attempt_id,
-            snap.frozen_inputs_json.as_deref().unwrap(),
-        )
-        .unwrap();
         host.apply_notification(
             &created.mission_id,
             RuntimeNotification::PlanCompleted {
                 plan: "plan".into(),
-                digest: digest.clone(),
                 quiescent: true,
             },
         )
         .unwrap();
+        let digest = host
+            .snapshot(&created.mission_id)
+            .unwrap()
+            .plan_digest
+            .unwrap();
         admit(
             &mut host,
             crate::CommandBody::ApprovePlan {

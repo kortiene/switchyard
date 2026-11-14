@@ -350,6 +350,9 @@ pub enum AttentionReason {
     /// Stored attempt inputs no longer match the freeze. The snapshot is not
     /// rewritten; a successor attempt is a later slice.
     FrozenInputDrift,
+    /// `attempts.plan_digest` does not match the digest recomputed from
+    /// `attempts.plan_body` and the stored freeze. The freeze is not rewritten.
+    PlanDigestMismatch,
 }
 
 impl AttentionReason {
@@ -363,6 +366,7 @@ impl AttentionReason {
             Self::FailedStop => "failed_stop",
             Self::ExecutionUncertain => "execution_uncertain",
             Self::FrozenInputDrift => "frozen_input_drift",
+            Self::PlanDigestMismatch => "plan_digest_mismatch",
         }
     }
 }
@@ -386,6 +390,7 @@ impl FromStr for AttentionReason {
             "failed_stop" => Ok(Self::FailedStop),
             "execution_uncertain" => Ok(Self::ExecutionUncertain),
             "frozen_input_drift" => Ok(Self::FrozenInputDrift),
+            "plan_digest_mismatch" => Ok(Self::PlanDigestMismatch),
             other => Err(Error::guard(format!("unknown attention reason {other}"))),
         }
     }
@@ -530,7 +535,6 @@ pub enum CommandBody {
     StartPlanning,
     PlanCompleted {
         plan: String,
-        digest: String,
         quiescent: bool,
     },
     RequestRevisedPlan {
@@ -645,13 +649,8 @@ impl CommandBody {
             | Self::ConfirmCancelled => {
                 serde_json::json!({})
             }
-            Self::PlanCompleted {
-                plan,
-                digest,
-                quiescent,
-            } => serde_json::json!({
+            Self::PlanCompleted { plan, quiescent } => serde_json::json!({
                 "plan": plan,
-                "digest": digest,
                 "quiescent": quiescent,
             }),
             Self::RequestRevisedPlan { feedback } => serde_json::json!({"feedback": feedback}),
@@ -754,7 +753,11 @@ pub struct MissionRecord {
     pub permitted_recovery_target: Option<Phase>,
     pub reconcile_only: bool,
     pub content_digest: String,
+    /// Current plan digest. On ledger v12 this is `attempts.plan_digest`.
+    /// `missions.plan_digest` is deprecated and unused.
     pub plan_digest: Option<String>,
+    /// Current plan text. On ledger v12 this is `attempts.plan_body`.
+    /// `missions.plan_body` is deprecated and unused.
     pub plan_body: Option<String>,
     pub reviewed_digest: Option<String>,
     pub successor_of_mission_id: Option<String>,

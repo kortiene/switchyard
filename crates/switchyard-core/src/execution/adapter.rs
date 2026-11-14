@@ -869,7 +869,6 @@ mod tests {
             RuntimeAdapter::Fake(FakeRuntime::open(&dir.path().join("fake-runtime.json")).unwrap());
         let plan = CommandBody::PlanCompleted {
             plan: "do the work".into(),
-            digest: "sha256:abc".into(),
             quiescent: true,
         };
         fake.validate_admission(&CommandBody::ConfirmStopped, CommandOrigin::Operator)

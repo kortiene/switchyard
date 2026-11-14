@@ -128,7 +128,7 @@ fn world_approved_for_drift(host: &mut Host, world: &World) -> crate::MissionSna
     let created = create(host, &world.repo, 2);
     admit(host, &created.mission_id, CommandBody::StartPlanning);
     host.dispatch_pending(&created.mission_id).unwrap();
-    let note = plan_note(host, &created.mission_id, "plan");
+    let note = plan_note("plan");
     notify(host, &created.mission_id, note);
     let digest = stored_plan_digest(host, &created.mission_id);
     admit(
@@ -188,7 +188,7 @@ fn terminal_missions_reject_content_writes() {
     let created = create(&mut host, &world.repo, 2);
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
     host.dispatch_pending(&created.mission_id).unwrap();
-    let note = plan_note(&host, &created.mission_id, "plan");
+    let note = plan_note("plan");
     notify(&mut host, &created.mission_id, note);
     admit(
         &mut host,
@@ -278,7 +278,7 @@ fn paused_review_targets_without_pass_evidence_resume_into_verifying() {
         let created = create(&mut host, &world.repo, 2);
         admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
         deliver(&mut host, &created.mission_id);
-        let note = plan_note(&host, &created.mission_id, "plan");
+        let note = plan_note("plan");
         notify(&mut host, &created.mission_id, note);
         let digest = stored_plan_digest(&host, &created.mission_id);
         admit(
@@ -407,7 +407,7 @@ fn terminal_verification_notifications_do_not_write_evidence() {
     let created = create(&mut host, &world.repo, 2);
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
     deliver(&mut host, &created.mission_id);
-    let note = plan_note(&host, &created.mission_id, "plan");
+    let note = plan_note("plan");
     notify(&mut host, &created.mission_id, note);
     admit(
         &mut host,

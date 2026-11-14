@@ -120,8 +120,8 @@ impl World {
             switchyard_core::bound_plan_digest("fixture plan", &m.attempt_id, &frozen).unwrap();
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute(
-            "UPDATE missions SET phase='awaiting_plan_approval', plan_body='fixture plan', plan_digest=?1 WHERE id=?2",
-            rusqlite::params![digest, m.mission_id],
+            "UPDATE missions SET phase='awaiting_plan_approval' WHERE id=?1",
+            [&m.mission_id],
         )
         .unwrap();
         conn.execute(

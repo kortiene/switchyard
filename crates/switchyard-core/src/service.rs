@@ -186,6 +186,7 @@ impl MissionSnapshot {
             "planRevisionCount": self.plan_revision_count,
             "maxPlanRevisions": self.max_plan_revisions,
             "contentDigest": self.content_digest,
+            // Attempt plan digest. missions.plan_digest is deprecated and unused.
             "planDigest": self.plan_digest,
             "reviewedDigest": self.reviewed_digest,
             "resumeTarget": self.resume_target.map(|phase| phase.as_str()),
@@ -646,6 +647,16 @@ impl Host {
             }
             return Err(Error::guard(
                 "frozen attempt inputs drifted; the command was not applied",
+            ));
+        }
+        if self.plan_digest_mismatched(&mission)?
+            && !crate::freeze::drift_exit(mission.phase, request.body.kind())
+        {
+            if mission.phase != Phase::NeedsAttention && !mission.phase.is_terminal() {
+                self.record_plan_digest_mismatch(&mission)?;
+            }
+            return Err(Error::guard(
+                "stored plan digest does not match the plan body; the command was not applied",
             ));
         }
         if is_runtime_observation(request.body.kind())
@@ -1360,25 +1371,14 @@ impl Host {
         let mission = self.store.load_mission(mission_id)?;
         match notification {
             RuntimeNotification::Idle => Ok(unchanged(&mission)),
-            RuntimeNotification::PlanCompleted {
-                plan,
-                digest,
-                quiescent,
-            } => {
-                if mission.plan_digest.as_deref() == Some(digest.as_str())
-                    && mission.phase != Phase::Planning
+            RuntimeNotification::PlanCompleted { plan, quiescent } => {
+                if mission.phase != Phase::Planning
+                    && mission.plan_body.as_deref() == Some(plan.as_str())
                 {
                     return Ok(unchanged(&mission));
                 }
-                self.admit_observation(
-                    &mission,
-                    CommandBody::PlanCompleted {
-                        plan,
-                        digest,
-                        quiescent,
-                    },
-                )
-                .map(NotifyOutcome::Transition)
+                self.admit_observation(&mission, CommandBody::PlanCompleted { plan, quiescent })
+                    .map(NotifyOutcome::Transition)
             }
             RuntimeNotification::ImplementationSettled { quiescent } => {
                 if mission.phase == Phase::Verifying
@@ -1625,6 +1625,24 @@ impl Host {
         Ok(stored != &crate::freeze::frozen_canonical(mission)?)
     }
 
+    /// Stored attempt digest versus the digest of `plan_body` and the freeze.
+    ///
+    /// Both absent means no plan yet. A freeze is required to recompute; a
+    /// NULL freeze is `frozen_inputs_missing`, not this check.
+    fn plan_digest_mismatched(&self, mission: &MissionRecord) -> Result<bool> {
+        let Some(frozen) = mission.attempt.frozen_inputs_json.as_deref() else {
+            return Ok(false);
+        };
+        match (mission.plan_body.as_deref(), mission.plan_digest.as_deref()) {
+            (None, None) => Ok(false),
+            (Some(body), Some(stored)) => {
+                let current = crate::bound_plan_digest(body, &mission.attempt.id, frozen)?;
+                Ok(stored != current)
+            }
+            _ => Ok(true),
+        }
+    }
+
     /// Legal `detect_uncertainty` edge. The freeze snapshot is left unchanged.
     fn record_frozen_input_drift(&mut self, mission: &MissionRecord) -> Result<AdmitResult> {
         self.admit_checked(
@@ -1637,6 +1655,25 @@ impl Host {
                 origin: CommandOrigin::HostSupervisor,
                 body: CommandBody::DetectUncertainty {
                     reason: AttentionReason::FrozenInputDrift,
+                    content_digest: None,
+                },
+            },
+            None,
+            true,
+        )
+    }
+
+    fn record_plan_digest_mismatch(&mut self, mission: &MissionRecord) -> Result<AdmitResult> {
+        self.admit_checked(
+            AdmitRequest {
+                command_id: None,
+                mission_id: mission.id.clone(),
+                attempt_id: Some(mission.attempt.id.clone()),
+                expected_revision: mission.revision,
+                actor: "host".into(),
+                origin: CommandOrigin::HostSupervisor,
+                body: CommandBody::DetectUncertainty {
+                    reason: AttentionReason::PlanDigestMismatch,
                     content_digest: None,
                 },
             },

@@ -122,16 +122,9 @@ pub(super) fn notify(host: &mut Host, mission: &str, notification: RuntimeNotifi
     outcome.phase()
 }
 
-pub(super) fn plan_note(host: &Host, mission: &str, plan: &str) -> RuntimeNotification {
-    let snap = host.snapshot(mission).unwrap();
+pub(super) fn plan_note(plan: &str) -> RuntimeNotification {
     RuntimeNotification::PlanCompleted {
         plan: plan.into(),
-        digest: crate::bound_plan_digest(
-            plan,
-            &snap.attempt_id,
-            snap.frozen_inputs_json.as_deref().expect("frozen inputs"),
-        )
-        .unwrap(),
         quiescent: true,
     }
 }
@@ -165,7 +158,7 @@ pub(super) fn drive_to_publishing(host: &mut Host, mission: &str) -> String {
     admit(host, mission, CommandBody::StartPlanning);
     host.dispatch_pending(mission).unwrap();
     let plan = "implement the ledger";
-    let note = plan_note(host, mission, plan);
+    let note = plan_note(plan);
     assert_eq!(notify(host, mission, note), Phase::AwaitingPlanApproval);
     let digest = stored_plan_digest(host, mission);
     admit(

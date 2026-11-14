@@ -89,6 +89,8 @@ pub struct MissionCard {
     pub plan_revision_count: u32,
     pub max_plan_revisions: u32,
     pub content_digest: String,
+    /// Attempt plan digest (`attempts.plan_digest` via the host snapshot).
+    /// `missions.plan_digest` is deprecated and is not read.
     pub plan_digest: Option<String>,
     /// The digest a human approved. The review panel compares this against
     /// `content_digest`, because approving something other than the exact
