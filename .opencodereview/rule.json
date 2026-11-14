@@ -1,0 +1,13 @@
+{
+  "include": [
+    "**/*_test.rs",
+    "**/tests/**/*.rs"
+  ],
+  "rules": [
+    {
+      "path": "**/*",
+      "rule": "Switchyard host/runtime boundary. Apply every check below, on top of the built-in language rule:\n- Verification, approval, and publication or landing are Host operations.\n- The agent runtime gets no workflow tools. It must not gain open-PR, run-verify, approve, or land tools. It only edits files and runs commands through the Rust ExecutionEnv.\n- Uncertainty about effects stays a Host fact and is never resolved by the adapter.\n- Fail closed on unknown methods, stale bindings, or missing facts.\n- FakeRuntime stays the default. Nothing in the change may enable Pi or a live provider.",
+      "merge_system_rule": true
+    }
+  ]
+}
