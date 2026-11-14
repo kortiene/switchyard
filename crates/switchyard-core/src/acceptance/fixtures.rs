@@ -1,5 +1,4 @@
 use crate::execution::RuntimeNotification;
-use crate::policy::plan_digest_for;
 use crate::{AdmitRequest, CommandBody, CommandOrigin, Error, Host, Phase};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -123,12 +122,25 @@ pub(super) fn notify(host: &mut Host, mission: &str, notification: RuntimeNotifi
     outcome.phase()
 }
 
-pub(super) fn plan_note(plan: &str) -> RuntimeNotification {
+pub(super) fn plan_note(host: &Host, mission: &str, plan: &str) -> RuntimeNotification {
+    let snap = host.snapshot(mission).unwrap();
     RuntimeNotification::PlanCompleted {
         plan: plan.into(),
-        digest: plan_digest_for(plan).unwrap(),
+        digest: crate::bound_plan_digest(
+            plan,
+            &snap.attempt_id,
+            snap.frozen_inputs_json.as_deref().expect("frozen inputs"),
+        )
+        .unwrap(),
         quiescent: true,
     }
+}
+
+pub(super) fn stored_plan_digest(host: &Host, mission: &str) -> String {
+    host.snapshot(mission)
+        .unwrap()
+        .plan_digest
+        .expect("current plan digest")
 }
 
 pub(super) fn pass_note(digest: &str) -> RuntimeNotification {
@@ -153,15 +165,14 @@ pub(super) fn drive_to_publishing(host: &mut Host, mission: &str) -> String {
     admit(host, mission, CommandBody::StartPlanning);
     host.dispatch_pending(mission).unwrap();
     let plan = "implement the ledger";
-    assert_eq!(
-        notify(host, mission, plan_note(plan)),
-        Phase::AwaitingPlanApproval
-    );
+    let note = plan_note(host, mission, plan);
+    assert_eq!(notify(host, mission, note), Phase::AwaitingPlanApproval);
+    let digest = stored_plan_digest(host, mission);
     admit(
         host,
         mission,
         CommandBody::ApprovePlan {
-            plan_digest: plan_digest_for(plan).unwrap(),
+            plan_digest: digest,
         },
     );
     assert_eq!(

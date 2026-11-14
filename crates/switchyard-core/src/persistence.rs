@@ -26,7 +26,7 @@ pub(crate) mod linux_execution;
 mod pi_host;
 mod workspace;
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 const VERIFIER_JSON: &str = r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}"#;
 const ENVIRONMENT_JSON: &str = r#"{"confinement":"deferred_to_s3","host":"single"}"#;
@@ -71,6 +71,8 @@ pub(crate) struct StoredDecision {
     pub action: String,
     pub digest: Option<String>,
     pub command_id: Option<String>,
+    pub actor: String,
+    pub invalidated: bool,
 }
 
 pub struct CreatedMission {
@@ -432,6 +434,31 @@ impl Store {
                 .map_err(Error::storage)?;
             tx.commit().map_err(Error::storage)?;
         }
+        if current < 12 {
+            // Additive only. Existing rows keep NULL plan columns. There is
+            // no backfill from missions.plan_digest, which may be a pre-172b
+            // plan-text hash and is not an approval target.
+            let tx = self.immediate()?;
+            let plan_column: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('attempts') WHERE name = 'plan_digest'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Error::storage)?;
+            if plan_column == 0 {
+                tx.execute_batch(include_str!("migrations/012_attempt_plan.sql"))
+                    .map_err(Error::storage)?;
+            }
+            tx.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (12, ?1)",
+                [now_ms()],
+            )
+            .map_err(Error::storage)?;
+            tx.execute_batch("PRAGMA user_version = 12;")
+                .map_err(Error::storage)?;
+            tx.commit().map_err(Error::storage)?;
+        }
         Ok(())
     }
 
@@ -586,9 +613,17 @@ impl Store {
         } else {
             "NULL, NULL"
         };
+        // v12 plan columns are authoritative and are not backfilled. Older
+        // ledgers still expose the mission columns, which may hold a
+        // plan-text hash. That hash is not an approval target.
+        let plan = if version >= 12 {
+            "a.plan_digest, a.plan_body"
+        } else {
+            "m.plan_digest, m.plan_body"
+        };
         let mut stmt = self
             .conn
-            .prepare(&mission_sql(freeze))
+            .prepare(&mission_sql(freeze, plan))
             .map_err(Error::storage)?;
         collect_mission(&mut stmt, mission_id)
     }
@@ -613,7 +648,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT action, digest, command_id FROM decisions
+                "SELECT action, digest, command_id, actor, invalidated FROM decisions
                  WHERE mission_id = ?1 ORDER BY created_at, id",
             )
             .map_err(Error::storage)?;
@@ -623,6 +658,8 @@ impl Store {
                     action: row.get(0)?,
                     digest: row.get(1)?,
                     command_id: row.get(2)?,
+                    actor: row.get(3)?,
+                    invalidated: row.get::<_, i64>(4)? != 0,
                 })
             })
             .map_err(Error::storage)?;
@@ -822,11 +859,11 @@ impl Store {
                     permitted_recovery_target = ?6,
                     reconcile_only = ?7,
                     content_digest = ?8,
-                    plan_digest = ?9,
-                    plan_body = ?10,
-                    reviewed_digest = ?11,
-                    updated_at = ?12
-                 WHERE id = ?13 AND revision = ?14",
+                    plan_digest = CASE WHEN ?9 THEN ?10 ELSE plan_digest END,
+                    plan_body = CASE WHEN ?9 THEN ?11 ELSE plan_body END,
+                    reviewed_digest = ?12,
+                    updated_at = ?13
+                 WHERE id = ?14 AND revision = ?15",
                 params![
                     i64_from_u64(command.resulting_revision)?,
                     plan.next.as_str(),
@@ -837,6 +874,7 @@ impl Store {
                     opt_phase(plan.permitted_recovery_target),
                     i64::from(plan.reconcile_only),
                     plan.content_digest,
+                    i64::from(plan.writes_plan),
                     plan.plan_digest,
                     plan.plan_body,
                     plan.reviewed_digest,
@@ -862,6 +900,17 @@ impl Store {
             ],
         )
         .map_err(Error::storage)?;
+        if plan.writes_plan {
+            let changed = tx
+                .execute(
+                    "UPDATE attempts SET plan_body = ?1, plan_digest = ?2 WHERE id = ?3",
+                    params![plan.plan_body, plan.plan_digest, command.attempt_id],
+                )
+                .map_err(Error::storage)?;
+            if changed != 1 {
+                return Err(Error::NotFound);
+            }
+        }
         if plan.invalidate_evidence {
             tx.execute(
                 "UPDATE evidence SET invalidated = 1 WHERE mission_id = ?1 AND invalidated = 0",
@@ -1045,6 +1094,44 @@ impl Store {
                 detail: format!("command {command_id} could not be superseded"),
             });
         }
+        tx.commit().map_err(Error::storage)?;
+        Ok(())
+    }
+
+    /// Host refusal that stores a command receipt and does not change mission state.
+    pub fn insert_refused_command(
+        &mut self,
+        command: &NewCommand,
+        receipt_json: &str,
+    ) -> Result<()> {
+        let tx = self.immediate()?;
+        let now = now_ms();
+        tx.execute(
+            "INSERT INTO commands(
+                id, mission_id, attempt_id, seq, kind, payload_canonical, payload_hash, expected_revision,
+                resulting_revision, state, request_id, origin, runtime_receipt_json, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, ?3,
+                (SELECT COALESCE(MAX(seq), 0) + 1 FROM commands),
+                ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13
+             )",
+            params![
+                command.id,
+                command.mission_id,
+                command.attempt_id,
+                command.kind.as_str(),
+                command.payload_canonical,
+                command.payload_hash,
+                i64_from_u64(command.expected_revision)?,
+                i64_from_u64(command.resulting_revision)?,
+                command.state.as_str(),
+                command.request_id,
+                command.origin.as_str(),
+                receipt_json,
+                now
+            ],
+        )
+        .map_err(Error::storage)?;
         tx.commit().map_err(Error::storage)?;
         Ok(())
     }
@@ -1566,12 +1653,12 @@ fn insert_decision(tx: &Transaction<'_>, decision: DecisionWrite<'_>) -> Result<
     Ok(())
 }
 
-fn mission_sql(freeze_columns: &str) -> String {
+fn mission_sql(freeze_columns: &str, plan_columns: &str) -> String {
     format!(
         "SELECT
             m.id, m.revision, m.phase, m.objective, m.repo_identity_json, m.source_issue_json,
             m.resume_target, m.prior_phase, m.attention_reason, m.permitted_recovery_target,
-            m.reconcile_only, m.content_digest, m.plan_digest, m.plan_body, m.reviewed_digest,
+            m.reconcile_only, m.content_digest, {plan_columns}, m.reviewed_digest,
             m.successor_of_mission_id, m.created_at, m.updated_at,
             t.id, t.acceptance_criteria,
             a.id, a.task_id, a.base_sha, a.session_id, a.runtime_config_json, a.policy_json,
@@ -1603,7 +1690,10 @@ fn collect_mission(stmt: &mut rusqlite::Statement<'_>, mission_id: &str) -> Resu
 }
 
 fn mission_in_tx(tx: &Transaction<'_>, mission_id: &str) -> Result<MissionRecord> {
-    let sql = mission_sql("a.frozen_inputs_json, a.owner_generation");
+    let sql = mission_sql(
+        "a.frozen_inputs_json, a.owner_generation",
+        "a.plan_digest, a.plan_body",
+    );
     let mut stmt = tx.prepare(&sql).map_err(Error::storage)?;
     collect_mission(&mut stmt, mission_id)
 }
@@ -2092,7 +2182,7 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
             .unwrap();
         assert_eq!(foreign_keys, 1);
-        assert_eq!(user_version(&store.conn).unwrap(), 11);
+        assert_eq!(user_version(&store.conn).unwrap(), 12);
         let index: String = store
             .conn
             .query_row(
@@ -2155,6 +2245,74 @@ mod tests {
                 ("c-old", "superseded"),
             ]
         );
+    }
+
+    #[test]
+    fn v11_ledger_keeps_its_plan_text_hash_and_v12_does_not_backfill_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mission.sqlite");
+        let mut store = Store::open_writer(&db).unwrap();
+        store.migrate().unwrap();
+        store.create_mission(sample_mission()).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE missions SET phase = 'awaiting_plan_approval', plan_body = 'legacy plan',
+                 plan_digest = 'sha256:legacy-text' WHERE id = 'm-1'",
+                [],
+            )
+            .unwrap();
+        drop(store);
+
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             CREATE TABLE attempts_v11 AS SELECT
+                id, mission_id, task_id, base_sha, session_id, runtime_config_json, policy_json,
+                policy_hash, verifier_json, environment_json, successor_of, active, repair_count,
+                max_repairs, plan_revision_count, max_plan_revisions, created_at,
+                frozen_inputs_json, owner_generation
+             FROM attempts;
+             DROP TABLE attempts;
+             ALTER TABLE attempts_v11 RENAME TO attempts;
+             DELETE FROM schema_migrations WHERE version >= 12;
+             PRAGMA user_version = 11;
+             PRAGMA foreign_keys=ON;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let reader = Store::open_reader(&db).unwrap();
+        let legacy = reader.load_mission("m-1").unwrap();
+        assert_eq!(legacy.plan_body.as_deref(), Some("legacy plan"));
+        assert_eq!(legacy.plan_digest.as_deref(), Some("sha256:legacy-text"));
+        assert!(legacy.attempt.frozen_inputs_json.is_none());
+        drop(reader);
+
+        let mut writer = Store::open_writer(&db).unwrap();
+        writer.migrate().unwrap();
+        assert_eq!(user_version(&writer.conn).unwrap(), 12);
+        let attempt_plan: Option<String> = writer
+            .conn
+            .query_row(
+                "SELECT plan_digest FROM attempts WHERE id = 'a-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempt_plan, None);
+        let mission_plan: String = writer
+            .conn
+            .query_row(
+                "SELECT plan_digest FROM missions WHERE id = 'm-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mission_plan, "sha256:legacy-text");
+        let loaded = writer.load_mission("m-1").unwrap();
+        assert_eq!(loaded.plan_digest, None);
+        assert_eq!(loaded.plan_body, None);
     }
 
     #[test]

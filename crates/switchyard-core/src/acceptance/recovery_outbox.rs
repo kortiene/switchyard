@@ -1,9 +1,9 @@
 use super::fixtures::{
-    admit, admit_expect, command_payload, create, deliver, fail_note, notify, open_world, plan_note,
+    admit, admit_expect, command_payload, create, deliver, fail_note, notify, open_world,
+    plan_note, stored_plan_digest,
 };
 use crate::domain::AttentionReason;
 use crate::execution::{FakeRuntime, RuntimeNotification, RuntimeRequest};
-use crate::policy::plan_digest_for;
 use crate::{AdmitRequest, CommandBody, CommandOrigin, CommandState, EffectProof, Host, Phase};
 
 #[test]
@@ -88,12 +88,14 @@ fn needs_attention_recovery_repair_limits_and_terminal_identity() {
     let attempt = created.attempt_id.clone();
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
     host.dispatch_pending(&created.mission_id).unwrap();
-    notify(&mut host, &created.mission_id, plan_note("plan"));
+    let note = plan_note(&host, &created.mission_id, "plan");
+    notify(&mut host, &created.mission_id, note);
+    let digest = stored_plan_digest(&host, &created.mission_id);
     admit(
         &mut host,
         &created.mission_id,
         CommandBody::ApprovePlan {
-            plan_digest: plan_digest_for("plan").unwrap(),
+            plan_digest: digest,
         },
     );
     notify(
@@ -370,12 +372,14 @@ fn resume_enqueues_a_runtime_continuation_for_withheld_work() {
     let created = create(&mut host, &world.repo, 2);
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
     deliver(&mut host, &created.mission_id);
-    notify(&mut host, &created.mission_id, plan_note("plan"));
+    let note = plan_note(&host, &created.mission_id, "plan");
+    notify(&mut host, &created.mission_id, note);
+    let digest = stored_plan_digest(&host, &created.mission_id);
     admit(
         &mut host,
         &created.mission_id,
         CommandBody::ApprovePlan {
-            plan_digest: plan_digest_for("plan").unwrap(),
+            plan_digest: digest,
         },
     );
     admit(&mut host, &created.mission_id, CommandBody::Pause);
@@ -402,12 +406,14 @@ fn resume_enqueues_a_runtime_continuation_for_withheld_work() {
     let created = create(&mut host, &world.repo, 2);
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
     deliver(&mut host, &created.mission_id);
-    notify(&mut host, &created.mission_id, plan_note("plan"));
+    let note = plan_note(&host, &created.mission_id, "plan");
+    notify(&mut host, &created.mission_id, note);
+    let digest = stored_plan_digest(&host, &created.mission_id);
     admit(
         &mut host,
         &created.mission_id,
         CommandBody::ApprovePlan {
-            plan_digest: plan_digest_for("plan").unwrap(),
+            plan_digest: digest,
         },
     );
     notify(

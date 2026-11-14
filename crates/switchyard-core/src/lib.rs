@@ -56,6 +56,8 @@ pub use execution::{
 };
 #[cfg(feature = "pi-contract")]
 pub use execution::{PiBridge, PiEffectOutcome};
+pub use freeze::bound_plan_digest;
+pub use service::read_attempt_freeze;
 pub use service::{
     AdmitRequest, AdmitResult, CommandView, CreateMission, DeliveryView, Host, MissionSnapshot,
     NotifyOutcome, journal_path,

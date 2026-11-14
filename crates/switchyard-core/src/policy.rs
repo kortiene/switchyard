@@ -5,7 +5,8 @@ use crate::domain::{
     validated_recovery_target,
 };
 use crate::error::{Error, Result};
-use crate::freeze::frozen_document;
+use crate::freeze::{bound_plan_digest, frozen_document};
+
 use crate::transitions::TargetSpec;
 
 /// Facts Rust already stored. A runtime notification cannot replace these.
@@ -42,6 +43,8 @@ pub struct TransitionPlan {
     pub invalidate_evidence: bool,
     pub invalidate_reviews: bool,
     pub invalidate_plan_approval: bool,
+    /// Persist the current plan text and digest. Other transitions leave them.
+    pub writes_plan: bool,
     pub decision_digest: Option<String>,
     pub delivery_insert: Option<NewDelivery>,
     pub delivery_publish: Option<PublicationProof>,
@@ -78,22 +81,35 @@ pub fn authorize(mission: &MissionRecord, body: &CommandBody, facts: &Facts) -> 
             if !quiescent || facts.ops_blocked {
                 return Err(blocked());
             }
-            require_plan_digest(plan, digest)
+            let frozen = require_frozen_inputs(mission)?;
+            let actual = bound_plan_digest(plan, &mission.attempt.id, frozen)?;
+            if actual != digest.as_str() {
+                return Err(Error::guard("plan digest does not match the plan body"));
+            }
+            Ok(())
         }
         CommandBody::RequestRevisedPlan { feedback } => {
             require_nonempty(feedback, "feedback")?;
             if mission.attempt.plan_revision_count >= mission.attempt.max_plan_revisions {
-                return Err(Error::UsageLimitExhausted {
+                return Err(Error::PlanRevisionLimitReached {
                     count: mission.attempt.plan_revision_count,
                     max: mission.attempt.max_plan_revisions,
                 });
             }
             Ok(())
         }
-        CommandBody::ApprovePlan { plan_digest } => match &mission.plan_digest {
-            Some(current) if current == plan_digest => Ok(()),
-            _ => Err(Error::guard("plan digest does not match the frozen plan")),
-        },
+        CommandBody::ApprovePlan { plan_digest } => {
+            // Missing freeze is `frozen_inputs_missing`, checked before drift.
+            let frozen = require_frozen_inputs(mission)?;
+            let Some(body) = mission.plan_body.as_deref() else {
+                return Err(Error::StalePlanDigest);
+            };
+            let current = bound_plan_digest(body, &mission.attempt.id, frozen)?;
+            if mission.plan_digest.as_deref() != Some(current.as_str()) || plan_digest != &current {
+                return Err(Error::StalePlanDigest);
+            }
+            Ok(())
+        }
         CommandBody::RequestVerification { quiescent } => {
             if !quiescent || facts.ops_blocked {
                 return Err(blocked());
@@ -358,12 +374,12 @@ fn require_repair_allowance(attempt: &AttemptRecord) -> Result<()> {
     }
 }
 
-fn require_plan_digest(plan: &str, digest: &str) -> Result<()> {
-    let actual = plan_digest_for(plan)?;
-    if actual != digest {
-        return Err(Error::guard("plan digest does not match the plan body"));
-    }
-    Ok(())
+fn require_frozen_inputs(mission: &MissionRecord) -> Result<&str> {
+    mission
+        .attempt
+        .frozen_inputs_json
+        .as_deref()
+        .ok_or(Error::FrozenInputsMissing)
 }
 
 fn require_nonempty(value: &str, label: &str) -> Result<()> {
@@ -426,6 +442,7 @@ pub fn project(
         invalidate_evidence: false,
         invalidate_reviews: false,
         invalidate_plan_approval: false,
+        writes_plan: false,
         decision_digest: None,
         delivery_insert: None,
         delivery_publish: None,
@@ -442,21 +459,28 @@ pub fn project(
             plan.owner_generation = Some(owner);
             plan.decision_digest = Some(payload_hash(&document)?);
         }
-        CommandBody::PlanCompleted {
-            plan: text, digest, ..
-        } => {
+        CommandBody::PlanCompleted { plan: text, .. } => {
+            let frozen = require_frozen_inputs(mission)?;
+            let digest = bound_plan_digest(text, &mission.attempt.id, frozen)?;
             plan.plan_body = Some(text.clone());
             plan.plan_digest = Some(digest.clone());
-            plan.decision_digest = Some(digest.clone());
+            plan.decision_digest = Some(digest);
+            plan.invalidate_plan_approval = true;
+            plan.writes_plan = true;
         }
         CommandBody::RequestRevisedPlan { .. } => {
+            plan.decision_digest = mission.plan_digest.clone();
             plan.plan_digest = None;
             plan.plan_body = None;
             plan.plan_revision_count = mission.attempt.plan_revision_count.saturating_add(1);
             plan.invalidate_plan_approval = true;
+            plan.writes_plan = true;
         }
         CommandBody::ApprovePlan { plan_digest } => {
             plan.decision_digest = Some(plan_digest.clone());
+        }
+        CommandBody::Reject { .. } => {
+            plan.decision_digest = mission.plan_digest.clone();
         }
         CommandBody::AuthorizeBoundedRepair { .. } | CommandBody::RequestChanges { .. } => {
             plan.repair_count = mission.attempt.repair_count.saturating_add(1);
@@ -565,10 +589,6 @@ pub fn project(
         _ => {}
     }
     Ok(plan)
-}
-
-pub fn plan_digest_for(plan: &str) -> Result<String> {
-    payload_hash(&serde_json::Value::String(plan.to_string()))
 }
 
 #[cfg(test)]

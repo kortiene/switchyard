@@ -39,7 +39,7 @@ Without a written contract, three things stay unspecified: what a native runtime
 
 1. A runtime gets **no workflow tools**. It reaches files and processes only through Rust-owned execution: the simulated `ExecutionEnv` today, and supervised Linux execution (supervisor and ledger) for `Confined`. The bundled tool allowlist ([README: Bridge process confinement](README.md#bridge-process-confinement-and-in-process-allowlist)) enforces this today. The proposed D6 "Controlled registry/execution" row will enforce it for new adapters.
 2. **Verification, approval, publication and landing are Host operations.** The Host also owns dispatch (`DispatchProfile.host_owned`), stop admission and recovery. A runtime may report observations. It never sets mission state, settles an approval, or asserts execution quiescence.
-3. Planning approval is not yet an end-to-end CLI flow. Until S4 planning lands ([#172](https://github.com/kortiene/switchyard/issues/172)), the `awaiting_plan_approval` row and its plan digest are seeded through SQL, and `approve_plan` runs against that seeded row.
+3. Plan approval targets the bound plan digest from 172b. `plan_completed` is still a runtime observation, so a confined fixture may seed `awaiting_plan_approval` only by storing the freeze document and that digest on the attempt. A seed that uses the plan-text hash, or an attempt with no freeze, is refused. There is no second approver. A planning runtime that produces the plan is still later S4 work.
 4. "The Host owns publication" fixes only *where* publication runs. How it is materialized, which branch identity and credentials it uses, and who authorizes a live run are decided in [#170](https://github.com/kortiene/switchyard/issues/170) (S6) and [#167](https://github.com/kortiene/switchyard/issues/167). This ADR does not pre-decide them. M1 ends at PR publication ([README: Verification and delivery](README.md#verification-and-delivery)), so landing has no M1 implementation.
 
 ### D2. Sealed adapter set with declared profiles (normative now)
@@ -177,12 +177,15 @@ Gate evidence is recorded in a dedicated issue, as #96 does. The proposed check 
 
 ### D7. Plan approval and workspace model
 
-1. **Plan digest.** This ADR adopts [#172](https://github.com/kortiene/switchyard/issues/172) (S4-A) as written and adds nothing to it:
-   - `awaiting_plan_approval → implementing` (approve plan): "authorized actor confirms the current plan digest; implementation policy is unchanged."
-   - "Plan drift invalidates approval; approval targets the current plan digest only."
-   - "Changing scope or policy requires a successor attempt and never inherits an old approval."
-   - 172a freezes inputs at `draft → planning`. An attempt that left draft before ledger v11 has `frozen_inputs_json` NULL. 172b `approve_plan` will refuse that attempt. Continuing requires a successor attempt. This slice does not re-freeze it.
-   - The 172b plan digest is `payload_hash` of `{schema, attemptId, frozenInputsDigest, plan}` with schema `switchyard.plan-digest.v1`. `frozenInputsDigest` is the hash of the whole `switchyard.attempt-freeze.v1` document.
+1. **Plan digest.** 172b implements the [#172](https://github.com/kortiene/switchyard/issues/172) approval edges. It adds no second planning flag and does not re-freeze inputs.
+   - `awaiting_plan_approval → implementing` (approve plan): the CLI `--actor` confirms the current plan digest. Implementation policy is unchanged. There is no second approver.
+   - Plan drift invalidates approval. Approval targets the current plan digest only. A different digest is `stale_plan_digest` and writes nothing.
+   - `request_revised_plan` records feedback outside the freeze, clears the plan, invalidates the plan decision, and increments `plan_revision_count` in that same transaction. The cap is the frozen `max_plan_revisions` (CLI default 3). At the cap the refusal is `plan_revision_limit_reached`. Approve, reject, and cancel stay open. A higher cap needs a successor attempt.
+   - Changing scope, policy, verifier, or limits requires a successor attempt and never inherits an old approval. This slice does not create that attempt.
+   - An attempt that left draft before ledger v11 has `frozen_inputs_json` NULL. `approve_plan` refuses it in place with `frozen_inputs_missing`, stores the command receipt, and does not enter `needs_attention`. Cancel and reject stay admitted. There is no backfill and no re-freeze.
+   - Frozen-input drift still follows 172a (`frozen_input_drift`, then `needs_attention`). Approve stays refused.
+   - The plan digest is `payload_hash` of `{schema:"switchyard.plan-digest.v1", attemptId, frozenInputsDigest, plan}`. `frozenInputsDigest` is `payload_hash` of the whole stored `switchyard.attempt-freeze.v1` document. Ledger v12 adds nullable `attempts.plan_body` and `attempts.plan_digest` and does not backfill them. Existing rows keep those columns NULL. The legacy `missions.plan_digest` text hash is not an approval target.
+   - Digest and plan checks stay in Host admission. `certifies_mission_facts` remains an authority gate only.
 2. **Workspace.** Each attempt runs in a Host-owned worktree created from an exact base commit, with its lifecycle owned by S3 in Rust ([README: Workspace and trust boundary](README.md#workspace-and-trust-boundary)). This ADR records that as the model and opens no new workspace work.
 3. Binding publication to a reviewed-content digest is out of scope here. See open question 4.
 

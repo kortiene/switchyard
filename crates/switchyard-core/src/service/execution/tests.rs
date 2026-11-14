@@ -49,7 +49,13 @@ fn setup() -> (tempfile::TempDir, Host, ExecutionRequest) {
         .unwrap();
     command(&mut host, &m.mission_id, CommandBody::StartPlanning);
     host.dispatch_pending(&m.mission_id).unwrap();
-    let digest = crate::policy::plan_digest_for("plan").unwrap();
+    let snap = host.snapshot(&m.mission_id).unwrap();
+    let digest = crate::bound_plan_digest(
+        "plan",
+        &snap.attempt_id,
+        snap.frozen_inputs_json.as_deref().unwrap(),
+    )
+    .unwrap();
     host.apply_notification(
         &m.mission_id,
         RuntimeNotification::PlanCompleted {
@@ -331,7 +337,7 @@ fn v3_inspection_and_forward_upgrade_preserve_mission_and_workspace() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        11
+        12
     );
 }
 
@@ -755,7 +761,7 @@ fn v4_upgrade_preserves_completed_prepared_and_uncertain_effects() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        11
+        12
     );
     assert_eq!(
         conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
@@ -1603,7 +1609,7 @@ fn v6_upgrade_preserves_effects_and_resolutions() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
 }
 
 #[test]
@@ -1846,7 +1852,9 @@ fn simulated_no_row_error_is_transient(error: &Error) -> bool {
         | Error::OperationConflict { .. }
         | Error::StaleGeneration { .. }
         | Error::RepairLimitExhausted { .. }
-        | Error::UsageLimitExhausted { .. }
+        | Error::FrozenInputsMissing
+        | Error::StalePlanDigest
+        | Error::PlanRevisionLimitReached { .. }
         | Error::AdmissionRejected { .. }
         | Error::GuardFailed { .. }
         | Error::UnknownNotification { .. }
@@ -1917,7 +1925,9 @@ fn execute_fake_operation_pins_is_transient_for_every_error_it_can_return() {
         },
         Error::ActiveMissionExists,
         Error::RepairLimitExhausted { count: 1, max: 1 },
-        Error::UsageLimitExhausted { count: 1, max: 1 },
+        Error::FrozenInputsMissing,
+        Error::StalePlanDigest,
+        Error::PlanRevisionLimitReached { count: 1, max: 1 },
         Error::AdmissionRejected {
             category: "busy".into(),
         },
@@ -3388,7 +3398,7 @@ fn v8_upgrade_preserves_abandoned_simulated_and_linux_rows() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     let snapshot = host.snapshot(&mission).unwrap();
     assert!(snapshot.execution_blocked);
     assert!(snapshot.execution_supersessions.is_empty());
@@ -3642,7 +3652,7 @@ fn v9_inspection_and_upgrade_preserve_original_effect_receipts() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        11
+        12
     );
 }
 

@@ -344,6 +344,14 @@ pub fn canonical_db_path(path: &Path) -> Result<PathBuf> {
         .join(name))
 }
 
+/// Canonical freeze of the stored attempt. Read-only: no lock, no migration,
+/// no runtime. Seeding a plan stores this text; it does not re-freeze.
+pub fn read_attempt_freeze(db_path: &Path, mission_id: &str) -> Result<String> {
+    let db_path = canonical_db_path(db_path)?;
+    let store = Store::open_reader(&db_path)?;
+    crate::freeze::frozen_canonical(&store.load_mission(mission_id)?)
+}
+
 impl Host {
     pub fn open(db_path: &Path) -> Result<Self> {
         let db_path = canonical_db_path(db_path)?;
@@ -395,6 +403,13 @@ impl Host {
 
     pub fn generation(&self) -> u64 {
         self.lock.generation
+    }
+
+    /// Canonical freeze document for the active attempt. Does not write it.
+    /// Fixtures that seed `awaiting_plan_approval` without a planning runtime
+    /// store this text and the bound plan digest. It is not a re-freeze.
+    pub fn canonical_attempt_freeze(&self, mission_id: &str) -> Result<String> {
+        crate::freeze::frozen_canonical(&self.store.load_mission(mission_id)?)
     }
 
     /// Fake-runtime simulation seam for hosts opened with [`Host::open`].
@@ -573,6 +588,9 @@ impl Host {
                     detail: "command id is already bound to a different mission or attempt".into(),
                 });
             }
+            if let Some(error) = host_plan_refusal(&existing) {
+                return Err(error);
+            }
             return Ok(AdmitResult {
                 command_id: existing.id,
                 request_id: existing.request_id,
@@ -595,6 +613,30 @@ impl Host {
                 expected: request.expected_revision,
                 actual: mission.revision,
             });
+        }
+        if matches!(request.body, CommandBody::ApprovePlan { .. })
+            && mission.phase == Phase::AwaitingPlanApproval
+            && mission.attempt.frozen_inputs_json.is_none()
+        {
+            let command = new_command(
+                &request,
+                &mission,
+                &attempt_id,
+                CommandDraft {
+                    command_id,
+                    canonical,
+                    hash,
+                    resulting_revision: mission.revision,
+                    state: CommandState::Rejected,
+                },
+            );
+            let receipt = json!({
+                "admission": "rejected",
+                "reason": "frozen_inputs_missing",
+            })
+            .to_string();
+            self.store.insert_refused_command(&command, &receipt)?;
+            return Err(Error::FrozenInputsMissing);
         }
         if self.frozen_input_drifted(&mission)?
             && !crate::freeze::drift_exit(mission.phase, request.body.kind())
@@ -2276,6 +2318,18 @@ fn unchanged(mission: &MissionRecord) -> NotifyOutcome {
     NotifyOutcome::Unchanged {
         phase: mission.phase,
         revision: mission.revision,
+    }
+}
+
+fn host_plan_refusal(command: &crate::domain::CommandRecord) -> Option<Error> {
+    if command.state != CommandState::Rejected {
+        return None;
+    }
+    let receipt = command.runtime_receipt_json.as_deref()?;
+    let value: Value = serde_json::from_str(receipt).ok()?;
+    match value.get("reason").and_then(Value::as_str) {
+        Some("frozen_inputs_missing") => Some(Error::FrozenInputsMissing),
+        _ => None,
     }
 }
 
