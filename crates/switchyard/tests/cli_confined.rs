@@ -118,14 +118,19 @@ fn cli_confined_pi_runs_composed_s3_acceptance_scenario() {
     // `awaiting_plan_approval` is the same seeded row the probe harness writes,
     // not an S4 command. This import is what lets `approve_plan` run the
     // composed scenario from the CLI.
-    let digest = switchyard_core::payload_hash(&json!("fixture plan")).unwrap();
-    rusqlite::Connection::open(&db)
-        .unwrap()
-        .execute(
-            "UPDATE missions SET phase='awaiting_plan_approval', plan_body='fixture plan', plan_digest=?1 WHERE id=?2",
-            rusqlite::params![digest, mission],
-        )
-        .unwrap();
+    let frozen = switchyard_core::read_attempt_freeze(Path::new(db_arg), mission).unwrap();
+    let digest = switchyard_core::bound_plan_digest("fixture plan", attempt, &frozen).unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "UPDATE missions SET phase='awaiting_plan_approval' WHERE id=?1",
+        [mission],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE attempts SET frozen_inputs_json=?1, plan_body='fixture plan', plan_digest=?2 WHERE id=?3",
+        rusqlite::params![frozen, digest, attempt],
+    )
+    .unwrap();
     let (code, status, error) = run(&[
         "mission",
         "status",

@@ -55,7 +55,6 @@ pub struct RuntimeReceipt {
 pub enum RuntimeNotification {
     PlanCompleted {
         plan: String,
-        digest: String,
         quiescent: bool,
     },
     ImplementationSettled {
@@ -121,9 +120,10 @@ pub fn parse_notification(value: &Value) -> Result<RuntimeNotification> {
             .ok_or_else(|| Error::guard("notification requires requirements"))
     };
     match kind {
+        // `digest`, when present, is an optional observation. It is not
+        // parsed into the command and does not affect the payload hash.
         "plan_completed" => Ok(RuntimeNotification::PlanCompleted {
             plan: text("plan")?,
-            digest: text("digest")?,
             quiescent: value
                 .get("quiescent")
                 .and_then(Value::as_bool)
@@ -177,12 +177,8 @@ pub fn parse_notification(value: &Value) -> Result<RuntimeNotification> {
 impl RuntimeNotification {
     pub fn frame_json(&self) -> Value {
         match self {
-            Self::PlanCompleted {
-                plan,
-                digest,
-                quiescent,
-            } => {
-                json!({"kind": "plan_completed", "plan": plan, "digest": digest, "quiescent": quiescent})
+            Self::PlanCompleted { plan, quiescent } => {
+                json!({"kind": "plan_completed", "plan": plan, "quiescent": quiescent})
             }
             Self::ImplementationSettled { quiescent } => {
                 json!({"kind": "implementation_settled", "quiescent": quiescent})
@@ -567,9 +563,7 @@ mod tests {
         }))
         .unwrap();
         match parsed {
-            RuntimeNotification::PlanCompleted {
-                plan, quiescent, ..
-            } => {
+            RuntimeNotification::PlanCompleted { plan, quiescent } => {
                 assert_eq!(plan, "do the work");
                 assert!(quiescent);
             }

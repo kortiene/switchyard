@@ -254,12 +254,9 @@ fn tampered_frozen_inputs_still_admit_cancel_and_in_table_reject() {
     let created = create(&mut host, &world.repo, 2);
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
     host.dispatch_pending(&created.mission_id).unwrap();
+    let note = plan_note("implement the ledger");
     assert_eq!(
-        notify(
-            &mut host,
-            &created.mission_id,
-            plan_note("implement the ledger")
-        ),
+        notify(&mut host, &created.mission_id, note),
         crate::Phase::AwaitingPlanApproval
     );
     let frozen = host.snapshot(&created.mission_id).unwrap();

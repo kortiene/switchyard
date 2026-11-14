@@ -1716,16 +1716,19 @@ mod os {
         };
         admit(&mut host, crate::CommandBody::StartPlanning);
         host.dispatch_pending(&created.mission_id).unwrap();
-        let digest = crate::policy::plan_digest_for("plan").unwrap();
         host.apply_notification(
             &created.mission_id,
             RuntimeNotification::PlanCompleted {
                 plan: "plan".into(),
-                digest: digest.clone(),
                 quiescent: true,
             },
         )
         .unwrap();
+        let digest = host
+            .snapshot(&created.mission_id)
+            .unwrap()
+            .plan_digest
+            .unwrap();
         admit(
             &mut host,
             crate::CommandBody::ApprovePlan {
@@ -2102,16 +2105,19 @@ mod os {
         };
         admit(&mut host, crate::CommandBody::StartPlanning);
         host.dispatch_pending(&created.mission_id).unwrap();
-        let digest = crate::policy::plan_digest_for("plan").unwrap();
         host.apply_notification(
             &created.mission_id,
             RuntimeNotification::PlanCompleted {
                 plan: "plan".into(),
-                digest: digest.clone(),
                 quiescent: true,
             },
         )
         .unwrap();
+        let digest = host
+            .snapshot(&created.mission_id)
+            .unwrap()
+            .plan_digest
+            .unwrap();
         admit(
             &mut host,
             crate::CommandBody::ApprovePlan {

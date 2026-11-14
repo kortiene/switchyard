@@ -113,10 +113,22 @@ impl World {
         fs::create_dir(&workspaces).unwrap();
         host.prepare_workspace(&m.mission_id, &m.attempt_id, &workspaces)
             .unwrap();
-        // S4 is excluded from B5: import an awaiting-approval fixture, then use
-        // normal operator admission and the real Host outbox for all execution.
-        let digest = payload_hash(&json!("fixture plan")).unwrap();
-        rusqlite::Connection::open(&db).unwrap().execute("UPDATE missions SET phase='awaiting_plan_approval',plan_body='fixture plan',plan_digest=?1 WHERE id=?2", [&digest, &m.mission_id]).unwrap();
+        // S4 planning is not this fixture. Seed the freeze and the bound plan
+        // digest so approve_plan can admit the composed scenario.
+        let frozen = host.canonical_attempt_freeze(&m.mission_id).unwrap();
+        let digest =
+            switchyard_core::bound_plan_digest("fixture plan", &m.attempt_id, &frozen).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE missions SET phase='awaiting_plan_approval' WHERE id=?1",
+            [&m.mission_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE attempts SET frozen_inputs_json=?1, plan_body='fixture plan', plan_digest=?2 WHERE id=?3",
+            rusqlite::params![frozen, digest, m.attempt_id],
+        )
+        .unwrap();
         admit(
             &mut host,
             &m.mission_id,

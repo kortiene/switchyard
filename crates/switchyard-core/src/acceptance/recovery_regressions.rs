@@ -1,9 +1,9 @@
 use super::fixtures::{
-    admit, admit_expect, command_payload, create, deliver, fail_note, notify, open_world, plan_note,
+    admit, admit_expect, command_payload, create, deliver, fail_note, notify, open_world,
+    plan_note, stored_plan_digest,
 };
 use crate::domain::AttentionReason;
 use crate::execution::{FakeRuntime, RuntimeNotification, RuntimeRequest};
-use crate::policy::plan_digest_for;
 use crate::{CommandBody, EffectProof, Error, Host, Phase};
 
 fn recover_to(host: &mut Host, mission: &str, target: Phase) -> Result<(), Error> {
@@ -93,7 +93,8 @@ fn revised_plan_resume_ignores_prior_planning_acknowledgment() {
     let mission = &created.mission_id;
     admit(&mut host, mission, CommandBody::StartPlanning);
     deliver(&mut host, mission);
-    notify(&mut host, mission, plan_note("first plan"));
+    let first = plan_note("first plan");
+    notify(&mut host, mission, first);
     let revised = admit(
         &mut host,
         mission,
@@ -139,12 +140,14 @@ fn second_repair_resume_ignores_prior_repair_acknowledgment() {
     let mission = &created.mission_id;
     admit(&mut host, mission, CommandBody::StartPlanning);
     deliver(&mut host, mission);
-    notify(&mut host, mission, plan_note("plan"));
+    let note = plan_note("plan");
+    notify(&mut host, mission, note);
+    let digest = stored_plan_digest(&host, mission);
     admit(
         &mut host,
         mission,
         CommandBody::ApprovePlan {
-            plan_digest: plan_digest_for("plan").unwrap(),
+            plan_digest: digest,
         },
     );
     deliver(&mut host, mission);

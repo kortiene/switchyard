@@ -600,7 +600,6 @@ fn command_body(kind: &str, payload: &Value) -> switchyard_core::Result<CommandB
         CommandKind::StartPlanning => CommandBody::StartPlanning,
         CommandKind::PlanCompleted => CommandBody::PlanCompleted {
             plan: text("plan")?,
-            digest: text("digest")?,
             quiescent: flag("quiescent"),
         },
         CommandKind::RequestRevisedPlan => CommandBody::RequestRevisedPlan {

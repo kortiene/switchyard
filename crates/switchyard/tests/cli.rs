@@ -616,12 +616,10 @@ fn abandon_execution_is_audited_idempotently_and_keeps_the_block() {
     };
     admit(&mut host, CommandBody::StartPlanning);
     host.dispatch_pending(&m.mission_id).unwrap();
-    // Bind the simulation observation to the canonical plan digest.
     host.apply_notification(
         &m.mission_id,
         parse_notification(&serde_json::json!({
-            "kind":"plan_completed", "plan":"plan", "quiescent":true,
-            "digest":payload_hash(&serde_json::json!("plan")).unwrap()
+            "kind":"plan_completed", "plan":"plan", "quiescent":true
         }))
         .unwrap(),
     )
@@ -888,8 +886,7 @@ fn supersede_execution_audits_the_simulated_journal_and_refuses_linux_rows() {
     host.apply_notification(
         &m.mission_id,
         parse_notification(&serde_json::json!({
-            "kind":"plan_completed", "plan":"plan", "quiescent":true,
-            "digest": payload_hash(&serde_json::json!("plan")).unwrap()
+            "kind":"plan_completed", "plan":"plan", "quiescent":true
         }))
         .unwrap(),
     )

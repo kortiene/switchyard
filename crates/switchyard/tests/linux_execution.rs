@@ -16,7 +16,7 @@ use switchyard_core::{
     ExecutionResolutionDecision, ExecutionResolutionRequest, ExecutionSupersessionRequest, Host,
     LINUX_EDIT_SCOPE, LINUX_EXEC_CANCEL_SCOPE, LINUX_EXEC_START_SCOPE, LINUX_EXEC_STATUS_SCOPE,
     LINUX_LIST_SCOPE, LINUX_RANGE_SCOPE, LINUX_READ_SCOPE, LINUX_WRITE_SCOPE, LinuxExecutionConfig,
-    LinuxExecutionRequest, LinuxOperation, Phase, RuntimeBinding, parse_notification, payload_hash,
+    LinuxExecutionRequest, LinuxOperation, Phase, RuntimeBinding, parse_notification,
 };
 
 fn now_ms() -> i64 {
@@ -186,8 +186,7 @@ fn implementing(world: &mut World) -> (Host, String) {
         parse_notification(&json!({
             "kind": "plan_completed",
             "plan": "plan",
-            "quiescent": true,
-            "digest": payload_hash(&json!("plan")).unwrap()
+            "quiescent": true
         }))
         .unwrap(),
     )

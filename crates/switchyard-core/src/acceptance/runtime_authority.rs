@@ -1,8 +1,8 @@
 use super::fixtures::{
     admit, admit_expect, create, git, ledger_text, notify, open_world, pass_note, plan_note,
+    stored_plan_digest,
 };
 use crate::execution::RuntimeNotification;
-use crate::policy::plan_digest_for;
 use crate::{CommandBody, Host, Phase};
 use serde_json::json;
 
@@ -28,7 +28,7 @@ fn runtime_notifications_never_set_mission_status_directly() {
             &json!({
                 "kind": "plan_completed",
                 "plan": "x",
-                "digest": plan_digest_for("x").unwrap(),
+                "digest": "sha256:not-yet-bound",
                 "quiescent": true,
                 "status": "published"
             }),
@@ -47,7 +47,7 @@ fn runtime_notifications_never_set_mission_status_directly() {
             &json!({
                 "kind": "plan_completed",
                 "plan": "x",
-                "digest": plan_digest_for("x").unwrap(),
+                "digest": "sha256:ignored-observation",
                 "quiescent": true,
                 "status": "published"
             }),
@@ -61,7 +61,7 @@ fn runtime_notifications_never_set_mission_status_directly() {
             &json!({
                 "kind": "plan_completed",
                 "plan": "x",
-                "digest": plan_digest_for("x").unwrap(),
+                "digest": "sha256:also-ignored",
                 "quiescent": true
             }),
         )
@@ -77,12 +77,14 @@ fn incomplete_notification_frames_do_not_advance_and_errors_keep_the_queue() {
     let created = create(&mut host, &world.repo, 2);
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
     host.dispatch_pending(&created.mission_id).unwrap();
-    notify(&mut host, &created.mission_id, plan_note("plan"));
+    let note = plan_note("plan");
+    notify(&mut host, &created.mission_id, note);
+    let digest = stored_plan_digest(&host, &created.mission_id);
     admit(
         &mut host,
         &created.mission_id,
         CommandBody::ApprovePlan {
-            plan_digest: plan_digest_for("plan").unwrap(),
+            plan_digest: digest,
         },
     );
     notify(
@@ -116,9 +118,8 @@ fn incomplete_notification_frames_do_not_advance_and_errors_keep_the_queue() {
     host.runtime_mut()
         .unwrap()
         .push_notification(pass_note(&digest));
-    host.runtime_mut()
-        .unwrap()
-        .push_notification(plan_note("later"));
+    let later = plan_note("later");
+    host.runtime_mut().unwrap().push_notification(later);
     host.runtime_mut()
         .unwrap()
         .push_notification(RuntimeNotification::Idle);
@@ -159,7 +160,6 @@ fn operators_cannot_certify_observations_and_origin_urls_drop_userinfo() {
         &created.mission_id,
         CommandBody::PlanCompleted {
             plan: "plan".into(),
-            digest: plan_digest_for("plan").unwrap(),
             quiescent: true,
         },
     )
@@ -169,7 +169,8 @@ fn operators_cannot_certify_observations_and_origin_urls_drop_userinfo() {
         host.snapshot(&created.mission_id).unwrap().phase,
         Phase::Planning
     );
-    notify(&mut host, &created.mission_id, plan_note("plan"));
+    let note = plan_note("plan");
+    notify(&mut host, &created.mission_id, note);
     assert_eq!(
         host.snapshot(&created.mission_id).unwrap().phase,
         Phase::AwaitingPlanApproval

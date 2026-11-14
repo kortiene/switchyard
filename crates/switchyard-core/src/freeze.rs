@@ -71,13 +71,13 @@ pub(crate) fn frozen_canonical(mission: &MissionRecord) -> Result<String> {
     canonicalize(&frozen_document(mission)?)
 }
 
-/// Body the following slice will hash as the plan digest.
+/// Body hashed as the plan digest.
 ///
-/// Not stored or checked by plan approval in this slice. The object is
-/// `{schema, attemptId, frozenInputsDigest, plan}`. `frozenInputsDigest` is
-/// `payload_hash` of the whole frozen-input document, so one field binds all
-/// eight inputs. There is no separate sandbox digest.
-#[cfg_attr(not(test), allow(dead_code))]
+/// The object is `{schema, attemptId, frozenInputsDigest, plan}`.
+/// `frozenInputsDigest` is `payload_hash` of the whole stored frozen-input
+/// document, so one field binds all eight inputs. There is no separate
+/// sandbox digest. Host admission stores and checks this value. An adapter
+/// authority profile does not.
 pub(crate) fn plan_digest_document(
     plan: &str,
     attempt_id: &str,
@@ -94,7 +94,6 @@ pub(crate) fn plan_digest_document(
     }))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn plan_digest_hash(
     plan: &str,
     attempt_id: &str,
@@ -105,6 +104,18 @@ pub(crate) fn plan_digest_hash(
         attempt_id,
         frozen_inputs_digest,
     )?)
+}
+
+/// Plan digest for the stored freeze document.
+///
+/// `frozen_inputs_json` is the canonical `switchyard.attempt-freeze.v1`
+/// document already written on the attempt. Its `payload_hash` is the
+/// `frozenInputsDigest` inside the plan-digest document.
+pub fn bound_plan_digest(plan: &str, attempt_id: &str, frozen_inputs_json: &str) -> Result<String> {
+    let document: Value = serde_json::from_str(frozen_inputs_json)
+        .map_err(|_| Error::guard("frozen inputs are not valid JSON"))?;
+    let frozen_inputs_digest = payload_hash(&document)?;
+    plan_digest_hash(plan, attempt_id, &frozen_inputs_digest)
 }
 
 fn runtime_configuration(raw: &str) -> Result<Value> {
@@ -149,7 +160,6 @@ fn require_text(value: &str, label: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::domain::{AttemptRecord, MissionRecord, Phase, RepoIdentity, SourceIssue};
-    use crate::policy::plan_digest_for;
 
     fn mission() -> MissionRecord {
         MissionRecord {
@@ -234,7 +244,13 @@ mod tests {
             )
         );
         let digest = plan_digest_hash("do the work", "a-test", &inputs).unwrap();
-        assert_ne!(digest, plan_digest_for("do the work").unwrap());
+        let text_only = payload_hash(&Value::String("do the work".into())).unwrap();
+        assert_ne!(digest, text_only);
+        let stored = canonicalize(&frozen).unwrap();
+        assert_eq!(
+            bound_plan_digest("do the work", "a-test", &stored).unwrap(),
+            digest
+        );
         assert!(plan_digest_document("  ", "a-test", &inputs).is_err());
         assert!(plan_digest_document("do the work", "", &inputs).is_err());
         assert!(plan_digest_document("do the work", "a-test", "").is_err());

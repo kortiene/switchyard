@@ -1,10 +1,9 @@
 use super::fixtures::{
     World, admit, admit_expect, create, deliver, drive_to_publishing, notify, open_world,
-    pass_note, plan_note,
+    pass_note, plan_note, stored_plan_digest,
 };
 use crate::domain::AttentionReason;
 use crate::execution::RuntimeNotification;
-use crate::policy::plan_digest_for;
 use crate::{CommandBody, EffectProof, Host, Phase};
 use serde_json::json;
 use std::path::Path;
@@ -129,12 +128,14 @@ fn world_approved_for_drift(host: &mut Host, world: &World) -> crate::MissionSna
     let created = create(host, &world.repo, 2);
     admit(host, &created.mission_id, CommandBody::StartPlanning);
     host.dispatch_pending(&created.mission_id).unwrap();
-    notify(host, &created.mission_id, plan_note("plan"));
+    let note = plan_note("plan");
+    notify(host, &created.mission_id, note);
+    let digest = stored_plan_digest(host, &created.mission_id);
     admit(
         host,
         &created.mission_id,
         CommandBody::ApprovePlan {
-            plan_digest: plan_digest_for("plan").unwrap(),
+            plan_digest: digest,
         },
     );
     notify(
@@ -187,7 +188,8 @@ fn terminal_missions_reject_content_writes() {
     let created = create(&mut host, &world.repo, 2);
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
     host.dispatch_pending(&created.mission_id).unwrap();
-    notify(&mut host, &created.mission_id, plan_note("plan"));
+    let note = plan_note("plan");
+    notify(&mut host, &created.mission_id, note);
     admit(
         &mut host,
         &created.mission_id,
@@ -276,12 +278,14 @@ fn paused_review_targets_without_pass_evidence_resume_into_verifying() {
         let created = create(&mut host, &world.repo, 2);
         admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
         deliver(&mut host, &created.mission_id);
-        notify(&mut host, &created.mission_id, plan_note("plan"));
+        let note = plan_note("plan");
+        notify(&mut host, &created.mission_id, note);
+        let digest = stored_plan_digest(&host, &created.mission_id);
         admit(
             &mut host,
             &created.mission_id,
             CommandBody::ApprovePlan {
-                plan_digest: plan_digest_for("plan").unwrap(),
+                plan_digest: digest,
             },
         );
         notify(
@@ -403,7 +407,8 @@ fn terminal_verification_notifications_do_not_write_evidence() {
     let created = create(&mut host, &world.repo, 2);
     admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
     deliver(&mut host, &created.mission_id);
-    notify(&mut host, &created.mission_id, plan_note("plan"));
+    let note = plan_note("plan");
+    notify(&mut host, &created.mission_id, note);
     admit(
         &mut host,
         &created.mission_id,

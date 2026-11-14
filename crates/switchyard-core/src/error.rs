@@ -60,8 +60,20 @@ pub enum Error {
     #[error("repair limit exhausted ({count}/{max})")]
     RepairLimitExhausted { count: u32, max: u32 },
 
-    #[error("usage limit exhausted ({count}/{max})")]
-    UsageLimitExhausted { count: u32, max: u32 },
+    /// `approve_plan` on an attempt that left draft before frozen inputs existed.
+    /// The command receipt is stored and mission state does not change.
+    /// Continuing requires a successor attempt.
+    #[error("frozen inputs are absent; a successor attempt is needed")]
+    FrozenInputsMissing,
+
+    /// The approval named a digest other than the current plan digest.
+    #[error("plan digest does not match the current plan")]
+    StalePlanDigest,
+
+    /// `request_revised_plan` at the frozen `max_plan_revisions` cap.
+    /// Mission state does not change. Approve, reject, and cancel stay open.
+    #[error("plan revision limit reached ({count}/{max}); a higher cap needs a successor attempt")]
+    PlanRevisionLimitReached { count: u32, max: u32 },
 
     /// Pi refused to admit the command and the protocol marks that refusal as
     /// definite. Transport loss and `admission: uncertain` stay [`Self::GuardFailed`]
@@ -116,7 +128,9 @@ impl Error {
             Self::ExecutionBlocked { .. } => "execution_blocked",
             Self::StaleGeneration { .. } => "stale_generation",
             Self::RepairLimitExhausted { .. } => "repair_limit_exhausted",
-            Self::UsageLimitExhausted { .. } => "usage_limit_exhausted",
+            Self::FrozenInputsMissing => "frozen_inputs_missing",
+            Self::StalePlanDigest => "stale_plan_digest",
+            Self::PlanRevisionLimitReached { .. } => "plan_revision_limit_reached",
             Self::AdmissionRejected { .. } => "admission_rejected",
             Self::GuardFailed { .. } => "guard_failed",
             Self::UnknownNotification { .. } => "unknown_notification",
