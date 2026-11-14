@@ -8,11 +8,21 @@ const script = workflow.split('          script: |\n')[1]
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const execute = new AsyncFunction('require', 'process', 'github', 'context', 'core', script);
 
-async function render(report, outcome = 'success', existingComments = []) {
+async function render(report, outcome = 'success', existingComments = [], extra = {}) {
+  const stderr = extra.stderr || '';
+  const reportExists = extra.reportExists !== false;
   let created;
   let updated;
-  await execute(() => ({ existsSync: () => true, readFileSync: () => JSON.stringify(report) }), {
-    env: { OCR_RESULT_PATH: '/report.json', OCR_REVIEW_OUTCOME: outcome, OCR_MAX_TOKENS_BUDGET: '200000' },
+  await execute(() => ({
+    existsSync: (p) => (p === '/stderr.txt' ? Boolean(stderr) : reportExists),
+    readFileSync: (p) => (p === '/stderr.txt' ? stderr : JSON.stringify(report)),
+  }), {
+    env: {
+      OCR_RESULT_PATH: '/report.json',
+      OCR_REVIEW_OUTCOME: outcome,
+      OCR_MAX_TOKENS_BUDGET: '200000',
+      ...(stderr ? { OCR_STDERR_PATH: '/stderr.txt' } : {}),
+    },
   }, {
     paginate: async () => existingComments,
     rest: { issues: {
@@ -68,6 +78,29 @@ test('partial, null and malformed entries do not establish clean coverage or cra
   }
   const { body } = await render({ status: 'complete' }, 'failure');
   assert.doesNotMatch(body, /No findings\./);
+});
+
+test('failed review summary includes the neutralized stderr error line', async () => {
+  const stderr = [
+    '{',
+    '  "status": "failed"',
+    '}',
+    'Error: all 1 file review(s) failed — check your LLM configuration and API key @octocat https://example.com',
+  ].join('\n');
+  const { body } = await render(providerFailure, 'failure', [], { stderr });
+  assert.match(body, /Runner error:.*file review\(s\) failed/);
+  assert.match(body, /LLM configuration and API key/);
+  assert.doesNotMatch(body, /@octocat|https:\/\//);
+  assert.doesNotMatch(body, /"status": "failed"/);
+});
+
+test('a missing report still surfaces the stderr error line', async () => {
+  const { body } = await render(null, 'failure', [], {
+    stderr: 'Error: all 1 file review(s) failed — check your LLM configuration and API key',
+    reportExists: false,
+  });
+  assert.match(body, /did not finish/);
+  assert.match(body, /Runner error:.*LLM configuration and API key/);
 });
 
 test('provider failure fields are neutralized', async () => {
