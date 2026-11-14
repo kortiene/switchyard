@@ -38,7 +38,41 @@ pub(crate) struct RecoveryProfile {
     pub(crate) skip_verify_for_supervised_writers: bool,
 }
 
+/// Who delivers commands and observations. Fake and the Pi probe use
+/// `RuntimeAdapter::dispatch`. Only the confined adapter routes stops, work,
+/// and observation polling through the Host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct DispatchProfile {
+    pub(crate) host_owned: bool,
+}
+
+/// How uncertainty becomes a mission fact. Fake and the Pi probe admit it as
+/// a runtime observation. The confined adapter records it as a supervisor fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct FactProfile {
+    pub(crate) uncertainty_is_host_fact: bool,
+}
+
+/// Linux execution ledger. The Pi probe admits no Linux effects. Fake may
+/// admit them and keeps an admitted stop. Only the confined adapter supervises
+/// live effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct LinuxLedgerProfile {
+    pub(crate) admits_effects: bool,
+    pub(crate) preserves_admitted_stop: bool,
+    pub(crate) supervises_live_effects: bool,
+}
+
+/// Operator status text. Only Fake names the `detect_uncertainty` command.
+/// Read-only inspection has no live adapter, so it uses the recorded name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct GuidanceProfile {
+    pub(crate) operator_resolution_hint: bool,
+}
+
 impl RuntimeAdapter {
+    pub(crate) const FAKE_ADAPTER_NAME: &'static str = "fake";
+
     pub(crate) fn recovery_profile(&self) -> RecoveryProfile {
         match self {
             Self::Fake(_) => RecoveryProfile::default(),
@@ -58,23 +92,79 @@ impl RuntimeAdapter {
         }
     }
 
-    pub(crate) fn is_confined(&self) -> bool {
-        #[cfg(all(
-            feature = "pi-contract",
-            feature = "linux-execution",
-            target_os = "linux"
-        ))]
-        {
-            matches!(self, Self::Confined(_))
+    pub(crate) fn dispatch_profile(&self) -> DispatchProfile {
+        match self {
+            Self::Fake(_) => DispatchProfile::default(),
+            #[cfg(feature = "pi-contract")]
+            Self::Pi(_) => DispatchProfile::default(),
+            #[cfg(all(
+                feature = "pi-contract",
+                feature = "linux-execution",
+                target_os = "linux"
+            ))]
+            Self::Confined(_) => DispatchProfile { host_owned: true },
         }
-        #[cfg(not(all(
-            feature = "pi-contract",
-            feature = "linux-execution",
-            target_os = "linux"
-        )))]
-        {
-            let _ = self;
-            false
+    }
+
+    pub(crate) fn fact_profile(&self) -> FactProfile {
+        match self {
+            Self::Fake(_) => FactProfile::default(),
+            #[cfg(feature = "pi-contract")]
+            Self::Pi(_) => FactProfile::default(),
+            #[cfg(all(
+                feature = "pi-contract",
+                feature = "linux-execution",
+                target_os = "linux"
+            ))]
+            Self::Confined(_) => FactProfile {
+                uncertainty_is_host_fact: true,
+            },
+        }
+    }
+
+    pub(crate) fn linux_ledger(&self) -> LinuxLedgerProfile {
+        match self {
+            Self::Fake(_) => LinuxLedgerProfile {
+                admits_effects: true,
+                preserves_admitted_stop: true,
+                supervises_live_effects: false,
+            },
+            #[cfg(feature = "pi-contract")]
+            Self::Pi(_) => LinuxLedgerProfile::default(),
+            #[cfg(all(
+                feature = "pi-contract",
+                feature = "linux-execution",
+                target_os = "linux"
+            ))]
+            Self::Confined(_) => LinuxLedgerProfile {
+                admits_effects: true,
+                preserves_admitted_stop: true,
+                supervises_live_effects: true,
+            },
+        }
+    }
+
+    pub(crate) fn guidance(&self) -> GuidanceProfile {
+        match self {
+            Self::Fake(_) => GuidanceProfile {
+                operator_resolution_hint: true,
+            },
+            #[cfg(feature = "pi-contract")]
+            Self::Pi(_) => GuidanceProfile::default(),
+            #[cfg(all(
+                feature = "pi-contract",
+                feature = "linux-execution",
+                target_os = "linux"
+            ))]
+            Self::Confined(_) => GuidanceProfile::default(),
+        }
+    }
+
+    /// Recorded `attempts.runtime_config_json` adapter name. Inspection does
+    /// not open a runtime, so status text uses this instead of a live variant.
+    pub(crate) fn guidance_for_recorded_name(recorded: &str) -> GuidanceProfile {
+        GuidanceProfile {
+            operator_resolution_hint: recorded == Self::FAKE_ADAPTER_NAME,
         }
     }
 
@@ -85,7 +175,7 @@ impl RuntimeAdapter {
 
     pub(crate) fn name(&self) -> &'static str {
         match self {
-            Self::Fake(_) => "fake",
+            Self::Fake(_) => Self::FAKE_ADAPTER_NAME,
             #[cfg(feature = "pi-contract")]
             Self::Pi(_) => "pi-probe-v1",
             #[cfg(all(
@@ -99,7 +189,7 @@ impl RuntimeAdapter {
 
     pub(crate) fn configuration(&self) -> Value {
         match self {
-            Self::Fake(_) => json!({"adapter":"fake", "credentials":"none"}),
+            Self::Fake(_) => json!({"adapter": Self::FAKE_ADAPTER_NAME, "credentials":"none"}),
             #[cfg(feature = "pi-contract")]
             Self::Pi(runtime) => runtime.configuration(),
             #[cfg(all(
@@ -333,5 +423,101 @@ mod tests {
                 .recovery_profile(),
             );
         }
+    }
+
+    fn assert_declared(adapter: &RuntimeAdapter) {
+        let dispatch = adapter.dispatch_profile();
+        let facts = adapter.fact_profile();
+        let linux = adapter.linux_ledger();
+        let guidance = adapter.guidance();
+        assert!(
+            !dispatch.host_owned || facts.uncertainty_is_host_fact,
+            "host-owned dispatch records uncertainty as a supervisor fact: {dispatch:?} {facts:?}"
+        );
+        assert!(
+            !linux.supervises_live_effects || linux.admits_effects,
+            "live supervision admits the effects it settles: {linux:?}"
+        );
+        assert_eq!(
+            guidance,
+            RuntimeAdapter::guidance_for_recorded_name(adapter.name()),
+            "{}",
+            adapter.name()
+        );
+    }
+
+    #[test]
+    fn declared_profiles_for_fake_and_pi_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake =
+            RuntimeAdapter::Fake(FakeRuntime::open(&dir.path().join("fake-runtime.json")).unwrap());
+        assert_eq!(fake.dispatch_profile(), DispatchProfile::default());
+        assert_eq!(fake.fact_profile(), FactProfile::default());
+        assert_eq!(
+            fake.linux_ledger(),
+            LinuxLedgerProfile {
+                admits_effects: true,
+                preserves_admitted_stop: true,
+                supervises_live_effects: false,
+            }
+        );
+        assert!(fake.guidance().operator_resolution_hint);
+        assert!(
+            RuntimeAdapter::guidance_for_recorded_name(RuntimeAdapter::FAKE_ADAPTER_NAME)
+                .operator_resolution_hint
+        );
+        assert!(
+            !RuntimeAdapter::guidance_for_recorded_name("pi-probe-v1").operator_resolution_hint
+        );
+        assert!(
+            !RuntimeAdapter::guidance_for_recorded_name("pi-confined-v1").operator_resolution_hint
+        );
+        assert!(!RuntimeAdapter::guidance_for_recorded_name("other").operator_resolution_hint);
+        assert_declared(&fake);
+        #[cfg(feature = "pi-contract")]
+        {
+            let node = std::env::current_exe().unwrap();
+            let pi = RuntimeAdapter::Pi(Box::new(
+                crate::execution::PiRuntime::new(&dir.path().join("ledger.sqlite"), &node).unwrap(),
+            ));
+            assert_eq!(pi.dispatch_profile(), DispatchProfile::default());
+            assert_eq!(pi.fact_profile(), FactProfile::default());
+            assert_eq!(pi.linux_ledger(), LinuxLedgerProfile::default());
+            assert_eq!(pi.guidance(), GuidanceProfile::default());
+            assert_declared(&pi);
+        }
+    }
+
+    #[cfg(all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn confined_pi_declared_profiles_are_host_owned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = || std::path::PathBuf::from("/uninstalled-conformance-fixture");
+        let runtime = crate::execution::confined_pi::fixture_runtime(tmp.path(), "profiles");
+        let config = crate::execution::confined_pi::ConfinedPiConfig {
+            root: path(),
+            cgroup_root: path(),
+            runtime,
+            node: path(),
+            bubblewrap: path(),
+            launcher: path(),
+            policy: path(),
+            model_endpoint: None,
+        };
+        let confined = RuntimeAdapter::Confined(Box::new(
+            crate::execution::confined_runtime::ConfinedRuntime::new(config, "answer").unwrap(),
+        ));
+        assert!(confined.dispatch_profile().host_owned);
+        assert!(confined.fact_profile().uncertainty_is_host_fact);
+        let linux = confined.linux_ledger();
+        assert!(linux.admits_effects);
+        assert!(linux.preserves_admitted_stop);
+        assert!(linux.supervises_live_effects);
+        assert_eq!(confined.guidance(), GuidanceProfile::default());
+        assert_declared(&confined);
     }
 }

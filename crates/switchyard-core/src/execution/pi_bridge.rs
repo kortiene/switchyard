@@ -123,6 +123,36 @@ pub struct PiBridge {
     _owner: OwnerLock,
 }
 
+fn bridge_fixture_allowed(fixture: &str) -> bool {
+    matches!(
+        fixture,
+        "answer"
+            | "file-write"
+            | "process-fast"
+            | "process-wait"
+            | "process-hold"
+            | "process-cancel"
+            | "tools"
+            | "gated-tools"
+            | "recover"
+            | "crash-before-admission"
+            | "crash-after-admission"
+            | "crash-after-abort-recorded"
+            | "crash-after-abort-settled"
+            | "hold-abort"
+            | "ignore-abort"
+            | "cooperative-wait"
+            | "storage-submit"
+            | "storage-abort-intent"
+            | "storage-abort-cancel"
+            | "storage-abort-settlement"
+            | "storage-background"
+            | "storage-close"
+            | "stopping-once"
+            | "mismatch"
+    ) || (cfg!(test) && crate::execution::is_busy_once_fixture(fixture))
+}
+
 impl PiBridge {
     /// Spawn the trusted conformance launcher with an empty environment and a
     /// canonical storage lock. S3 must add OS confinement before live use.
@@ -133,34 +163,8 @@ impl PiBridge {
         binding: RuntimeBinding,
         fixture: &str,
     ) -> Result<Self> {
-        if !matches!(
-            fixture,
-            "answer"
-                | "file-write"
-                | "process-fast"
-                | "process-wait"
-                | "process-hold"
-                | "process-cancel"
-                | "tools"
-                | "gated-tools"
-                | "recover"
-                | "crash-before-admission"
-                | "crash-after-admission"
-                | "crash-after-abort-recorded"
-                | "crash-after-abort-settled"
-                | "hold-abort"
-                | "ignore-abort"
-                | "cooperative-wait"
-                | "storage-submit"
-                | "storage-abort-intent"
-                | "storage-abort-cancel"
-                | "storage-abort-settlement"
-                | "storage-background"
-                | "storage-close"
-                | "busy-once"
-                | "stopping-once"
-                | "mismatch"
-        ) || binding.generation == 0
+        if !bridge_fixture_allowed(fixture)
+            || binding.generation == 0
             || binding.generation > 9_007_199_254_740_991
             || [
                 &binding.mission_id,

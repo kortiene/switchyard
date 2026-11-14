@@ -159,6 +159,9 @@ pub struct MissionSnapshot {
     pub execution_supersessions: Vec<Value>,
     pub execution_blocked: bool,
     pub quarantined: Vec<(i64, String, String, String)>,
+    /// Fake's operator `detect_uncertainty` hint. Live hosts use the adapter
+    /// enum; read-only inspection uses the recorded adapter name.
+    operator_resolution_hint: bool,
 }
 
 impl MissionSnapshot {
@@ -274,7 +277,7 @@ impl MissionSnapshot {
         }
         if self.execution_blocked {
             steps.push("Unresolved execution effects still block pause/cancel completion, recovery and workspace reuse. Inspect each block and its evidence protocol (#125 for execution effects). An abandoned effect remains blocking until an evidence-backed supersession; the outcome stays unknown.".into());
-            if self.runtime_adapter == "fake"
+            if self.operator_resolution_hint
                 && matches!(self.phase, Phase::Pausing | Phase::Cancelling)
             {
                 steps.push(format!("To enter needs_attention for #125 resolution, admit DetectUncertainty as the operator: switchyard mission command --db '<DB_PATH>' --mission {} --attempt {} --command-id '<STABLE_COMMAND_ID>' --kind detect_uncertainty --payload '{{\"reason\":\"execution_uncertain\"}}' --expected-revision {} --persist-only. Replace the quoted placeholders and reuse the command ID on retry. This records uncertainty without clearing any effect. Resolve with matching evidence, then explicitly recover the recorded stop target; abandonment remains blocking.", self.mission_id, self.attempt_id, self.revision));
@@ -410,7 +413,7 @@ impl Host {
         }
         let mut snapshots = Vec::new();
         for id in ids {
-            snapshots.push(snapshot_from(&store, &id, generation)?);
+            snapshots.push(snapshot_from(&store, &id, generation, None)?);
         }
         Ok(snapshots)
     }
@@ -526,13 +529,9 @@ impl Host {
         if host_fact {
             // The private door records only Rust confinement proofs, and only
             // under the origin that distinguishes them from Pi observations.
+            // The body allowlist lives in [`host_supervisor_fact`].
             if request.origin != CommandOrigin::HostSupervisor
-                || !matches!(
-                    request.body,
-                    CommandBody::DetectUncertainty { .. }
-                        | CommandBody::ConfirmStopped
-                        | CommandBody::ConfirmCancelled
-                )
+                || !host_supervisor_fact(&request.body)
             {
                 return Err(Error::guard(
                     "host facts are limited to supervisor stop and uncertainty proofs",
@@ -687,13 +686,8 @@ impl Host {
     /// only after Rust proves bridge termination and all workspace effects settle;
     /// a protocol abort acknowledgement alone never certifies quiescence.
     pub fn dispatch_stops(&mut self, mission_id: &str) -> Result<usize> {
-        #[cfg(all(
-            feature = "pi-contract",
-            feature = "linux-execution",
-            target_os = "linux"
-        ))]
-        if self.runtime.is_confined() {
-            return self.dispatch_confined_stops(mission_id);
+        if self.runtime.dispatch_profile().host_owned {
+            return self.dispatch_host_owned_stops(mission_id);
         }
         let mission = self.store.load_mission(mission_id)?;
         let binding = self.binding(&mission);
@@ -798,13 +792,8 @@ impl Host {
     /// Dispatch pending commands without verifying the workspace again.
     /// The caller must already have reconciled it in this owner generation.
     pub fn dispatch_reconciled(&mut self, mission_id: &str) -> Result<usize> {
-        #[cfg(all(
-            feature = "pi-contract",
-            feature = "linux-execution",
-            target_os = "linux"
-        ))]
-        if self.runtime.is_confined() {
-            return self.dispatch_confined_work(mission_id);
+        if self.runtime.dispatch_profile().host_owned {
+            return self.dispatch_host_owned_work(mission_id);
         }
         // Stops run first. A Pi abort refused with `stopping` or rejected
         // returns from here and does not reach `reject_pending` for that
@@ -1138,6 +1127,66 @@ impl Host {
         }
     }
 
+    fn dispatch_host_owned_stops(&mut self, mission_id: &str) -> Result<usize> {
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        {
+            self.dispatch_confined_stops(mission_id)
+        }
+        #[cfg(not(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        )))]
+        {
+            let _ = mission_id;
+            Err(Error::guard("dispatch profile requires a confined session"))
+        }
+    }
+
+    fn dispatch_host_owned_work(&mut self, mission_id: &str) -> Result<usize> {
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        {
+            self.dispatch_confined_work(mission_id)
+        }
+        #[cfg(not(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        )))]
+        {
+            let _ = mission_id;
+            Err(Error::guard("dispatch profile requires a confined session"))
+        }
+    }
+
+    fn poll_host_owned(&mut self, mission_id: &str) -> Result<Vec<NotifyOutcome>> {
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        {
+            self.poll_confined(mission_id)
+        }
+        #[cfg(not(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        )))]
+        {
+            let _ = mission_id;
+            Err(Error::guard("dispatch profile requires a confined session"))
+        }
+    }
+
     fn stop_pending(&self, mission_id: &str) -> Result<bool> {
         Ok(self.store.list_commands(mission_id)?.iter().any(|command| {
             command.state == CommandState::Pending
@@ -1199,13 +1248,8 @@ impl Host {
     }
 
     pub fn poll_runtime(&mut self, mission_id: &str) -> Result<Vec<NotifyOutcome>> {
-        #[cfg(all(
-            feature = "pi-contract",
-            feature = "linux-execution",
-            target_os = "linux"
-        ))]
-        if self.runtime.is_confined() {
-            return self.poll_confined(mission_id);
+        if self.runtime.dispatch_profile().host_owned {
+            return self.poll_host_owned(mission_id);
         }
         let mut outcomes = Vec::new();
         while let Some(note) = self
@@ -1477,7 +1521,37 @@ impl Host {
     }
 
     pub fn snapshot(&self, mission_id: &str) -> Result<MissionSnapshot> {
-        snapshot_from(&self.store, mission_id, self.lock.generation)
+        snapshot_from(
+            &self.store,
+            mission_id,
+            self.lock.generation,
+            Some(self.runtime.guidance().operator_resolution_hint),
+        )
+    }
+
+    /// The only admission path for Rust supervisor facts. The allowlist is
+    /// [`host_supervisor_fact`]; `admit_checked` repeats that check.
+    fn admit_host_fact(
+        &mut self,
+        mission: &MissionRecord,
+        body: CommandBody,
+    ) -> Result<AdmitResult> {
+        if !host_supervisor_fact(&body) {
+            return Err(Error::guard("unsupported Host-owned fact"));
+        }
+        self.admit_checked(
+            AdmitRequest {
+                command_id: None,
+                mission_id: mission.id.clone(),
+                attempt_id: Some(mission.attempt.id.clone()),
+                expected_revision: mission.revision,
+                actor: "rust-confined-supervisor".into(),
+                origin: CommandOrigin::HostSupervisor,
+                body,
+            },
+            None,
+            true,
+        )
     }
 
     fn admit_observation(
@@ -1504,14 +1578,9 @@ impl Host {
         if mission.phase == Phase::NeedsAttention {
             return Ok(unchanged(mission));
         }
-        #[cfg(all(
-            feature = "pi-contract",
-            feature = "linux-execution",
-            target_os = "linux"
-        ))]
-        if self.runtime.is_confined() {
+        if self.runtime.fact_profile().uncertainty_is_host_fact {
             return self
-                .confined_host_fact(
+                .admit_host_fact(
                     mission,
                     CommandBody::DetectUncertainty {
                         reason,
@@ -1821,7 +1890,12 @@ impl Host {
     }
 }
 
-fn snapshot_from(store: &Store, mission_id: &str, generation: u64) -> Result<MissionSnapshot> {
+fn snapshot_from(
+    store: &Store,
+    mission_id: &str,
+    generation: u64,
+    operator_resolution_hint: Option<bool>,
+) -> Result<MissionSnapshot> {
     let mission = store.load_mission(mission_id)?;
     let workspace = store
         .load_workspace(&mission.attempt.id)?
@@ -1848,6 +1922,10 @@ fn snapshot_from(store: &Store, mission_id: &str, generation: u64) -> Result<Mis
             publication_state: delivery.publication_state,
         });
     let pi_host = store.pi_host_view(&mission.attempt.id)?;
+    let operator_resolution_hint = operator_resolution_hint.unwrap_or_else(|| {
+        RuntimeAdapter::guidance_for_recorded_name(&mission.attempt.runtime_adapter)
+            .operator_resolution_hint
+    });
     Ok(MissionSnapshot {
         mission_id: mission.id,
         revision: mission.revision,
@@ -1889,6 +1967,7 @@ fn snapshot_from(store: &Store, mission_id: &str, generation: u64) -> Result<Mis
         execution_supersessions: store.execution_supersessions(mission_id)?,
         execution_blocked: store.ops_blocked(mission_id)?,
         quarantined: store.list_quarantine(mission_id)?,
+        operator_resolution_hint,
     })
 }
 
@@ -2085,6 +2164,17 @@ fn verification_record(
     }
 }
 
+/// Supervisor facts the Host may record. Runtime observations and operator
+/// commands never use this list.
+fn host_supervisor_fact(body: &CommandBody) -> bool {
+    matches!(
+        body,
+        CommandBody::DetectUncertainty { .. }
+            | CommandBody::ConfirmStopped
+            | CommandBody::ConfirmCancelled
+    )
+}
+
 fn runtime_method(kind: CommandKind) -> &'static str {
     match kind {
         CommandKind::Pause | CommandKind::Cancel => "abort",
@@ -2132,6 +2222,27 @@ fn rationale(body: &CommandBody) -> String {
         CommandBody::Continue { activity } => format!("continue {activity}"),
         CommandBody::DetectUncertainty { reason, .. } => reason.as_str().to_string(),
         other => other.kind().as_str().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod host_fact_tests {
+    use super::host_supervisor_fact;
+    use crate::domain::{AttentionReason, CommandBody};
+
+    #[test]
+    fn host_supervisor_facts_are_only_stop_and_uncertainty() {
+        assert!(host_supervisor_fact(&CommandBody::ConfirmStopped));
+        assert!(host_supervisor_fact(&CommandBody::ConfirmCancelled));
+        assert!(host_supervisor_fact(&CommandBody::DetectUncertainty {
+            reason: AttentionReason::ExecutionUncertain,
+            content_digest: None,
+        }));
+        assert!(!host_supervisor_fact(&CommandBody::Pause));
+        assert!(!host_supervisor_fact(&CommandBody::Cancel));
+        assert!(!host_supervisor_fact(&CommandBody::Steer {
+            content: "later".into(),
+        }));
     }
 }
 

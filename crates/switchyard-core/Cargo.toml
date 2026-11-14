@@ -10,6 +10,9 @@ description = "Switchyard mission authority: transitions, ledger, and fake runti
 [features]
 pi-contract = []
 linux-execution = ["dep:rustix"]
+# `busy-once` only. Not a default, and not enabled by the product CLI.
+# The confinement probe's dev-dependency is the only enabler.
+test-fixtures = []
 
 [dependencies]
 rusqlite = { version = "0.37", features = ["bundled"] }

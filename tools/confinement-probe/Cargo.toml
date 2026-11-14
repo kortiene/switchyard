@@ -20,6 +20,9 @@ switchyard-core = { path = "../../crates/switchyard-core", features = ["pi-contr
 [dev-dependencies]
 tempfile = "3"
 rusqlite = { version = "0.37", features = ["bundled"] }
+# Test builds only. `pi-contract` stays on the optional normal dependency so a
+# workspace test does not enable it for switchyard-core itself.
+switchyard-core = { path = "../../crates/switchyard-core", features = ["test-fixtures"] }
 
 [[bin]]
 name = "confinement-fixture"

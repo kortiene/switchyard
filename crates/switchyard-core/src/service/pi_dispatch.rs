@@ -31,11 +31,48 @@ impl Host {
         linux: LinuxExecutionConfig,
         fixture: &str,
     ) -> Result<Self> {
+        Self::open_confined(db, config, linux, fixture, false)
+    }
+
+    /// Same as [`Self::open_confined_pi`], plus the `busy-once` stop-admission
+    /// fixture. Compiled only with the `test-fixtures` feature, which the
+    /// confinement probe enables from its dev-dependency. `cfg(test)` is not
+    /// set on this library when that probe builds it.
+    #[cfg(feature = "test-fixtures")]
+    pub fn open_confined_test_fixture(
+        db: &Path,
+        config: ConfinedPiConfig,
+        linux: LinuxExecutionConfig,
+        fixture: &str,
+    ) -> Result<Self> {
+        Self::open_confined(db, config, linux, fixture, true)
+    }
+
+    fn open_confined(
+        db: &Path,
+        config: ConfinedPiConfig,
+        linux: LinuxExecutionConfig,
+        fixture: &str,
+        test_fixtures: bool,
+    ) -> Result<Self> {
         let db = canonical_db_path(db)?;
         let mut host = Self::open_with_runtime(&db, |_| {
-            Ok(RuntimeAdapter::Confined(Box::new(ConfinedRuntime::new(
-                config, fixture,
-            )?)))
+            let runtime = if !test_fixtures {
+                ConfinedRuntime::new(config, fixture)?
+            } else {
+                #[cfg(any(test, feature = "test-fixtures"))]
+                {
+                    ConfinedRuntime::new_for_harness(config, fixture)?
+                }
+                #[cfg(not(any(test, feature = "test-fixtures")))]
+                {
+                    // Unreachable. Only `open_confined_test_fixture` passes true,
+                    // and that method exists only with `test-fixtures`.
+                    let _ = (config, fixture);
+                    return Err(Error::guard("busy-once is not a production fixture"));
+                }
+            };
+            Ok(RuntimeAdapter::Confined(Box::new(runtime)))
         })?;
         host.enable_linux_execution(linux)?;
         // No bridge is opened until a mission binding is available. Each reopen
@@ -147,12 +184,14 @@ impl Host {
         let initialized = self.store.runtime_initialized(&binding.attempt_id)?;
         let digest = self.confined_mut()?.runtime_digest.clone();
         let runtime = self.confined_mut()?;
+        let test_fixtures = runtime.allow_test_fixtures();
         let opened = ConfinedPiSession::open_required(
             &runtime.config,
             binding.clone(),
             &runtime.fixture,
             initialized,
             Some(&digest),
+            test_fixtures,
         );
         let session = match opened {
             Ok(session) => session,
@@ -545,7 +584,7 @@ impl Host {
                 _ => None,
             };
             if let Some(body) = body {
-                self.confined_host_fact(&current, body)?;
+                self.admit_host_fact(&current, body)?;
             }
         }
         // Cancel is terminal, so this drops the proven-stopped bridge. Pause is
@@ -591,34 +630,6 @@ impl Host {
         }
         self.reconcile_execution(mission_id)?;
         Ok(vec![unchanged(&self.store.load_mission(mission_id)?)])
-    }
-
-    pub(super) fn confined_host_fact(
-        &mut self,
-        mission: &MissionRecord,
-        body: CommandBody,
-    ) -> Result<AdmitResult> {
-        if !matches!(
-            body,
-            CommandBody::DetectUncertainty { .. }
-                | CommandBody::ConfirmStopped
-                | CommandBody::ConfirmCancelled
-        ) {
-            return Err(Error::guard("unsupported Host-owned fact"));
-        }
-        self.admit_checked(
-            AdmitRequest {
-                command_id: None,
-                mission_id: mission.id.clone(),
-                attempt_id: Some(mission.attempt.id.clone()),
-                expected_revision: mission.revision,
-                actor: "rust-confined-supervisor".into(),
-                origin: CommandOrigin::HostSupervisor,
-                body,
-            },
-            None,
-            true,
-        )
     }
 }
 

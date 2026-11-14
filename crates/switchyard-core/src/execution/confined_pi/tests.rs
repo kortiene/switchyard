@@ -79,7 +79,9 @@ fn confined_pi_recovery_rejects_foreign_leaf_and_invalid_identity() {
     assert!(validate(&binding, "eval").is_err());
     assert!(validate(&binding, "answer").is_ok());
     assert!(validate(&binding, "s3-acceptance").is_ok());
+    assert!(!production_session_fixture("busy-once"));
     assert!(validate(&binding, "busy-once").is_ok());
+    assert!(validate_fixture(&binding, "busy-once", false).is_err());
     assert!(validate(&binding, "http://169.254.169.254/latest").is_err());
     assert!(validate(&binding, "http://127.0.0.1:9/v1").is_err());
 }
@@ -324,6 +326,7 @@ fn confined_pi_mismatched_runtime_digest_is_refused_before_recovery() {
         "answer",
         false,
         Some("sha256:not-the-installed-runtime"),
+        false,
     ) {
         Ok(_) => panic!("a mismatched runtime digest must be refused"),
         Err(error) => error.to_string(),

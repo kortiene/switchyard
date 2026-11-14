@@ -27,10 +27,9 @@ impl Host {
     }
 
     fn flag_linux_attention(&mut self, mission: &crate::domain::MissionRecord) -> Result<()> {
-        let stopping_fake = (matches!(self.runtime, RuntimeAdapter::Fake(_))
-            || self.runtime.is_confined())
+        let preserving_stop = self.runtime.linux_ledger().preserves_admitted_stop
             && matches!(mission.phase, Phase::Pausing | Phase::Cancelling);
-        if !mission.phase.is_terminal() && !stopping_fake {
+        if !mission.phase.is_terminal() && !preserving_stop {
             self.uncertainty(mission, crate::domain::AttentionReason::ExecutionUncertain)?;
         }
         Ok(())
@@ -196,9 +195,9 @@ mod os {
 
     impl Host {
         pub fn enable_linux_execution(&mut self, config: LinuxExecutionConfig) -> Result<()> {
-            if self.runtime.fake_mut().is_none() && !self.runtime.is_confined() {
+            if !self.runtime.linux_ledger().admits_effects {
                 return Err(Error::guard(
-                    "linux execution is a non-default test backend and requires FakeRuntime",
+                    "linux execution requires an adapter that admits Linux effects",
                 ));
             }
             require_bwrap(&config.bubblewrap)?;
@@ -396,10 +395,31 @@ mod os {
                 .resolve_linux(request, receipt.as_ref(), &quiescence)
         }
 
+        fn settle_supervised_effect(
+            &mut self,
+            id: &str,
+            effect: &crate::persistence::linux_execution::LinuxEffectRecord,
+            proof: &Value,
+        ) -> Result<bool> {
+            #[cfg(feature = "pi-contract")]
+            {
+                self.reconcile_confined_effect(id, effect, proof)
+            }
+            #[cfg(not(feature = "pi-contract"))]
+            {
+                // Unreachable today. Only Confined supervises live effects, and
+                // that variant exists only with pi-contract.
+                let _ = (id, effect, proof);
+                Err(Error::guard(
+                    "linux ledger profile requires a confined session",
+                ))
+            }
+        }
+
         pub(super) fn reconcile_linux_os(&mut self, mission_id: &str) -> Result<()> {
             let views = self.store.linux_views(mission_id)?;
             for view in &views {
-                if self.runtime.is_confined() {
+                if self.runtime.linux_ledger().supervises_live_effects {
                     self.poll_active(&view.operation_id)?;
                 }
             }
@@ -420,9 +440,8 @@ mod os {
                 if let Ok(quiescence) = self.prove_effect(&effect) {
                     self.store
                         .save_linux_quiescence(&view.operation_id, &quiescence)?;
-                    #[cfg(feature = "pi-contract")]
-                    if self.runtime.is_confined()
-                        && self.reconcile_confined_effect(
+                    if self.runtime.linux_ledger().supervises_live_effects
+                        && self.settle_supervised_effect(
                             &view.operation_id,
                             &effect,
                             &quiescence,
@@ -445,7 +464,7 @@ mod os {
                         .is_some_and(|s| s.active.contains_key(&v.operation_id))
             });
             if self.store.linux_execution_blocked(mission_id)?
-                && (!self.runtime.is_confined() || abandoned)
+                && (!self.runtime.linux_ledger().supervises_live_effects || abandoned)
             {
                 let mission = self.store.load_mission(mission_id)?;
                 self.flag_linux_attention(&mission)?;

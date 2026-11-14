@@ -89,7 +89,7 @@ impl ConfinedPiSession {
     /// thread that created the child. The supervisor stays parked until
     /// [`Self::stop`], so `open` may run on a thread that ends first.
     pub fn open(config: &ConfinedPiConfig, binding: RuntimeBinding, fixture: &str) -> Result<Self> {
-        Self::open_required(config, binding, fixture, false, None)
+        Self::open_required(config, binding, fixture, false, None, cfg!(test))
     }
 
     pub(crate) fn open_required(
@@ -100,8 +100,9 @@ impl ConfinedPiSession {
         // Digest recorded when the host ledger was opened. None for a direct
         // session open that has no attempt ledger yet.
         expected_digest: Option<&str>,
+        test_fixtures: bool,
     ) -> Result<Self> {
-        validate(&binding, fixture)?;
+        validate_fixture(&binding, fixture, test_fixtures || cfg!(test))?;
         let root = Directory::root(&config.root)?;
         let key = payload_hash(&identity(&binding))?;
         let control = root.child(&format!("session-{key}"))?;
@@ -492,8 +493,8 @@ fn binding_value(binding: &RuntimeBinding) -> Value {
         "sessionId":binding.session_id,"generation":binding.generation})
 }
 
-fn validate(binding: &RuntimeBinding, fixture: &str) -> Result<()> {
-    if !matches!(
+fn production_session_fixture(fixture: &str) -> bool {
+    matches!(
         fixture,
         "answer"
             | "recover"
@@ -504,8 +505,22 @@ fn validate(binding: &RuntimeBinding, fixture: &str) -> Result<()> {
             | "process-cancel"
             | "tools"
             | "s3-acceptance"
-            | "busy-once"
-    ) || binding.generation == 0
+    )
+}
+
+fn session_fixture_allowed(fixture: &str, test_fixtures: bool) -> bool {
+    production_session_fixture(fixture)
+        || (test_fixtures && crate::execution::is_busy_once_fixture(fixture))
+}
+
+#[cfg(test)]
+fn validate(binding: &RuntimeBinding, fixture: &str) -> Result<()> {
+    validate_fixture(binding, fixture, true)
+}
+
+fn validate_fixture(binding: &RuntimeBinding, fixture: &str, test_fixtures: bool) -> Result<()> {
+    if !session_fixture_allowed(fixture, test_fixtures)
+        || binding.generation == 0
         || binding.generation > 9_007_199_254_740_991
         || [
             &binding.mission_id,
