@@ -259,22 +259,27 @@ fn interrupted_intent_and_effect_are_quarantined_on_recovery() {
 #[test]
 fn receipt_before_lost_reply_replays_and_stale_settlement_cannot_write() {
     let (dir, mut host, mut request) = setup();
-    assert!(
-        host.execute_fake_at(&request, |at| if at == "completed" {
-            Err(Error::storage("lost reply"))
-        } else {
-            Ok(())
+    let err = host
+        .execute_fake_at(&request, |at| {
+            if at == "completed" {
+                Err(Error::storage("lost reply"))
+            } else {
+                Ok(())
+            }
         })
-        .is_err()
+        .unwrap_err();
+    assert!(
+        matches!(&err, Error::Storage { detail } if detail == "lost reply"),
+        "unexpected early failure: {err:?}"
     );
-    let id = request.operation_id().unwrap();
+    let id = request.operation_id().expect("request has no operation_id");
     let original = host
         .store
         .execution_effect(&id)
-        .unwrap()
-        .unwrap()
+        .expect("store read failed")
+        .expect("no execution_effects row written")
         .receipt
-        .unwrap();
+        .expect("no receipt");
     drop(host);
     let mut host = Host::open(&dir.path().join("mission.sqlite")).unwrap();
     assert!(host.store.complete_execution(&request, &original).is_err());
