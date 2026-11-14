@@ -57,6 +57,8 @@ S1 adds a separate Rust gate. From the repository root:
 
 The script checks formatting, clippy, and `cargo test` with the committed Rust 1.99.1 toolchain. This is the default-feature local gate. CI runs it as the `rust-core` job within `verify.yml`; `rust-core` is not currently required by the rulesets. The required `pi-bridge-contract` job runs workspace formatting, Clippy and tests with `pi-contract`; the separate required `execution-confinement` job builds and tests Linux execution and the confined bridge lifecycle. Legacy `npm run verify` remains separate.
 
+The read-only dashboard is a separate workspace, so `rust-core` does not build it. `./scripts/ui-verify.sh` is its gate (formatting, Clippy, and `cargo test`). CI runs that script as the `switchyard-ui` job in `verify.yml` after installing `pkg-config`, `libxkbcommon-dev`, and `libwayland-dev`. The job is not a required check and does not change rulesets. It does not render scene snapshots; `SWITCHYARD_UI_SNAP=1` stays local.
+
 # Pi package audit (published-package NO-GO)
 
 The separate `pi-package-audit` job uses pinned Node 22.23.4 on Ubuntu 24.04 to
@@ -95,6 +97,7 @@ Each CI check maps to a local command; local and CI agree on what the check prov
 | --- | --- | --- | --- |
 | `verify (node 20.19.0)`, `verify (node 22)` (`verify.yml`) | `cd adw_sdlc && npm ci && npm run verify` | Frozen TypeScript reference gate: typecheck, environment lint, prompt pack/mirror drift, wiki check, coverage thresholds, build. | Yes (rulesets 26316513 and 26316769) |
 | `rust-core` (`verify.yml`) | `./scripts/rust-verify.sh` | Default-feature Rust gate: formatting, Clippy, and `cargo test` on the committed Rust 1.99.1 toolchain. | No |
+| `switchyard-ui` (`verify.yml`) | `./scripts/ui-verify.sh` | Read-only dashboard gate: formatting, Clippy, and `cargo test` for `crates/switchyard-ui`. Needs `pkg-config`, `libxkbcommon-dev`, and `libwayland-dev` on Linux. Does not render snapshots. | No |
 | `pi-bridge-contract` (`pi-bridge-contract.yml`) | `node runtime/pi-source/install-npm.mjs && (cd runtime/pi-source && node build.mjs && npm ci) && node runtime/pi-source/contract.mjs` | Full credential-free S2 contract matrix with revision-bound evidence. | Yes |
 | `execution-confinement` (`execution-confinement.yml`) | `./scripts/confinement-verify.sh` and `./scripts/bridge-confinement-verify.sh` (prerequisites below) | Real OS confinement, bridge lifecycle, and model-endpoint egress on the declared Ubuntu 24.04 x86_64 runner. | Yes |
 | `pi-package-audit` (`pi-package-audit.yml`) | `cd runtime/pi && npm ci && npm run verify && npm run audit:package` | Published-package diagnostic; reproduces the historical NO-GO evidence. Not `pi-bridge-contract`. | No (diagnostic) |

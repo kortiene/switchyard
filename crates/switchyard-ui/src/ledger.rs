@@ -150,7 +150,7 @@ impl MissionCard {
     }
 
     /// A card with every field present but unremarkable, for fixtures.
-    fn blank() -> Self {
+    pub(crate) fn blank() -> Self {
         Self {
             mission_id: String::new(),
             phase: MissionPhase::Draft,
@@ -257,15 +257,19 @@ impl Ledger {
         self.cards.is_empty()
     }
 
-    /// The CLI invocations for one mission: one honest read, and one flagged
-    /// mutation per pending command. Nothing here is ever executed by this
-    /// crate; the strings exist to be copied.
+    /// The CLI invocations for one mission. Nothing here is ever executed;
+    /// the strings exist to be copied. Pending commands are already admitted,
+    /// so they echo `mission recover` rather than a second admit.
     pub fn cli_echo(&self, card: &MissionCard) -> Vec<CliEcho> {
         let db = &self.source;
         let mission = &card.mission_id;
         let mut out = vec![CliEcho {
             label: "status".to_string(),
-            command: format!("switchyard mission status --db {db} --mission {mission}"),
+            command: format!(
+                "switchyard mission status --db {} --mission {}",
+                shell_quote(db),
+                shell_quote(mission),
+            ),
             mutates: false,
             note: Some("read-only; does not take the owner lock".to_string()),
         }];
@@ -274,8 +278,11 @@ impl Ledger {
             out.push(CliEcho {
                 label: "workspace".to_string(),
                 command: format!(
-                    "switchyard mission workspace --db {db} --mission {mission} --attempt {} --root <dir-outside-the-checkout>",
-                    card.attempt_id
+                    "switchyard mission workspace --db {} --mission {} --attempt {} --root {}",
+                    shell_quote(db),
+                    shell_quote(mission),
+                    shell_quote(&card.attempt_id),
+                    shell_quote("<dir-outside-the-checkout>"),
                 ),
                 mutates: true,
                 note: Some(
@@ -290,7 +297,11 @@ impl Ledger {
             // duplicate; the honest action is `recover`, which redelivers them.
             out.push(CliEcho {
                 label: "recover".to_string(),
-                command: format!("switchyard mission recover --db {db} --mission {mission}"),
+                command: format!(
+                    "switchyard mission recover --db {} --mission {}",
+                    shell_quote(db),
+                    shell_quote(mission),
+                ),
                 mutates: true,
                 note: Some(
                     "takes the owner lock and redelivers the pending commands. They are \
@@ -319,13 +330,21 @@ impl Ledger {
             _ => None,
         };
         if let Some((kind, payload)) = decision {
+            let revision = card.revision.to_string();
             out.push(CliEcho {
                 label: kind.to_string(),
                 command: format!(
-                    "switchyard mission command --db {db} --mission {mission} --kind {kind} \
-                     --expected-revision {} --attempt {} --command-id <id-you-generate> \
-                     --actor <operator> --payload '{payload}'",
-                    card.revision, card.attempt_id
+                    "switchyard mission command --db {} --mission {} --kind {} \
+                     --expected-revision {} --attempt {} --command-id {} \
+                     --actor {} --payload {}",
+                    shell_quote(db),
+                    shell_quote(mission),
+                    shell_quote(kind),
+                    shell_quote(&revision),
+                    shell_quote(&card.attempt_id),
+                    shell_quote("<id-you-generate>"),
+                    shell_quote("<operator>"),
+                    shell_quote(&payload),
                 ),
                 mutates: true,
                 note: Some(
@@ -476,6 +495,72 @@ impl Ledger {
     }
 }
 
+/// POSIX single quotes, so a copied command survives spaces and quotes in
+/// the database path. `'` becomes `'\''`.
+pub(crate) fn shell_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Split a command this crate echoed. Handles the single quotes `shell_quote`
+/// produces, including the `'\''` escape.
+#[cfg(test)]
+pub(crate) fn shell_split(input: &str) -> Result<Vec<String>, &'static str> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut args = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= chars.len() {
+            break;
+        }
+        let mut arg = String::new();
+        let mut in_single = false;
+        while i < chars.len() {
+            let ch = chars[i];
+            if in_single {
+                if ch == '\'' {
+                    in_single = false;
+                } else {
+                    arg.push(ch);
+                }
+                i += 1;
+            } else if ch.is_whitespace() {
+                break;
+            } else if ch == '\'' {
+                in_single = true;
+                i += 1;
+            } else if ch == '\\' {
+                i += 1;
+                if i >= chars.len() {
+                    return Err("trailing escape");
+                }
+                arg.push(chars[i]);
+                i += 1;
+            } else {
+                arg.push(ch);
+                i += 1;
+            }
+        }
+        if in_single {
+            return Err("unclosed quote");
+        }
+        args.push(arg);
+    }
+    Ok(args)
+}
+
 /// `HH:MM:SS` in UTC, without a date/time dependency.
 fn utc_hms() -> String {
     let secs = SystemTime::now()
@@ -563,7 +648,7 @@ mod tests {
         assert!(
             echoes[0]
                 .command
-                .contains("--db /tmp/switchyard/mission.db")
+                .contains("--db '/tmp/switchyard/mission.db'")
         );
 
         let workspace = echoes.iter().find(|e| e.label == "workspace");
@@ -612,10 +697,10 @@ mod tests {
             .find(|e| e.label == "approve_review")
             .expect("awaiting review echoes approve_review");
         assert!(approve.mutates);
-        assert!(approve.command.contains("--kind approve_review"));
-        assert!(approve.command.contains("--expected-revision 7"));
-        assert!(approve.command.contains("--attempt att-01"));
-        assert!(approve.command.contains("--command-id <id-you-generate>"));
+        assert!(approve.command.contains("--kind 'approve_review'"));
+        assert!(approve.command.contains("--expected-revision '7'"));
+        assert!(approve.command.contains("--attempt 'att-01'"));
+        assert!(approve.command.contains("--command-id '<id-you-generate>'"));
         assert!(
             approve
                 .command
@@ -623,7 +708,7 @@ mod tests {
             "rationale lives in the payload, not as a flag: {}",
             approve.command
         );
-        assert!(!approve.command.contains("--rationale "));
+        assert!(!approve.command.contains(" --rationale"));
         assert!(
             approve
                 .note
@@ -672,6 +757,15 @@ mod tests {
             "no worktree exists, so no worktree command is offered"
         );
         assert_eq!(echoes.len(), 1, "only the honest read remains");
+    }
+
+    #[test]
+    fn shell_quote_round_trips_a_path_with_a_space_and_an_apostrophe() {
+        let path = "/tmp/operator's ledger/mission db.db";
+        let quoted = shell_quote(path);
+        assert_eq!(quoted, r"'/tmp/operator'\''s ledger/mission db.db'");
+        let split = shell_split(&quoted).expect("quoted path splits");
+        assert_eq!(split, vec![path.to_string()]);
     }
 
     #[test]

@@ -17,8 +17,13 @@ fi
 UI=crates/switchyard-ui
 
 # Rune links these at build time on Linux. Headless snapshot runs do not need
-# a display, but the compile does need the dev packages.
+# a display, but the compile does need the dev packages. Probe pkg-config
+# itself first: a missing binary is not a missing library.
 if [[ "$(uname -s)" == "Linux" ]]; then
+  if ! command -v pkg-config >/dev/null 2>&1; then
+    echo "pkg-config is required to detect Rune's Linux libraries (Debian/Ubuntu: apt-get install pkg-config libxkbcommon-dev libwayland-dev)" >&2
+    exit 1
+  fi
   for lib in xkbcommon wayland-client; do
     if ! pkg-config --exists "$lib"; then
       echo "missing $lib dev package (Debian/Ubuntu: apt-get install libxkbcommon-dev libwayland-dev)" >&2

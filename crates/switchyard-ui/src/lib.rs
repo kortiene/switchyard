@@ -25,6 +25,9 @@
 pub mod ledger;
 pub mod view;
 
+#[cfg(test)]
+mod cli_echo_test;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -341,6 +344,36 @@ mod tests {
             ..Ui::default()
         };
         assert!(!scheduled.read_due(50.0, false), "auto on but not yet due");
+    }
+
+    #[test]
+    fn a_paused_refresh_issues_one_read_and_does_not_stack_another() {
+        let mut ui = Ui {
+            auto_refresh: false,
+            next_due: 100.0,
+            source: PathBuf::from("/nonexistent/switchyard-ui-refresh.db"),
+            // Stay pending for the whole test. A short debounce can finish the
+            // read before the second poll, which would hide a stacked request.
+            fetch: Latest::default().debounce(std::time::Duration::from_secs(3600)),
+            ..Ui::default()
+        };
+        let mut tx = Tx::default();
+        assert!(
+            !poll(&mut ui, 50.0, &mut tx),
+            "an idle paused poll changes nothing"
+        );
+        assert!(!ui.fetch.is_pending());
+
+        refresh_now(&mut ui);
+        poll(&mut ui, 50.0, &mut tx);
+        assert!(!ui.force_refresh, "the request consumes the manual flag");
+        assert!(ui.fetch.is_pending(), "one read is in flight");
+
+        poll(&mut ui, 50.0, &mut tx);
+        assert!(
+            ui.fetch.is_pending(),
+            "a second poll does not drop or replace the in-flight read"
+        );
     }
 
     #[test]

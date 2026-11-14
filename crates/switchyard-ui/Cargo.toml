@@ -37,6 +37,11 @@ switchyard-core = { path = "../switchyard-core" }
 # Linux and macOS build unpatched. A Windows host needs the same vendored patch
 # copied into this workspace before it will build.
 
+[dev-dependencies]
+# The echo test compiles `crates/switchyard/src/cli.rs` and parses with its
+# clap derive. Dev-only, so the dashboard binary does not depend on clap.
+clap = { version = "4", features = ["derive"] }
+
 [profile.dev]
 # Full debug info for Rune's tree measured 18-23 GB of RAM for one build; line
 # tables keep backtraces and file:line in panics at a fraction of that.
