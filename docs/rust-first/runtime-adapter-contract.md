@@ -1,6 +1,8 @@
 # Runtime adapter contract and native Rust runtime gate
 
-Status: **proposed**. Not accepted. D1 and D2 describe how the code already works and lock that shape. The `AgentRuntime` trait, the `ExecutionEnv` move and the conformance suite (D3–D6) are not implemented. This ADR does not change the FakeRuntime default, does not enable Pi, and does not authorize a live run.
+Status: **proposed**. Not accepted. D1 and D2 describe how the code already works, except for the variant-specific gaps named in Context, and lock that shape. The `AgentRuntime` trait, the `ExecutionEnv` move and the conformance suite (D3–D6) are not implemented. This ADR does not change the FakeRuntime default, does not enable Pi, and does not authorize a live run.
+
+S2 is **GO for the credential-free source-built candidate** and **NO-GO for the published npm package**. See [#96](https://github.com/kortiene/switchyard/issues/96), [s2-contract-gate.md](s2-contract-gate.md), and [s2-feasibility.md](s2-feasibility.md).
 
 Companions: [architecture](README.md), [runtime protocol](runtime-protocol.md), [delivery plan](delivery-plan.md), [S2 contract gate](s2-contract-gate.md), [S3 execution receipts](s3-execution-receipts.md).
 
@@ -24,7 +26,7 @@ Proposed register row for [`wiki/decisions/invariants.md`](../../wiki/decisions/
   - `LinuxLedgerProfile`: whether Linux effects are admitted, an admitted stop is kept, and live effects are supervised.
   - `GuidanceProfile`: operator status text.
 - `Host::recover` runs one recovery sequence parameterized by `RecoveryProfile`.
-- Still decided by variant rather than declared: `validate_admission` and `validate_command` (`!is_fake()`), observation intake for non-host-owned adapters (`fake_mut().pop_notification()` with an `expect` on requeue), and `ExecutionEnv`, which only `FakeRuntime` implements and the Host reaches through `fake_mut()`. Method mapping still falls through to submit (`runtime_method`: `_ => "submit"`).
+- Still decided by variant rather than declared: `validate_admission` and `validate_command` (`!is_fake()`), observation intake for non-host-owned adapters (`fake_mut().pop_notification()` with an `expect` on requeue), and `ExecutionEnv`, which only `FakeRuntime` implements and the Host reaches through `fake_mut()`. Method mapping still falls through to submit (`runtime_method`: `_ => "submit"`). Operator guidance for a recorded adapter name still compares against the Fake adapter's name (`guidance_for_recorded_name` vs `FAKE_ADAPTER_NAME`).
 
 Without a written contract, three things stay unspecified: what a native runtime must satisfy, whether a Pi fix is "enough", and whether a new adapter is safe by default.
 
@@ -32,7 +34,7 @@ Without a written contract, three things stay unspecified: what a native runtime
 
 ### D1. The agent is simple; the Host decides (normative now)
 
-1. A runtime gets **no workflow tools**. It reaches files and processes only through the Host's Rust `ExecutionEnv`. The bundled tool allowlist ([README: Bridge process confinement](README.md#bridge-process-confinement-and-in-process-allowlist)) and the D6 "Controlled registry/execution" row enforce this.
+1. A runtime gets **no workflow tools**. It reaches files and processes only through Rust-owned execution: the simulated `ExecutionEnv` today, and supervised Linux execution (supervisor and ledger) for `Confined`. The bundled tool allowlist ([README: Bridge process confinement](README.md#bridge-process-confinement-and-in-process-allowlist)) enforces this today. The proposed D6 "Controlled registry/execution" row will enforce it for new adapters.
 2. **Verification, approval, publication and landing are Host operations.** The Host also owns dispatch (`DispatchProfile.host_owned`), stop admission and recovery. A runtime may report observations. It never sets mission state, settles an approval, or asserts execution quiescence.
 3. Planning approval is not yet an end-to-end CLI flow. Until S4 planning lands ([#172](https://github.com/kortiene/switchyard/issues/172)), the `awaiting_plan_approval` row and its plan digest are seeded through SQL, and `approve_plan` runs against that seeded row.
 4. "The Host owns publication" fixes only *where* publication runs. How it is materialized, which branch identity and credentials it uses, and who authorizes a live run are decided in [#170](https://github.com/kortiene/switchyard/issues/170) (S6) and [#167](https://github.com/kortiene/switchyard/issues/167). This ADR does not pre-decide them. M1 ends at PR publication ([README: Verification and delivery](README.md#verification-and-delivery)), so landing has no M1 implementation.
@@ -40,7 +42,7 @@ Without a written contract, three things stay unspecified: what a native runtime
 ### D2. Sealed adapter set with declared profiles (normative now)
 
 1. The adapter set is closed: `RuntimeAdapter { Fake, Pi, Confined }`, with enum dispatch. There is no public `Box<dyn AgentRuntime>` and no project-supplied adapter. This follows the bundled-trusted-adapter rule ([README: Scope and deferred work](README.md#scope-and-deferred-work)) and keeps [#42](https://github.com/kortiene/switchyard/issues/42) deferred.
-2. Every adapter difference that the Host acts on is a declared profile (`RecoveryProfile`, `DispatchProfile`, `FactProfile`, `LinuxLedgerProfile`, `GuidanceProfile`), not a branch on the variant. A new adapter starts from the profile defaults.
+2. Every adapter difference that the Host acts on is a declared profile (`RecoveryProfile`, `DispatchProfile`, `FactProfile`, `LinuxLedgerProfile`, `GuidanceProfile`), not a branch on the variant. The named exceptions are the variant-specific decisions listed in Context (`validate_admission`/`validate_command` on `!is_fake()`, observation intake, the submit fallthrough and `guidance_for_recorded_name`). Removing them is target work (D8). Each profile function is an exhaustive match, so a new variant must declare each profile explicitly. The defaults are inert.
 3. There is one effect journal and one recovery sequence, parameterized by `RecoveryProfile`. The Host has no `is_confined()` branches.
 4. Uncertainty and replay semantics stay host facts (`FactProfile.uncertainty_is_host_fact`). An adapter never owns them, and a host-owned dispatcher must record uncertainty as a host fact.
 5. FakeRuntime is the product default. Pi is the proof-of-concept runtime. The native Rust runtime is the committed long-term target, and it is the only planned additional adapter.
@@ -153,7 +155,7 @@ The suite is a generic harness, `fn conformance<A: AgentRuntime + FaultInjection
 
 For FakeRuntime to pass D5 and B3 it needs a durable, inspectable simulated effect store. Today `simulated_files` is in memory.
 
-The native runtime gate mirrors S2 ([delivery-plan.md](delivery-plan.md)). Passing it authorizes the native adapter for downstream M1 live work under the same S3 confinement gate. An unproven mandatory row is NO-GO.
+The native runtime gate mirrors S2 ([delivery-plan.md](delivery-plan.md)). Passing it makes the native adapter eligible for downstream M1 live work under the same S3 confinement gate, subject to the live-run authorization in [#167](https://github.com/kortiene/switchyard/issues/167). An unproven mandatory row is NO-GO.
 
 | Required proof | NO-GO condition | S2 row it mirrors |
 | --- | --- | --- |
@@ -192,12 +194,12 @@ Gate evidence is recorded in a dedicated issue, as #96 does. The proposed check 
   - Pi fixes and native work are judged by the same evidence.
   - The thin path is not blocked on a refactor.
 - **Negative / cost:**
-  - Until extraction, admission authority, observation intake and the submit fallthrough stay variant-specific.
+  - Until extraction, admission authority, observation intake, the submit fallthrough and `guidance_for_recorded_name` stay variant-specific.
   - Extraction touches `adapter.rs`, `service.rs` and `service/execution.rs`, which overlap with #112 and #114.
   - FakeRuntime grows a durable effect store.
 - **Unchanged:**
   - FakeRuntime stays the product default, and Pi stays opt-in.
-  - The S2 records stay as they are: published package NO-GO, credential-free source-built candidate GO.
+  - The S2 records stay as they are: published package NO-GO, credential-free source-built candidate GO ([#96](https://github.com/kortiene/switchyard/issues/96), [s2-contract-gate.md](s2-contract-gate.md), [s2-feasibility.md](s2-feasibility.md)).
   - No live execution, no TypeScript fallback, no plugin mechanism (#42 stays deferred).
 
 ## Alternatives considered
