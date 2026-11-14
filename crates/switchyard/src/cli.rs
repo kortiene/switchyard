@@ -1,3 +1,12 @@
+// Clap definition for the `switchyard` binary.
+//
+// `crates/switchyard-ui` `include!`s this file in a test so echoed commands
+// are parsed with this definition rather than a copy of the flags. Keep the
+// file free of `crate::` and `super::` imports; those paths would point at
+// the UI crate when the file is included there. Inner doc comments (`//!`)
+// are also unusable here: `include!` does not treat them as the module docs.
+// `std` and `clap` only.
+
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};

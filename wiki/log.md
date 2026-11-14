@@ -2,7 +2,7 @@
 
 ## 2026-11-14
 
-* **Check inventory**: [Testing and CI](reference/testing-and-ci.md) records the `switchyard-ui` job in `verify.yml`. It runs `./scripts/ui-verify.sh` for the read-only dashboard workspace. The job is not a required ruleset check.
+* **Check inventory**: [Testing and CI](reference/testing-and-ci.md) records the `switchyard-ui` job in `verify.yml`. It runs `./scripts/ui-verify.sh` for the read-only dashboard workspace. The job is not a required ruleset check. Its first run, a cache miss on `9a147a3`, took 2m30s (UI gate step 1m51s). The runner did not record peak memory.
 
 ## 2026-11-13
 

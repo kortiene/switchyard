@@ -369,10 +369,18 @@ mod tests {
         assert!(!ui.force_refresh, "the request consumes the manual flag");
         assert!(ui.fetch.is_pending(), "one read is in flight");
 
+        // Ask again while that read is still in flight. Without the
+        // `!in_flight` guard, this poll would start another read and clear
+        // the flag, so the assertion below would fail.
+        refresh_now(&mut ui);
         poll(&mut ui, 50.0, &mut tx);
         assert!(
+            ui.force_refresh,
+            "an in-flight read holds the next manual refresh; it must not start a second read"
+        );
+        assert!(
             ui.fetch.is_pending(),
-            "a second poll does not drop or replace the in-flight read"
+            "the original read is still the one in flight"
         );
     }
 

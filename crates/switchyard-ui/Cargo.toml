@@ -40,7 +40,9 @@ switchyard-core = { path = "../switchyard-core" }
 [dev-dependencies]
 # The echo test compiles `crates/switchyard/src/cli.rs` and parses with its
 # clap derive. Dev-only, so the dashboard binary does not depend on clap.
-clap = { version = "4", features = ["derive"] }
+# Pinned to the same clap the `switchyard` binary resolves in the root
+# Cargo.lock, so this separate workspace cannot drift onto another 4.x.
+clap = { version = "=4.6.7", features = ["derive"] }
 
 [profile.dev]
 # Full debug info for Rune's tree measured 18-23 GB of RAM for one build; line

@@ -59,6 +59,8 @@ The script checks formatting, clippy, and `cargo test` with the committed Rust 1
 
 The read-only dashboard is a separate workspace, so `rust-core` does not build it. `./scripts/ui-verify.sh` is its gate (formatting, Clippy, and `cargo test`). CI runs that script as the `switchyard-ui` job in `verify.yml` after installing `pkg-config`, `libxkbcommon-dev`, and `libwayland-dev`. The job is not a required check and does not change rulesets. It does not render scene snapshots; `SWITCHYARD_UI_SNAP=1` stays local.
 
+The first run (commit `9a147a3`, [run 43589795894](https://github.com/kortiene/switchyard/actions/runs/43589795894), job `132431888791`) was a cache miss. The job took 2m30s (2026-11-14 11:23:29Z–11:25:59Z). The UI gate step took 1m51s (11:24:01Z–11:25:52Z). The runner does not record peak memory. The 30 minute timeout is not a measured requirement.
+
 # Pi package audit (published-package NO-GO)
 
 The separate `pi-package-audit` job uses pinned Node 22.23.4 on Ubuntu 24.04 to
