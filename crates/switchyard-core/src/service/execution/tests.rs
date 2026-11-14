@@ -272,7 +272,7 @@ fn receipt_before_lost_reply_replays_and_stale_settlement_cannot_write() {
         matches!(&err, Error::Storage { detail } if detail == "lost reply"),
         "unexpected early failure: {err:?}"
     );
-    let id = request.operation_id().unwrap();
+    let id = request.operation_id().expect("request has no operation_id");
     let original = host
         .store
         .execution_effect(&id)
