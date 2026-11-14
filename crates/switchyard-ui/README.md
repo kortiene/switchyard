@@ -45,6 +45,21 @@ window and for a headless run.
 
 Toolbar: `Refresh` asks for an immediate read; `Theme` cycles Auto/Dark/Light;
 `Auto` toggles the two-second poll; `Prev`/`Next` move between missions.
+Previous/next become unavailable at the boundaries and carry full accessible
+names. Overview also counts missions needing attention across the whole ledger,
+not just the selected mission.
+
+Before the first completed read, the dashboard says `not read` and shows
+unknown—not zero—mission counts. An in-flight read says `reading` even when
+polling is paused. A successful empty ledger offers `switchyard mission create`;
+a failed read says `read failed`, wraps the raw error in panel 1, and offers a
+recovery hint in panel 2. These are distinct states, not variations of "empty."
+
+The selected-mission summary keeps identity, phase, and objective prominent and
+folds revision/runner and base/head details into two compact rows. `3. ATTENTION`
+sits immediately after it, before pipeline, limits, workspace, and command
+history. Critical prose wraps rather than truncating, and capped command lists
+say how many rows are not shown.
 
 Panel 8, `CLI ECHO · INSERT, NOT EXECUTE`, is the ADW Cockpit's signature move
 ported from the Pi extension: the exact `switchyard mission …` invocation for
@@ -52,8 +67,9 @@ the selected mission, as selectable text (`Cmd+C` / `Ctrl+C` copies). Reads are
 badged `READ-ONLY`; anything that would change state is badged `MUTATES` with
 the caveat that makes it safe to run by hand — including the `--command-id`
 idempotency discipline the CLI documents. The dashboard never executes any of
-it. A window 1080×780 scrolls; panels 7 and 8 sit below the fold by design,
-because attention and the escape hatch are drill-downs, not ambient noise.
+it. A window 1080×780 scrolls; command history and panel 8 sit below the fold
+by design, because lower-level detail and the escape hatch are drill-downs, not
+ambient noise.
 
 ## Headless verification
 

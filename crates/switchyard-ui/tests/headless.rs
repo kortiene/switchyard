@@ -9,8 +9,9 @@ use rune::{Env, Runtime};
 use switchyard_ui::{DB_ENV, Ui, spec, view};
 
 /// The scenes a snapshot run may ask for.
-const REQUIRED_SCENES: [&str; 6] = [
+const REQUIRED_SCENES: [&str; 7] = [
     "unread",
+    "unreadable",
     "planning",
     "awaiting-review",
     "needs-attention",
