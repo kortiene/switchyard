@@ -177,6 +177,7 @@ fn poll(s: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
         let path = s.source.clone();
         s.fetch.request(path, |p| Ledger::read(&p));
         s.next_due = clock + REFRESH.as_secs_f64();
+        changed = true;
     }
     if s.auto_refresh {
         let wait = (s.next_due - clock).max(0.05);
@@ -220,6 +221,11 @@ fn scene_unread(s: &mut Ui) {
     s.auto_refresh = false;
 }
 
+fn scene_unreadable(s: &mut Ui) {
+    s.ledger = Ledger::fixture_unreadable();
+    s.auto_refresh = false;
+}
+
 fn scene_planning(s: &mut Ui) {
     s.ledger = Ledger::fixture_planning();
     s.auto_refresh = false;
@@ -250,6 +256,7 @@ type SceneFn = fn(&mut Ui);
 
 const SCENES: &[(&str, SceneFn)] = &[
     ("unread", scene_unread),
+    ("unreadable", scene_unreadable),
     ("planning", scene_planning),
     ("awaiting-review", scene_awaiting_review),
     ("needs-attention", scene_needs_attention),
@@ -365,7 +372,10 @@ mod tests {
         assert!(!ui.fetch.is_pending());
 
         refresh_now(&mut ui);
-        poll(&mut ui, 50.0, &mut tx);
+        assert!(
+            poll(&mut ui, 50.0, &mut tx),
+            "starting a read repaints the visible in-flight state"
+        );
         assert!(!ui.force_refresh, "the request consumes the manual flag");
         assert!(ui.fetch.is_pending(), "one read is in flight");
 
