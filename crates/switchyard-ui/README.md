@@ -94,6 +94,10 @@ Use the dedicated gate:
 ./scripts/ui-verify.sh
 ```
 
+CI runs that script as the `switchyard-ui` job in
+[`.github/workflows/verify.yml`](../../.github/workflows/verify.yml). The job is
+not a required check.
+
 ## Build requirements
 
 Rust 1.99.1, pinned by the root `rust-toolchain.toml`, which matches Rune's own
@@ -151,5 +155,5 @@ of a native UI, and the reason it lives outside the core gate.
   dependency surface stayed minimal while the toolchain was proven.
 - The write path, via the `switchyard` binary, with confirmation and a
   persisted `--command-id`.
-- A CI job running `scripts/ui-verify.sh` and publishing the scene snapshots as
-  artifacts.
+- Publishing the headless scene snapshots from CI. The `switchyard-ui` job
+  runs the gate; `SWITCHYARD_UI_SNAP=1` stays local.

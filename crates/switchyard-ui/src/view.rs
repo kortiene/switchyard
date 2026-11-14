@@ -4,7 +4,7 @@
 //! (`.pi/extensions/adw-cockpit/index.ts`, `renderDashboard`) line for line,
 //! translated from terminal box-drawing to Rune primitives:
 //!
-//! - a heading line: bold accent name at the left, `updated HH:MM:SS  ● live`
+//! - a heading line: bold accent name at the left, `updated HH:MM:SS UTC  ● live`
 //!   at the right;
 //! - a top band of two equal panels side by side — `1. OVERVIEW` and
 //!   `2. MISSION` (the cockpit's `2. LATEST RUN`) — stacking when the window is
@@ -133,7 +133,7 @@ fn panels(p: Paint, s: &Ui) -> Vec<El> {
 
 // ---------------------------------------------------------------- chrome
 
-/// `SWITCHYARD COCKPIT ............ updated HH:MM:SS  ● live`
+/// `SWITCHYARD COCKPIT ............ updated HH:MM:SS UTC  ● live`
 fn heading(p: Paint, s: &Ui) -> El {
     let updated = s
         .ledger
@@ -165,7 +165,7 @@ fn heading(p: Paint, s: &Ui) -> El {
                 .gap(space::S2)
                 .center_y()
                 .child(
-                    text(format!("updated {updated}"))
+                    text(format!("updated {updated} UTC"))
                         .key("updated")
                         .font(type_::MONO_CAPTION.mono())
                         .color(p.dim),
@@ -1063,6 +1063,10 @@ mod tests {
         let rt = render(Ledger::fixture_planning());
         let updated = text_of(&rt, "updated").unwrap_or_default();
         assert!(updated.starts_with("updated "), "got: {updated}");
+        assert!(
+            updated.ends_with(" UTC"),
+            "the clock is labeled UTC, got: {updated}"
+        );
         assert!(has(&rt, "live-dot"));
         assert!(has(&rt, "readonly-badge"));
     }
@@ -1210,7 +1214,7 @@ mod tests {
             status.starts_with("switchyard mission status --db "),
             "got: {status}"
         );
-        assert!(status.contains("--mission msn-7f3a1c"), "got: {status}");
+        assert!(status.contains("--mission 'msn-7f3a1c'"), "got: {status}");
 
         let recover = text_of(&rt, "cli-2-cmd").unwrap_or_default();
         assert!(recover.contains("mission recover --db"), "got: {recover}");
@@ -1256,8 +1260,16 @@ mod tests {
     }
 
     #[test]
-    fn the_refresh_button_is_pressable() {
+    fn the_refresh_button_reads_once_while_auto_is_off() {
         let mut rt = render(Ledger::fixture_planning());
+        assert!(!rt.state.auto_refresh, "the scene is paused");
+        let mut tx = rune::Tx::default();
+        crate::poll(&mut rt.state, 50.0, &mut tx);
+        assert!(
+            !rt.state.fetch.is_pending(),
+            "paused and idle does not read"
+        );
+
         let (x, y) = rt.find("refresh").expect("the refresh button is laid out");
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
@@ -1265,6 +1277,11 @@ mod tests {
             rt.frame(1.0 / 60.0);
         }
         assert!(rt.state.force_refresh, "a press asks for an immediate read");
+
+        crate::poll(&mut rt.state, 50.0, &mut tx);
+        assert!(!rt.state.force_refresh, "poll consumes the manual refresh");
+        let started = rt.state.fetch.is_pending() || rt.state.fetch.take().is_some();
+        assert!(started, "a paused refresh starts one read");
     }
 
     #[test]
