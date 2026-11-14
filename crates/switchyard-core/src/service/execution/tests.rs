@@ -331,7 +331,7 @@ fn v3_inspection_and_forward_upgrade_preserve_mission_and_workspace() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        10
+        11
     );
 }
 
@@ -755,7 +755,7 @@ fn v4_upgrade_preserves_completed_prepared_and_uncertain_effects() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        10
+        11
     );
     assert_eq!(
         conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
@@ -1603,7 +1603,7 @@ fn v6_upgrade_preserves_effects_and_resolutions() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
 }
 
 #[test]
@@ -3388,7 +3388,7 @@ fn v8_upgrade_preserves_abandoned_simulated_and_linux_rows() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
     let snapshot = host.snapshot(&mission).unwrap();
     assert!(snapshot.execution_blocked);
     assert!(snapshot.execution_supersessions.is_empty());
@@ -3624,7 +3624,7 @@ fn v9_inspection_and_upgrade_preserve_original_effect_receipts() {
     drop(host);
     let db = dir.path().join("mission.sqlite");
     let conn = Connection::open(&db).unwrap();
-    conn.execute_batch("DROP TABLE pi_host_sessions; DELETE FROM schema_migrations WHERE version=10; PRAGMA user_version=9;").unwrap();
+    conn.execute_batch("DROP TABLE pi_host_sessions; DELETE FROM schema_migrations WHERE version>=10; PRAGMA user_version=9;").unwrap();
     let inspected = Host::inspect(&db, Some(&request.binding.mission_id)).unwrap()[0].to_json();
     assert_eq!(inspected["executionEffects"], before["executionEffects"]);
     assert_eq!(
@@ -3642,7 +3642,7 @@ fn v9_inspection_and_upgrade_preserve_original_effect_receipts() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        10
+        11
     );
 }
 

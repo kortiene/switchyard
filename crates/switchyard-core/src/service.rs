@@ -159,6 +159,12 @@ pub struct MissionSnapshot {
     pub execution_supersessions: Vec<Value>,
     pub execution_blocked: bool,
     pub quarantined: Vec<(i64, String, String, String)>,
+    /// True after `draft → planning` has frozen the attempt inputs.
+    pub inputs_frozen: bool,
+    /// Canonical frozen inputs. Absent until planning starts.
+    pub frozen_inputs_json: Option<String>,
+    /// Exclusive owner generation recorded with the freeze.
+    pub attempt_owner_generation: Option<u64>,
     /// Fake's operator `detect_uncertainty` hint. Live hosts use the adapter
     /// enum; read-only inspection uses the recorded adapter name.
     operator_resolution_hint: bool,
@@ -226,6 +232,8 @@ impl MissionSnapshot {
         value["linuxExecutionResolutions"] = json!(self.linux_execution_resolutions);
         value["executionSupersessions"] = json!(self.execution_supersessions);
         value["executionBlocked"] = json!(self.execution_blocked);
+        value["inputsFrozen"] = json!(self.inputs_frozen);
+        value["attemptOwnerGeneration"] = json!(self.attempt_owner_generation);
         value["nextSteps"] = json!(self.next_steps());
         value
     }
@@ -587,6 +595,16 @@ impl Host {
                 expected: request.expected_revision,
                 actual: mission.revision,
             });
+        }
+        if self.frozen_input_drifted(&mission)?
+            && !crate::freeze::drift_exit(mission.phase, request.body.kind())
+        {
+            if mission.phase != Phase::NeedsAttention && !mission.phase.is_terminal() {
+                self.record_frozen_input_drift(&mission)?;
+            }
+            return Err(Error::guard(
+                "frozen attempt inputs drifted; the command was not applied",
+            ));
         }
         if is_runtime_observation(request.body.kind())
             && request.origin != CommandOrigin::RuntimeObservation
@@ -1558,6 +1576,33 @@ impl Host {
         })
     }
 
+    fn frozen_input_drifted(&self, mission: &MissionRecord) -> Result<bool> {
+        let Some(stored) = &mission.attempt.frozen_inputs_json else {
+            return Ok(false);
+        };
+        Ok(stored != &crate::freeze::frozen_canonical(mission)?)
+    }
+
+    /// Legal `detect_uncertainty` edge. The freeze snapshot is left unchanged.
+    fn record_frozen_input_drift(&mut self, mission: &MissionRecord) -> Result<AdmitResult> {
+        self.admit_checked(
+            AdmitRequest {
+                command_id: None,
+                mission_id: mission.id.clone(),
+                attempt_id: Some(mission.attempt.id.clone()),
+                expected_revision: mission.revision,
+                actor: "host".into(),
+                origin: CommandOrigin::HostSupervisor,
+                body: CommandBody::DetectUncertainty {
+                    reason: AttentionReason::FrozenInputDrift,
+                    content_digest: None,
+                },
+            },
+            None,
+            true,
+        )
+    }
+
     fn uncertainty(
         &mut self,
         mission: &MissionRecord,
@@ -1865,7 +1910,34 @@ impl Host {
             admitted_runtime_work: commands.iter().any(|command| {
                 command.state == CommandState::Acknowledged && is_runtime_work(command.kind)
             }),
+            owner_generation: self.store.bound_owner_generation(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn revise_attempt_inputs(
+        &mut self,
+        mission_id: &str,
+        patch: &crate::persistence::AttemptInputPatch,
+    ) -> Result<()> {
+        self.store.revise_attempt_inputs(mission_id, patch)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decisions(
+        &self,
+        mission_id: &str,
+    ) -> Result<Vec<crate::persistence::StoredDecision>> {
+        self.store.list_decisions(mission_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tamper_attempt_base_sha(
+        &mut self,
+        mission_id: &str,
+        base_sha: &str,
+    ) -> Result<()> {
+        self.store.tamper_attempt_base_sha(mission_id, base_sha)
     }
 
     fn binding(&self, mission: &MissionRecord) -> RuntimeBinding {
@@ -1955,6 +2027,9 @@ fn snapshot_from(
         execution_supersessions: store.execution_supersessions(mission_id)?,
         execution_blocked: store.ops_blocked(mission_id)?,
         quarantined: store.list_quarantine(mission_id)?,
+        inputs_frozen: mission.attempt.frozen_inputs_json.is_some(),
+        frozen_inputs_json: mission.attempt.frozen_inputs_json,
+        attempt_owner_generation: mission.attempt.owner_generation,
         operator_resolution_hint,
     })
 }

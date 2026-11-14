@@ -25,7 +25,8 @@ Proposed register row for [`wiki/decisions/invariants.md`](../../wiki/decisions/
   - `FactProfile.uncertainty_is_host_fact`: whether uncertainty is recorded as a supervisor fact instead of a runtime observation.
   - `LinuxLedgerProfile`: whether Linux effects are admitted, an admitted stop is kept, and live effects are supervised.
   - `GuidanceProfile`: operator status text. A recorded adapter name resolves through a table of the names `name()` publishes, paired with that variant's `guidance()` value. Unknown names stay inert.
-  - `AuthorityProfile`: whether the adapter may certify mission facts and quiescence, and which command check it declared (`Simulated` or `PiProtocol`). `validate_admission` and `validate_command` read this profile.
+  - `AuthorityProfile`: whether the adapter may certify mission facts and quiescence, and which command check it declared (`Simulated` or `PiProtocol`). `validate_admission` and `validate_command` read this profile. `certifies_mission_facts` is an authority gate only. Plan shape, digest, and freeze checks stay in Host admission.
+  - `PlanningToolProfile.admits_writes`: whether planning may admit a write tool. Every sealed adapter sets it false. The host calls `admit_planning_tool` and does not branch on the variant.
   - `ExecutionProfile.simulated`: whether the in-process simulated `ExecutionEnv` is available. Only Fake sets it.
 - `Host::recover` runs one recovery sequence parameterized by `RecoveryProfile`.
 - The five decisions that used to special-case Fake are closed on the enum ([#185](https://github.com/kortiene/switchyard/issues/185)). Non-host-owned observation intake is `pop_observation` / `requeue_observation`, both `Result`s, with no `expect`. `runtime_method` matches every `CommandKind` and has no `_` arm; kinds that are not pause, cancel, or steer still map to submit. Simulated apply is `RuntimeAdapter::apply_simulated`. Pi and Confined still refuse it with `simulated execution requires FakeRuntime` and do not execute. `ExecutionEnv` is still implemented by `FakeRuntime`. The trait, the typed `RuntimeMethod` enum, and an unknown-method `unsupported_capability` error (A8) are not extracted.
@@ -44,7 +45,7 @@ Without a written contract, three things stay unspecified: what a native runtime
 ### D2. Sealed adapter set with declared profiles (normative now)
 
 1. The adapter set is closed: `RuntimeAdapter { Fake, Pi, Confined }`, with enum dispatch. There is no public `Box<dyn AgentRuntime>` and no project-supplied adapter. This follows the bundled-trusted-adapter rule ([README: Scope and deferred work](README.md#scope-and-deferred-work)) and keeps [#42](https://github.com/kortiene/switchyard/issues/42) deferred.
-2. Every adapter difference that the Host acts on is a declared profile (`RecoveryProfile`, `DispatchProfile`, `FactProfile`, `LinuxLedgerProfile`, `GuidanceProfile`, `AuthorityProfile`, `ExecutionProfile`), not a branch on the variant. The five Context gaps are closed: admission and command checks read `AuthorityProfile`, observation intake and simulated apply are adapter methods, `runtime_method` is exhaustive over `CommandKind`, and recorded guidance is a name lookup. Each profile function is an exhaustive match, so a new variant must declare each profile explicitly. The defaults are inert. `AuthorityProfile` has no `Default`; every variant sets both of its fields. Trait extraction remains D8.
+2. Every adapter difference that the Host acts on is a declared profile (`RecoveryProfile`, `DispatchProfile`, `FactProfile`, `LinuxLedgerProfile`, `GuidanceProfile`, `AuthorityProfile`, `PlanningToolProfile`, `ExecutionProfile`), not a branch on the variant. The five Context gaps are closed: admission and command checks read `AuthorityProfile`, observation intake and simulated apply are adapter methods, `runtime_method` is exhaustive over `CommandKind`, and recorded guidance is a name lookup. Each profile function is an exhaustive match, so a new variant must declare each profile explicitly. The defaults are inert. `AuthorityProfile` and `PlanningToolProfile` have no `Default`; every variant sets their fields. `PlanningToolProfile.admits_writes` is false on every current variant. Trait extraction remains D8.
 3. There is one effect journal and one recovery sequence, parameterized by `RecoveryProfile`. The Host has no `is_confined()` branches.
 4. Uncertainty and replay semantics stay host facts (`FactProfile.uncertainty_is_host_fact`). An adapter never owns them, and a host-owned dispatcher must record uncertainty as a host fact.
 5. FakeRuntime is the product default. Pi is the proof-of-concept runtime. The native Rust runtime is the committed long-term target, and it is the only planned additional adapter.
@@ -104,6 +105,7 @@ pub(crate) trait AgentRuntime {
     fn linux_ledger(&self) -> LinuxLedgerProfile;
     fn guidance(&self) -> GuidanceProfile;
     fn authority(&self) -> AuthorityProfile;                               // default: certifies nothing
+    fn planning_tools(&self) -> PlanningToolProfile;                       // default: writes refused
 }
 
 pub(crate) enum EffectObservation { Applied(ExecutionReceipt), NotApplied, Unknown { detail: String } }
@@ -179,6 +181,8 @@ Gate evidence is recorded in a dedicated issue, as #96 does. The proposed check 
    - `awaiting_plan_approval → implementing` (approve plan): "authorized actor confirms the current plan digest; implementation policy is unchanged."
    - "Plan drift invalidates approval; approval targets the current plan digest only."
    - "Changing scope or policy requires a successor attempt and never inherits an old approval."
+   - 172a freezes inputs at `draft → planning`. An attempt that left draft before ledger v11 has `frozen_inputs_json` NULL. 172b `approve_plan` will refuse that attempt. Continuing requires a successor attempt. This slice does not re-freeze it.
+   - The 172b plan digest is `payload_hash` of `{schema, attemptId, frozenInputsDigest, plan}` with schema `switchyard.plan-digest.v1`. `frozenInputsDigest` is the hash of the whole `switchyard.attempt-freeze.v1` document.
 2. **Workspace.** Each attempt runs in a Host-owned worktree created from an exact base commit, with its lifecycle owned by S3 in Rust ([README: Workspace and trust boundary](README.md#workspace-and-trust-boundary)). This ADR records that as the model and opens no new workspace work.
 3. Binding publication to a reviewed-content digest is out of scope here. See open question 4.
 
