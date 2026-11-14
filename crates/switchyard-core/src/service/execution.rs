@@ -207,6 +207,10 @@ impl Host {
                 detail: "unresolved generic S1 operations; this request was not attempted".into(),
             });
         }
+        if mission.phase == Phase::Planning {
+            self.runtime
+                .admit_planning_tool(planning_effect(&request.operation))?;
+        }
         if mission.phase != Phase::Implementing {
             return Err(Error::guard(
                 "new execution requires an implementing mission",
@@ -270,6 +274,12 @@ impl Host {
                 original.with_context(format!("could not record execution uncertainty: {error}"))
             }
         }
+    }
+}
+
+fn planning_effect(operation: &crate::ExecutionOperation) -> crate::execution::ToolEffect {
+    match operation {
+        crate::ExecutionOperation::WriteFile { .. } => crate::execution::ToolEffect::Write,
     }
 }
 

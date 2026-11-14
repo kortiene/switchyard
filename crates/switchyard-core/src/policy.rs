@@ -1,10 +1,11 @@
-use crate::canonical::payload_hash;
+use crate::canonical::{canonicalize, payload_hash};
 use crate::domain::{
     AttemptRecord, AttentionReason, CommandBody, DeliveryRecord, MissionRecord, Phase,
     PublicationProof, VerificationFact, VerificationOutcome, content_drift,
     validated_recovery_target,
 };
 use crate::error::{Error, Result};
+use crate::freeze::frozen_document;
 use crate::transitions::TargetSpec;
 
 /// Facts Rust already stored. A runtime notification cannot replace these.
@@ -19,6 +20,9 @@ pub struct Facts {
     pub acknowledged_pause: bool,
     pub acknowledged_cancel: bool,
     pub admitted_runtime_work: bool,
+    /// Generation bound to this host's exclusive owner lock. Start planning
+    /// refuses to run without it.
+    pub owner_generation: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -41,6 +45,10 @@ pub struct TransitionPlan {
     pub decision_digest: Option<String>,
     pub delivery_insert: Option<NewDelivery>,
     pub delivery_publish: Option<PublicationProof>,
+    /// Canonical attempt inputs written by `start_planning`.
+    pub frozen_inputs_json: Option<String>,
+    /// Exclusive owner generation recorded with that freeze.
+    pub owner_generation: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -53,7 +61,15 @@ pub struct NewDelivery {
 pub fn authorize(mission: &MissionRecord, body: &CommandBody, facts: &Facts) -> Result<()> {
     let blocked = || Error::guard("runtime or writers are not quiescent");
     match body {
-        CommandBody::StartPlanning => Ok(()),
+        CommandBody::StartPlanning => {
+            if facts.owner_generation.is_none() {
+                return Err(Error::guard(
+                    "start planning requires exclusive host ownership",
+                ));
+            }
+            // Shape and completeness live here, not on the adapter profile.
+            frozen_document(mission).map(|_| ())
+        }
         CommandBody::PlanCompleted {
             plan,
             digest,
@@ -413,8 +429,19 @@ pub fn project(
         decision_digest: None,
         delivery_insert: None,
         delivery_publish: None,
+        frozen_inputs_json: None,
+        owner_generation: None,
     };
     match body {
+        CommandBody::StartPlanning => {
+            let owner = facts
+                .owner_generation
+                .ok_or_else(|| Error::guard("start planning requires exclusive host ownership"))?;
+            let document = frozen_document(mission)?;
+            plan.frozen_inputs_json = Some(canonicalize(&document)?);
+            plan.owner_generation = Some(owner);
+            plan.decision_digest = Some(payload_hash(&document)?);
+        }
         CommandBody::PlanCompleted {
             plan: text, digest, ..
         } => {
@@ -588,14 +615,18 @@ mod tests {
                 base_sha: "abc".into(),
                 session_id: "s-test".into(),
                 runtime_adapter: "fake".into(),
+                runtime_config_json: r#"{"adapter":"fake","credentials":"none"}"#.into(),
                 policy_json: "{}".into(),
                 policy_hash: "sha256:policy".into(),
                 verifier_json: "{}".into(),
+                environment_json: r#"{"host":"single"}"#.into(),
                 repair_count: 0,
                 max_repairs: 2,
                 plan_revision_count: 0,
                 max_plan_revisions: 3,
                 successor_of: None,
+                frozen_inputs_json: None,
+                owner_generation: None,
             },
             created_at: 0,
             updated_at: 0,

@@ -679,6 +679,21 @@ mod os {
             Err(Error::ExecutionUncertain { operation_id: id })
         }
 
+        fn planning_tool_effect(operation: &LinuxOperation) -> crate::execution::ToolEffect {
+            match operation {
+                LinuxOperation::ReadFile { .. }
+                | LinuxOperation::ReadFileRange { .. }
+                | LinuxOperation::ListDirectory { .. } => crate::execution::ToolEffect::Read,
+                LinuxOperation::WriteFile { .. }
+                | LinuxOperation::EditFile { .. }
+                | LinuxOperation::ExecStart { .. }
+                // Status and cancel return before this function. ExecCancel is
+                // a write-class effect, so a direct call does not treat it as a read.
+                | LinuxOperation::ExecCancel { .. } => crate::execution::ToolEffect::Write,
+                LinuxOperation::ExecStatus { .. } => crate::execution::ToolEffect::Read,
+            }
+        }
+
         pub(in crate::service) fn authorize_new(
             &self,
             request: &LinuxExecutionRequest,
@@ -716,6 +731,12 @@ mod os {
                         "linux status and cancel require an implementing or needs_attention mission",
                     ));
                 }
+            } else if mission.phase == Phase::Planning {
+                self.runtime
+                    .admit_planning_tool(Self::planning_tool_effect(&request.operation))?;
+                return Err(Error::guard(
+                    "new linux execution requires an implementing mission",
+                ));
             } else if mission.phase != Phase::Implementing {
                 return Err(Error::guard(
                     "new linux execution requires an implementing mission",

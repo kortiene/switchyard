@@ -17,7 +17,7 @@ pub use runtime::{
     parse_notification,
 };
 
-pub(crate) use adapter::{RecoveryProfile, RuntimeAdapter};
+pub(crate) use adapter::{RecoveryProfile, RuntimeAdapter, ToolEffect};
 
 /// Stop-admission fixture. It is not on a production allowlist.
 #[cfg(feature = "pi-contract")]

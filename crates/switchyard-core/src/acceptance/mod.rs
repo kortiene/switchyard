@@ -5,6 +5,7 @@ mod build_contract;
 mod fixtures;
 mod ownership;
 mod pause_cancel;
+mod planning_freeze;
 mod publication;
 mod recovery_outbox;
 mod recovery_regressions;
