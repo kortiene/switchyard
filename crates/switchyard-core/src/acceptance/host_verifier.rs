@@ -173,6 +173,56 @@ fn path_gate_uses_the_owned_workspace() {
 }
 
 #[test]
+fn verify_drift_records_frozen_input_drift_once_then_cancels() {
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = host
+        .create_mission_with_verifier(request(&world.repo), Some(RUST_VERIFY_JSON.into()))
+        .unwrap();
+    to_verifying(&mut host, &created.mission_id);
+    let before = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(before.phase, Phase::Verifying);
+    host.tamper_attempt_base_sha(&created.mission_id, "deadbeef")
+        .unwrap();
+    let first = host.verify_mission(&created.mission_id).unwrap_err();
+    assert_eq!(first.category(), "frozen_input_drift");
+    assert!(first.to_string().contains("drifted"), "{first}");
+    let attention = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(attention.phase, Phase::NeedsAttention);
+    assert_eq!(
+        attention.attention_reason.as_deref(),
+        Some("frozen_input_drift")
+    );
+    assert_eq!(attention.revision, before.revision + 1);
+    assert_eq!(detect_uncertainty_count(&attention), 1);
+    let again = host.verify_mission(&created.mission_id).unwrap_err();
+    assert_eq!(again.category(), "frozen_input_drift");
+    let still = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(still.phase, Phase::NeedsAttention);
+    assert_eq!(still.revision, attention.revision);
+    assert_eq!(detect_uncertainty_count(&still), 1);
+    admit(&mut host, &created.mission_id, CommandBody::Cancel);
+    deliver(&mut host, &created.mission_id);
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::ConfirmCancelled,
+    );
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().phase,
+        Phase::Cancelled
+    );
+}
+
+fn detect_uncertainty_count(snapshot: &crate::MissionSnapshot) -> usize {
+    snapshot
+        .commands
+        .iter()
+        .filter(|command| command.kind == "detect_uncertainty")
+        .count()
+}
+
+#[test]
 fn verify_without_a_workspace_is_uncertain() {
     let world = open_world();
     let mut host = Host::open(&world.db).unwrap();

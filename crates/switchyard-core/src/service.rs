@@ -709,10 +709,7 @@ impl Host {
         if self.frozen_input_drifted(&mission)?
             && !crate::freeze::drift_exit(mission.phase, request.body.kind())
         {
-            if mission.phase != Phase::NeedsAttention && !mission.phase.is_terminal() {
-                self.record_frozen_input_drift(&mission)?;
-            }
-            return Err(Error::FrozenInputDrift);
+            return self.refuse_frozen_input_drift(&mission);
         }
         if self.plan_digest_mismatched(&mission)?
             && !crate::freeze::drift_exit(mission.phase, request.body.kind())
@@ -1591,16 +1588,21 @@ impl Host {
 
     /// Set the content digest, then apply the frozen changed-path gate.
     /// A clean gate refuses; this slice does not run the verifier.
+    /// Drift uses the same refusal as admission.
     pub fn verify_mission(&mut self, mission_id: &str) -> Result<(MissionSnapshot, String)> {
         let mission = self.store.load_mission(mission_id)?;
+        // `needs_attention` stays on this path so a second verify returns the
+        // same category and does not write another uncertainty row.
+        if matches!(mission.phase, Phase::Verifying | Phase::NeedsAttention)
+            && self.frozen_input_drifted(&mission)?
+        {
+            return self.refuse_frozen_input_drift(&mission);
+        }
         if mission.phase != Phase::Verifying {
             return Err(Error::IllegalTransition {
                 from: mission.phase.to_string(),
                 command: "verify".into(),
             });
-        }
-        if self.frozen_input_drifted(&mission)? {
-            return Err(Error::guard("frozen inputs drifted"));
         }
         let verifier =
             crate::freeze::parse_object(&mission.attempt.verifier_json, "verifier definition")?;
@@ -1791,6 +1793,16 @@ impl Host {
             }
             _ => Ok(true),
         }
+    }
+
+    /// First refusal records `detect_uncertainty` and enters `needs_attention`.
+    /// A later refusal returns [`Error::FrozenInputDrift`] and does not write.
+    /// The freeze snapshot is left unchanged. Admission and `mission verify` share this.
+    fn refuse_frozen_input_drift<T>(&mut self, mission: &MissionRecord) -> Result<T> {
+        if mission.phase != Phase::NeedsAttention && !mission.phase.is_terminal() {
+            self.record_frozen_input_drift(mission)?;
+        }
+        Err(Error::FrozenInputDrift)
     }
 
     /// Legal `detect_uncertainty` edge. The freeze snapshot is left unchanged.
