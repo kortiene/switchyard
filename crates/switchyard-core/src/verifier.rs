@@ -253,7 +253,7 @@ fn line_count(path: &Path, room: u64) -> Result<Option<u64>> {
     let mut file = match open_for_count(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Some(0)),
-        Err(error) if error.raw_os_error() == Some(40) => return Ok(None),
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
         Err(error) => return Err(Error::storage(error)),
     };
     // fstat the open handle. A FIFO swapped in after the earlier lstat must not be read.
@@ -289,12 +289,13 @@ fn line_count(path: &Path, room: u64) -> Result<Option<u64>> {
     Ok(Some(lines))
 }
 
-/// Linux `O_NOFOLLOW | O_NONBLOCK`. A symlink fails the open; a FIFO does not block.
+/// `O_NOFOLLOW | O_NONBLOCK` from libc, so the values match this architecture.
+/// A symlink fails the open; a FIFO does not block.
 fn open_for_count(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(0x20000 | 0x800)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
 }
 

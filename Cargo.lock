@@ -508,6 +508,7 @@ dependencies = [
 name = "switchyard-core"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rusqlite",
  "rustix",
  "serde_json",
