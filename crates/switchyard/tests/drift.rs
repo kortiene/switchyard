@@ -276,7 +276,6 @@ fn resume_after_pause_then_drift_is_refused_and_stays_on_the_drift_exit_path() {
         frozen_inputs_json,
         freeze_generation,
     } = open_frozen();
-    let _keep_ledger = _tmp;
     pause_until_paused(&mut host, &mission_id);
     let paused = host.snapshot(&mission_id).unwrap();
     assert_eq!(paused.phase, Phase::Paused);
@@ -324,4 +323,9 @@ fn resume_after_pause_then_drift_is_refused_and_stays_on_the_drift_exit_path() {
             .iter()
             .all(|command| command.kind != "resume")
     );
+
+    admit(&mut host, &mission_id, CommandBody::Cancel).unwrap();
+    host.dispatch_pending(&mission_id).unwrap();
+    admit(&mut host, &mission_id, CommandBody::ConfirmCancelled).unwrap();
+    assert_eq!(host.snapshot(&mission_id).unwrap().phase, Phase::Cancelled);
 }
