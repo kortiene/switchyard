@@ -71,6 +71,13 @@ fn path_gate_uses_the_owned_workspace() {
         git(&tree, &["clean", "-fdx"]);
     }
 
+    std::fs::remove_file(tree.join("docs/f.bin")).unwrap();
+    let deleted_bin = host.verify_mission(&id).unwrap_err();
+    assert_ne!(deleted_bin.category(), "storage_failed", "{deleted_bin}");
+    assert_eq!(deleted_bin.category(), "verifier_confinement_unavailable");
+    git(&tree, &["reset", "--hard", base]);
+    git(&tree, &["clean", "-fdx"]);
+
     std::fs::remove_file(tree.join("crates/switchyard/tests/cli_confined.rs")).unwrap();
     expect_fail(
         &mut host,
@@ -97,6 +104,48 @@ fn path_gate_uses_the_owned_workspace() {
     expect_fail(&mut host, &world.db, &id, "special:docs/zero");
     git(&tree, &["reset", "--hard", base]);
     git(&tree, &["clean", "-fdx"]);
+
+    let outside = world._tmp.path().join("outside-box");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("f.bin"), "x\n".repeat(500)).unwrap();
+    std::fs::remove_dir_all(tree.join("docs/box")).unwrap();
+    std::os::unix::fs::symlink(&outside, tree.join("docs/box")).unwrap();
+    let (snap, outcome) = host.verify_mission(&id).unwrap();
+    assert_eq!((outcome.as_str(), snap.phase), ("fail", Phase::Verifying));
+    let (document, _, _) = evidence(&world.db, &id).unwrap();
+    let violations = document["violations"].as_array().unwrap();
+    assert!(
+        violations
+            .iter()
+            .any(|item| item == "special:docs/box/f.bin"),
+        "{document}"
+    );
+    assert_eq!(document["addedLines"], json!(0), "{document}");
+    git(&tree, &["reset", "--hard", base]);
+    git(&tree, &["clean", "-fdx"]);
+
+    for index in 0..50 {
+        write(
+            &tree,
+            &format!("docs/batch/{index}.md"),
+            &"line\n".repeat(10),
+        );
+    }
+    expect_fail(&mut host, &world.db, &id, "maxAddedLines:401");
+    git(&tree, &["reset", "--hard", base]);
+    git(&tree, &["clean", "-fdx"]);
+
+    git(&tree, &["update-index", "--assume-unchanged", "README.md"]);
+    let hidden = host.verify_mission(&id).unwrap_err();
+    assert_eq!(hidden.category(), "verifier_index_flags_set");
+    assert!(
+        hidden.to_string().contains("--no-assume-unchanged"),
+        "{hidden}"
+    );
+    git(
+        &tree,
+        &["update-index", "--no-assume-unchanged", "README.md"],
+    );
 
     write(&tree, "docs/ok.md", "ok\n");
     let prior = host.snapshot(&id).unwrap().content_digest;
@@ -195,6 +244,9 @@ fn seed(repo: &Path) {
         "fn small() {}\n",
     );
     write(repo, "crates/switchyard/tests/.gitattributes", "* -diff\n");
+    write(repo, "docs/.gitattributes", "*.bin binary\n");
+    write(repo, "docs/f.bin", "binary\n");
+    write(repo, "docs/box/f.bin", "old\n");
     git(repo, &["add", "."]);
     git(repo, &["commit", "-m", "gate fixtures"]);
 }

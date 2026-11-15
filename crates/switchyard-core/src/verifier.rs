@@ -42,6 +42,9 @@ pub(crate) struct Report {
 pub(crate) fn assess(repo: &Path, base: &str, gate: &Gate) -> Result<Report> {
     refuse_hidden_index(repo)?;
     let mut files = BTreeMap::<String, Entry>::new();
+    // Running total of allowed lines. Once it passes the cap, later files are
+    // not read. Re-walking the map for every path would be quadratic.
+    let mut tallied = 0u64;
     let diff = host_git(
         repo,
         &[
@@ -65,18 +68,7 @@ pub(crate) fn assess(repo: &Path, base: &str, gate: &Gate) -> Result<Report> {
         // `--text` does not override an unset `diff` attribute on Git 2.43, so
         // a `-` stat is counted from disk for allowed paths instead of as zero.
         let entry = if added == "-" {
-            if path_allowed(gate, path) {
-                untracked_entry(
-                    repo,
-                    path,
-                    gate.max_added_lines.saturating_sub(counted(&files, gate)),
-                )?
-            } else {
-                Entry {
-                    lines: 0,
-                    special: false,
-                }
-            }
+            disk_entry(repo, gate, path, &mut tallied)?
         } else {
             Entry {
                 lines: added
@@ -85,7 +77,7 @@ pub(crate) fn assess(repo: &Path, base: &str, gate: &Gate) -> Result<Report> {
                 special: false,
             }
         };
-        files.insert(path.to_string(), entry);
+        remember(&mut files, gate, path, entry, &mut tallied);
     }
     for args in [
         &["ls-files", "-z", "-o", "--exclude-standard"][..],
@@ -98,16 +90,8 @@ pub(crate) fn assess(repo: &Path, base: &str, gate: &Gate) -> Result<Report> {
             if files.contains_key(path) {
                 continue;
             }
-            let entry = if path_allowed(gate, path) {
-                let room = gate.max_added_lines.saturating_sub(counted(&files, gate));
-                untracked_entry(repo, path, room)?
-            } else {
-                Entry {
-                    lines: 0,
-                    special: false,
-                }
-            };
-            files.insert(path.to_string(), entry);
+            let entry = disk_entry(repo, gate, path, &mut tallied)?;
+            remember(&mut files, gate, path, entry, &mut tallied);
         }
     }
     let mut violations = Vec::new();
@@ -145,16 +129,59 @@ fn path_allowed(gate: &Gate, path: &str) -> bool {
         && gate.allowed.iter().any(|pattern| glob_match(pattern, path))
 }
 
-fn counted(files: &BTreeMap<String, Entry>, gate: &Gate) -> u64 {
-    files
-        .iter()
-        .filter(|(path, entry)| !entry.special && path_allowed(gate, path))
-        .fold(0, |sum, (_, entry)| sum.saturating_add(entry.lines))
+fn remember(
+    files: &mut BTreeMap<String, Entry>,
+    gate: &Gate,
+    path: &str,
+    entry: Entry,
+    tallied: &mut u64,
+) {
+    if !entry.special && path_allowed(gate, path) {
+        *tallied = tallied.saturating_add(entry.lines);
+    }
+    files.insert(path.to_string(), entry);
 }
 
+/// Allowed paths are counted from disk until the cap is passed. After that,
+/// further files are not read.
+fn disk_entry(repo: &Path, gate: &Gate, path: &str, tallied: &mut u64) -> Result<Entry> {
+    if !path_allowed(gate, path) {
+        return Ok(Entry {
+            lines: 0,
+            special: false,
+        });
+    }
+    if *tallied > gate.max_added_lines {
+        return Ok(Entry {
+            lines: 0,
+            special: false,
+        });
+    }
+    untracked_entry(repo, path, gate.max_added_lines.saturating_sub(*tallied))
+}
+
+/// From-disk line count when Git will not diff the path.
+///
+/// This deliberately overcounts: it counts every line in the file, not the
+/// added lines of a real diff. Do not replace it with a diff.
 fn untracked_entry(repo: &Path, path: &str, room: u64) -> Result<Entry> {
+    if parent_is_symlink(repo, path)? {
+        return Ok(Entry {
+            lines: 0,
+            special: true,
+        });
+    }
     let full = repo.join(path);
-    let meta = std::fs::symlink_metadata(&full).map_err(Error::storage)?;
+    let meta = match std::fs::symlink_metadata(&full) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Entry {
+                lines: 0,
+                special: false,
+            });
+        }
+        Err(error) => return Err(Error::storage(error)),
+    };
     if meta.file_type().is_symlink() || !meta.file_type().is_file() {
         return Ok(Entry {
             lines: 0,
@@ -180,9 +207,7 @@ fn refuse_hidden_index(repo: &Path) -> Result<()> {
     for record in raw.split('\0').filter(|record| !record.is_empty()) {
         let tag = record.chars().next().unwrap_or(' ');
         if tag == 'S' || tag.is_ascii_lowercase() {
-            return Err(Error::guard(
-                "assume-unchanged or skip-worktree hides verifier paths",
-            ));
+            return Err(Error::VerifierIndexFlagsSet);
         }
     }
     Ok(())
@@ -202,14 +227,40 @@ fn strings(doc: &Value, key: &str) -> Result<Vec<String>> {
         .collect()
 }
 
+/// A parent component that is a symlink would make `lstat` of the leaf look
+/// outside the worktree. The leaf itself is classified by the caller.
+fn parent_is_symlink(repo: &Path, path: &str) -> Result<bool> {
+    let mut cursor = repo.to_path_buf();
+    let mut parts = path.split('/').filter(|part| !part.is_empty()).peekable();
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            break;
+        }
+        cursor.push(part);
+        match std::fs::symlink_metadata(&cursor) {
+            Ok(meta) if meta.file_type().is_symlink() => return Ok(true),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(Error::storage(error)),
+        }
+    }
+    Ok(false)
+}
+
 /// `None` is a symlink or special file. Regular files stop once `room` newlines
 /// are counted, so a huge allowed file is not read in full.
 fn line_count(path: &Path, room: u64) -> Result<Option<u64>> {
-    let meta = std::fs::symlink_metadata(path).map_err(Error::storage)?;
-    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+    let mut file = match open_for_count(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Some(0)),
+        Err(error) if error.raw_os_error() == Some(40) => return Ok(None),
+        Err(error) => return Err(Error::storage(error)),
+    };
+    // fstat the open handle. A FIFO swapped in after the earlier lstat must not be read.
+    let meta = file.metadata().map_err(Error::storage)?;
+    if !meta.file_type().is_file() {
         return Ok(None);
     }
-    let mut file = std::fs::File::open(path).map_err(Error::storage)?;
     let mut buf = [0u8; 8192];
     let mut lines = 0u64;
     let mut last_newline = true;
@@ -236,6 +287,15 @@ fn line_count(path: &Path, room: u64) -> Result<Option<u64>> {
         lines += 1;
     }
     Ok(Some(lines))
+}
+
+/// Linux `O_NOFOLLOW | O_NONBLOCK`. A symlink fails the open; a FIFO does not block.
+fn open_for_count(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(0x20000 | 0x800)
+        .open(path)
 }
 
 fn glob_match(pattern: &str, path: &str) -> bool {

@@ -111,6 +111,12 @@ pub enum Error {
     #[error("this verifier has no host path gate")]
     VerifierGateUnavailable,
 
+    /// The index hides paths from `git diff`. Clear the flag, then verify again.
+    #[error(
+        "assume-unchanged or skip-worktree hides verifier paths; clear them with git update-index --no-assume-unchanged <path> or --no-skip-worktree <path>, then run verify again"
+    )]
+    VerifierIndexFlagsSet,
+
     /// Pi refused to admit the command and the protocol marks that refusal as
     /// definite. Transport loss and `admission: uncertain` stay [`Self::GuardFailed`]
     /// or [`Self::Storage`]. Effect outcomes use `PiEffectOutcome` separately
@@ -175,6 +181,7 @@ impl Error {
             Self::VerificationNotHostRun => "verification_not_host_run",
             Self::VerifierConfinementUnavailable => "verifier_confinement_unavailable",
             Self::VerifierGateUnavailable => "verifier_gate_unavailable",
+            Self::VerifierIndexFlagsSet => "verifier_index_flags_set",
             Self::AdmissionRejected { .. } => "admission_rejected",
             Self::GuardFailed { .. } => "guard_failed",
             Self::UnknownNotification { .. } => "unknown_notification",
