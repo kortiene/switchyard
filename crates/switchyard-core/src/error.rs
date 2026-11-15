@@ -66,6 +66,13 @@ pub enum Error {
     #[error("frozen inputs are absent; a successor attempt is needed")]
     FrozenInputsMissing,
 
+    /// Live attempt inputs differ from the stored freeze. The command is not
+    /// applied. The first refusal still commits `needs_attention`. Later
+    /// refusals leave the revision unchanged. The way out is `cancel`, then
+    /// `confirm_cancelled`, then `mission successor` if scope must change.
+    #[error("frozen attempt inputs drifted; the command was not applied")]
+    FrozenInputDrift,
+
     /// The approval named a digest other than the current plan digest.
     #[error("plan digest does not match the current plan")]
     StalePlanDigest,
@@ -146,6 +153,7 @@ impl Error {
             Self::StaleGeneration { .. } => "stale_generation",
             Self::RepairLimitExhausted { .. } => "repair_limit_exhausted",
             Self::FrozenInputsMissing => "frozen_inputs_missing",
+            Self::FrozenInputDrift => "frozen_input_drift",
             Self::StalePlanDigest => "stale_plan_digest",
             Self::PlanRevisionLimitReached { .. } => "plan_revision_limit_reached",
             Self::SuccessorSourceNotTerminal => "successor_source_not_terminal",

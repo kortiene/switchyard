@@ -1816,7 +1816,7 @@ fn enforce_attempt_freeze(
     if let Some(stored) = &mission.attempt.frozen_inputs_json {
         let current = frozen_canonical(&mission)?;
         if stored != &current && !drift_exit(mission.phase, command.kind) {
-            return Err(Error::guard("frozen attempt inputs are immutable"));
+            return Err(Error::FrozenInputDrift);
         }
     }
     Ok(())
@@ -2452,6 +2452,85 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(!drifted.contains("sessionInitialized"), "{drifted}");
+    }
+
+    /// Service admission returns before this write. The backstop is the check
+    /// inside `apply_transition`.
+    #[test]
+    fn drifted_freeze_backstop_returns_frozen_input_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mission.sqlite");
+        let mut store = Store::open_writer(&db).unwrap();
+        store.migrate().unwrap();
+        store.create_mission(sample_mission()).unwrap();
+        let stored = r#"{"schema":"switchyard.attempt-freeze.v1","stale":true}"#;
+        let changed = store
+            .conn
+            .execute(
+                "UPDATE missions SET phase = 'planning' WHERE id = 'm-1'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+        let changed = store
+            .conn
+            .execute(
+                "UPDATE attempts SET frozen_inputs_json = ?1 WHERE id = 'a-1'",
+                [stored],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+        let error = store
+            .apply_transition(
+                &TransitionPlan {
+                    next: Phase::Pausing,
+                    resume_target: None,
+                    prior_phase: None,
+                    attention_reason: None,
+                    permitted_recovery_target: None,
+                    reconcile_only: false,
+                    content_digest: "digest".into(),
+                    plan_digest: None,
+                    plan_body: None,
+                    reviewed_digest: None,
+                    repair_count: 0,
+                    plan_revision_count: 0,
+                    invalidate_evidence: false,
+                    invalidate_reviews: false,
+                    invalidate_plan_approval: false,
+                    writes_plan: false,
+                    decision_digest: None,
+                    delivery_insert: None,
+                    delivery_publish: None,
+                    frozen_inputs_json: None,
+                    owner_generation: None,
+                },
+                &NewCommand {
+                    id: "c-pause".into(),
+                    mission_id: "m-1".into(),
+                    attempt_id: "a-1".into(),
+                    kind: CommandKind::Pause,
+                    payload_canonical: "{}".into(),
+                    payload_hash: "sha256:00".into(),
+                    expected_revision: 1,
+                    resulting_revision: 2,
+                    state: CommandState::Pending,
+                    request_id: "a-1:c-pause".into(),
+                    origin: CommandOrigin::Operator,
+                    actor: "operator".into(),
+                    rationale: "pause".into(),
+                    decision_digest: None,
+                },
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.category(), "frozen_input_drift");
+        let mission = store.load_mission("m-1").unwrap();
+        assert_eq!(mission.phase, Phase::Planning);
+        assert_eq!(mission.revision, 1);
+        assert_eq!(mission.attempt.frozen_inputs_json.as_deref(), Some(stored));
+        assert!(store.list_commands("m-1").unwrap().is_empty());
     }
 
     fn sample_mission() -> CreatedMission {

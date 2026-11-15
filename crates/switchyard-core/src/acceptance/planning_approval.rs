@@ -507,7 +507,8 @@ fn cancel_after_frozen_input_drift_settles_cancelled() {
         },
     )
     .unwrap_err();
-    assert_eq!(error.category(), "guard_failed");
+    assert_eq!(error.category(), "frozen_input_drift");
+    assert!(error.to_string().contains("drifted"), "{error}");
     assert_eq!(
         host.snapshot(&created.mission_id)
             .unwrap()
@@ -555,7 +556,7 @@ fn approve_and_recovery_stay_refused_after_frozen_input_drift() {
     host.tamper_attempt_base_sha(&created.mission_id, "cafebabe")
         .unwrap();
     let first = approve(&mut host, &created.mission_id, &digest, "operator").unwrap_err();
-    assert_eq!(first.category(), "guard_failed");
+    assert_eq!(first.category(), "frozen_input_drift");
     assert!(first.to_string().contains("drifted"), "{first}");
     let attention = host.snapshot(&created.mission_id).unwrap();
     assert_eq!(attention.phase, Phase::NeedsAttention);
@@ -570,7 +571,8 @@ fn approve_and_recovery_stay_refused_after_frozen_input_drift() {
             .all(|command| command.kind != "approve_plan")
     );
     let again = approve(&mut host, &created.mission_id, &digest, "operator").unwrap_err();
-    assert_eq!(again.category(), "guard_failed");
+    assert_eq!(again.category(), "frozen_input_drift");
+    assert!(again.to_string().contains("drifted"), "{again}");
     let target = attention.permitted_recovery_target.unwrap();
     let recovery = admit_expect(
         &mut host,
@@ -582,8 +584,39 @@ fn approve_and_recovery_stay_refused_after_frozen_input_drift() {
         },
     )
     .unwrap_err();
-    assert_eq!(recovery.category(), "guard_failed");
+    assert_eq!(recovery.category(), "frozen_input_drift");
     assert!(recovery.to_string().contains("drifted"), "{recovery}");
+    let still = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(still.phase, Phase::NeedsAttention);
+    assert_eq!(still.revision, attention.revision);
+}
+
+#[test]
+fn first_approve_after_drift_bumps_revision_and_the_next_does_not() {
+    let world = open_world();
+    let mut host = crate::Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    deliver(&mut host, &created.mission_id);
+    let note = plan_note("plan");
+    notify(&mut host, &created.mission_id, note);
+    let before = host.snapshot(&created.mission_id).unwrap();
+    let digest = before.plan_digest.clone().unwrap();
+    host.tamper_attempt_base_sha(&created.mission_id, "cafebabe")
+        .unwrap();
+    let first = approve(&mut host, &created.mission_id, &digest, "operator").unwrap_err();
+    assert_eq!(first.category(), "frozen_input_drift");
+    assert!(first.to_string().contains("drifted"), "{first}");
+    let attention = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(attention.phase, Phase::NeedsAttention);
+    assert_eq!(
+        attention.attention_reason.as_deref(),
+        Some("frozen_input_drift")
+    );
+    assert_eq!(attention.revision, before.revision + 1);
+    let again = approve(&mut host, &created.mission_id, &digest, "operator").unwrap_err();
+    assert_eq!(again.category(), "frozen_input_drift");
+    assert!(again.to_string().contains("drifted"), "{again}");
     let still = host.snapshot(&created.mission_id).unwrap();
     assert_eq!(still.phase, Phase::NeedsAttention);
     assert_eq!(still.revision, attention.revision);

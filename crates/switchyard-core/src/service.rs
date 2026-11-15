@@ -699,9 +699,7 @@ impl Host {
             if mission.phase != Phase::NeedsAttention && !mission.phase.is_terminal() {
                 self.record_frozen_input_drift(&mission)?;
             }
-            return Err(Error::guard(
-                "frozen attempt inputs drifted; the command was not applied",
-            ));
+            return Err(Error::FrozenInputDrift);
         }
         if self.plan_digest_mismatched(&mission)?
             && !crate::freeze::drift_exit(mission.phase, request.body.kind())

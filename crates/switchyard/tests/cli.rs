@@ -1480,3 +1480,65 @@ fn successor_rejects_empty_acceptance_parts_and_bad_verifier_files() {
         .unwrap();
     assert_eq!(missions, 1);
 }
+
+#[test]
+fn drifted_pause_refuses_with_frozen_input_drift_and_exit_2() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "202",
+        "--objective",
+        "name the drift refusal",
+        "--acceptance",
+        "pause after drift exits 2",
+        "--admit",
+        "start_planning",
+        "--persist-only",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let attempt = created["mission"]["attemptId"].as_str().unwrap();
+    let revision = created["mission"]["revision"].as_u64().unwrap().to_string();
+    assert_eq!(created["mission"]["phase"], "planning");
+    let changed = rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE attempts SET base_sha = 'deadbeef' WHERE id = ?1",
+            [attempt],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    let (code, stdout, stderr) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        mission,
+        "--kind",
+        "pause",
+        "--expected-revision",
+        &revision,
+        "--persist-only",
+    ]);
+    assert_eq!(code, 2, "{stdout} {stderr}");
+    assert!(stdout.is_null(), "{stdout}");
+    assert_eq!(stderr["ok"], false);
+    assert_eq!(stderr["error"]["category"], "frozen_input_drift");
+    assert!(
+        stderr["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("drifted"),
+        "{stderr}"
+    );
+}
