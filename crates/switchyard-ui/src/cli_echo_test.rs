@@ -166,7 +166,7 @@ fn mission_write_parses_with_the_real_cli() {
         "--actor",
         "sam",
     ])
-    .unwrap();
+    .unwrap_or_else(|error| panic!("mission write did not parse:\n{error}"));
     match cli.command {
         Command::Mission { action } => match action {
             MissionCommand::Write {
