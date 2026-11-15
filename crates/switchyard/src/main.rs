@@ -136,6 +136,30 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 let workspace = host.prepare_workspace(&mission, &attempt, &root)?;
                 Ok(json!({"ok": true, "workspace": workspace.to_json()}))
             }
+            MissionCommand::Write {
+                db,
+                mission,
+                attempt,
+                path,
+                from,
+                actor,
+            } => {
+                let mut host = open_host(&db, runtime)?;
+                let write = host.operator_write(&mission, &attempt, &path, &from, &actor)?;
+                Ok(json!({
+                    "ok": true,
+                    "write": {
+                        "path": write.path,
+                        "bytes": write.bytes,
+                        "sha256": write.sha256,
+                        "authoredBy": "operator",
+                        "actor": write.actor,
+                        "workspacePath": write.workspace_path,
+                        "baseSha": write.base_sha,
+                    },
+                    "mission": host.snapshot(&mission)?.to_json(),
+                }))
+            }
             MissionCommand::Create {
                 db,
                 repo,

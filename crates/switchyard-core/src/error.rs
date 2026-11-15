@@ -117,6 +117,18 @@ pub enum Error {
     )]
     VerifierIndexFlagsSet,
 
+    /// `mission write` on a runtime other than Fake. Pi writes go through the
+    /// confined `WriteFile` path; this command does not open that path.
+    #[error(
+        "operator write is unavailable on this runtime; Pi missions write through the confined WriteFile path"
+    )]
+    OperatorWriteUnavailable,
+
+    /// `mission write` outside phase `implementing`.
+    /// Way out: `approve_plan` first. Repair writes are a later slice.
+    #[error("operator write is closed in phase {phase}; approve_plan first")]
+    OperatorWritePhaseClosed { phase: String },
+
     /// Pi refused to admit the command and the protocol marks that refusal as
     /// definite. Transport loss and `admission: uncertain` stay [`Self::GuardFailed`]
     /// or [`Self::Storage`]. Effect outcomes use `PiEffectOutcome` separately
@@ -182,6 +194,8 @@ impl Error {
             Self::VerifierConfinementUnavailable => "verifier_confinement_unavailable",
             Self::VerifierGateUnavailable => "verifier_gate_unavailable",
             Self::VerifierIndexFlagsSet => "verifier_index_flags_set",
+            Self::OperatorWriteUnavailable => "operator_write_unavailable",
+            Self::OperatorWritePhaseClosed { .. } => "operator_write_phase_closed",
             Self::AdmissionRejected { .. } => "admission_rejected",
             Self::GuardFailed { .. } => "guard_failed",
             Self::UnknownNotification { .. } => "unknown_notification",

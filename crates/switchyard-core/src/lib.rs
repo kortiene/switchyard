@@ -19,6 +19,7 @@ mod execution_resolution;
 mod execution_supersession;
 mod freeze;
 mod linux_execution;
+mod regular_file;
 pub use execution_env::{
     ExecutionOperation, ExecutionReceipt, ExecutionRequest, ExecutionView, FAKE_WRITE_SCOPE,
 };
@@ -61,7 +62,7 @@ pub use freeze::bound_plan_digest;
 pub use service::read_attempt_freeze;
 pub use service::{
     AdmitRequest, AdmitResult, CommandView, CreateMission, DeliveryView, Host, MissionSnapshot,
-    NotifyOutcome, SuccessorChanges, journal_path,
+    NotifyOutcome, OperatorWrite, SuccessorChanges, journal_path,
 };
 
 #[cfg(test)]

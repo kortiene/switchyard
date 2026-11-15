@@ -1857,6 +1857,8 @@ fn simulated_no_row_error_is_transient(error: &Error) -> bool {
         | Error::VerifierConfinementUnavailable
         | Error::VerifierGateUnavailable
         | Error::VerifierIndexFlagsSet
+        | Error::OperatorWriteUnavailable
+        | Error::OperatorWritePhaseClosed { .. }
         | Error::AdmissionRejected { .. }
         | Error::GuardFailed { .. }
         | Error::UnknownNotification { .. }
@@ -1938,6 +1940,10 @@ fn execute_fake_operation_pins_is_transient_for_every_error_it_can_return() {
         Error::SourceChangedDuringCreate,
         Error::VerifierNotSupported {
             supported: "switchyard.verifier.v1".into(),
+        },
+        Error::OperatorWriteUnavailable,
+        Error::OperatorWritePhaseClosed {
+            phase: "draft".into(),
         },
         Error::AdmissionRejected {
             category: "busy".into(),

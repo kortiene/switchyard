@@ -118,6 +118,25 @@ pub(crate) enum MissionCommand {
         #[arg(long)]
         root: PathBuf,
     },
+    /// Copy one local file into this attempt's owned worktree.
+    /// Admitted only in phase `implementing`, and only on the fake runtime.
+    /// Does not bump the revision. One path per call.
+    Write {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        mission: String,
+        #[arg(long)]
+        attempt: String,
+        /// Workspace-relative destination. One file per call.
+        #[arg(long)]
+        path: String,
+        /// Local file to copy. Must be a regular file of at most 64 KiB.
+        #[arg(long)]
+        from: PathBuf,
+        #[arg(long, default_value = "operator")]
+        actor: String,
+    },
     /// Create a draft mission and one attempt from a local Git repository.
     Create {
         #[arg(long)]
