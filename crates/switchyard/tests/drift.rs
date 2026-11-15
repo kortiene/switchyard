@@ -116,7 +116,7 @@ fn admit(host: &mut Host, mission: &str, body: CommandBody) -> Result<(), Error>
 }
 
 fn assert_drift_refusal(error: &Error) {
-    assert_eq!(error.category(), "guard_failed");
+    assert_eq!(error.category(), "frozen_input_drift");
     assert!(
         error.to_string().contains("drifted"),
         "refusal should name drift, got {error}"

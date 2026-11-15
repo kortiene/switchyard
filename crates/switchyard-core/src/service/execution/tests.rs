@@ -1846,6 +1846,7 @@ fn simulated_no_row_error_is_transient(error: &Error) -> bool {
         | Error::StaleGeneration { .. }
         | Error::RepairLimitExhausted { .. }
         | Error::FrozenInputsMissing
+        | Error::FrozenInputDrift
         | Error::StalePlanDigest
         | Error::PlanRevisionLimitReached { .. }
         | Error::SuccessorSourceNotTerminal
@@ -1923,6 +1924,7 @@ fn execute_fake_operation_pins_is_transient_for_every_error_it_can_return() {
         Error::ActiveMissionExists,
         Error::RepairLimitExhausted { count: 1, max: 1 },
         Error::FrozenInputsMissing,
+        Error::FrozenInputDrift,
         Error::StalePlanDigest,
         Error::PlanRevisionLimitReached { count: 1, max: 1 },
         Error::SuccessorSourceNotTerminal,

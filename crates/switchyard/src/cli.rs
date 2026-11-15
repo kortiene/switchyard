@@ -206,9 +206,10 @@ pub(crate) enum MissionCommand {
     /// Create a new mission after a terminal one. The source mission stays terminal.
     ///
     /// Omitted overrides are copied from the source. Base SHA and runtime
-    /// configuration are always re-read from the host. A drifted or mismatched
-    /// source must `cancel`, then `confirm_cancelled`, first. A source refused
-    /// with `frozen_inputs_missing` must `reject` or `cancel`, then successor.
+    /// configuration are always re-read from the host. A source refused with
+    /// `frozen_input_drift`, or a plan-digest mismatch, must `cancel`, then
+    /// `confirm_cancelled`, first. A source refused with `frozen_inputs_missing`
+    /// must `reject` or `cancel`, then successor.
     Successor {
         #[arg(long)]
         db: PathBuf,

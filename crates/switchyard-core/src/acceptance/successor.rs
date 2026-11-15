@@ -526,7 +526,8 @@ fn drift_then_cancel_then_successor() {
         },
     )
     .unwrap_err();
-    assert_eq!(drifted.category(), "guard_failed");
+    assert_eq!(drifted.category(), "frozen_input_drift");
+    assert!(drifted.to_string().contains("drifted"), "{drifted}");
     let attention = host.snapshot(&created.mission_id).unwrap();
     assert_eq!(attention.phase, Phase::NeedsAttention);
     assert_eq!(

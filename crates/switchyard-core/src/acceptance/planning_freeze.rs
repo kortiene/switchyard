@@ -203,7 +203,8 @@ fn tampered_frozen_inputs_route_to_needs_attention_and_still_cancel() {
         },
     )
     .unwrap_err();
-    assert_eq!(error.category(), "guard_failed");
+    assert_eq!(error.category(), "frozen_input_drift");
+    assert!(error.to_string().contains("drifted"), "{error}");
     assert!(error.to_string().contains("was not applied"), "{error}");
     let attention = host.snapshot(&created.mission_id).unwrap();
     assert_eq!(attention.phase.as_str(), "needs_attention");

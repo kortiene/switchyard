@@ -1816,7 +1816,7 @@ fn enforce_attempt_freeze(
     if let Some(stored) = &mission.attempt.frozen_inputs_json {
         let current = frozen_canonical(&mission)?;
         if stored != &current && !drift_exit(mission.phase, command.kind) {
-            return Err(Error::guard("frozen attempt inputs are immutable"));
+            return Err(Error::FrozenInputDrift);
         }
     }
     Ok(())
