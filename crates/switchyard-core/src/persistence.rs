@@ -1310,6 +1310,32 @@ impl Store {
         Ok(new_revision)
     }
 
+    /// One operator worktree write. Not a transition: revision, commands, and
+    /// `content_digest` stay as they are. `command_id` is NULL.
+    pub(crate) fn record_operator_write(
+        &mut self,
+        mission_id: &str,
+        attempt_id: &str,
+        actor: &str,
+        rationale: &str,
+        digest: &str,
+    ) -> Result<()> {
+        let tx = self.immediate()?;
+        insert_decision(
+            &tx,
+            DecisionWrite {
+                mission_id,
+                attempt_id,
+                actor,
+                action: "operator_write",
+                rationale,
+                digest: Some(digest),
+                command_id: None,
+            },
+        )?;
+        tx.commit().map_err(Error::storage)
+    }
+
     pub fn record_verification(
         &mut self,
         mission_id: &str,

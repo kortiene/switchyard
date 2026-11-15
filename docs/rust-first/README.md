@@ -199,6 +199,19 @@ S1 (#95) implements the ledger and transition kernel with the clarifications bel
   4. `active_mission_exists`. Way out: finish or cancel that mission. A non-terminal mission counts, including a pending successor of a different source.
   5. `source_changed_during_create`. Compared inside the insert transaction before any write. Way out: nothing is written; retry.
 
+## Operator worktree write
+
+`switchyard mission write --db --mission --attempt --path --from [--actor]` copies one local file into the attempt's owned worktree. It is not a transition. The revision is not bumped, no command kind is added, and `content_digest` is not recomputed. The ledger row is a `decisions` record through `insert_decision`: `action` `operator_write`, `command_id` NULL, `digest` `sha256:` plus the hex SHA-256 of the file bytes, and a canonical JSON rationale `{actor, authoredBy, bytes, path, sha256}` with `authoredBy` `operator`. FakeRuntime `WriteFile` stays in memory and is not this path. The schema stays at 12.
+
+Refusals:
+
+1. `operator_write_unavailable`, when the open runtime is not Fake. Way out: Pi missions write through the confined `WriteFile` path. This command does not enable that path.
+2. `operator_write_phase_closed`, when the phase is not `implementing`. Way out: `approve_plan` first. Repair writes are not this command.
+3. `frozen_input_drift`, when live attempt inputs differ from the stored freeze. The check is the host's existing drift check. The first refusal records `needs_attention` and does not create the file. Way out: `cancel`, then `confirm_cancelled`, then `mission successor`.
+4. `workspace_uncertain`, when no workspace is recorded, or reconciliation (the same workspace recovery dispatch uses) still leaves it short of `ready` for this owner. Way out: `mission workspace` when none is recorded; otherwise `mission recover`.
+5. `guard_failed`, when the path is absolute, empty, or contains `..`, `.`, or `.git`, or a symlink parent or target resolves outside the worktree. Way out: pass one workspace-relative path that stays inside the tree.
+6. `guard_failed`, when `--from` is missing or not a regular file, or the content is over 64 KiB (the Linux `WriteFile` cap). Way out: pass an existing regular file of at most 64 KiB.
+
 ## Persistence and recovery
 
 Use separate application-owned and runtime-owned stores. Rust never writes Pi's internal tables. There is no atomic commit across these stores.

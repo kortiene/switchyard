@@ -1786,3 +1786,133 @@ fn create_verifier_and_mission_verify_use_the_owned_workspace() {
     assert_eq!(verified["outcome"], "fail");
     assert_eq!(verified["mission"]["phase"], "verifying");
 }
+
+#[test]
+fn mission_write_copies_one_file_and_refuses_a_closed_phase() {
+    use switchyard_core::*;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    let root = tmp.path().join("workspaces");
+    init_repo(&repo);
+    std::fs::create_dir(&root).unwrap();
+    let (code, created, err) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "196",
+        "--objective",
+        "operator write",
+        "--acceptance",
+        "file lands in the worktree",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let mission = created["mission"]["missionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let attempt = created["mission"]["attemptId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let from = tmp.path().join("body.txt");
+    std::fs::write(&from, b"hello").unwrap();
+    let (code, stdout, err) = run(&[
+        "mission",
+        "write",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        &mission,
+        "--attempt",
+        &attempt,
+        "--path",
+        "note.txt",
+        "--from",
+        from.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2, "{stdout} {err}");
+    assert_eq!(err["error"]["category"], "operator_write_phase_closed");
+
+    let mut host = Host::open(&db).unwrap();
+    let admit = |host: &mut Host, body| {
+        host.admit(AdmitRequest {
+            command_id: None,
+            mission_id: mission.clone(),
+            attempt_id: None,
+            expected_revision: host.snapshot(&mission).unwrap().revision,
+            actor: "operator".into(),
+            origin: CommandOrigin::Operator,
+            body,
+        })
+        .unwrap();
+    };
+    admit(&mut host, CommandBody::StartPlanning);
+    host.dispatch_pending(&mission).unwrap();
+    host.apply_notification(
+        &mission,
+        parse_notification(&serde_json::json!({
+            "kind": "plan_completed", "plan": "write the file", "quiescent": true
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let digest = host.snapshot(&mission).unwrap().plan_digest.unwrap();
+    admit(
+        &mut host,
+        CommandBody::ApprovePlan {
+            plan_digest: digest,
+        },
+    );
+    let workspace = host.prepare_workspace(&mission, &attempt, &root).unwrap();
+    let revision = host.snapshot(&mission).unwrap().revision;
+    drop(host);
+    let (code, stdout, err) = run(&[
+        "mission",
+        "write",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        &mission,
+        "--attempt",
+        &attempt,
+        "--path",
+        "src/note.txt",
+        "--from",
+        from.to_str().unwrap(),
+        "--actor",
+        "sam",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(stdout["ok"], true);
+    assert_eq!(stdout["write"]["path"], "src/note.txt");
+    assert_eq!(stdout["write"]["bytes"], 5);
+    assert_eq!(stdout["write"]["authoredBy"], "operator");
+    assert_eq!(stdout["write"]["actor"], "sam");
+    assert_eq!(stdout["write"]["workspacePath"], workspace.path);
+    assert_eq!(stdout["mission"]["phase"], "implementing");
+    assert_eq!(stdout["mission"]["revision"].as_u64(), Some(revision));
+    let file = std::path::Path::new(&workspace.path).join("src/note.txt");
+    assert_eq!(std::fs::read(&file).unwrap(), b"hello");
+    let hashed = Command::new("sha256sum").arg(&file).output().unwrap();
+    let hex = String::from_utf8(hashed.stdout).unwrap();
+    let hex = hex.split_whitespace().next().unwrap();
+    assert_eq!(stdout["write"]["sha256"], format!("sha256:{hex}"));
+    let (action, digest, command_id): (String, String, Option<String>) =
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT action, digest, command_id FROM decisions WHERE action = 'operator_write'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+    assert_eq!(action, "operator_write");
+    assert_eq!(digest, stdout["write"]["sha256"]);
+    assert_eq!(command_id, None);
+
+}

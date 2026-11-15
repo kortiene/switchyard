@@ -21,6 +21,7 @@ use crate::verification::{NewVerification, VerificationCollector};
 
 mod execution;
 mod linux_execution;
+mod operator_write;
 #[cfg(all(
     feature = "pi-contract",
     feature = "linux-execution",
@@ -40,6 +41,8 @@ mod pi_linux_process;
 ))]
 mod pi_linux_write;
 mod workspace;
+
+pub use operator_write::OperatorWrite;
 
 /// Open the host, take the single-host lock, and reuse the active attempt.
 ///

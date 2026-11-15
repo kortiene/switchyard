@@ -148,6 +148,40 @@ fn assert_parsed(label: &str, action: &MissionCommand, ledger: &Ledger, card: &M
 }
 
 #[test]
+fn mission_write_parses_with_the_real_cli() {
+    let cli = Cli::try_parse_from([
+        "switchyard",
+        "mission",
+        "write",
+        "--db",
+        "/tmp/operator's ledger/mission db.db",
+        "--mission",
+        "msn x",
+        "--attempt",
+        "att 01",
+        "--path",
+        "src/lib.rs",
+        "--from",
+        "/tmp/body.txt",
+        "--actor",
+        "sam",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Mission { action } => match action {
+            MissionCommand::Write {
+                path, actor, from, ..
+            } => {
+                assert_eq!(path, "src/lib.rs");
+                assert_eq!(actor, "sam");
+                assert_eq!(from.display().to_string(), "/tmp/body.txt");
+            }
+            other => panic!("write parsed as {other:?}"),
+        },
+    }
+}
+
+#[test]
 fn mission_command_rejects_a_rationale_flag() {
     let rejected = Cli::try_parse_from([
         "switchyard",
