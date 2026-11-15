@@ -1914,5 +1914,4 @@ fn mission_write_copies_one_file_and_refuses_a_closed_phase() {
     assert_eq!(action, "operator_write");
     assert_eq!(digest, stdout["write"]["sha256"]);
     assert_eq!(command_id, None);
-
 }

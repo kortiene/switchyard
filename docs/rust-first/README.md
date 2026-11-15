@@ -207,10 +207,12 @@ Refusals:
 
 1. `operator_write_unavailable`, when the open runtime is not Fake. Way out: Pi missions write through the confined `WriteFile` path. This command does not enable that path.
 2. `operator_write_phase_closed`, when the phase is not `implementing`. Way out: `approve_plan` first. Repair writes are not this command.
-3. `frozen_input_drift`, when live attempt inputs differ from the stored freeze. The check is the host's existing drift check. The first refusal records `needs_attention` and does not create the file. Way out: `cancel`, then `confirm_cancelled`, then `mission successor`.
-4. `workspace_uncertain`, when no workspace is recorded, or reconciliation (the same workspace recovery dispatch uses) still leaves it short of `ready` for this owner. Way out: `mission workspace` when none is recorded; otherwise `mission recover`.
-5. `guard_failed`, when the path is absolute, empty, or contains `..`, `.`, or `.git`, or a symlink parent or target resolves outside the worktree. Way out: pass one workspace-relative path that stays inside the tree.
-6. `guard_failed`, when `--from` is missing or not a regular file, or the content is over 64 KiB (the Linux `WriteFile` cap). Way out: pass an existing regular file of at most 64 KiB.
+3. `frozen_input_drift`, when live attempt inputs differ from the stored freeze. Drift is checked before the phase gate, the same order as admission. The first refusal records `needs_attention` and does not create the file. A later write returns `frozen_input_drift` again, and the revision increases only on that first refusal. Way out: `cancel`, then `confirm_cancelled`, then `mission successor`.
+4. `workspace_uncertain`, when no workspace is recorded, or reconciliation (the same workspace recovery dispatch uses) still leaves it short of `ready` for this owner. Way out: `mission workspace` when none is recorded; otherwise `mission recover`. An unresolved Linux execution row is `execution_blocked` instead: the write reconciles execution before it touches the worktree, as dispatch does. Way out: `mission recover`.
+5. `guard_failed`, when the path is absolute, empty, or contains `..`, `.`, or `.git`, or is a path through any symlink, or the leaf exists and is not a regular file. Way out: pass one workspace-relative path of a new file or an existing regular file, with no symlink component.
+6. `guard_failed`, when `--from` is missing, is a symlink, or is not a regular file (including a FIFO), or the content is over 64 KiB (the Linux `WriteFile` cap). Way out: pass an existing regular file of at most 64 KiB. A symlinked `--from` is refused as not a regular file.
+
+The bytes are written to the worktree before the decision row on purpose. Host verify re-derives changed paths, so a failed decision insert is not rolled back.
 
 ## Persistence and recovery
 

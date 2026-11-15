@@ -2,6 +2,9 @@
 //! Not a transition: revision, commands, and content digest stay put.
 //! FakeRuntime `WriteFile` is not used.
 
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use super::*;
@@ -41,44 +44,22 @@ impl Host {
                 detail: "operator write attempt does not belong to this mission".into(),
             });
         }
+        // Drift before the phase gate, the same order as admission.
+        if self.frozen_input_drifted(&mission)? {
+            return self.refuse_frozen_input_drift(&mission);
+        }
         if mission.phase != Phase::Implementing {
             return Err(Error::OperatorWritePhaseClosed {
                 phase: mission.phase.as_str().into(),
             });
         }
-        if self.frozen_input_drifted(&mission)? {
-            if mission.phase != Phase::NeedsAttention && !mission.phase.is_terminal() {
-                self.record_frozen_input_drift(&mission)?;
-            }
-            return Err(Error::FrozenInputDrift);
-        }
-        let workspace = match self.recover_workspace(mission_id)? {
-            Some(view)
-                if view.state == "ready" && view.verified_generation == Some(self.generation()) =>
-            {
-                view
-            }
-            Some(view) => {
-                return Err(Error::WorkspaceUncertain {
-                    workspace_id: view.id,
-                    detail: view
-                        .detail
-                        .unwrap_or_else(|| "workspace is not ready for this owner".into()),
-                });
-            }
-            None => {
-                return Err(Error::WorkspaceUncertain {
-                    workspace_id: attempt_id.to_string(),
-                    detail: "no workspace is recorded for this attempt".into(),
-                });
-            }
-        };
+        let workspace = self.ready_workspace(mission_id)?;
         let destination = operator_destination(Path::new(&workspace.path), path)?;
         let bytes = read_operator_source(from)?;
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent).map_err(Error::storage)?;
         }
-        std::fs::write(&destination, &bytes).map_err(Error::storage)?;
+        install_regular_file(&destination, &bytes)?;
         let digest = format!("sha256:{}", crate::canonical::sha256_hex(&bytes));
         let rationale = crate::canonical::canonicalize(&json!({
             "actor": actor,
@@ -101,20 +82,8 @@ impl Host {
 }
 
 fn read_operator_source(from: &Path) -> Result<Vec<u8>> {
-    let meta = match std::fs::symlink_metadata(from) {
-        Ok(meta) => meta,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(Error::guard("operator write source file is missing"));
-        }
-        Err(error) => return Err(Error::storage(error)),
-    };
-    if !meta.file_type().is_file() {
-        return Err(Error::guard("operator write source is not a regular file"));
-    }
-    if meta.len() > crate::linux_execution::MAX_FILE_BYTES as u64 {
-        return Err(Error::guard("operator write content exceeds 64 KiB"));
-    }
-    let bytes = std::fs::read(from).map_err(Error::storage)?;
+    let limit = crate::linux_execution::MAX_FILE_BYTES.saturating_add(1);
+    let bytes = crate::regular_file::read_regular_nofollow(from, limit)?;
     if bytes.len() > crate::linux_execution::MAX_FILE_BYTES {
         return Err(Error::guard("operator write content exceeds 64 KiB"));
     }
@@ -122,7 +91,7 @@ fn read_operator_source(from: &Path) -> Result<Vec<u8>> {
 }
 
 /// Workspace-relative destination. Reuses the Linux path rules, then refuses
-/// a symlink whose resolution leaves the worktree.
+/// any symlink component and a leaf that exists but is not a regular file.
 fn operator_destination(workspace: &Path, relative: &str) -> Result<PathBuf> {
     crate::linux_execution::validate_workspace_path(relative, false)?;
     let root = std::fs::canonicalize(workspace).map_err(Error::storage)?;
@@ -141,20 +110,10 @@ fn operator_destination(workspace: &Path, relative: &str) -> Result<PathBuf> {
             }
             Err(error) => return Err(Error::storage(error)),
             Ok(meta) if meta.file_type().is_symlink() => {
-                let resolved = std::fs::canonicalize(&next)
-                    .map_err(|_| Error::guard("symlinked path resolves outside the workspace"))?;
-                if !stays_inside(&root, &resolved) {
-                    return Err(Error::guard(
-                        "symlinked path resolves outside the workspace",
-                    ));
-                }
-                if last {
-                    cursor = next;
-                } else if resolved.is_dir() {
-                    cursor = resolved;
-                } else {
-                    return Err(Error::guard("symlinked parent is not a directory"));
-                }
+                return Err(Error::guard("operator write path contains a symlink"));
+            }
+            Ok(meta) if last && !meta.is_file() => {
+                return Err(Error::guard("operator write target is not a regular file"));
             }
             Ok(meta) if !last && !meta.is_dir() => {
                 return Err(Error::guard("operator write parent is not a directory"));
@@ -163,34 +122,35 @@ fn operator_destination(workspace: &Path, relative: &str) -> Result<PathBuf> {
         }
     }
     if !cursor.starts_with(&root) {
-        return Err(Error::guard(
-            "symlinked path resolves outside the workspace",
-        ));
-    }
-    let parent = cursor.parent().unwrap_or(root.as_path());
-    let ancestor = existing_ancestor(parent)?;
-    if !stays_inside(&root, &ancestor) {
-        return Err(Error::guard(
-            "symlinked path resolves outside the workspace",
-        ));
+        return Err(Error::guard("operator write path leaves the workspace"));
     }
     Ok(cursor)
 }
 
-fn stays_inside(root: &Path, path: &Path) -> bool {
-    path == root || path.starts_with(root)
-}
-
-fn existing_ancestor(path: &Path) -> Result<PathBuf> {
-    let mut cursor = path.to_path_buf();
-    loop {
-        if cursor.exists() {
-            return std::fs::canonicalize(&cursor).map_err(Error::storage);
-        }
-        if !cursor.pop() {
-            return Err(Error::guard("operator write has no workspace parent"));
-        }
+/// Write `bytes` via `.switchyard-write-<random>` in the destination directory,
+/// opened with `O_CREAT|O_EXCL|O_NOFOLLOW`, then rename it over the leaf.
+/// Any error removes the temp file.
+fn install_regular_file(destination: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| Error::guard("operator write has no workspace parent"))?;
+    let temp = parent.join(format!(
+        ".switchyard-write-{}",
+        crate::domain::new_id("f").trim_start_matches("f-")
+    ));
+    let written = (|| -> Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true);
+        options.custom_flags(libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW);
+        let mut file = options.open(&temp).map_err(Error::storage)?;
+        file.write_all(bytes).map_err(Error::storage)?;
+        std::fs::rename(&temp, destination).map_err(Error::storage)?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
+    written
 }
 
 #[cfg(test)]
@@ -455,7 +415,9 @@ mod tests {
         let from = source(fix._tmp.path(), "body.txt", b"hello");
         let error = refuse(&mut fix, "src/note.txt", &from);
         assert_eq!(error.category(), "frozen_input_drift");
-        let tree = fix.tree.unwrap();
+        let again = refuse(&mut fix, "src/note.txt", &from);
+        assert_eq!(again.category(), "frozen_input_drift");
+        let tree = fix.tree.as_ref().unwrap();
         assert!(!tree.join("src/note.txt").exists());
         assert!(!tree.join("src").exists());
         let drifted = fix.host.snapshot(&fix.mission).unwrap();
@@ -475,8 +437,119 @@ mod tests {
     }
 
     #[test]
+    fn operator_write_refuses_symlinks_and_non_regular_leaves_without_a_temp_file() {
+        let mut fix = implementing(true);
+        let from = source(fix._tmp.path(), "body.txt", b"hello");
+        let tree = fix.tree.clone().unwrap();
+        let inside = tree.join("inside");
+        fs::create_dir(&inside).unwrap();
+        std::os::unix::fs::symlink(&inside, tree.join("link")).unwrap();
+        assert_eq!(
+            refuse(&mut fix, "link/pwned.txt", &from).category(),
+            "guard_failed"
+        );
+        assert!(!inside.join("pwned.txt").exists());
+
+        let gitfile = fs::read(tree.join(".git")).unwrap();
+        std::os::unix::fs::symlink(".git", tree.join("x")).unwrap();
+        assert_eq!(refuse(&mut fix, "x", &from).category(), "guard_failed");
+        assert_eq!(fs::read(tree.join(".git")).unwrap(), gitfile);
+
+        assert!(
+            Command::new("mkfifo")
+                .arg(tree.join("pipe"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(refuse(&mut fix, "pipe", &from).category(), "guard_failed");
+        fs::create_dir(tree.join("adir")).unwrap();
+        assert_eq!(refuse(&mut fix, "adir", &from).category(), "guard_failed");
+        assert!(
+            !stray_temp(&tree),
+            "a refused write left a temp file in the worktree"
+        );
+
+        let nested = fix._tmp.path().join("not-a-file");
+        fs::create_dir(&nested).unwrap();
+        let failed = install_regular_file(&nested, b"hello");
+        assert!(failed.is_err(), "renaming onto a directory should fail");
+        assert!(
+            !stray_temp(fix._tmp.path()),
+            "a failed install left {}",
+            stray_names(fix._tmp.path()).join(", ")
+        );
+    }
+
+    #[test]
+    fn operator_write_accepts_exactly_64_kib_and_refuses_a_fifo_source() {
+        let mut fix = implementing(true);
+        let exact = vec![b'a'; crate::linux_execution::MAX_FILE_BYTES];
+        let from = source(fix._tmp.path(), "exact.bin", &exact);
+        let wrote = fix
+            .host
+            .operator_write(&fix.mission, &fix.attempt, "exact.bin", &from, "operator")
+            .unwrap();
+        assert_eq!(wrote.bytes, crate::linux_execution::MAX_FILE_BYTES as u64);
+        let tree = fix.tree.clone().unwrap();
+        assert_eq!(fs::read(tree.join("exact.bin")).unwrap(), exact);
+
+        let fifo = fix._tmp.path().join("source.pipe");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            refuse(&mut fix, "from-fifo.txt", &fifo).category(),
+            "guard_failed"
+        );
+        assert!(!tree.join("from-fifo.txt").exists());
+    }
+
+    #[test]
+    fn operator_write_refuses_a_blocked_execution_and_an_unready_workspace() {
+        let mut blocked = implementing(true);
+        let snap = blocked.host.snapshot(&blocked.mission).unwrap();
+        rusqlite::Connection::open(&blocked.db)
+            .unwrap()
+            .execute(
+                "INSERT INTO linux_execution_effects(
+                    operation_id, mission_id, attempt_id, session_id, payload_hash, request_json,
+                    started_generation, state, created_at
+                 ) VALUES ('op-v1:operator-write', ?1, ?2, ?3, 'sha256:row', '{}', 1, 'prepared', 1)",
+                rusqlite::params![blocked.mission, blocked.attempt, snap.session_id],
+            )
+            .unwrap();
+        let from = source(blocked._tmp.path(), "body.txt", b"hello");
+        let error = refuse(&mut blocked, "blocked.txt", &from);
+        assert_eq!(error.category(), "execution_blocked", "{error}");
+        assert!(!blocked.tree.as_ref().unwrap().join("blocked.txt").exists());
+
+        let mut stale = implementing(true);
+        let changed = rusqlite::Connection::open(&stale.db)
+            .unwrap()
+            .execute(
+                "UPDATE workspaces SET state='uncertain', detail='not verified for this owner'
+                 WHERE mission_id=?1",
+                [&stale.mission],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+        let from = source(stale._tmp.path(), "body.txt", b"hello");
+        assert_eq!(
+            refuse(&mut stale, "later.txt", &from).category(),
+            "workspace_uncertain"
+        );
+        assert!(!stale.tree.unwrap().join("later.txt").exists());
+    }
+
+    #[test]
     #[cfg(feature = "pi-contract")]
     fn operator_write_is_unavailable_off_fake() {
+        // The default build's only runtime is Fake, so this refusal runs only with pi-contract.
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         fs::create_dir(&repo).unwrap();
@@ -515,5 +588,31 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.category(), "operator_write_unavailable");
+    }
+
+    fn stray_temp(dir: &Path) -> bool {
+        !stray_names(dir).is_empty()
+    }
+
+    fn stray_names(dir: &Path) -> Vec<String> {
+        let mut names = Vec::new();
+        let entries = fs::read_dir(dir).unwrap();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".switchyard-write-") {
+                names.push(name);
+            }
+            if entry.file_type().unwrap().is_dir()
+                && let Ok(nested) = fs::read_dir(entry.path())
+            {
+                for child in nested.flatten() {
+                    let child_name = child.file_name().to_string_lossy().into_owned();
+                    if child_name.starts_with(".switchyard-write-") {
+                        names.push(child_name);
+                    }
+                }
+            }
+        }
+        names
     }
 }

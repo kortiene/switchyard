@@ -19,6 +19,7 @@ mod execution_resolution;
 mod execution_supersession;
 mod freeze;
 mod linux_execution;
+mod regular_file;
 pub use execution_env::{
     ExecutionOperation, ExecutionReceipt, ExecutionRequest, ExecutionView, FAKE_WRITE_SCOPE,
 };

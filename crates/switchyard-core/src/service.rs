@@ -1654,9 +1654,21 @@ impl Host {
         Ok((self.snapshot(mission_id)?, outcome.as_str().to_string()))
     }
 
-    /// Owned worktree, ready and reconciled for this owner. Missing or uncertain
-    /// is `workspace_uncertain`; `mission recover` is the way out.
+    /// Owned worktree, ready and reconciled for this owner.
+    ///
+    /// Reconciles execution first. An unresolved Linux row is `execution_blocked`
+    /// and the worktree is not touched; `mission recover` is the way out.
+    /// Missing or uncertain is `workspace_uncertain`; `mission recover` is the way out.
     fn ready_workspace(&mut self, mission_id: &str) -> Result<crate::WorkspaceView> {
+        self.reconcile_execution(mission_id)?;
+        if self.store.linux_execution_blocked(mission_id)? {
+            self.dispatch_stops(mission_id)?;
+            return Err(Error::ExecutionBlocked {
+                mission_id: mission_id.to_string(),
+                detail: "unresolved linux execution effects; workspace was not verified or reused"
+                    .into(),
+            });
+        }
         match self.recover_workspace(mission_id)? {
             Some(view)
                 if view.state == "ready" && view.verified_generation == Some(self.generation()) =>

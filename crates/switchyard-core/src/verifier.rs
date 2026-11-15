@@ -250,7 +250,7 @@ fn parent_is_symlink(repo: &Path, path: &str) -> Result<bool> {
 /// `None` is a symlink or special file. Regular files stop once `room` newlines
 /// are counted, so a huge allowed file is not read in full.
 fn line_count(path: &Path, room: u64) -> Result<Option<u64>> {
-    let mut file = match open_for_count(path) {
+    let mut file = match crate::regular_file::open_nofollow(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Some(0)),
         Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
@@ -287,16 +287,6 @@ fn line_count(path: &Path, room: u64) -> Result<Option<u64>> {
         lines += 1;
     }
     Ok(Some(lines))
-}
-
-/// `O_NOFOLLOW | O_NONBLOCK` from libc, so the values match this architecture.
-/// A symlink fails the open; a FIFO does not block.
-fn open_for_count(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
 }
 
 fn glob_match(pattern: &str, path: &str) -> bool {
