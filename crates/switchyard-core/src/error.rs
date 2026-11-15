@@ -107,6 +107,10 @@ pub enum Error {
     #[error("verifier confinement is not available")]
     VerifierConfinementUnavailable,
 
+    /// `mission verify` on a verifier that has no host path gate.
+    #[error("this verifier has no host path gate")]
+    VerifierGateUnavailable,
+
     /// Pi refused to admit the command and the protocol marks that refusal as
     /// definite. Transport loss and `admission: uncertain` stay [`Self::GuardFailed`]
     /// or [`Self::Storage`]. Effect outcomes use `PiEffectOutcome` separately
@@ -170,6 +174,7 @@ impl Error {
             Self::VerifierNotSupported { .. } => "verifier_not_supported",
             Self::VerificationNotHostRun => "verification_not_host_run",
             Self::VerifierConfinementUnavailable => "verifier_confinement_unavailable",
+            Self::VerifierGateUnavailable => "verifier_gate_unavailable",
             Self::AdmissionRejected { .. } => "admission_rejected",
             Self::GuardFailed { .. } => "guard_failed",
             Self::UnknownNotification { .. } => "unknown_notification",

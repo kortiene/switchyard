@@ -726,7 +726,7 @@ impl Host {
         }
         if is_runtime_observation(request.body.kind())
             && request.origin != CommandOrigin::RuntimeObservation
-            && !host_pass
+            && !(host_pass && request.origin == CommandOrigin::HostSupervisor)
         {
             return Err(Error::guard(
                 "plan, verification, and publication observations must come from the runtime",
@@ -1605,7 +1605,7 @@ impl Host {
         let verifier =
             crate::freeze::parse_object(&mission.attempt.verifier_json, "verifier definition")?;
         let gate = crate::verifier::Gate::parse(&verifier)?;
-        let tree = PathBuf::from(&mission.repo.toplevel);
+        let tree = PathBuf::from(self.ready_workspace(mission_id)?.path);
         let before = crate::execution::workspace::content_digest(&tree)?;
         self.note_content_digest(
             mission_id,
@@ -1613,13 +1613,12 @@ impl Host {
             &before,
             "switchyard-host-verifier",
         )?;
-        let (violations, added_lines) =
-            crate::verifier::assess(&tree, &mission.attempt.base_sha, &gate)?;
+        let report = crate::verifier::assess(&tree, &mission.attempt.base_sha, &gate)?;
         let after = crate::execution::workspace::content_digest(&tree)?;
         let mission = self.store.load_mission(mission_id)?;
         let (outcome, completeness) = if before != after {
             (VerificationOutcome::Incomplete, Completeness::Incomplete)
-        } else if !violations.is_empty() {
+        } else if !report.violations.is_empty() {
             (VerificationOutcome::Fail, Completeness::Complete)
         } else {
             return Err(Error::VerifierConfinementUnavailable);
@@ -1631,21 +1630,43 @@ impl Host {
             &NewVerification {
                 outcome,
                 content_digest: mission.content_digest.clone(),
-                evidence_body: violations.join("\n"),
+                evidence_body: report.violations.join("\n"),
                 completeness,
                 requirements: Vec::new(),
                 collector: VerificationCollector::HostVerifier,
                 host_fields: Some(json!({
-                    "addedLines": added_lines,
+                    "addedLines": report.added_lines,
+                    "baseSha": mission.attempt.base_sha,
+                    "changedPaths": report.paths,
                     "contentDigestAfter": after,
                     "contentDigestBefore": before,
                     "outcome": outcome.as_str(),
                     "verifierDigest": verifier_digest,
-                    "violations": violations,
+                    "violations": report.violations,
                 })),
             },
         )?;
         Ok((self.snapshot(mission_id)?, outcome.as_str().to_string()))
+    }
+
+    /// Owned worktree, ready and reconciled for this owner. Missing or uncertain
+    /// is `workspace_uncertain`; `mission recover` is the way out.
+    fn ready_workspace(&mut self, mission_id: &str) -> Result<crate::WorkspaceView> {
+        match self.recover_workspace(mission_id)? {
+            Some(view)
+                if view.state == "ready" && view.verified_generation == Some(self.generation()) =>
+            {
+                Ok(view)
+            }
+            Some(view) => Err(Error::WorkspaceUncertain {
+                workspace_id: view.id,
+                detail: "owned workspace is not ready for this owner; mission recover".into(),
+            }),
+            None => Err(Error::WorkspaceUncertain {
+                workspace_id: mission_id.to_string(),
+                detail: "owned workspace is missing; mission recover".into(),
+            }),
+        }
     }
 
     pub fn record_operation(
@@ -2663,6 +2684,43 @@ mod host_fact_tests {
             content: "later".into(),
         }));
         assert!(!host_supervisor_fact(&CommandBody::CompletePass));
+    }
+
+    #[test]
+    fn host_verifier_pass_requires_collector_and_matching_digest() {
+        use crate::domain::{Completeness, VerificationOutcome};
+        use crate::verification::{NewVerification, VerificationCollector};
+        let pass = |collector, digest: &str| NewVerification {
+            outcome: VerificationOutcome::Pass,
+            content_digest: digest.into(),
+            evidence_body: String::new(),
+            completeness: Completeness::Complete,
+            requirements: Vec::new(),
+            collector,
+            host_fields: None,
+        };
+        let host = pass(VerificationCollector::HostVerifier, "digest");
+        assert!(super::host_verifier_pass(
+            &CommandBody::CompletePass,
+            Some(&host),
+            "digest"
+        ));
+        assert!(!super::host_verifier_pass(
+            &CommandBody::CompletePass,
+            Some(&host),
+            "other"
+        ));
+        let notify = pass(VerificationCollector::RuntimeObservation, "digest");
+        assert!(!super::host_verifier_pass(
+            &CommandBody::CompletePass,
+            Some(&notify),
+            "digest"
+        ));
+        assert!(!super::host_verifier_pass(
+            &CommandBody::Pause,
+            Some(&host),
+            "digest"
+        ));
     }
 }
 
