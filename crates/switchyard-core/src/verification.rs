@@ -10,14 +10,31 @@ pub struct NewVerification {
     pub evidence_body: String,
     pub completeness: Completeness,
     pub requirements: Vec<String>,
+    pub collector: VerificationCollector,
+    /// Extra `body_json` fields for a host-run row. Notify rows leave this empty.
+    pub host_fields: Option<Value>,
+}
+
+/// Who collected a new evidence row. Historical rows are not rewritten.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerificationCollector {
+    /// Notify-injected pass or fail.
+    RuntimeObservation,
+    /// `mission verify` on this host.
+    HostVerifier,
 }
 
 impl NewVerification {
-    pub fn provenance() -> Value {
-        json!({
-            "collector": "switchyard-host",
-            "runtimeClaim": false
-        })
+    pub fn provenance(&self) -> Value {
+        match self.collector {
+            VerificationCollector::RuntimeObservation => json!({
+                "collector": "runtime-observation",
+                "runtimeClaim": true
+            }),
+            VerificationCollector::HostVerifier => json!({
+                "collector": "switchyard-host-verifier"
+            }),
+        }
     }
 
     pub fn requirements_json(&self) -> String {

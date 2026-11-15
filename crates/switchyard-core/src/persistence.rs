@@ -30,11 +30,14 @@ const SCHEMA_VERSION: i64 = 12;
 
 const VERIFIER_JSON: &str = r#"{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}"#;
 
+/// `switchyard.verifier.rust-verify.v1`. Canonical RFC 8785 object, keys sorted.
+pub(crate) const RUST_VERIFY_JSON: &str = r#"{"allowedPaths":["crates/*/tests/**","docs/**"],"argv":["./scripts/rust-verify.sh"],"confinement":"linux-bubblewrap-0.9.0","deniedPaths":["crates/switchyard-core/tests/pi_bridge.rs","crates/switchyard/tests/linux_execution.rs","crates/switchyard/tests/cli_confined.rs"],"executes":true,"frozen":true,"id":"switchyard.verifier.rust-verify.v1","maxAddedLines":400,"outputCapBytes":1048576,"timeoutSeconds":1800}"#;
+
 /// Verifier documents this host can freeze, as RFC 8785 JSON.
 ///
 /// A new verifier is another entry here. Callers match the canonical text.
 pub(crate) fn supported_verifier_documents() -> &'static [&'static str] {
-    &[VERIFIER_JSON]
+    &[VERIFIER_JSON, RUST_VERIFY_JSON]
 }
 const ENVIRONMENT_JSON: &str = r#"{"confinement":"deferred_to_s3","host":"single"}"#;
 
@@ -1619,13 +1622,19 @@ fn insert_verification(
     let evidence_id = crate::domain::new_id("e");
     let verification_id = crate::domain::new_id("v");
     let now = now_ms();
-    let body = serde_json::to_string(&json!({
+    let mut document = json!({
         "body": verification.evidence_body,
         "contentDigest": verification.content_digest,
-    }))
-    .map_err(Error::storage)?;
-    let provenance =
-        serde_json::to_string(&NewVerification::provenance()).map_err(Error::storage)?;
+    });
+    if let Some(fields) = &verification.host_fields
+        && let (Some(dest), Some(src)) = (document.as_object_mut(), fields.as_object())
+    {
+        for (key, value) in src {
+            dest.insert(key.clone(), value.clone());
+        }
+    }
+    let body = serde_json::to_string(&document).map_err(Error::storage)?;
+    let provenance = serde_json::to_string(&verification.provenance()).map_err(Error::storage)?;
     tx.execute(
         "INSERT INTO evidence(
             id, mission_id, attempt_id, content_hash, completeness, provenance_json,

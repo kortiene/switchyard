@@ -99,6 +99,14 @@ pub enum Error {
     #[error("verifier is not supported by this host; supported: {supported}")]
     VerifierNotSupported { supported: String },
 
+    /// Notify `verification_pass` or `verification_fail` while the frozen verifier executes.
+    #[error("verification must be collected by the host verifier")]
+    VerificationNotHostRun,
+
+    /// The path gate passed. This slice does not run the verifier.
+    #[error("verifier confinement is not available")]
+    VerifierConfinementUnavailable,
+
     /// Pi refused to admit the command and the protocol marks that refusal as
     /// definite. Transport loss and `admission: uncertain` stay [`Self::GuardFailed`]
     /// or [`Self::Storage`]. Effect outcomes use `PiEffectOutcome` separately
@@ -160,6 +168,8 @@ impl Error {
             Self::SuccessorExists { .. } => "successor_exists",
             Self::SourceChangedDuringCreate => "source_changed_during_create",
             Self::VerifierNotSupported { .. } => "verifier_not_supported",
+            Self::VerificationNotHostRun => "verification_not_host_run",
+            Self::VerifierConfinementUnavailable => "verifier_confinement_unavailable",
             Self::AdmissionRejected { .. } => "admission_rejected",
             Self::GuardFailed { .. } => "guard_failed",
             Self::UnknownNotification { .. } => "unknown_notification",

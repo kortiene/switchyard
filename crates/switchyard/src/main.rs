@@ -149,18 +149,22 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 admit,
                 persist_only,
                 payload,
+                verifier,
             } => {
                 let mut host = open_host(&db, runtime)?;
-                let snapshot = host.create_mission(CreateMission {
-                    repo,
-                    issue_number: issue,
-                    issue_title,
-                    objective,
-                    acceptance,
-                    actor: actor.clone(),
-                    max_repairs,
-                    max_plan_revisions,
-                })?;
+                let snapshot = host.create_mission_with_verifier(
+                    CreateMission {
+                        repo,
+                        issue_number: issue,
+                        issue_title,
+                        objective,
+                        acceptance,
+                        actor: actor.clone(),
+                        max_repairs,
+                        max_plan_revisions,
+                    },
+                    verifier,
+                )?;
                 let schedule_scenario = runtime == RuntimeSelection::ConfinedPi
                     && !persist_only
                     && admit.as_deref() == Some("approve_plan");
@@ -373,6 +377,15 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     },
                 )?;
                 Ok(json!({"ok": true, "mission": snapshot.to_json()}))
+            }
+            MissionCommand::Verify { db, mission } => {
+                let mut host = open_host(&db, runtime)?;
+                let (snapshot, outcome) = host.verify_mission(&mission)?;
+                Ok(json!({
+                    "ok": true,
+                    "outcome": outcome,
+                    "mission": snapshot.to_json(),
+                }))
             }
             MissionCommand::Content {
                 db,

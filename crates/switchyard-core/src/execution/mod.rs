@@ -8,6 +8,7 @@ pub(crate) mod pi_runtime;
 mod runtime;
 pub(crate) mod workspace;
 
+pub(crate) use git::git as host_git;
 pub use git::inspect_repo;
 pub use owner::{OwnerLock, lock_path, try_acquire};
 #[cfg(feature = "pi-contract")]

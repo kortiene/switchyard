@@ -146,6 +146,9 @@ pub(crate) enum MissionCommand {
         persist_only: bool,
         #[arg(long, default_value = "{}")]
         payload: String,
+        /// Verifier document JSON. Omitted stores `switchyard.verifier.v1`.
+        #[arg(long)]
+        verifier: Option<String>,
     },
     /// Read mission state without taking the owner lock.
     Status {
@@ -232,10 +235,17 @@ pub(crate) enum MissionCommand {
         /// Replace the source plan-revision limit.
         #[arg(long)]
         max_plan_revisions: Option<u32>,
-        /// Replace the source verifier. A supported verifier document; today
-        /// only `switchyard.verifier.v1`.
+        /// Replace the source verifier. A supported document:
+        /// `switchyard.verifier.v1` or `switchyard.verifier.rust-verify.v1`.
         #[arg(long)]
         verifier: Option<String>,
+    },
+    /// Run the frozen changed-path gate. Does not execute the verifier.
+    Verify {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        mission: String,
     },
     /// Record a content digest. Review-gated phases enter needs_attention.
     Content {

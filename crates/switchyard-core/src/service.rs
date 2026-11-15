@@ -17,7 +17,7 @@ use crate::execution::{
 use crate::persistence::{CreatedMission, ExpectedSource, NewCommand, Store};
 use crate::policy::{self, Facts};
 use crate::transitions::target_spec;
-use crate::verification::NewVerification;
+use crate::verification::{NewVerification, VerificationCollector};
 
 mod execution;
 mod linux_execution;
@@ -463,6 +463,19 @@ impl Host {
     }
 
     pub fn create_mission(&mut self, request: CreateMission) -> Result<MissionSnapshot> {
+        self.create_mission_with_verifier(request, None)
+    }
+
+    /// `None` stores `switchyard.verifier.v1`. Any other value must be allowlisted.
+    pub fn create_mission_with_verifier(
+        &mut self,
+        request: CreateMission,
+        verifier_json: Option<String>,
+    ) -> Result<MissionSnapshot> {
+        let verifier_json = match verifier_json {
+            Some(raw) => Some(canonical_verifier(&raw)?),
+            None => None,
+        };
         let repo = inspect_repo(&request.repo)?;
         let created = CreatedMission {
             runtime_config: canonicalize(&self.runtime.configuration())?,
@@ -485,7 +498,7 @@ impl Host {
             max_plan_revisions: request.max_plan_revisions,
             successor_of_mission_id: None,
             successor_of_attempt_id: None,
-            verifier_json: None,
+            verifier_json,
             decision_rationale: None,
             expected_source: None,
         };
@@ -604,12 +617,12 @@ impl Host {
             .command_id
             .clone()
             .unwrap_or_else(|| crate::domain::new_id("c"));
+        // Host PASS is the one widening: collector switchyard-host-verifier and a matching digest.
+        let host_pass = host_verifier_pass(&request.body, verification, &mission.content_digest);
         if host_fact {
-            // The private door records only Rust confinement proofs, and only
-            // under the origin that distinguishes them from Pi observations.
             // The body allowlist lives in [`host_supervisor_fact`].
             if request.origin != CommandOrigin::HostSupervisor
-                || !host_supervisor_fact(&request.body)
+                || !(host_supervisor_fact(&request.body) || host_pass)
             {
                 return Err(Error::guard(
                     "host facts are limited to supervisor stop and uncertainty proofs",
@@ -713,6 +726,7 @@ impl Host {
         }
         if is_runtime_observation(request.body.kind())
             && request.origin != CommandOrigin::RuntimeObservation
+            && !host_pass
         {
             return Err(Error::guard(
                 "plan, verification, and publication observations must come from the runtime",
@@ -1473,6 +1487,7 @@ impl Host {
                         phase: mission.phase.to_string(),
                     });
                 }
+                refuse_executed_verifier(&mission)?;
                 if mission.phase != Phase::Verifying {
                     return Err(Error::IllegalTransition {
                         from: mission.phase.to_string(),
@@ -1572,6 +1587,65 @@ impl Host {
             )?;
         }
         self.snapshot(mission_id)
+    }
+
+    /// Set the content digest, then apply the frozen changed-path gate.
+    /// A clean gate refuses; this slice does not run the verifier.
+    pub fn verify_mission(&mut self, mission_id: &str) -> Result<(MissionSnapshot, String)> {
+        let mission = self.store.load_mission(mission_id)?;
+        if mission.phase != Phase::Verifying {
+            return Err(Error::IllegalTransition {
+                from: mission.phase.to_string(),
+                command: "verify".into(),
+            });
+        }
+        if self.frozen_input_drifted(&mission)? {
+            return Err(Error::guard("frozen inputs drifted"));
+        }
+        let verifier =
+            crate::freeze::parse_object(&mission.attempt.verifier_json, "verifier definition")?;
+        let gate = crate::verifier::Gate::parse(&verifier)?;
+        let tree = PathBuf::from(&mission.repo.toplevel);
+        let before = crate::execution::workspace::content_digest(&tree)?;
+        self.note_content_digest(
+            mission_id,
+            mission.revision,
+            &before,
+            "switchyard-host-verifier",
+        )?;
+        let (violations, added_lines) =
+            crate::verifier::assess(&tree, &mission.attempt.base_sha, &gate)?;
+        let after = crate::execution::workspace::content_digest(&tree)?;
+        let mission = self.store.load_mission(mission_id)?;
+        let (outcome, completeness) = if before != after {
+            (VerificationOutcome::Incomplete, Completeness::Incomplete)
+        } else if !violations.is_empty() {
+            (VerificationOutcome::Fail, Completeness::Complete)
+        } else {
+            return Err(Error::VerifierConfinementUnavailable);
+        };
+        let verifier_digest = payload_hash(&verifier)?;
+        self.store.record_verification(
+            &mission.id,
+            &mission.attempt.id,
+            &NewVerification {
+                outcome,
+                content_digest: mission.content_digest.clone(),
+                evidence_body: violations.join("\n"),
+                completeness,
+                requirements: Vec::new(),
+                collector: VerificationCollector::HostVerifier,
+                host_fields: Some(json!({
+                    "addedLines": added_lines,
+                    "contentDigestAfter": after,
+                    "contentDigestBefore": before,
+                    "outcome": outcome.as_str(),
+                    "verifierDigest": verifier_digest,
+                    "violations": violations,
+                })),
+            },
+        )?;
+        Ok((self.snapshot(mission_id)?, outcome.as_str().to_string()))
     }
 
     pub fn record_operation(
@@ -1779,6 +1853,7 @@ impl Host {
                 phase: mission.phase.to_string(),
             });
         }
+        refuse_executed_verifier(mission)?;
         if mission.phase == Phase::AwaitingReview && mission.content_digest == content_digest {
             return Ok(unchanged(mission));
         }
@@ -1921,6 +1996,8 @@ impl Host {
                 evidence_body: evidence.to_string(),
                 completeness,
                 requirements: requirements.to_vec(),
+                collector: VerificationCollector::RuntimeObservation,
+                host_fields: None,
             },
         )?;
         Ok(())
@@ -2461,7 +2538,32 @@ fn verification_record(
         evidence_body: evidence.to_string(),
         completeness,
         requirements: requirements.to_vec(),
+        collector: VerificationCollector::RuntimeObservation,
+        host_fields: None,
     }
+}
+
+fn refuse_executed_verifier(mission: &MissionRecord) -> Result<()> {
+    let doc = crate::freeze::parse_object(&mission.attempt.verifier_json, "verifier definition")?;
+    if doc.get("executes").and_then(Value::as_bool) == Some(true) {
+        return Err(Error::VerificationNotHostRun);
+    }
+    Ok(())
+}
+
+/// Unreachable from `mission verify` in #199a. Collector and digest must both match.
+fn host_verifier_pass(
+    body: &CommandBody,
+    verification: Option<&NewVerification>,
+    content_digest: &str,
+) -> bool {
+    matches!(body, CommandBody::CompletePass)
+        && verification.is_some_and(|fact| {
+            fact.collector == VerificationCollector::HostVerifier
+                && fact.outcome == VerificationOutcome::Pass
+                && fact.completeness == Completeness::Complete
+                && fact.content_digest == content_digest
+        })
 }
 
 /// Supervisor facts the Host may record. Runtime observations and operator
@@ -2560,6 +2662,7 @@ mod host_fact_tests {
         assert!(!host_supervisor_fact(&CommandBody::Steer {
             content: "later".into(),
         }));
+        assert!(!host_supervisor_fact(&CommandBody::CompletePass));
     }
 }
 
