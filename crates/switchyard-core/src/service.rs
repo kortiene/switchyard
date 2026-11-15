@@ -1601,6 +1601,7 @@ impl Host {
         {
             return self.refuse_frozen_input_drift(&mission);
         }
+        self.refuse_blocked_execution(mission_id)?;
         if mission.phase != Phase::Verifying {
             return Err(Error::IllegalTransition {
                 from: mission.phase.to_string(),
@@ -1657,18 +1658,12 @@ impl Host {
     /// Owned worktree, ready and reconciled for this owner.
     ///
     /// Reconciles execution first. An unresolved Linux row is `execution_blocked`
-    /// and the worktree is not touched; `mission recover` is the way out.
+    /// and the worktree is not touched. This check does not deliver a stop or
+    /// terminate a writer. Way out: dispatch (delivers the admitted stop) or
+    /// `mission recover` once effects settle.
     /// Missing or uncertain is `workspace_uncertain`; `mission recover` is the way out.
     fn ready_workspace(&mut self, mission_id: &str) -> Result<crate::WorkspaceView> {
-        self.reconcile_execution(mission_id)?;
-        if self.store.linux_execution_blocked(mission_id)? {
-            self.dispatch_stops(mission_id)?;
-            return Err(Error::ExecutionBlocked {
-                mission_id: mission_id.to_string(),
-                detail: "unresolved linux execution effects; workspace was not verified or reused"
-                    .into(),
-            });
-        }
+        self.refuse_blocked_execution(mission_id)?;
         match self.recover_workspace(mission_id)? {
             Some(view)
                 if view.state == "ready" && view.verified_generation == Some(self.generation()) =>
@@ -1684,6 +1679,19 @@ impl Host {
                 detail: "owned workspace is missing; mission recover".into(),
             }),
         }
+    }
+
+    /// Precondition only. Does not deliver a pending stop or terminate a writer.
+    fn refuse_blocked_execution(&mut self, mission_id: &str) -> Result<()> {
+        self.reconcile_execution(mission_id)?;
+        if self.store.linux_execution_blocked(mission_id)? {
+            return Err(Error::ExecutionBlocked {
+                mission_id: mission_id.to_string(),
+                detail: "unresolved linux execution effects; dispatch (delivers the admitted stop) or mission recover once effects settle"
+                    .into(),
+            });
+        }
+        Ok(())
     }
 
     pub fn record_operation(

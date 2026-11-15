@@ -4,7 +4,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use super::*;
@@ -48,6 +48,9 @@ impl Host {
         if self.frozen_input_drifted(&mission)? {
             return self.refuse_frozen_input_drift(&mission);
         }
+        // A blocked execution is a precondition. Checked before the phase gate
+        // so an admitted stop is refused here and left pending.
+        self.refuse_blocked_execution(mission_id)?;
         if mission.phase != Phase::Implementing {
             return Err(Error::OperatorWritePhaseClosed {
                 phase: mission.phase.as_str().into(),
@@ -144,6 +147,14 @@ fn install_regular_file(destination: &Path, bytes: &[u8]) -> Result<()> {
         options.custom_flags(libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW);
         let mut file = options.open(&temp).map_err(Error::storage)?;
         file.write_all(bytes).map_err(Error::storage)?;
+        if let Ok(leaf) = std::fs::symlink_metadata(destination)
+            && leaf.file_type().is_file()
+        {
+            let mode = leaf.permissions().mode() & 0o7777;
+            let mut perms = file.metadata().map_err(Error::storage)?.permissions();
+            perms.set_mode(mode);
+            file.set_permissions(perms).map_err(Error::storage)?;
+        }
         std::fs::rename(&temp, destination).map_err(Error::storage)?;
         Ok(())
     })();
@@ -482,6 +493,25 @@ mod tests {
     }
 
     #[test]
+    fn overwriting_keeps_the_existing_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut fix = implementing(true);
+        let tree = fix.tree.clone().unwrap();
+        let leaf = tree.join("script.sh");
+        fs::write(&leaf, b"old").unwrap();
+        let mut perms = fs::metadata(&leaf).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&leaf, perms).unwrap();
+        let from = source(fix._tmp.path(), "body.txt", b"new");
+        fix.host
+            .operator_write(&fix.mission, &fix.attempt, "script.sh", &from, "operator")
+            .unwrap();
+        let mode = fs::symlink_metadata(&leaf).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o755);
+        assert_eq!(fs::read(&leaf).unwrap(), b"new");
+    }
+
+    #[test]
     fn operator_write_accepts_exactly_64_kib_and_refuses_a_fifo_source() {
         let mut fix = implementing(true);
         let exact = vec![b'a'; crate::linux_execution::MAX_FILE_BYTES];
@@ -527,6 +557,38 @@ mod tests {
         let error = refuse(&mut blocked, "blocked.txt", &from);
         assert_eq!(error.category(), "execution_blocked", "{error}");
         assert!(!blocked.tree.as_ref().unwrap().join("blocked.txt").exists());
+
+        let mut stopped = implementing(true);
+        let snap = stopped.host.snapshot(&stopped.mission).unwrap();
+        rusqlite::Connection::open(&stopped.db)
+            .unwrap()
+            .execute(
+                "INSERT INTO linux_execution_effects(
+                    operation_id, mission_id, attempt_id, session_id, payload_hash, request_json,
+                    started_generation, state, created_at
+                 ) VALUES ('op-v1:write-stop', ?1, ?2, ?3, 'sha256:row', '{}', 1, 'prepared', 1)",
+                rusqlite::params![stopped.mission, stopped.attempt, snap.session_id],
+            )
+            .unwrap();
+        admit(&mut stopped.host, &stopped.mission, CommandBody::Pause);
+        let from = source(stopped._tmp.path(), "body.txt", b"hello");
+        let error = refuse(&mut stopped, "stopped.txt", &from);
+        assert_eq!(error.category(), "execution_blocked", "{error}");
+        assert!(
+            error.to_string().contains(
+                "dispatch (delivers the admitted stop) or mission recover once effects settle"
+            ),
+            "{error}"
+        );
+        let after = stopped.host.snapshot(&stopped.mission).unwrap();
+        let pause = after
+            .commands
+            .iter()
+            .find(|command| command.kind == "pause")
+            .unwrap();
+        assert_eq!(pause.state, "pending");
+        assert!(pause.receipt_id.is_none());
+        assert!(!stopped.tree.as_ref().unwrap().join("stopped.txt").exists());
 
         let mut stale = implementing(true);
         let changed = rusqlite::Connection::open(&stale.db)

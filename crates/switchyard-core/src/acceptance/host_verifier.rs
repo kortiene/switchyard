@@ -257,6 +257,50 @@ fn verify_refuses_a_blocked_execution_before_the_verifier_runs() {
 }
 
 #[test]
+fn verify_with_an_admitted_stop_stays_blocked_and_leaves_the_stop_pending() {
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = host
+        .create_mission_with_verifier(request(&world.repo), Some(RUST_VERIFY_JSON.into()))
+        .unwrap();
+    to_verifying(&mut host, &created.mission_id);
+    let _tree = workspace(
+        &mut host,
+        &created.mission_id,
+        &created.attempt_id,
+        &world._tmp.path().join("ws"),
+    );
+    let before = host.snapshot(&created.mission_id).unwrap();
+    rusqlite::Connection::open(&world.db)
+        .unwrap()
+        .execute(
+            "INSERT INTO linux_execution_effects(
+                operation_id, mission_id, attempt_id, session_id, payload_hash, request_json,
+                started_generation, state, created_at
+             ) VALUES ('op-v1:verify-stop', ?1, ?2, ?3, 'sha256:row', '{}', 1, 'prepared', 1)",
+            rusqlite::params![created.mission_id, created.attempt_id, before.session_id],
+        )
+        .unwrap();
+    admit(&mut host, &created.mission_id, CommandBody::Pause);
+    let error = host.verify_mission(&created.mission_id).unwrap_err();
+    assert_eq!(error.category(), "execution_blocked", "{error}");
+    assert!(evidence(&world.db, &created.mission_id).is_none());
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().content_digest,
+        before.content_digest
+    );
+    let pause = host
+        .snapshot(&created.mission_id)
+        .unwrap()
+        .commands
+        .into_iter()
+        .find(|command| command.kind == "pause")
+        .unwrap();
+    assert_eq!(pause.state, "pending");
+    assert!(pause.receipt_id.is_none());
+}
+
+#[test]
 fn verify_without_a_workspace_is_uncertain() {
     let world = open_world();
     let mut host = Host::open(&world.db).unwrap();
