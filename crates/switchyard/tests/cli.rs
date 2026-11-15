@@ -1542,3 +1542,247 @@ fn drifted_pause_refuses_with_frozen_input_drift_and_exit_2() {
         "{stderr}"
     );
 }
+#[test]
+fn drifted_verify_refuses_with_frozen_input_drift_and_exit_2() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap();
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "199",
+        "--objective",
+        "name the verify drift refusal",
+        "--acceptance",
+        "verify after drift exits 2",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let attempt = created["mission"]["attemptId"].as_str().unwrap();
+    let mut revision = created["mission"]["revision"].as_u64().unwrap().to_string();
+    let (code, _started, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--kind",
+        "start_planning",
+        "--expected-revision",
+        &revision,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let (code, planned, error) = run(&[
+        "mission",
+        "notify",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--json-body",
+        r#"{"kind":"plan_completed","plan":"implement","quiescent":true}"#,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let digest = planned["mission"]["planDigest"].as_str().unwrap();
+    let payload = format!(r#"{{"planDigest":"{digest}"}}"#);
+    revision = planned["mission"]["revision"].as_u64().unwrap().to_string();
+    let (code, _approved, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--kind",
+        "approve_plan",
+        "--expected-revision",
+        &revision,
+        "--payload",
+        &payload,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let (code, verifying, error) = run(&[
+        "mission",
+        "notify",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--json-body",
+        r#"{"kind":"implementation_settled","quiescent":true}"#,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(verifying["mission"]["phase"], "verifying");
+    let changed = rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE attempts SET base_sha = 'deadbeef' WHERE id = ?1",
+            [attempt],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    let (code, stdout, stderr) = run(&["mission", "verify", "--db", db_arg, "--mission", mission]);
+    assert_eq!(code, 2, "{stdout} {stderr}");
+    assert!(stdout.is_null(), "{stdout}");
+    assert_eq!(stderr["ok"], false);
+    assert_eq!(stderr["error"]["category"], "frozen_input_drift");
+    assert!(
+        stderr["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("drifted"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn create_verifier_and_mission_verify_use_the_owned_workspace() {
+    const RUST: &str = concat!(
+        r#"{"allowedPaths":["crates/*/tests/**","docs/**"],"argv":["./scripts/rust-verify.sh"],"#,
+        r#""confinement":"linux-bubblewrap-0.9.0","deniedPaths":["crates/switchyard-core/tests/pi_bridge.rs","#,
+        r#""crates/switchyard/tests/linux_execution.rs","crates/switchyard/tests/cli_confined.rs"],"#,
+        r#""executes":true,"frozen":true,"id":"switchyard.verifier.rust-verify.v1","maxAddedLines":400,"#,
+        r#""outputCapBytes":1048576,"timeoutSeconds":1800}"#
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    let root = tmp.path().join("workspaces");
+    std::fs::create_dir(&root).unwrap();
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap();
+    let (code, _, stderr) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "199",
+        "--objective",
+        "Gate",
+        "--acceptance",
+        "Refuse",
+        "--verifier",
+        r#"{"id":"nope"}"#,
+    ]);
+    assert_eq!(code, 2);
+    assert_eq!(stderr["error"]["category"], "verifier_not_supported");
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "199",
+        "--objective",
+        "Gate the diff",
+        "--acceptance",
+        "Refuse unconfined execution",
+        "--verifier",
+        RUST,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(
+        created["mission"]["verifier"]["id"],
+        "switchyard.verifier.rust-verify.v1"
+    );
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let attempt = created["mission"]["attemptId"].as_str().unwrap();
+    let (code, workspace, error) = run(&[
+        "mission",
+        "workspace",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--attempt",
+        attempt,
+        "--root",
+        root.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let tree = workspace["workspace"]["path"].as_str().unwrap();
+    let mut revision = created["mission"]["revision"].as_u64().unwrap().to_string();
+    let (code, _started, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--kind",
+        "start_planning",
+        "--expected-revision",
+        &revision,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let (code, planned, error) = run(&[
+        "mission",
+        "notify",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--json-body",
+        r#"{"kind":"plan_completed","plan":"implement","quiescent":true}"#,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let digest = planned["mission"]["planDigest"].as_str().unwrap();
+    let payload = format!(r#"{{"planDigest":"{digest}"}}"#);
+    revision = planned["mission"]["revision"].as_u64().unwrap().to_string();
+    let (code, _approved, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--kind",
+        "approve_plan",
+        "--expected-revision",
+        &revision,
+        "--payload",
+        &payload,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let (code, verifying, error) = run(&[
+        "mission",
+        "notify",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--json-body",
+        r#"{"kind":"implementation_settled","quiescent":true}"#,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(verifying["mission"]["phase"], "verifying");
+    let (code, _, stderr) = run(&["mission", "verify", "--db", db_arg, "--mission", mission]);
+    assert_eq!(code, 2, "{stderr}");
+    assert_eq!(
+        stderr["error"]["category"],
+        "verifier_confinement_unavailable"
+    );
+    std::fs::create_dir_all(Path::new(tree).join("scripts")).unwrap();
+    std::fs::write(
+        Path::new(tree).join("scripts/rust-verify.sh"),
+        "#!/bin/sh\n",
+    )
+    .unwrap();
+    let (code, verified, error) = run(&["mission", "verify", "--db", db_arg, "--mission", mission]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(verified["outcome"], "fail");
+    assert_eq!(verified["mission"]["phase"], "verifying");
+}

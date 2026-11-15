@@ -38,6 +38,7 @@ mod policy;
 mod service;
 mod transitions;
 mod verification;
+mod verifier;
 mod workspace;
 
 pub use workspace::WorkspaceView;

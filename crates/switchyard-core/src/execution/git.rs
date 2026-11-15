@@ -57,7 +57,7 @@ pub fn strip_userinfo(url: &str) -> String {
     format!("{}://{}", &url[..scheme_end], &rest[at + 1..])
 }
 
-pub(super) fn git(path: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git(path: &Path, args: &[&str]) -> Result<String> {
     let bytes = git_bytes(path, args)?;
     String::from_utf8(bytes)
         .map_err(|error| Error::git(format!("git output was not utf-8: {error}"), None))

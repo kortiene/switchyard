@@ -1853,6 +1853,10 @@ fn simulated_no_row_error_is_transient(error: &Error) -> bool {
         | Error::SuccessorExists { .. }
         | Error::SourceChangedDuringCreate
         | Error::VerifierNotSupported { .. }
+        | Error::VerificationNotHostRun
+        | Error::VerifierConfinementUnavailable
+        | Error::VerifierGateUnavailable
+        | Error::VerifierIndexFlagsSet
         | Error::AdmissionRejected { .. }
         | Error::GuardFailed { .. }
         | Error::UnknownNotification { .. }

@@ -3,6 +3,7 @@
 mod admission_identity;
 mod build_contract;
 mod fixtures;
+mod host_verifier;
 mod ownership;
 mod pause_cancel;
 mod planning_approval;
