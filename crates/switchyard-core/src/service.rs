@@ -264,6 +264,7 @@ pub struct CreateMission {
     pub issue_number: u64,
     pub issue_title: String,
     pub objective: String,
+    /// Frozen acceptance criteria. Empty or whitespace-only text is refused.
     pub acceptance: String,
     pub actor: String,
     pub max_repairs: u32,
@@ -699,6 +700,9 @@ impl Host {
         request: CreateMission,
         verifier_json: Option<String>,
     ) -> Result<MissionSnapshot> {
+        // Acceptance is part of the frozen mission contract. Refuse an empty
+        // or whitespace-only value before a mission row is written.
+        require_override(&request.acceptance, "acceptance criteria")?;
         let verifier_json = match verifier_json {
             Some(raw) => Some(canonical_verifier(&raw)?),
             None => None,

@@ -46,6 +46,25 @@ fn run(args: &[&str]) -> (i32, Value, Value) {
     (output.status.code().unwrap_or(1), stdout, stderr)
 }
 
+fn count_rows(db: &Path, sql: &str) -> i64 {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row(sql, [], |row| row.get(0))
+        .unwrap()
+}
+
+fn assert_ledger_has_no_mission(db: &Path) {
+    assert!(db.is_file(), "{db:?} should exist after the host opens");
+    for sql in [
+        "SELECT COUNT(*) FROM missions",
+        "SELECT COUNT(*) FROM tasks",
+        "SELECT COUNT(*) FROM attempts",
+        "SELECT COUNT(*) FROM decisions",
+    ] {
+        assert_eq!(count_rows(db, sql), 0, "{sql}");
+    }
+}
+
 fn head(repo: &Path) -> String {
     let output = Command::new("git")
         .arg("-C")
@@ -2659,4 +2678,189 @@ fn export_out_prints_a_receipt_and_stdout_without_out_is_the_document() {
     assert_export_receipt(&receipt, &out, &file_bytes);
     let filed: Value = serde_json::from_slice(&file_bytes).unwrap();
     assert_eq!(filed, document);
+}
+
+#[test]
+fn create_refuses_missing_empty_and_whitespace_acceptance_without_a_mission() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+    let repo_arg = repo.to_str().unwrap().to_string();
+    let objective = "keep acceptance required";
+
+    let missing_db = tmp.path().join("missing.sqlite");
+    let missing = Command::new(bin())
+        .args([
+            "mission",
+            "create",
+            "--db",
+            missing_db.to_str().unwrap(),
+            "--repo",
+            &repo_arg,
+            "--issue",
+            "201",
+            "--objective",
+            objective,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(2), "{missing:?}");
+    assert!(missing.stdout.is_empty(), "{missing:?}");
+    let stderr = String::from_utf8(missing.stderr).unwrap();
+    assert!(
+        stderr.contains("the following required arguments were not provided"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--acceptance"), "{stderr}");
+    assert!(!missing_db.exists(), "{stderr}");
+
+    let refuse = |name: &str, acceptance: &str| {
+        let db = tmp.path().join(name);
+        let (code, stdout, error) = run(&[
+            "mission",
+            "create",
+            "--db",
+            db.to_str().unwrap(),
+            "--repo",
+            &repo_arg,
+            "--issue",
+            "201",
+            "--objective",
+            objective,
+            "--acceptance",
+            acceptance,
+        ]);
+        assert_eq!(code, 2, "{stdout} {error}");
+        assert!(stdout.is_null(), "{stdout}");
+        assert_eq!(error["ok"], false);
+        assert_eq!(error["error"]["category"], "guard_failed");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("acceptance criteria is required"),
+            "{error}"
+        );
+        assert_ledger_has_no_mission(&db);
+    };
+    refuse("empty.sqlite", "");
+    refuse("whitespace.sqlite", " \t\n ");
+}
+
+#[test]
+fn create_and_successor_help_state_the_acceptance_rules() {
+    let create = Command::new(bin())
+        .args(["mission", "create", "--help"])
+        .output()
+        .unwrap();
+    assert!(create.status.success(), "{create:?}");
+    let help = String::from_utf8(create.stdout).unwrap();
+    assert!(
+        help.contains("required and must not be empty or whitespace-only"),
+        "{help}"
+    );
+    assert!(help.contains("There is no default"), "{help}");
+
+    let successor = Command::new(bin())
+        .args(["mission", "successor", "--help"])
+        .output()
+        .unwrap();
+    assert!(successor.status.success(), "{successor:?}");
+    let help = String::from_utf8(successor.stdout).unwrap();
+    assert!(
+        help.contains("Omitting this flag copies the source mission's acceptance"),
+        "{help}"
+    );
+}
+
+#[test]
+fn successor_omitting_acceptance_copies_the_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap();
+    let acceptance = "source acceptance copied forward";
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "201",
+        "--objective",
+        "source objective",
+        "--acceptance",
+        acceptance,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(created["mission"]["phase"], "draft");
+    assert_eq!(created["mission"]["runtimeAdapter"], "fake");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let (code, cancelled, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--kind",
+        "cancel",
+        "--expected-revision",
+        "1",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(cancelled["mission"]["phase"], "cancelling");
+    let revision = cancelled["mission"]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let (code, confirmed, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--kind",
+        "confirm_cancelled",
+        "--expected-revision",
+        &revision,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(confirmed["mission"]["phase"], "cancelled");
+
+    let (code, successor, error) =
+        run(&["mission", "successor", "--db", db_arg, "--mission", mission]);
+    assert_eq!(code, 0, "{error}");
+    let copied = &successor["mission"];
+    assert_eq!(copied["phase"], "draft");
+    assert_eq!(copied["objective"], "source objective");
+    assert_eq!(copied["runtimeAdapter"], "fake");
+    assert_eq!(copied["successorOfMissionId"], mission);
+    let successor_id = copied["missionId"].as_str().unwrap();
+    assert_ne!(successor_id, mission);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let acceptance_of = |mission_id: &str| -> String {
+        conn.query_row(
+            "SELECT acceptance_criteria FROM tasks WHERE mission_id = ?1 AND root = 1",
+            [mission_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(acceptance_of(mission), acceptance);
+    assert_eq!(acceptance_of(successor_id), acceptance);
+    let rationale: String = conn
+        .query_row(
+            "SELECT rationale FROM decisions WHERE mission_id = ?1 AND action = 'create'",
+            [successor_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let payload: Value = serde_json::from_str(&rationale).unwrap();
+    assert_eq!(payload["overridden"], serde_json::json!([]));
+    assert_eq!(count_rows(&db, "SELECT COUNT(*) FROM missions"), 2);
 }
