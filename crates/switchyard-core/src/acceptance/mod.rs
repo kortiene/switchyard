@@ -4,6 +4,8 @@ mod admission_identity;
 mod build_contract;
 mod fixtures;
 mod host_verifier;
+#[cfg(all(feature = "linux-execution", target_os = "linux"))]
+mod host_verifier_confined;
 mod ownership;
 mod pause_cancel;
 mod planning_approval;

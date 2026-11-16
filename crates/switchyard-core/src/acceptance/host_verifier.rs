@@ -4,7 +4,7 @@ use super::fixtures::{
 };
 use crate::execution::RuntimeNotification;
 use crate::persistence::RUST_VERIFY_JSON;
-use crate::{CommandBody, CreateMission, Host, Phase, SuccessorChanges};
+use crate::{AdmitRequest, CommandBody, CreateMission, Host, Phase, SuccessorChanges};
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -283,7 +283,8 @@ fn verify_with_an_admitted_stop_stays_blocked_and_leaves_the_stop_pending() {
         .unwrap();
     admit(&mut host, &created.mission_id, CommandBody::Pause);
     let error = host.verify_mission(&created.mission_id).unwrap_err();
-    assert_eq!(error.category(), "execution_blocked", "{error}");
+    // Phase is pausing, so the phase gate wins over the execution block.
+    assert_eq!(error.category(), "illegal_transition", "{error}");
     assert!(evidence(&world.db, &created.mission_id).is_none());
     assert_eq!(
         host.snapshot(&created.mission_id).unwrap().content_digest,
@@ -356,6 +357,420 @@ fn successor_and_default_verifier_follow_the_allowlist() {
         next.verifier_json
             .contains("switchyard.verifier.rust-verify.v1")
     );
+}
+
+#[test]
+fn require_pass_refuses_a_runtime_complete_pass_after_a_host_pass_row() {
+    let world = open_world();
+    seed(&world.repo);
+    let mut host = Host::open(&world.db).unwrap();
+    let created = host
+        .create_mission_with_verifier(request(&world.repo), Some(RUST_VERIFY_JSON.into()))
+        .unwrap();
+    to_verifying(&mut host, &created.mission_id);
+    let _tree = workspace(
+        &mut host,
+        &created.mission_id,
+        &created.attempt_id,
+        &world._tmp.path().join("ws"),
+    );
+    let snap = host.snapshot(&created.mission_id).unwrap();
+    insert_pass(
+        &world.db,
+        &created.mission_id,
+        &created.attempt_id,
+        &snap.content_digest,
+        "runtime-observation",
+    );
+    let refused = host
+        .admit(AdmitRequest {
+            command_id: None,
+            mission_id: created.mission_id.clone(),
+            attempt_id: Some(created.attempt_id.clone()),
+            expected_revision: snap.revision,
+            actor: "runtime".into(),
+            origin: crate::CommandOrigin::RuntimeObservation,
+            body: CommandBody::CompletePass,
+        })
+        .unwrap_err();
+    assert_eq!(refused.category(), "guard_failed", "{refused}");
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().phase,
+        Phase::Verifying
+    );
+
+    rusqlite::Connection::open(&world.db)
+        .unwrap()
+        .execute(
+            "UPDATE evidence SET provenance_json = '{\"collector\":\"switchyard-host-verifier\"}'
+             WHERE mission_id = ?1",
+            [&created.mission_id],
+        )
+        .unwrap();
+    let snap = host.snapshot(&created.mission_id).unwrap();
+    let still = host
+        .admit(AdmitRequest {
+            command_id: None,
+            mission_id: created.mission_id.clone(),
+            attempt_id: Some(created.attempt_id.clone()),
+            expected_revision: snap.revision,
+            actor: "runtime".into(),
+            origin: crate::CommandOrigin::RuntimeObservation,
+            body: CommandBody::CompletePass,
+        })
+        .unwrap_err();
+    assert_eq!(still.category(), "verification_not_host_run", "{still}");
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().phase,
+        Phase::Verifying
+    );
+}
+
+#[test]
+fn plan_digest_mismatch_is_refused_before_the_sandbox_starts() {
+    let world = open_world();
+    seed(&world.repo);
+    let mut host = Host::open(&world.db).unwrap();
+    let created = host
+        .create_mission_with_verifier(request(&world.repo), Some(RUST_VERIFY_JSON.into()))
+        .unwrap();
+    to_verifying(&mut host, &created.mission_id);
+    let _tree = workspace(
+        &mut host,
+        &created.mission_id,
+        &created.attempt_id,
+        &world._tmp.path().join("ws"),
+    );
+    let changed = rusqlite::Connection::open(&world.db)
+        .unwrap()
+        .execute(
+            "UPDATE attempts SET plan_digest = 'sha256:not-the-plan' WHERE id = ?1",
+            [&created.attempt_id],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    host.synthetic_verifier = Some(crate::service::SyntheticVerifier::Pass);
+    let first = host.verify_mission(&created.mission_id).unwrap_err();
+    assert_eq!(first.category(), "guard_failed", "{first}");
+    assert!(first.to_string().contains("plan digest"), "{first}");
+    let attention = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(attention.phase, Phase::NeedsAttention);
+    assert_eq!(
+        attention.attention_reason.as_deref(),
+        Some("plan_digest_mismatch")
+    );
+    assert!(evidence(&world.db, &created.mission_id).is_none());
+    assert!(host.synthetic_verifier.is_some());
+    let again = host.verify_mission(&created.mission_id).unwrap_err();
+    assert_eq!(again.category(), "guard_failed", "{again}");
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().revision,
+        attention.revision
+    );
+}
+
+#[test]
+fn digest_mismatch_timeout_and_truncated_output_enter_needs_attention() {
+    let world = open_world();
+    seed(&world.repo);
+    let mut host = Host::open(&world.db).unwrap();
+    let created = host
+        .create_mission_with_verifier(request(&world.repo), Some(RUST_VERIFY_JSON.into()))
+        .unwrap();
+    to_verifying(&mut host, &created.mission_id);
+    let tree = workspace(
+        &mut host,
+        &created.mission_id,
+        &created.attempt_id,
+        &world._tmp.path().join("ws"),
+    );
+    host.verifier_between_digests = Some(write_tamper);
+    let (snap, outcome) = host.verify_mission(&created.mission_id).unwrap();
+    assert_eq!(outcome, "incomplete");
+    assert_eq!(snap.phase, Phase::NeedsAttention);
+    assert_eq!(
+        snap.attention_reason.as_deref(),
+        Some("verification_incomplete")
+    );
+    let (document, _, completeness) = evidence(&world.db, &created.mission_id).unwrap();
+    assert_eq!(completeness, "incomplete");
+    assert_ne!(
+        document["contentDigestBefore"], document["contentDigestAfter"],
+        "{document}"
+    );
+    let _ = tree;
+
+    for (kind, label) in [
+        (crate::service::SyntheticVerifier::Timeout, "timeout"),
+        (crate::service::SyntheticVerifier::Truncated, "truncated"),
+    ] {
+        let world = open_world();
+        seed(&world.repo);
+        let mut host = Host::open(&world.db).unwrap();
+        let created = host
+            .create_mission_with_verifier(request(&world.repo), Some(RUST_VERIFY_JSON.into()))
+            .unwrap();
+        to_verifying(&mut host, &created.mission_id);
+        let _tree = workspace(
+            &mut host,
+            &created.mission_id,
+            &created.attempt_id,
+            &world._tmp.path().join("ws"),
+        );
+        host.synthetic_verifier = Some(kind);
+        let (snap, outcome) = host.verify_mission(&created.mission_id).unwrap();
+        assert_eq!(
+            (label, outcome.as_str(), snap.phase),
+            (label, "incomplete", Phase::NeedsAttention),
+            "{label}"
+        );
+        let (document, provenance, completeness) =
+            evidence(&world.db, &created.mission_id).unwrap();
+        assert_eq!(completeness, "incomplete", "{label} {document}");
+        assert_eq!(document["outcome"], "incomplete", "{label}");
+        assert_eq!(
+            provenance["collector"], "switchyard-host-verifier",
+            "{label}"
+        );
+        assert_eq!(snap.repair_count, 0, "{label}");
+    }
+}
+
+#[test]
+fn a_missing_result_signal_empty_hash_or_oom_is_incomplete_and_uses_no_repair() {
+    for kind in [
+        crate::service::SyntheticVerifier::MissingResult,
+        crate::service::SyntheticVerifier::Signal,
+        crate::service::SyntheticVerifier::EmptyHash,
+        crate::service::SyntheticVerifier::Oom,
+    ] {
+        let world = open_world();
+        seed(&world.repo);
+        let mut host = Host::open(&world.db).unwrap();
+        let created = host
+            .create_mission_with_verifier(request(&world.repo), Some(RUST_VERIFY_JSON.into()))
+            .unwrap();
+        to_verifying(&mut host, &created.mission_id);
+        let _tree = workspace(
+            &mut host,
+            &created.mission_id,
+            &created.attempt_id,
+            &world._tmp.path().join("ws"),
+        );
+        host.synthetic_verifier = Some(kind);
+        let (snap, outcome) = host.verify_mission(&created.mission_id).unwrap();
+        assert_eq!(outcome, "incomplete", "{kind:?} {snap:?}");
+        assert_eq!(snap.phase, Phase::NeedsAttention);
+        assert_eq!(snap.repair_count, 0);
+    }
+}
+
+#[test]
+fn a_failing_test_that_prints_a_resolution_marker_still_records_fail() {
+    let world = open_world();
+    seed(&world.repo);
+    let mut host = Host::open(&world.db).unwrap();
+    let created = host
+        .create_mission_with_verifier(request(&world.repo), Some(RUST_VERIFY_JSON.into()))
+        .unwrap();
+    to_verifying(&mut host, &created.mission_id);
+    let _tree = workspace(
+        &mut host,
+        &created.mission_id,
+        &created.attempt_id,
+        &world._tmp.path().join("ws"),
+    );
+    host.synthetic_verifier = Some(crate::service::SyntheticVerifier::ResolutionMarker);
+    let (snap, outcome) = host.verify_mission(&created.mission_id).unwrap();
+    assert_eq!(outcome, "fail");
+    assert_eq!(snap.phase, Phase::Verifying);
+    assert_eq!(snap.repair_count, 0);
+}
+
+#[test]
+fn a_corrupted_verifier_json_refuses_complete_pass() {
+    let world = open_world();
+    seed(&world.repo);
+    let mut host = Host::open(&world.db).unwrap();
+    let created = host
+        .create_mission_with_verifier(request(&world.repo), Some(RUST_VERIFY_JSON.into()))
+        .unwrap();
+    to_verifying(&mut host, &created.mission_id);
+    let _tree = workspace(
+        &mut host,
+        &created.mission_id,
+        &created.attempt_id,
+        &world._tmp.path().join("ws"),
+    );
+    rusqlite::Connection::open(&world.db)
+        .unwrap()
+        .execute(
+            "UPDATE attempts SET verifier_json = '{' WHERE id = ?1",
+            [&created.attempt_id],
+        )
+        .unwrap();
+    let snap = host.snapshot(&created.mission_id).unwrap();
+    insert_pass(
+        &world.db,
+        &created.mission_id,
+        &created.attempt_id,
+        &snap.content_digest,
+        "runtime-observation",
+    );
+    let refused = host
+        .admit(AdmitRequest {
+            command_id: None,
+            mission_id: created.mission_id.clone(),
+            attempt_id: Some(created.attempt_id.clone()),
+            expected_revision: snap.revision,
+            actor: "runtime".into(),
+            origin: crate::CommandOrigin::RuntimeObservation,
+            body: CommandBody::CompletePass,
+        })
+        .unwrap_err();
+    assert_eq!(refused.category(), "guard_failed", "{refused}");
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().phase,
+        Phase::Verifying
+    );
+}
+
+#[test]
+fn a_file_over_one_mebibyte_without_a_newline_is_max_bytes() {
+    let world = open_world();
+    seed(&world.repo);
+    let mut host = Host::open(&world.db).unwrap();
+    let created = host
+        .create_mission_with_verifier(request(&world.repo), Some(RUST_VERIFY_JSON.into()))
+        .unwrap();
+    to_verifying(&mut host, &created.mission_id);
+    let tree = workspace(
+        &mut host,
+        &created.mission_id,
+        &created.attempt_id,
+        &world._tmp.path().join("ws"),
+    );
+    let mut body = vec![b'a'; 1024 * 1024 + 1];
+    assert!(!body.contains(&b'\n'));
+    let path = tree.join("docs/wide.bin");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, &body).unwrap();
+    body.clear();
+    expect_fail(
+        &mut host,
+        &world.db,
+        &created.mission_id,
+        "maxBytes:docs/wide.bin",
+    );
+}
+
+#[test]
+fn more_than_4096_changed_paths_is_a_complete_fail() {
+    let world = open_world();
+    seed(&world.repo);
+    let mut host = Host::open(&world.db).unwrap();
+    let created = host
+        .create_mission_with_verifier(request(&world.repo), Some(RUST_VERIFY_JSON.into()))
+        .unwrap();
+    to_verifying(&mut host, &created.mission_id);
+    let tree = workspace(
+        &mut host,
+        &created.mission_id,
+        &created.attempt_id,
+        &world._tmp.path().join("ws"),
+    );
+    let count = 4097;
+    for index in 0..count {
+        write(&tree, &format!("docs/many/{index}.md"), "");
+    }
+    let (snap, outcome) = host.verify_mission(&created.mission_id).unwrap();
+    assert_eq!((outcome.as_str(), snap.phase), ("fail", Phase::Verifying));
+    let (document, _, completeness) = evidence(&world.db, &created.mission_id).unwrap();
+    assert_eq!(completeness, "complete");
+    let violations = document["violations"].as_array().unwrap();
+    assert!(
+        violations.iter().any(|item| item == "maxChangedPaths:4097"),
+        "{document}"
+    );
+    assert_eq!(document["changedPaths"].as_array().unwrap().len(), 4096);
+    assert_eq!(document["changedPathCount"], json!(4097));
+}
+
+#[test]
+fn an_unknown_execution_kind_stays_blocked_and_is_never_skipped() {
+    let world = open_world();
+    seed(&world.repo);
+    let mut host = Host::open(&world.db).unwrap();
+    let created = host
+        .create_mission_with_verifier(request(&world.repo), Some(RUST_VERIFY_JSON.into()))
+        .unwrap();
+    to_verifying(&mut host, &created.mission_id);
+    let _tree = workspace(
+        &mut host,
+        &created.mission_id,
+        &created.attempt_id,
+        &world._tmp.path().join("ws"),
+    );
+    let snap = host.snapshot(&created.mission_id).unwrap();
+    rusqlite::Connection::open(&world.db)
+        .unwrap()
+        .execute(
+            "INSERT INTO linux_execution_effects(
+                operation_id, mission_id, attempt_id, session_id, payload_hash, request_json,
+                started_generation, state, created_at
+             ) VALUES ('op-v1:0123456789abcdef0123456789abcdefaaaaaaaa', ?1, ?2, ?3, 'sha256:row', '{\"kind\":\"nope\"}', 1, 'prepared', 1)",
+            rusqlite::params![created.mission_id, created.attempt_id, snap.session_id],
+        )
+        .unwrap();
+    let error = host.verify_mission(&created.mission_id).unwrap_err();
+    assert_eq!(error.category(), "execution_blocked", "{error}");
+    let state = effect_state(&world.db, "op-v1:0123456789abcdef0123456789abcdefaaaaaaaa");
+    assert_eq!(state, "uncertain", "{state}");
+    let recovered = host.recover(&created.mission_id).unwrap_err();
+    assert_eq!(recovered.category(), "execution_blocked", "{recovered}");
+    let state = effect_state(&world.db, "op-v1:0123456789abcdef0123456789abcdefaaaaaaaa");
+    assert_eq!(state, "uncertain");
+    assert_ne!(state, "completed");
+    assert_ne!(state, "not_applied");
+}
+
+fn write_tamper(tree: &Path) {
+    write(tree, "docs/tamper.md", "changed\n");
+}
+
+fn insert_pass(db: &Path, mission: &str, attempt: &str, digest: &str, collector: &str) {
+    let provenance = format!("{{\"collector\":\"{collector}\"}}");
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .execute(
+            "INSERT INTO evidence(
+                id, mission_id, attempt_id, content_hash, completeness, provenance_json,
+                body_json, invalidated, created_at
+             ) VALUES ('e-pass', ?1, ?2, ?3, 'complete', ?4, '{\"body\":\"\"}', 0, 1)",
+            rusqlite::params![mission, attempt, digest, provenance],
+        )
+        .unwrap();
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .execute(
+            "INSERT INTO verifications(
+                id, mission_id, attempt_id, seq, evidence_id, outcome, requirements_json,
+                content_digest, invalidated, created_at
+             ) VALUES ('v-pass', ?1, ?2, 1, 'e-pass', 'pass', '[]', ?3, 0, 1)",
+            rusqlite::params![mission, attempt, digest],
+        )
+        .unwrap();
+}
+
+fn effect_state(db: &Path, operation: &str) -> String {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT state FROM linux_execution_effects WHERE operation_id = ?1",
+            [operation],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 fn seed(repo: &Path) {

@@ -32,8 +32,15 @@ impl Gate {
 pub(crate) struct Report {
     pub violations: Vec<String>,
     pub added_lines: u64,
+    /// First 4096 changed paths, in path order.
     pub paths: Vec<String>,
+    /// Every changed path, including those past the stored list.
+    pub path_count: usize,
 }
+
+const MAX_CHANGED_PATHS: usize = 4096;
+/// `line_count` stops once a file passes this many bytes.
+const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Changed paths against `base`: committed, unstaged, untracked, and ignored.
 ///
@@ -75,6 +82,7 @@ pub(crate) fn assess(repo: &Path, base: &str, gate: &Gate) -> Result<Report> {
                     .parse()
                     .map_err(|_| Error::guard("numstat was not a line count"))?,
                 special: false,
+                max_bytes: false,
             }
         };
         remember(&mut files, gate, path, entry, &mut tallied);
@@ -97,6 +105,10 @@ pub(crate) fn assess(repo: &Path, base: &str, gate: &Gate) -> Result<Report> {
     let mut violations = Vec::new();
     let mut added_lines = 0u64;
     for (path, entry) in &files {
+        if entry.max_bytes {
+            violations.push(format!("maxBytes:{path}"));
+            continue;
+        }
         if entry.special {
             violations.push(format!("special:{path}"));
             continue;
@@ -112,16 +124,22 @@ pub(crate) fn assess(repo: &Path, base: &str, gate: &Gate) -> Result<Report> {
     if added_lines > gate.max_added_lines {
         violations.push(format!("maxAddedLines:{added_lines}"));
     }
+    let path_count = files.len();
+    if path_count > MAX_CHANGED_PATHS {
+        violations.push(format!("maxChangedPaths:{path_count}"));
+    }
     Ok(Report {
-        paths: files.into_keys().collect(),
+        paths: files.into_keys().take(MAX_CHANGED_PATHS).collect(),
         violations,
         added_lines,
+        path_count,
     })
 }
 
 struct Entry {
     lines: u64,
     special: bool,
+    max_bytes: bool,
 }
 
 fn path_allowed(gate: &Gate, path: &str) -> bool {
@@ -136,7 +154,7 @@ fn remember(
     entry: Entry,
     tallied: &mut u64,
 ) {
-    if !entry.special && path_allowed(gate, path) {
+    if !entry.special && !entry.max_bytes && path_allowed(gate, path) {
         *tallied = tallied.saturating_add(entry.lines);
     }
     files.insert(path.to_string(), entry);
@@ -149,12 +167,14 @@ fn disk_entry(repo: &Path, gate: &Gate, path: &str, tallied: &mut u64) -> Result
         return Ok(Entry {
             lines: 0,
             special: false,
+            max_bytes: false,
         });
     }
     if *tallied > gate.max_added_lines {
         return Ok(Entry {
             lines: 0,
             special: false,
+            max_bytes: false,
         });
     }
     untracked_entry(repo, path, gate.max_added_lines.saturating_sub(*tallied))
@@ -169,6 +189,7 @@ fn untracked_entry(repo: &Path, path: &str, room: u64) -> Result<Entry> {
         return Ok(Entry {
             lines: 0,
             special: true,
+            max_bytes: false,
         });
     }
     let full = repo.join(path);
@@ -178,6 +199,7 @@ fn untracked_entry(repo: &Path, path: &str, room: u64) -> Result<Entry> {
             return Ok(Entry {
                 lines: 0,
                 special: false,
+                max_bytes: false,
             });
         }
         Err(error) => return Err(Error::storage(error)),
@@ -186,6 +208,7 @@ fn untracked_entry(repo: &Path, path: &str, room: u64) -> Result<Entry> {
         return Ok(Entry {
             lines: 0,
             special: true,
+            max_bytes: false,
         });
     }
     // Already at the cap: do not read. A non-empty file still exceeds it.
@@ -193,11 +216,33 @@ fn untracked_entry(repo: &Path, path: &str, room: u64) -> Result<Entry> {
         return Ok(Entry {
             lines: u64::from(meta.len() > 0),
             special: false,
+            max_bytes: false,
         });
     }
-    Ok(Entry {
-        lines: line_count(&full, room)?.unwrap_or(0),
-        special: false,
+    // A file that is already larger than the byte cap is `maxBytes` without a read.
+    if meta.len() > MAX_FILE_BYTES {
+        return Ok(Entry {
+            lines: 0,
+            special: false,
+            max_bytes: true,
+        });
+    }
+    Ok(match line_count(&full, room)? {
+        LineRead::Lines(lines) => Entry {
+            lines,
+            special: false,
+            max_bytes: false,
+        },
+        LineRead::Special => Entry {
+            lines: 0,
+            special: true,
+            max_bytes: false,
+        },
+        LineRead::MaxBytes => Entry {
+            lines: 0,
+            special: false,
+            max_bytes: true,
+        },
     })
 }
 
@@ -247,22 +292,33 @@ fn parent_is_symlink(repo: &Path, path: &str) -> Result<bool> {
     Ok(false)
 }
 
-/// `None` is a symlink or special file. Regular files stop once `room` newlines
-/// are counted, so a huge allowed file is not read in full.
-fn line_count(path: &Path, room: u64) -> Result<Option<u64>> {
+enum LineRead {
+    Lines(u64),
+    /// Symlink or other non-regular file.
+    Special,
+    /// The file passed the 1 MiB byte cap.
+    MaxBytes,
+}
+
+/// Regular files stop once `room` newlines are counted, or once the byte cap
+/// is passed, so a huge allowed file is not read in full.
+fn line_count(path: &Path, room: u64) -> Result<LineRead> {
     let mut file = match crate::regular_file::open_nofollow(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Some(0)),
-        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LineRead::Lines(0));
+        }
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(LineRead::Special),
         Err(error) => return Err(Error::storage(error)),
     };
     // fstat the open handle. A FIFO swapped in after the earlier lstat must not be read.
     let meta = file.metadata().map_err(Error::storage)?;
     if !meta.file_type().is_file() {
-        return Ok(None);
+        return Ok(LineRead::Special);
     }
     let mut buf = [0u8; 8192];
     let mut lines = 0u64;
+    let mut bytes = 0u64;
     let mut last_newline = true;
     let mut saw_byte = false;
     loop {
@@ -270,13 +326,17 @@ fn line_count(path: &Path, room: u64) -> Result<Option<u64>> {
         if read == 0 {
             break;
         }
+        bytes = bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        if bytes > MAX_FILE_BYTES {
+            return Ok(LineRead::MaxBytes);
+        }
         saw_byte = true;
         for byte in &buf[..read] {
             if *byte == b'\n' {
                 lines += 1;
                 last_newline = true;
                 if lines > room {
-                    return Ok(Some(lines));
+                    return Ok(LineRead::Lines(lines));
                 }
             } else {
                 last_newline = false;
@@ -286,7 +346,7 @@ fn line_count(path: &Path, room: u64) -> Result<Option<u64>> {
     if saw_byte && !last_newline {
         lines += 1;
     }
-    Ok(Some(lines))
+    Ok(LineRead::Lines(lines))
 }
 
 fn glob_match(pattern: &str, path: &str) -> bool {
@@ -308,4 +368,23 @@ fn glob_match(pattern: &str, path: &str) -> bool {
     let pattern: Vec<&str> = pattern.split('/').filter(|part| !part.is_empty()).collect();
     let path: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
     rec(&pattern, &path)
+}
+
+#[cfg(test)]
+mod line_count_tests {
+    use super::{LineRead, MAX_FILE_BYTES, line_count};
+
+    #[test]
+    fn line_count_stops_when_the_stream_passes_one_mebibyte() {
+        let dir =
+            std::env::temp_dir().join(format!("switchyard-line-count-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wide.rs");
+        let mut body = vec![b'x'; usize::try_from(MAX_FILE_BYTES).unwrap() + 8];
+        body.push(b'\n');
+        std::fs::write(&path, body).unwrap();
+        assert!(matches!(line_count(&path, 10).unwrap(), LineRead::MaxBytes));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

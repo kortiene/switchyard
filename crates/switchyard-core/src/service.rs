@@ -44,7 +44,169 @@ mod pi_linux_write;
 mod workspace;
 
 pub use export::{ExportReceipt, write_export_exclusive};
+
+/// What a confined test plants over `result.json` after the sandbox exits.
+#[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+#[derive(Clone, Copy)]
+pub(crate) enum VerifierResultPlant {
+    Symlink,
+    #[allow(dead_code)]
+    Fifo,
+}
 pub use operator_write::OperatorWrite;
+
+/// Test-only stand-in for a confined verifier result. It does not execute anything.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
+pub(crate) enum SyntheticVerifier {
+    Timeout,
+    Truncated,
+    FailExit,
+    Pass,
+    MissingResult,
+    Signal,
+    EmptyHash,
+    Oom,
+    ResolutionMarker,
+}
+
+enum VerifierDecision {
+    Pass,
+    Fail,
+    Incomplete,
+}
+
+struct RecordedRun {
+    exit_code: Option<i32>,
+    duration_ms: u64,
+    stdout_tail: String,
+    stderr_tail: String,
+    stdout_sha256: String,
+    stderr_sha256: String,
+    toolchain_identity: Option<String>,
+    etc_binds: Option<Vec<String>>,
+    linker_missing: Option<String>,
+    timed_out: bool,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+    signaled: bool,
+    oom_killed: bool,
+    limit_killed: bool,
+    result_unreadable: bool,
+    script_status_missing: bool,
+    cpu_backstop_seconds: u64,
+}
+
+fn hash_ok(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64 && hex.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+/// A complete FAIL is only the script's own non-zero exit with complete output,
+/// both hashes, and a stable digest. Everything that prevents a verdict is
+/// incomplete. A segfault inside `cargo test` is still a FAIL: cargo exits 101.
+fn classify_verifier(run: &RecordedRun, before: &str, after: &str) -> VerifierDecision {
+    let verdict = before == after
+        && !run.timed_out
+        && !run.stdout_truncated
+        && !run.stderr_truncated
+        && !run.signaled
+        && !run.oom_killed
+        && !run.limit_killed
+        && !run.result_unreadable
+        && !run.script_status_missing
+        && hash_ok(&run.stdout_sha256)
+        && hash_ok(&run.stderr_sha256)
+        && run.exit_code.is_some();
+    if !verdict {
+        return VerifierDecision::Incomplete;
+    }
+    if run.exit_code == Some(0) {
+        VerifierDecision::Pass
+    } else {
+        VerifierDecision::Fail
+    }
+}
+
+fn hosted_run(run: &linux_execution::VerifierRun) -> RecordedRun {
+    RecordedRun {
+        exit_code: run.exit_code,
+        duration_ms: run.duration_ms,
+        stdout_tail: run.stdout.clone(),
+        stderr_tail: run.stderr.clone(),
+        stdout_sha256: run.stdout_sha256.clone(),
+        stderr_sha256: run.stderr_sha256.clone(),
+        toolchain_identity: run.toolchain_identity.clone(),
+        etc_binds: Some(run.etc_binds.clone()),
+        linker_missing: run.linker_missing.clone(),
+        timed_out: run.timed_out,
+        stdout_truncated: run.stdout_truncated,
+        stderr_truncated: run.stderr_truncated,
+        signaled: run.signaled,
+        oom_killed: run.oom_killed,
+        limit_killed: run.limit_killed,
+        result_unreadable: run.result_unreadable,
+        script_status_missing: run.script_status_missing,
+        cpu_backstop_seconds: run.cpu_backstop_seconds,
+    }
+}
+
+#[cfg(test)]
+fn synthetic_run(kind: SyntheticVerifier) -> RecordedRun {
+    let hash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let mut run = RecordedRun {
+        exit_code: Some(0),
+        duration_ms: 1,
+        stdout_tail: String::new(),
+        stderr_tail: String::new(),
+        stdout_sha256: hash.into(),
+        stderr_sha256: hash.into(),
+        toolchain_identity: Some("sha256:synthetic-toolchain".into()),
+        etc_binds: None,
+        linker_missing: None,
+        timed_out: false,
+        stdout_truncated: false,
+        stderr_truncated: false,
+        signaled: false,
+        oom_killed: false,
+        limit_killed: false,
+        result_unreadable: false,
+        script_status_missing: false,
+        cpu_backstop_seconds: 0,
+    };
+    match kind {
+        SyntheticVerifier::Timeout => {
+            run.timed_out = true;
+            run.exit_code = None;
+        }
+        SyntheticVerifier::Truncated => run.stdout_truncated = true,
+        SyntheticVerifier::FailExit => run.exit_code = Some(101),
+        SyntheticVerifier::Pass => {}
+        SyntheticVerifier::MissingResult => {
+            run.result_unreadable = true;
+            run.exit_code = None;
+            run.stdout_sha256.clear();
+            run.stderr_sha256.clear();
+        }
+        SyntheticVerifier::Signal => {
+            run.signaled = true;
+            run.exit_code = None;
+        }
+        SyntheticVerifier::EmptyHash => run.stdout_sha256.clear(),
+        SyntheticVerifier::Oom => {
+            run.oom_killed = true;
+            run.exit_code = Some(137);
+        }
+        SyntheticVerifier::ResolutionMarker => {
+            run.exit_code = Some(101);
+            run.stderr_tail = "failed to download\n".into();
+        }
+    }
+    run
+}
 
 /// Open the host, take the single-host lock, and reuse the active attempt.
 ///
@@ -62,6 +224,37 @@ pub struct Host {
     /// post-write check returns `source_changed_during_create`.
     #[cfg(test)]
     successor_source_tamper: bool,
+    /// Test seam: mutate the worktree between the two content digests.
+    #[cfg(test)]
+    pub(crate) verifier_between_digests: Option<fn(&Path)>,
+    /// Test seam: a clean gate records this outcome instead of refusing confinement.
+    /// Release builds do not include it, and it does not run a command.
+    #[cfg(test)]
+    pub(crate) synthetic_verifier: Option<SyntheticVerifier>,
+    /// Test-only shorter verifier deadline, in milliseconds.
+    #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+    pub(crate) verifier_deadline_ms: Option<i64>,
+    /// Test-only rustup directory. A missing toolchain stays unavailable.
+    #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+    pub(crate) verifier_rustup_home: Option<PathBuf>,
+    /// Test-only cargo target directory outside the worktree.
+    #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+    pub(crate) verifier_target_dir: Option<PathBuf>,
+    /// Test-only: do not bind `/etc/alternatives`, so `cc` cannot resolve.
+    #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+    pub(crate) verifier_omit_linker: bool,
+    /// Test-only: fail after the cgroup leaf is created and remove it.
+    #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+    pub(crate) fail_prepare_verifier: bool,
+    /// Test-only: replace `result.json` with a symlink or FIFO before the host reads it.
+    #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+    pub(crate) verifier_result_plant: Option<VerifierResultPlant>,
+    /// Test-only CPU rlimit in seconds, independent of the wall-clock deadline.
+    #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+    pub(crate) verifier_cpu_seconds: Option<u64>,
+    /// Test-only: the embedded probe source does not compile.
+    #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+    pub(crate) verifier_break_probe: bool,
     #[cfg(all(feature = "linux-execution", target_os = "linux"))]
     linux: Option<linux_execution::LinuxSession>,
 }
@@ -431,6 +624,26 @@ impl Host {
             execution_evidence: Default::default(),
             #[cfg(test)]
             successor_source_tamper: false,
+            #[cfg(test)]
+            verifier_between_digests: None,
+            #[cfg(test)]
+            synthetic_verifier: None,
+            #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+            verifier_deadline_ms: None,
+            #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+            verifier_rustup_home: None,
+            #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+            verifier_target_dir: None,
+            #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+            verifier_omit_linker: false,
+            #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+            fail_prepare_verifier: false,
+            #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+            verifier_result_plant: None,
+            #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+            verifier_cpu_seconds: None,
+            #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+            verifier_break_probe: false,
             #[cfg(all(feature = "linux-execution", target_os = "linux"))]
             linux: None,
         })
@@ -771,9 +984,21 @@ impl Host {
                 outcome: verification.outcome,
                 content_digest: verification.content_digest.clone(),
                 complete: verification.completeness == Completeness::Complete,
+                collector: Some(verification.collector.as_str().to_string()),
             });
         }
         policy::authorize(&mission, &request.body, &facts)?;
+        // A stored host PASS must not let a runtime `complete_pass` through
+        // once the frozen verifier executes. `require_pass` checks the collector.
+        if matches!(request.body, CommandBody::CompletePass)
+            && crate::freeze::parse_object(&mission.attempt.verifier_json, "verifier definition")
+                .ok()
+                .and_then(|doc| doc.get("executes").and_then(Value::as_bool))
+                == Some(true)
+            && request.origin != CommandOrigin::HostSupervisor
+        {
+            return Err(Error::VerificationNotHostRun);
+        }
         let plan = policy::project(&mission, spec, &request.body, &facts)?;
         let mut command = new_command(
             &request,
@@ -1359,7 +1584,7 @@ impl Host {
         if profile.settle_stops_before_reconcile && self.stop_pending(mission_id)? {
             self.dispatch_stops(mission_id)?;
         }
-        self.reconcile_execution(mission_id)?;
+        self.reconcile_execution_for_recover(mission_id)?;
         if self.store.linux_execution_blocked(mission_id)? {
             let delivered = self.dispatch_stops(mission_id)?;
             self.poll_runtime(mission_id)?;
@@ -1600,8 +1825,10 @@ impl Host {
         self.snapshot(mission_id)
     }
 
-    /// Set the content digest, then apply the frozen changed-path gate.
-    /// A clean gate refuses; this slice does not run the verifier.
+    /// Set the content digest, apply the frozen changed-path gate, then run
+    /// the confined verifier when the gate is clean.
+    ///
+    /// Order: drift, plan-digest mismatch, phase, then [`Self::ready_workspace`].
     /// Drift uses the same refusal as admission.
     pub fn verify_mission(&mut self, mission_id: &str) -> Result<(MissionSnapshot, String)> {
         let mission = self.store.load_mission(mission_id)?;
@@ -1612,17 +1839,27 @@ impl Host {
         {
             return self.refuse_frozen_input_drift(&mission);
         }
-        self.refuse_blocked_execution(mission_id)?;
+        if matches!(mission.phase, Phase::Verifying | Phase::NeedsAttention)
+            && self.plan_digest_mismatched(&mission)?
+        {
+            if mission.phase != Phase::NeedsAttention && !mission.phase.is_terminal() {
+                self.record_plan_digest_mismatch(&mission)?;
+            }
+            return Err(Error::guard(
+                "stored plan digest does not match the plan body; the command was not applied",
+            ));
+        }
         if mission.phase != Phase::Verifying {
             return Err(Error::IllegalTransition {
                 from: mission.phase.to_string(),
                 command: "verify".into(),
             });
         }
+        let tree = PathBuf::from(self.ready_workspace(mission_id)?.path);
+        let mission = self.store.load_mission(mission_id)?;
         let verifier =
             crate::freeze::parse_object(&mission.attempt.verifier_json, "verifier definition")?;
         let gate = crate::verifier::Gate::parse(&verifier)?;
-        let tree = PathBuf::from(self.ready_workspace(mission_id)?.path);
         let before = crate::execution::workspace::content_digest(&tree)?;
         self.note_content_digest(
             mission_id,
@@ -1630,40 +1867,212 @@ impl Host {
             &before,
             "switchyard-host-verifier",
         )?;
+        #[cfg(test)]
+        if let Some(tamper) = self.verifier_between_digests.take() {
+            tamper(&tree);
+        }
         let report = crate::verifier::assess(&tree, &mission.attempt.base_sha, &gate)?;
         let after = crate::execution::workspace::content_digest(&tree)?;
         let mission = self.store.load_mission(mission_id)?;
-        let (outcome, completeness) = if before != after {
-            (VerificationOutcome::Incomplete, Completeness::Incomplete)
-        } else if !report.violations.is_empty() {
-            (VerificationOutcome::Fail, Completeness::Complete)
-        } else {
-            return Err(Error::VerifierConfinementUnavailable);
+        if before != after {
+            return self.record_verifier_decision(
+                &mission,
+                &verifier,
+                &report,
+                &before,
+                &after,
+                VerifierDecision::Incomplete,
+                None,
+            );
+        }
+        if !report.violations.is_empty() {
+            return self.record_verifier_decision(
+                &mission,
+                &verifier,
+                &report,
+                &before,
+                &after,
+                VerifierDecision::Fail,
+                None,
+            );
+        }
+        #[cfg(test)]
+        if let Some(synthetic) = self.synthetic_verifier.take() {
+            let run = synthetic_run(synthetic);
+            let decision = classify_verifier(&run, &before, &before);
+            return self.record_verifier_decision(
+                &mission,
+                &verifier,
+                &report,
+                &before,
+                &before,
+                decision,
+                Some(run),
+            );
+        }
+        match self.run_host_verifier(&mission, &tree, &verifier)? {
+            linux_execution::VerifierLaunch::Unavailable { detail } => {
+                let error = Error::VerifierConfinementUnavailable;
+                Err(match detail {
+                    Some(detail) => error.with_context(detail),
+                    None => error,
+                })
+            }
+            linux_execution::VerifierLaunch::Ran(run) => {
+                let after = crate::execution::workspace::content_digest(&tree)?;
+                let recorded = hosted_run(&run);
+                let decision = classify_verifier(&recorded, &before, &after);
+                let mission = self.store.load_mission(mission_id)?;
+                self.record_verifier_decision(
+                    &mission,
+                    &verifier,
+                    &report,
+                    &before,
+                    &after,
+                    decision,
+                    Some(hosted_run(&run)),
+                )
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_verifier_decision(
+        &mut self,
+        mission: &MissionRecord,
+        verifier: &Value,
+        report: &crate::verifier::Report,
+        before: &str,
+        after: &str,
+        decision: VerifierDecision,
+        run: Option<RecordedRun>,
+    ) -> Result<(MissionSnapshot, String)> {
+        let verifier_digest = payload_hash(verifier)?;
+        let (outcome, completeness, label) = match decision {
+            VerifierDecision::Pass => (VerificationOutcome::Pass, Completeness::Complete, "pass"),
+            VerifierDecision::Fail => (VerificationOutcome::Fail, Completeness::Complete, "fail"),
+            VerifierDecision::Incomplete => (
+                VerificationOutcome::Incomplete,
+                Completeness::Incomplete,
+                "incomplete",
+            ),
         };
-        let verifier_digest = payload_hash(&verifier)?;
-        self.store.record_verification(
-            &mission.id,
-            &mission.attempt.id,
-            &NewVerification {
-                outcome,
-                content_digest: mission.content_digest.clone(),
-                evidence_body: report.violations.join("\n"),
-                completeness,
-                requirements: Vec::new(),
-                collector: VerificationCollector::HostVerifier,
-                host_fields: Some(json!({
-                    "addedLines": report.added_lines,
-                    "baseSha": mission.attempt.base_sha,
-                    "changedPaths": report.paths,
-                    "contentDigestAfter": after,
-                    "contentDigestBefore": before,
-                    "outcome": outcome.as_str(),
-                    "verifierDigest": verifier_digest,
-                    "violations": report.violations,
-                })),
+        let mut fields = json!({
+            "addedLines": report.added_lines,
+            "baseSha": mission.attempt.base_sha,
+            "changedPathCount": report.path_count,
+            "changedPaths": report.paths,
+            "contentDigestAfter": after,
+            "contentDigestBefore": before,
+            "outcome": outcome.as_str(),
+            "verifierDigest": verifier_digest,
+            "violations": report.violations,
+        });
+        let mut provenance = None;
+        if let Some(run) = &run {
+            if let Some(object) = fields.as_object_mut() {
+                object.insert("durationMs".to_string(), json!(run.duration_ms));
+                object.insert("exitStatus".to_string(), json!(run.exit_code));
+                object.insert("stderrSha256".to_string(), json!(run.stderr_sha256));
+                object.insert("stderrTail".to_string(), json!(run.stderr_tail));
+                object.insert("stdoutSha256".to_string(), json!(run.stdout_sha256));
+                object.insert("stdoutTail".to_string(), json!(run.stdout_tail));
+            }
+            let mut extra = json!({
+                "bubblewrap": crate::linux_execution::BUBBLEWRAP_VERSION,
+                "toolchain": run.toolchain_identity,
+            });
+            if let Some(object) = extra.as_object_mut() {
+                if let Some(binds) = &run.etc_binds {
+                    object.insert("etcBinds".to_string(), json!(binds));
+                }
+                if let Some(path) = &run.linker_missing {
+                    object.insert("linkerMissing".to_string(), json!(path));
+                }
+                if run.etc_binds.is_some() {
+                    object.insert(
+                        "cpuMax".to_string(),
+                        json!(crate::linux_execution::VERIFIER_CPU_MAX),
+                    );
+                    object.insert(
+                        "memoryMax".to_string(),
+                        json!(crate::linux_execution::VERIFIER_MEMORY_MAX),
+                    );
+                    object.insert(
+                        "pidsMax".to_string(),
+                        json!(crate::linux_execution::VERIFIER_PIDS_MAX),
+                    );
+                    object.insert(
+                        "cpuBackstopSeconds".to_string(),
+                        json!(run.cpu_backstop_seconds),
+                    );
+                }
+            }
+            provenance = Some(extra);
+        }
+        let verification = NewVerification {
+            outcome,
+            content_digest: mission.content_digest.clone(),
+            evidence_body: report.violations.join("\n"),
+            completeness,
+            requirements: Vec::new(),
+            collector: VerificationCollector::HostVerifier,
+            host_fields: Some(fields),
+            provenance_extra: provenance,
+        };
+        match decision {
+            VerifierDecision::Fail => {
+                self.store
+                    .record_verification(&mission.id, &mission.attempt.id, &verification)?;
+            }
+            VerifierDecision::Incomplete => {
+                // The uncertainty edge invalidates prior evidence. Record the
+                // incomplete row after that, so this run stays the latest fact.
+                self.admit_checked(
+                    AdmitRequest {
+                        command_id: None,
+                        mission_id: mission.id.clone(),
+                        attempt_id: Some(mission.attempt.id.clone()),
+                        expected_revision: mission.revision,
+                        actor: "switchyard-host-verifier".into(),
+                        origin: CommandOrigin::HostSupervisor,
+                        body: CommandBody::DetectUncertainty {
+                            reason: AttentionReason::VerificationIncomplete,
+                            content_digest: None,
+                        },
+                    },
+                    None,
+                    true,
+                )?;
+                self.store
+                    .record_verification(&mission.id, &mission.attempt.id, &verification)?;
+            }
+            VerifierDecision::Pass => {
+                self.admit_host_verifier(mission, CommandBody::CompletePass, &verification)?;
+            }
+        }
+        Ok((self.snapshot(&mission.id)?, label.to_string()))
+    }
+
+    fn admit_host_verifier(
+        &mut self,
+        mission: &MissionRecord,
+        body: CommandBody,
+        verification: &NewVerification,
+    ) -> Result<AdmitResult> {
+        self.admit_checked(
+            AdmitRequest {
+                command_id: None,
+                mission_id: mission.id.clone(),
+                attempt_id: Some(mission.attempt.id.clone()),
+                expected_revision: mission.revision,
+                actor: "switchyard-host-verifier".into(),
+                origin: CommandOrigin::HostSupervisor,
+                body,
             },
-        )?;
-        Ok((self.snapshot(mission_id)?, outcome.as_str().to_string()))
+            Some(verification),
+            true,
+        )
     }
 
     /// Owned worktree, ready and reconciled for this owner.
@@ -2065,6 +2474,7 @@ impl Host {
                 requirements: requirements.to_vec(),
                 collector: VerificationCollector::RuntimeObservation,
                 host_fields: None,
+                provenance_extra: None,
             },
         )?;
         Ok(())
@@ -2607,6 +3017,7 @@ fn verification_record(
         requirements: requirements.to_vec(),
         collector: VerificationCollector::RuntimeObservation,
         host_fields: None,
+        provenance_extra: None,
     }
 }
 
@@ -2744,6 +3155,7 @@ mod host_fact_tests {
             requirements: Vec::new(),
             collector,
             host_fields: None,
+            provenance_extra: None,
         };
         let host = pass(VerificationCollector::HostVerifier, "digest");
         assert!(super::host_verifier_pass(

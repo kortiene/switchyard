@@ -44,13 +44,12 @@ impl Host {
                 detail: "operator write attempt does not belong to this mission".into(),
             });
         }
-        // Drift before the phase gate, the same order as admission.
+        // Drift, then phase, then ready_workspace. A wrong phase returns the
+        // phase error. ready_workspace is the only blocked-execution check, and
+        // it does not deliver an admitted stop.
         if self.frozen_input_drifted(&mission)? {
             return self.refuse_frozen_input_drift(&mission);
         }
-        // A blocked execution is a precondition. Checked before the phase gate
-        // so an admitted stop is refused here and left pending.
-        self.refuse_blocked_execution(mission_id)?;
         if mission.phase != Phase::Implementing {
             return Err(Error::OperatorWritePhaseClosed {
                 phase: mission.phase.as_str().into(),
@@ -573,13 +572,7 @@ mod tests {
         admit(&mut stopped.host, &stopped.mission, CommandBody::Pause);
         let from = source(stopped._tmp.path(), "body.txt", b"hello");
         let error = refuse(&mut stopped, "stopped.txt", &from);
-        assert_eq!(error.category(), "execution_blocked", "{error}");
-        assert!(
-            error.to_string().contains(
-                "dispatch (delivers the admitted stop) or mission recover once effects settle"
-            ),
-            "{error}"
-        );
+        assert_eq!(error.category(), "operator_write_phase_closed", "{error}");
         let after = stopped.host.snapshot(&stopped.mission).unwrap();
         let pause = after
             .commands

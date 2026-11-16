@@ -63,16 +63,33 @@ pub(crate) fn validate_delegation(root: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn create_leaf(root: &Path, name: &str) -> Result<CgroupIdentity> {
-    create_limited_leaf(root, name, MEMORY_MAX)
+    create_limited_leaf(root, name, MEMORY_MAX, PIDS_MAX, CPU_MAX)
 }
 
 /// Node needs a separate reviewed memory allowance; execution limits stay unchanged.
 #[cfg(feature = "pi-contract")]
 pub(crate) fn create_bridge_leaf(root: &Path, name: &str) -> Result<CgroupIdentity> {
-    create_limited_leaf(root, name, "268435456")
+    create_limited_leaf(root, name, "268435456", PIDS_MAX, CPU_MAX)
 }
 
-fn create_limited_leaf(root: &Path, name: &str, memory_max: &str) -> Result<CgroupIdentity> {
+/// Verifier leaf. Writer limits stay at 64 MiB, 64 pids, and half a CPU.
+pub(crate) fn create_verifier_leaf(root: &Path, name: &str) -> Result<CgroupIdentity> {
+    create_limited_leaf(
+        root,
+        name,
+        super::VERIFIER_MEMORY_MAX,
+        super::VERIFIER_PIDS_MAX,
+        super::VERIFIER_CPU_MAX,
+    )
+}
+
+fn create_limited_leaf(
+    root: &Path,
+    name: &str,
+    memory_max: &str,
+    pids_max: &str,
+    cpu_max: &str,
+) -> Result<CgroupIdentity> {
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err(Error::guard(
             "cgroup leaf name is not a single path segment",
@@ -89,7 +106,7 @@ fn create_limited_leaf(root: &Path, name: &str, memory_max: &str) -> Result<Cgro
             "cannot create a delegated cgroup leaf ({error}); refusing an unconfined fallback"
         ))
     })?;
-    if let Err(error) = apply_limits(&path, memory_max) {
+    if let Err(error) = apply_limits(&path, memory_max, pids_max, cpu_max) {
         let _ = fs::remove_dir(&path);
         return Err(error);
     }
@@ -207,12 +224,12 @@ pub(crate) fn git_file_is_regular(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-fn apply_limits(path: &Path, memory_max: &str) -> Result<()> {
+fn apply_limits(path: &Path, memory_max: &str, pids_max: &str, cpu_max: &str) -> Result<()> {
     write_file(path, "memory.max", memory_max)?;
     write_file(path, "memory.swap.max", "0")?;
     write_file(path, "memory.oom.group", "1")?;
-    write_file(path, "pids.max", PIDS_MAX)?;
-    write_file(path, "cpu.max", CPU_MAX)?;
+    write_file(path, "pids.max", pids_max)?;
+    write_file(path, "cpu.max", cpu_max)?;
     for required in [
         "memory.max",
         "memory.swap.max",

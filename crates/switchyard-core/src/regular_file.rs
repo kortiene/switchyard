@@ -65,3 +65,37 @@ fn is_not_regular(error: &std::io::Error) -> bool {
         Some(code) if code == libc::ELOOP || code == libc::ENXIO || code == libc::EAGAIN
     )
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::read_regular_nofollow;
+    use std::os::unix::fs::symlink;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_symlink_or_fifo_is_refused_without_following_or_blocking() {
+        let dir = std::env::temp_dir().join(format!("switchyard-nofollow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = dir.join("secret");
+        std::fs::write(&secret, "SECRET-RESULT").unwrap();
+        let link = dir.join("result.json");
+        symlink(&secret, &link).unwrap();
+        let started = Instant::now();
+        let error = read_regular_nofollow(&link, 64).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(2), "{error}");
+        assert!(!error.to_string().contains("SECRET-RESULT"), "{error}");
+        let _ = std::fs::remove_file(&link);
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&link)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let started = Instant::now();
+        let error = read_regular_nofollow(&link, 64).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(2), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

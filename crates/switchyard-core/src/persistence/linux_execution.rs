@@ -26,6 +26,15 @@ pub(crate) struct LinuxEffectRecord {
     pub quiescence_json: Option<String>,
 }
 
+pub(crate) struct LinuxEffectIdentity<'a> {
+    pub operation_id: &'a str,
+    pub payload_hash: &'a str,
+    pub generation: u64,
+    pub mission_id: &'a str,
+    pub attempt_id: &'a str,
+    pub session_id: &'a str,
+}
+
 pub(crate) struct StoredCgroup {
     pub path: String,
     pub dev: i64,
@@ -34,6 +43,36 @@ pub(crate) struct StoredCgroup {
 }
 
 const BLOCKING_STATES: &str = "('prepared','entered','running','uncertain')";
+
+/// How `request_json` selects a settlement path.
+///
+/// No `kind` is a writer, so existing rows keep their path. `verifier` is the
+/// host verifier. Any other value, including a non-string or unreadable
+/// document, is unknown: it stays blocking and is never settled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExecutionKind {
+    Writer,
+    Verifier,
+    Unknown,
+}
+
+pub(crate) fn execution_kind(request_json: &str) -> ExecutionKind {
+    let Ok(value) = serde_json::from_str::<Value>(request_json) else {
+        return ExecutionKind::Unknown;
+    };
+    if !value.is_object() {
+        return ExecutionKind::Unknown;
+    }
+    match value.get("kind") {
+        None => ExecutionKind::Writer,
+        Some(Value::String(kind)) if kind == "verifier" => ExecutionKind::Verifier,
+        Some(_) => ExecutionKind::Unknown,
+    }
+}
+
+pub(crate) fn blocking_linux_state(state: &str) -> bool {
+    matches!(state, "prepared" | "entered" | "running" | "uncertain")
+}
 
 impl Store {
     pub(crate) fn linux_execution_blocked(&self, mission: &str) -> Result<bool> {
@@ -597,6 +636,201 @@ impl Store {
             [id],
         )
         .map_err(Error::storage)?;
+        tx.commit().map_err(Error::storage)
+    }
+
+    /// Insert a verifier effect as `prepared`. The 60s writer deadline is not applied.
+    pub(crate) fn prepare_verifier_effect(
+        &mut self,
+        identity: &LinuxEffectIdentity,
+        request_json: &str,
+        cgroup: &StoredCgroup,
+    ) -> Result<()> {
+        self.require_effect_generation(identity)?;
+        let tx = self.immediate()?;
+        tx.execute(
+            "INSERT INTO linux_execution_effects(
+                operation_id, mission_id, attempt_id, session_id, payload_hash, request_json,
+                started_generation, state, cgroup_path, cgroup_dev, cgroup_ino, boot_id, created_at
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,'prepared',?8,?9,?10,?11,?12)",
+            params![
+                identity.operation_id,
+                identity.mission_id,
+                identity.attempt_id,
+                identity.session_id,
+                identity.payload_hash,
+                request_json,
+                identity.generation,
+                cgroup.path,
+                cgroup.dev,
+                cgroup.ino,
+                cgroup.boot_id,
+                now_ms()
+            ],
+        )
+        .map_err(|error| identity_conflict(identity.operation_id, error))?;
+        tx.commit().map_err(Error::storage)
+    }
+
+    pub(crate) fn mark_verifier_released(
+        &mut self,
+        identity: &LinuxEffectIdentity,
+        launcher_pid: u32,
+        launcher_start: &str,
+    ) -> Result<()> {
+        self.require_effect_generation(identity)?;
+        self.touch_verifier(
+            "UPDATE linux_execution_effects
+             SET released_at=?1, launcher_pid=?2, launcher_start=?3
+             WHERE operation_id=?4 AND payload_hash=?5 AND started_generation=?6
+               AND state='prepared' AND released_at IS NULL AND entered_at IS NULL
+               AND mission_id=?7 AND attempt_id=?8 AND session_id=?9",
+            params![
+                now_ms(),
+                launcher_pid,
+                launcher_start,
+                identity.operation_id,
+                identity.payload_hash,
+                identity.generation,
+                identity.mission_id,
+                identity.attempt_id,
+                identity.session_id
+            ],
+            "verifier release requires the original unreleased intent",
+        )
+    }
+
+    pub(crate) fn mark_verifier_entered(
+        &mut self,
+        identity: &LinuxEffectIdentity,
+        launcher_pid: u32,
+        launcher_start: &str,
+    ) -> Result<()> {
+        self.require_effect_generation(identity)?;
+        self.touch_verifier(
+            "UPDATE linux_execution_effects
+             SET state='entered', entered_at=?1, launcher_pid=?2, launcher_start=?3
+             WHERE operation_id=?4 AND payload_hash=?5 AND started_generation=?6
+               AND state='prepared' AND entered_at IS NULL AND released_at IS NOT NULL
+               AND mission_id=?7 AND attempt_id=?8 AND session_id=?9",
+            params![
+                now_ms(),
+                launcher_pid,
+                launcher_start,
+                identity.operation_id,
+                identity.payload_hash,
+                identity.generation,
+                identity.mission_id,
+                identity.attempt_id,
+                identity.session_id
+            ],
+            "verifier entry requires the original prepared effect",
+        )
+    }
+
+    pub(crate) fn mark_verifier_running(&mut self, identity: &LinuxEffectIdentity) -> Result<()> {
+        self.require_effect_generation(identity)?;
+        self.touch_verifier(
+            "UPDATE linux_execution_effects SET state='running'
+             WHERE operation_id=?1 AND payload_hash=?2 AND started_generation=?3
+               AND state='entered' AND entered_at IS NOT NULL
+               AND mission_id=?4 AND attempt_id=?5 AND session_id=?6",
+            params![
+                identity.operation_id,
+                identity.payload_hash,
+                identity.generation,
+                identity.mission_id,
+                identity.attempt_id,
+                identity.session_id
+            ],
+            "verifier running state requires a recorded entry",
+        )
+    }
+
+    /// Settle a proven verifier effect without the writer request type or its 60s cap.
+    /// A later owner may settle a row whose `started_generation` is stale.
+    pub(crate) fn complete_verifier_effect(
+        &mut self,
+        operation_id: &str,
+        receipt: &Value,
+        quiescence: &Value,
+    ) -> Result<()> {
+        if receipt.get("operationId").and_then(Value::as_str) != Some(operation_id)
+            || receipt.get("simulated").and_then(Value::as_bool) != Some(false)
+        {
+            return Err(Error::guard("verifier receipt does not match its intent"));
+        }
+        let tx = self.immediate()?;
+        let changed = tx
+            .execute(
+                "UPDATE linux_execution_effects
+                 SET state='completed', receipt_json=?1, quiescence_json=?2
+                 WHERE operation_id=?3
+                   AND state IN ('prepared','entered','running','uncertain')",
+                params![
+                    serde_json::to_string(receipt).map_err(Error::storage)?,
+                    serde_json::to_string(quiescence).map_err(Error::storage)?,
+                    operation_id
+                ],
+            )
+            .map_err(Error::storage)?;
+        if changed != 1 {
+            return Err(Error::guard(
+                "verifier completion requires the original unresolved effect",
+            ));
+        }
+        tx.commit().map_err(Error::storage)
+    }
+
+    pub(crate) fn verifier_not_applied(
+        &mut self,
+        operation_id: &str,
+        quiescence: &Value,
+    ) -> Result<()> {
+        let tx = self.immediate()?;
+        let changed = tx
+            .execute(
+                "UPDATE linux_execution_effects
+                 SET state='not_applied', quiescence_json=?1
+                 WHERE operation_id=?2
+                   AND state IN ('prepared','uncertain') AND entered_at IS NULL
+                   AND receipt_json IS NULL",
+                params![
+                    serde_json::to_string(quiescence).map_err(Error::storage)?,
+                    operation_id
+                ],
+            )
+            .map_err(Error::storage)?;
+        if changed != 1 {
+            return Err(Error::guard(
+                "verifier not-applied requires an unentered intent and matching quiescence",
+            ));
+        }
+        tx.commit().map_err(Error::storage)
+    }
+
+    fn require_effect_generation(&self, identity: &LinuxEffectIdentity) -> Result<()> {
+        let expected = self.generation()?;
+        if identity.generation != expected || self.owner_generation != Some(expected) {
+            return Err(Error::StaleGeneration {
+                expected,
+                actual: identity.generation,
+            });
+        }
+        Ok(())
+    }
+
+    fn touch_verifier(
+        &mut self,
+        sql: &str,
+        params: impl rusqlite::Params,
+        detail: &str,
+    ) -> Result<()> {
+        let tx = self.immediate()?;
+        let changed = tx.execute(sql, params).map_err(Error::storage)?;
+        if changed != 1 {
+            return Err(Error::guard(detail));
+        }
         tx.commit().map_err(Error::storage)
     }
 

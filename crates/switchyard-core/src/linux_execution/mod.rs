@@ -18,13 +18,283 @@ pub const EXEC_CANCEL_SCOPE: &str = "linux.exec.cancel.v1";
 
 pub const MAX_FILE_BYTES: usize = 64 * 1024;
 pub const EXEC_OUTPUT_CAP: usize = 64 * 1024;
+/// Verifier stdout and stderr tail. Matches the frozen document's output cap.
+pub const VERIFIER_OUTPUT_CAP: usize = 1024 * 1024;
 pub const MAX_DEADLINE_MS: i64 = 60_000;
 /// Reviewed Bubblewrap package. The helper, the host, and receipts share this pin.
 pub const BUBBLEWRAP_VERSION: &str = "0.9.0";
 pub const BUBBLEWRAP_BACKEND: &str = "linux-bubblewrap-0.9.0";
+/// Verifier `cpu.max`: two CPUs. Writers stay at half a CPU.
+pub const VERIFIER_CPU_MAX: &str = "200000 100000";
+pub const VERIFIER_MEMORY_MAX: &str = "4G";
+pub const VERIFIER_PIDS_MAX: &str = "2048";
+/// Stored stdout and stderr tails. The hash still covers the full stream.
+pub const VERIFIER_TAIL_BYTES: usize = 64 * 1024;
+
+/// Worst case is two 64 KiB tails stored as JSON text (about 6 bytes per byte)
+/// plus the envelope. Base64 keeps the common case smaller. 1 MiB covers both.
+pub fn verifier_result_cap() -> usize {
+    1024 * 1024
+}
+
+/// `oom_kill` from a cgroup `memory.events` body.
+pub fn memory_events_oom_kill(text: &str) -> u64 {
+    text.lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(' ')?;
+            (name == "oom_kill").then(|| value.parse::<u64>().ok())?
+        })
+        .unwrap_or(0)
+}
+
+pub(crate) fn b64_encode(bytes: &[u8]) -> String {
+    const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut index = 0;
+    while index + 3 <= bytes.len() {
+        let n = u32::from(bytes[index]) << 16
+            | u32::from(bytes[index + 1]) << 8
+            | u32::from(bytes[index + 2]);
+        out.push(char::from(ALPHA[((n >> 18) & 63) as usize]));
+        out.push(char::from(ALPHA[((n >> 12) & 63) as usize]));
+        out.push(char::from(ALPHA[((n >> 6) & 63) as usize]));
+        out.push(char::from(ALPHA[(n & 63) as usize]));
+        index += 3;
+    }
+    if bytes.len() - index == 1 {
+        let n = u32::from(bytes[index]) << 16;
+        out.push(char::from(ALPHA[((n >> 18) & 63) as usize]));
+        out.push(char::from(ALPHA[((n >> 12) & 63) as usize]));
+        out.push('=');
+        out.push('=');
+    } else if bytes.len() - index == 2 {
+        let n = u32::from(bytes[index]) << 16 | u32::from(bytes[index + 1]) << 8;
+        out.push(char::from(ALPHA[((n >> 18) & 63) as usize]));
+        out.push(char::from(ALPHA[((n >> 12) & 63) as usize]));
+        out.push(char::from(ALPHA[((n >> 6) & 63) as usize]));
+        out.push('=');
+    }
+    out
+}
+
+pub(crate) fn b64_decode(text: &str) -> Option<Vec<u8>> {
+    fn val(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        let pad = (bytes[index + 2] == b'=') as usize + (bytes[index + 3] == b'=') as usize;
+        let a = val(bytes[index])?;
+        let b = val(bytes[index + 1])?;
+        let c = if pad == 2 { 0 } else { val(bytes[index + 2])? };
+        let d = if pad >= 1 { 0 } else { val(bytes[index + 3])? };
+        let n = (u32::from(a) << 18) | (u32::from(b) << 12) | (u32::from(c) << 6) | u32::from(d);
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+        index += 4;
+    }
+    Some(out)
+}
+
+/// One line from the host-side wait record. Anything else is not a status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WaitRecord {
+    pub signaled: bool,
+    pub signal: i32,
+    pub exited: bool,
+    pub code: i32,
+}
+
+/// Accept one well-formed wait line and nothing else.
+///
+/// The line is `signaled` `signal` `exited` `code`, each `key=value`, separated
+/// by single spaces, ending in one newline, and at most 128 bytes.
+pub(crate) fn parse_wait_record(bytes: &[u8]) -> Option<WaitRecord> {
+    if bytes.is_empty() || bytes.len() > 128 {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    let line = text.strip_suffix('\n')?;
+    if line.is_empty() || line.as_bytes().contains(&b'\n') {
+        return None;
+    }
+    let mut fields = line.split(' ');
+    let signaled = flag_field(fields.next()?, "signaled")?;
+    let signal = number_field(fields.next()?, "signal")?;
+    let exited = flag_field(fields.next()?, "exited")?;
+    let code = number_field(fields.next()?, "code")?;
+    if fields.next().is_some() {
+        return None;
+    }
+    Some(WaitRecord {
+        signaled,
+        signal,
+        exited,
+        code,
+    })
+}
+
+fn flag_field(field: &str, key: &str) -> Option<bool> {
+    let value = field.strip_prefix(key)?.strip_prefix('=')?;
+    match value {
+        "0" => Some(false),
+        "1" => Some(true),
+        _ => None,
+    }
+}
+
+fn number_field(field: &str, key: &str) -> Option<i32> {
+    let value = field.strip_prefix(key)?.strip_prefix('=')?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok()
+}
+
+#[cfg(test)]
+mod memory_events_tests {
+    use super::{b64_decode, b64_encode, memory_events_oom_kill};
+
+    #[test]
+    fn memory_events_oom_kill_is_counted() {
+        assert_eq!(memory_events_oom_kill("low 0\noom_kill 3\n"), 3);
+        assert_eq!(memory_events_oom_kill("oom 1\n"), 0);
+        assert_eq!(memory_events_oom_kill(""), 0);
+    }
+
+    #[test]
+    fn base64_round_trip_keeps_control_bytes() {
+        let bytes: Vec<u8> = (0..256).map(|value| value as u8).collect();
+        let encoded = b64_encode(&bytes);
+        assert!(
+            encoded
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        );
+        assert_eq!(b64_decode(&encoded).as_deref(), Some(bytes.as_slice()));
+    }
+}
+
+#[cfg(test)]
+mod wait_record_tests {
+    use super::{WaitRecord, parse_wait_record};
+
+    #[test]
+    fn wait_record_accepts_only_one_well_formed_line() {
+        assert_eq!(
+            parse_wait_record(b"signaled=0 signal=000 exited=1 code=0001\n"),
+            Some(WaitRecord {
+                signaled: false,
+                signal: 0,
+                exited: true,
+                code: 1,
+            })
+        );
+        assert_eq!(
+            parse_wait_record(b"signaled=1 signal=009 exited=0 code=0000\n"),
+            Some(WaitRecord {
+                signaled: true,
+                signal: 9,
+                exited: false,
+                code: 0,
+            })
+        );
+        assert_eq!(parse_wait_record(b""), None);
+        assert_eq!(parse_wait_record(b"\n"), None);
+        assert_eq!(
+            parse_wait_record(b"signaled=0 signal=000 exited=1 code=0001"),
+            None
+        );
+        assert_eq!(parse_wait_record(b"signaled=0 signal=000 exited=1\n"), None);
+        let mut long = b"signaled=0 signal=000 exited=1 code=".to_vec();
+        long.extend(std::iter::repeat_n(b'0', 100));
+        long.push(b'\n');
+        assert!(long.len() > 128);
+        assert_eq!(parse_wait_record(&long), None);
+        assert_eq!(
+            parse_wait_record(
+                b"signaled=0 signal=000 exited=1 code=0001\nsignaled=1 signal=009 exited=0 code=0000\n"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_wait_record(b"signaled=2 signal=000 exited=1 code=0001\n"),
+            None
+        );
+        assert_eq!(
+            parse_wait_record(b"signaled=0 signal=000 exited=1 code=0001 trailing\n"),
+            None
+        );
+        assert_eq!(
+            parse_wait_record(b"SYWAIT1 signaled=0 signal=000 exited=1 code=0000\n"),
+            None
+        );
+    }
+}
 
 pub fn bubblewrap_version_line() -> String {
     format!("bubblewrap {BUBBLEWRAP_VERSION}\n")
+}
+
+/// `channel` from a rust-toolchain.toml body. A comment line is ignored.
+/// A `channel` key is accepted even when it is not under `[toolchain]`.
+pub fn toolchain_channel(text: &str) -> Option<&str> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("channel") else {
+            continue;
+        };
+        let Some(rest) = rest.trim().strip_prefix('=') else {
+            continue;
+        };
+        let rest = rest.trim().trim_matches('"').trim_matches('\'');
+        if !rest.is_empty() {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod toolchain_channel_tests {
+    use super::toolchain_channel;
+
+    #[test]
+    fn toolchain_channel_skips_the_table_header_comments_and_crlf() {
+        let text = "[toolchain]\nchannel = \"1.99.1\"\ncomponents = [\"rustfmt\", \"clippy\"]\n";
+        assert_eq!(toolchain_channel(text), Some("1.99.1"));
+        assert_eq!(toolchain_channel("channel = 'stable'\n"), Some("stable"));
+        assert_eq!(toolchain_channel("[toolchain]\n"), None);
+        assert_eq!(
+            toolchain_channel("# channel = \"ignore\"\nchannel = \"1.99.1\"\n"),
+            Some("1.99.1")
+        );
+        assert_eq!(
+            toolchain_channel("channel = \"1.99.1\"\r\n"),
+            Some("1.99.1")
+        );
+        assert_eq!(toolchain_channel("# only a comment\n[toolchain]\n"), None);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -333,3 +603,5 @@ pub(crate) mod cgroup;
 mod helper;
 #[cfg(all(feature = "linux-execution", target_os = "linux"))]
 pub use helper::helper_main;
+#[cfg(all(feature = "linux-execution", target_os = "linux"))]
+pub(crate) use helper::{VERIFIER_ETC_ALLOWLIST, present_etc_binds, unresolved_sandbox_cc};

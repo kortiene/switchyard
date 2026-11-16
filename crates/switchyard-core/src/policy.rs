@@ -335,17 +335,37 @@ fn revalidate_resume(mission: &MissionRecord, facts: &Facts, target: Phase) -> R
 }
 
 fn require_pass(mission: &MissionRecord, facts: &Facts) -> Result<()> {
+    let host_collector = !verifier_executes(mission)
+        || facts.verification.as_ref().is_some_and(|verification| {
+            verification.collector.as_deref() == Some("switchyard-host-verifier")
+        });
     match &facts.verification {
         Some(verification)
             if verification.outcome == VerificationOutcome::Pass
                 && verification.complete
-                && verification.content_digest == mission.content_digest =>
+                && verification.content_digest == mission.content_digest
+                && host_collector =>
         {
             Ok(())
         }
         _ => Err(Error::guard(
             "complete PASS evidence for the current content is required",
         )),
+    }
+}
+
+/// The host collector is required unless the frozen verifier parses and
+/// `executes` is false or absent. A parse failure or any other value keeps it.
+fn verifier_executes(mission: &MissionRecord) -> bool {
+    let Ok(doc) =
+        crate::freeze::parse_object(&mission.attempt.verifier_json, "verifier definition")
+    else {
+        return true;
+    };
+    match doc.get("executes") {
+        None => false,
+        Some(value) if value.as_bool() == Some(false) => false,
+        Some(_) => true,
     }
 }
 
@@ -678,6 +698,7 @@ mod tests {
                 outcome: VerificationOutcome::Fail,
                 content_digest: "digest-1".into(),
                 complete: true,
+                collector: None,
             }),
             ..Facts::default()
         };
@@ -734,6 +755,7 @@ mod tests {
                 outcome: VerificationOutcome::Pass,
                 content_digest: "digest-new".into(),
                 complete: true,
+                collector: None,
             }),
             ..Facts::default()
         };

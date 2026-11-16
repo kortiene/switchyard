@@ -2,6 +2,7 @@
 //! process so host SIGKILL closes its control pipe and `cgroup.kill` still runs.
 use std::fs::{self, File};
 use std::io::{BufRead, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,8 +12,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+use sha2::{Digest, Sha256};
+
 use super::cgroup::{self, CgroupIdentity};
-use super::{EXEC_OUTPUT_CAP, MAX_FILE_BYTES};
+use super::{EXEC_OUTPUT_CAP, MAX_FILE_BYTES, VERIFIER_OUTPUT_CAP};
 
 pub fn helper_main() {
     if let Err(error) = dispatch() {
@@ -24,6 +27,9 @@ pub fn helper_main() {
 fn dispatch() -> Result<(), String> {
     if std::env::var_os("SWITCHYARD_SANDBOX").is_some() {
         let mode = std::env::args().nth(1).unwrap_or_default();
+        if mode == "relay-wait" {
+            return relay_wait();
+        }
         if mode != "file" && mode != "probe" {
             return Err("sandbox helper refuses supervise and join".into());
         }
@@ -33,8 +39,84 @@ fn dispatch() -> Result<(), String> {
         Some("join") => join(),
         Some("file") => file_op(),
         Some("probe") => probe(),
-        _ => Err("usage: switchyard-execution-helper supervise|join|file|probe".into()),
+        Some("relay-wait") => relay_wait(),
+        _ => Err("usage: switchyard-execution-helper supervise|join|file|probe|relay-wait".into()),
     }
+}
+
+/// Run the script and write its wait status to an `O_CLOEXEC` fd.
+/// The script does not inherit that fd, and stderr is not a wait channel.
+fn relay_wait() -> Result<(), String> {
+    use std::os::fd::AsFd;
+    use std::os::unix::process::ExitStatusExt;
+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+        .map_err(|error| format!("relay-wait dumpable: {error}"))?;
+    let mut args = std::env::args().skip(2);
+    let wait_fd = match (args.next().as_deref(), args.next()) {
+        (Some("--wait-fd"), Some(value)) => value
+            .parse::<i32>()
+            .map_err(|_| "relay-wait fd is not an integer".to_string())?,
+        _ => return Err("relay-wait requires --wait-fd".into()),
+    };
+    if args.next().as_deref() != Some("--") {
+        return Err("relay-wait requires --".into());
+    }
+    let argv: Vec<String> = args.collect();
+    let Some(program) = argv.first() else {
+        return Err("relay-wait command is empty".into());
+    };
+    let mut record = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open(format!("/proc/self/fd/{wait_fd}"))
+        .map_err(|error| format!("relay-wait status fd: {error}"))?;
+    rustix::io::fcntl_setfd(record.as_fd(), rustix::io::FdFlags::CLOEXEC)
+        .map_err(|error| format!("relay-wait cloexec: {error}"))?;
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("exec {wait_fd}>&-; exec \"$@\""))
+        .arg("relay-script")
+        .arg(program)
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("relay-wait spawn: {error}"))?;
+    let mut child_out = child.stdout.take().ok_or("relay-wait missing stdout")?;
+    let mut child_err = child.stderr.take().ok_or("relay-wait missing stderr")?;
+    let out_thread = thread::spawn(move || {
+        let mut stdout = std::io::stdout();
+        let _ = std::io::copy(&mut child_out, &mut stdout);
+        let _ = stdout.flush();
+    });
+    let err_thread = thread::spawn(move || {
+        let mut stderr = std::io::stderr();
+        let _ = std::io::copy(&mut child_err, &mut stderr);
+        let _ = stderr.flush();
+    });
+    let status = child
+        .wait()
+        .map_err(|error| format!("relay-wait wait: {error}"))?;
+    let _ = out_thread.join();
+    let _ = err_thread.join();
+    let signaled = status.signal().is_some();
+    let signal = status.signal().unwrap_or(0);
+    let exited = status.code().is_some();
+    let code = status.code().unwrap_or(0);
+    writeln!(
+        record,
+        "signaled={} signal={:03} exited={} code={:04}",
+        u8::from(signaled),
+        signal,
+        u8::from(exited),
+        code
+    )
+    .map_err(|error| format!("relay-wait record: {error}"))?;
+    record
+        .flush()
+        .map_err(|error| format!("relay-wait record: {error}"))?;
+    Ok(())
 }
 
 fn join() -> Result<(), String> {
@@ -121,6 +203,11 @@ struct SuperviseOpts {
     result: PathBuf,
     argv: Vec<String>,
     fail_launch: bool,
+    cargo_home: Option<PathBuf>,
+    rustup_home: Option<PathBuf>,
+    toolchain: Option<PathBuf>,
+    target_dir: Option<PathBuf>,
+    cpu_seconds: Option<u64>,
 }
 
 fn supervise() -> Result<(), String> {
@@ -137,8 +224,8 @@ fn supervise() -> Result<(), String> {
         println!("DONE");
         return Ok(());
     }
-    let mut child = match spawn_sandbox(&opts) {
-        Ok(child) => child,
+    let (mut child, mut host_binds) = match spawn_confined(&opts) {
+        Ok(spawned) => spawned,
         Err(error) => {
             let quiescence = cgroup::kill_and_prove(&identity, Duration::from_secs(2))
                 .map_err(|error| error.to_string())?;
@@ -167,18 +254,36 @@ fn supervise() -> Result<(), String> {
     let stderr_truncated = Arc::new(AtomicBool::new(false));
     let stdout_buf = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::new()));
-    let cap = if opts.mode == "exec" {
-        EXEC_OUTPUT_CAP
-    } else {
+    let cap = match opts.mode.as_str() {
+        "exec" => EXEC_OUTPUT_CAP,
+        "verifier" => VERIFIER_OUTPUT_CAP,
         // serde_json turns one byte into `\u00XX` (6 bytes), plus the envelope.
-        MAX_FILE_BYTES * 6 + 8 * 1024
+        _ => MAX_FILE_BYTES * 6 + 8 * 1024,
     };
+    let stdout_hash = Arc::new(Mutex::new(String::new()));
+    let stderr_hash = Arc::new(Mutex::new(String::new()));
     let stdout_flag = Arc::clone(&stdout_truncated);
     let stdout_out = Arc::clone(&stdout_buf);
-    let stdout_thread = thread::spawn(move || drain(stdout, cap, &stdout_flag, &stdout_out));
+    let stdout_digest = Arc::clone(&stdout_hash);
+    let verifier_stdout = opts.mode == "verifier";
+    let stdout_thread = thread::spawn(move || {
+        if verifier_stdout {
+            drain_hashed(stdout, cap, &stdout_flag, &stdout_out, &stdout_digest);
+        } else {
+            drain(stdout, cap, &stdout_flag, &stdout_out);
+        }
+    });
     let stderr_flag = Arc::clone(&stderr_truncated);
     let stderr_out = Arc::clone(&stderr_buf);
-    let stderr_thread = thread::spawn(move || drain(stderr, cap, &stderr_flag, &stderr_out));
+    let stderr_digest = Arc::clone(&stderr_hash);
+    let verifier_stderr = opts.mode == "verifier";
+    let stderr_thread = thread::spawn(move || {
+        if verifier_stderr {
+            drain_hashed(stderr, cap, &stderr_flag, &stderr_out, &stderr_digest);
+        } else {
+            drain(stderr, cap, &stderr_flag, &stderr_out);
+        }
+    });
     let parent_dead = Arc::new(AtomicBool::new(false));
     let dead_flag = Arc::clone(&parent_dead);
     thread::spawn(move || {
@@ -265,7 +370,9 @@ fn supervise() -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let stdout = String::from_utf8_lossy(&stdout_buf.lock().expect("stdout")).into_owned();
     let stderr = String::from_utf8_lossy(&stderr_buf.lock().expect("stderr")).into_owned();
-    let helper = if opts.mode == "exec" {
+    // Verifier stdout is the script stream. Parsing it into `helper` let a
+    // failing script store a second copy of that stream and blow the result cap.
+    let helper = if opts.mode == "exec" || opts.mode == "verifier" {
         Value::Null
     } else {
         serde_json::from_str(&stdout).unwrap_or(Value::Null)
@@ -285,7 +392,7 @@ fn supervise() -> Result<(), String> {
     } else if disposition == "exited" && !status.success() {
         disposition = "runtime_failure".into();
     }
-    let settle = if opts.mode == "exec" {
+    let settle = if opts.mode == "exec" || opts.mode == "verifier" {
         true
     } else {
         match helper.get("ok").and_then(Value::as_bool) {
@@ -294,7 +401,7 @@ fn supervise() -> Result<(), String> {
             None => false,
         }
     };
-    let result = json!({
+    let mut result = json!({
         "disposition": disposition,
         "exitCode": status.code(),
         "stdout": stdout,
@@ -309,7 +416,69 @@ fn supervise() -> Result<(), String> {
         "quiescenceProven": quiescence.proven,
         "quiescenceReason": quiescence.reason,
     });
+    if opts.mode == "verifier" {
+        let stdout_sha = stdout_hash
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let stderr_sha = stderr_hash
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        if let Some(object) = result.as_object_mut() {
+            let stdout_bytes = stdout_buf
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default();
+            let stderr_bytes = stderr_buf
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default();
+            object.insert("stdout".to_string(), json!(""));
+            object.insert("stderr".to_string(), json!(""));
+            object.insert(
+                "stdoutB64".to_string(),
+                json!(super::b64_encode(&stdout_bytes)),
+            );
+            object.insert(
+                "stderrB64".to_string(),
+                json!(super::b64_encode(&stderr_bytes)),
+            );
+            object.insert("stdoutSha256".to_string(), json!(stdout_sha));
+            object.insert("stderrSha256".to_string(), json!(stderr_sha));
+            object.insert("helper".to_string(), Value::Null);
+            object.insert("etcBinds".to_string(), json!(host_binds.etc_present));
+            if let Some(path) = host_binds.linker_missing.take() {
+                object.insert("linkerMissing".to_string(), json!(path));
+            }
+            // The launcher's own exit must be clean. A signalled relay, or a
+            // Bubblewrap status other than 0, drops the record.
+            let wait = read_script_wait(status.code() == Some(0), host_binds.wait_read.take());
+            if let Some(path) = host_binds.wait_path.take() {
+                let _ = fs::remove_file(path);
+            }
+            if let Some(wait) = wait {
+                object.insert("scriptStatus".to_string(), json!(true));
+                object.insert("scriptSignaled".to_string(), json!(wait.signaled));
+                object.insert("scriptSignal".to_string(), json!(wait.signal));
+                object.insert("scriptExited".to_string(), json!(wait.exited));
+                object.insert(
+                    "scriptExit".to_string(),
+                    if wait.exited {
+                        json!(wait.code)
+                    } else {
+                        Value::Null
+                    },
+                );
+            } else {
+                object.insert("scriptStatus".to_string(), json!(false));
+            }
+        }
+    }
     write_result(&opts.result, &result)?;
+    if let Some(path) = host_binds.cargo_home_scratch.take() {
+        let _ = fs::remove_dir_all(path);
+    }
     println!("DONE");
     let _ = std::io::stdout().flush();
     Ok(())
@@ -460,6 +629,429 @@ fn spawn_sandbox(opts: &SuperviseOpts) -> Result<std::process::Child, String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("cannot spawn sandbox launcher: {error}"))
+}
+
+/// Allowlisted `/etc` entries the verifier may bind. No wildcards.
+pub(crate) const VERIFIER_ETC_ALLOWLIST: &[&str] = &[
+    ETC_ALTERNATIVES,
+    ETC_LD_SO_CACHE,
+    ETC_LD_SO_CONF,
+    ETC_LD_SO_CONF_D,
+];
+
+const ETC_ALTERNATIVES: &str = "/etc/alternatives";
+const ETC_LD_SO_CACHE: &str = "/etc/ld.so.cache";
+const ETC_LD_SO_CONF: &str = "/etc/ld.so.conf";
+const ETC_LD_SO_CONF_D: &str = "/etc/ld.so.conf.d";
+
+struct VerifierHostBinds {
+    etc_present: Vec<String>,
+    linker_missing: Option<String>,
+    /// Writable empty `CARGO_HOME`. Removed after the sandbox exits.
+    cargo_home_scratch: Option<PathBuf>,
+    /// Read end of the wait fifo. `O_CLOEXEC`, so the sandbox never inherits it.
+    wait_read: Option<File>,
+    wait_path: Option<PathBuf>,
+}
+
+impl VerifierHostBinds {
+    fn empty() -> Self {
+        Self {
+            etc_present: Vec::new(),
+            linker_missing: None,
+            cargo_home_scratch: None,
+            wait_read: None,
+            wait_path: None,
+        }
+    }
+}
+
+/// Allowlisted `/etc` paths that exist on `root` now. `--ro-bind-try` skips a
+/// missing source without saying so, so the evidence records this list.
+pub(crate) fn present_etc_binds(root: &Path) -> Vec<String> {
+    VERIFIER_ETC_ALLOWLIST
+        .iter()
+        .filter(|path| root.join(path.trim_start_matches('/')).exists())
+        .map(|path| (*path).to_string())
+        .collect()
+}
+
+/// First sandbox path in the `cc` symlink chain that this profile cannot see.
+///
+/// `root` is the host directory that corresponds to the sandbox `/`. Production
+/// passes `/`. A target outside the read-only `/usr` bind and the present
+/// allowlist is returned as that path; the profile is not widened to cover it.
+pub(crate) fn unresolved_sandbox_cc(
+    root: &Path,
+    toolchain: &Path,
+    present_etc: &[String],
+) -> Option<String> {
+    let candidates = [
+        PathBuf::from("/toolchain/bin/cc"),
+        PathBuf::from("/usr/bin/cc"),
+        PathBuf::from("/bin/cc"),
+    ];
+    let mut current = None;
+    for candidate in &candidates {
+        if fs::symlink_metadata(host_path(root, candidate, toolchain)).is_ok() {
+            current = Some(candidate.clone());
+            break;
+        }
+    }
+    let mut current = current.unwrap_or_else(|| PathBuf::from("/usr/bin/cc"));
+    if fs::symlink_metadata(host_path(root, &current, toolchain)).is_err() {
+        return Some(current.display().to_string());
+    }
+    for _ in 0..32 {
+        if !sandbox_visible(&current, present_etc) {
+            return Some(current.display().to_string());
+        }
+        let host = host_path(root, &current, toolchain);
+        let meta = match fs::symlink_metadata(&host) {
+            Ok(meta) => meta,
+            Err(_) => return Some(current.display().to_string()),
+        };
+        if !meta.file_type().is_symlink() {
+            return None;
+        }
+        let target = match fs::read_link(&host) {
+            Ok(target) => target,
+            Err(_) => return Some(current.display().to_string()),
+        };
+        let next = if target.is_absolute() {
+            target
+        } else {
+            current.parent().unwrap_or(Path::new("/")).join(target)
+        };
+        current = normalize_abs(&next);
+        if fs::symlink_metadata(host_path(root, &current, toolchain)).is_err() {
+            return Some(current.display().to_string());
+        }
+    }
+    Some(current.display().to_string())
+}
+
+fn sandbox_visible(path: &Path, present_etc: &[String]) -> bool {
+    let text = path.to_string_lossy();
+    const ROOTS: &[&str] = &[
+        "/usr",
+        "/bin",
+        "/lib",
+        "/lib64",
+        "/toolchain",
+        "/tmp",
+        "/proc",
+        "/dev",
+        "/workspace",
+        "/cargo-home",
+        "/rustup",
+        "/cargo-target",
+    ];
+    if ROOTS.iter().any(|root| covers(root, &text)) {
+        return true;
+    }
+    present_etc.iter().any(|root| covers(root, &text))
+}
+
+fn covers(root: &str, path: &str) -> bool {
+    path == root || path.starts_with(&format!("{root}/"))
+}
+
+fn host_path(root: &Path, sandbox: &Path, toolchain: &Path) -> PathBuf {
+    let logical = normalize_abs(sandbox);
+    let text = logical.to_string_lossy();
+    if let Some(rest) = text.strip_prefix("/toolchain") {
+        let rel = rest.trim_start_matches('/');
+        return if rel.is_empty() {
+            toolchain.to_path_buf()
+        } else {
+            toolchain.join(rel)
+        };
+    }
+    let mapped = if let Some(rest) = strip_sandbox_prefix(&text, "/bin") {
+        PathBuf::from("/usr/bin").join(rest)
+    } else if let Some(rest) = strip_sandbox_prefix(&text, "/lib64") {
+        PathBuf::from("/usr/lib64").join(rest)
+    } else if let Some(rest) = strip_sandbox_prefix(&text, "/lib") {
+        PathBuf::from("/usr/lib").join(rest)
+    } else {
+        logical
+    };
+    if root == Path::new("/") {
+        mapped
+    } else {
+        root.join(mapped.strip_prefix("/").unwrap_or(mapped.as_path()))
+    }
+}
+
+fn strip_sandbox_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    path.strip_prefix(prefix)
+        .map(|rest| rest.trim_start_matches('/'))
+}
+
+fn normalize_abs(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::RootDir => out.push("/"),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::Normal(part) => out.push(part),
+            std::path::Component::Prefix(_) => {}
+        }
+    }
+    if out.as_os_str().is_empty() {
+        PathBuf::from("/")
+    } else {
+        out
+    }
+}
+
+fn spawn_confined(
+    opts: &SuperviseOpts,
+) -> Result<(std::process::Child, VerifierHostBinds), String> {
+    if opts.mode == "verifier" {
+        spawn_verifier_sandbox(opts)
+    } else {
+        spawn_sandbox(opts).map(|child| (child, VerifierHostBinds::empty()))
+    }
+}
+
+/// Second profile, used only by the host verifier. The exec profile above is unchanged.
+///
+/// The worktree directory is bound read-only, so a tracked symlink stays a symlink.
+/// The toolchain, `CARGO_HOME`, and `RUSTUP_HOME` are read-only. `CARGO_TARGET_DIR`
+/// is a host directory outside the tree and is the only writable bind. `/usr` is
+/// read-only. The linker paths below are the only `/etc` entries, each with
+/// `--ro-bind-try`.
+fn spawn_verifier_sandbox(
+    opts: &SuperviseOpts,
+) -> Result<(std::process::Child, VerifierHostBinds), String> {
+    let cargo_home = opts
+        .cargo_home
+        .as_ref()
+        .ok_or("verifier sandbox requires --cargo-home")?;
+    let rustup_home = opts
+        .rustup_home
+        .as_ref()
+        .ok_or("verifier sandbox requires --rustup-home")?;
+    let toolchain = opts
+        .toolchain
+        .as_ref()
+        .ok_or("verifier sandbox requires --toolchain")?;
+    let target_dir = opts
+        .target_dir
+        .as_ref()
+        .ok_or("verifier sandbox requires --target-dir")?;
+    let cpu_seconds = opts
+        .cpu_seconds
+        .ok_or("verifier sandbox requires --cpu-seconds")?;
+    let cpu = format!("--cpu={cpu_seconds}:{cpu_seconds}");
+    let (wait_path, wait_read) = open_wait_fifo(&opts.status)?;
+    let mut command = Command::new(&opts.helper);
+    command
+        .arg("join")
+        .arg("--cgroup")
+        .arg(&opts.cgroup)
+        .arg("--");
+    command
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg("exec 3>\"$1\"; exec 4>\"$2\"; shift 2; exec \"$@\"");
+    command
+        .arg("sandbox")
+        .arg(&opts.status)
+        .arg(&wait_path)
+        .arg("/usr/bin/prlimit");
+    command.args([
+        "--fsize=2147483648:2147483648",
+        cpu.as_str(),
+        "--nofile=4096:4096",
+        "--core=0:0",
+        "--",
+    ]);
+    command.arg(&opts.bwrap);
+    command.args([
+        "--unshare-user",
+        "--disable-userns",
+        "--assert-userns-disabled",
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--unshare-cgroup",
+        "--cap-drop",
+        "ALL",
+        "--die-with-parent",
+        "--new-session",
+        "--json-status-fd",
+        "3",
+        "--clearenv",
+        "--setenv",
+        "PATH",
+        "/toolchain/bin:/usr/bin:/bin",
+        "--setenv",
+        "LANG",
+        "C",
+        "--setenv",
+        "CARGO_HOME",
+        "/cargo-home",
+        "--setenv",
+        "RUSTUP_HOME",
+        "/rustup",
+        "--setenv",
+        "CARGO_TARGET_DIR",
+        "/cargo-target",
+        "--setenv",
+        "CARGO_NET_OFFLINE",
+        "true",
+        "--setenv",
+        "SWITCHYARD_SANDBOX",
+        "1",
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--symlink",
+        "usr/bin",
+        "/bin",
+        "--symlink",
+        "usr/lib",
+        "/lib",
+        "--symlink",
+        "usr/lib64",
+        "/lib64",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--size",
+        "1073741824",
+        "--tmpfs",
+        "/tmp",
+    ]);
+    let mut etc_present = present_etc_binds(Path::new("/"));
+    if std::env::var_os("SWITCHYARD_OMIT_LINKER").is_some() {
+        etc_present.retain(|path| path != ETC_ALTERNATIVES);
+    }
+    let linker_missing = unresolved_sandbox_cc(Path::new("/"), toolchain, &etc_present);
+    // /etc/alternatives: /usr/bin/cc is an alternatives symlink.
+    if etc_present.iter().any(|path| path == ETC_ALTERNATIVES) {
+        command.args(["--ro-bind-try", ETC_ALTERNATIVES, ETC_ALTERNATIVES]);
+    }
+    // /etc/ld.so.cache: the dynamic linker reads this cache.
+    command.args(["--ro-bind-try", ETC_LD_SO_CACHE, ETC_LD_SO_CACHE]);
+    // /etc/ld.so.conf: names the directories the linker searches.
+    command.args(["--ro-bind-try", ETC_LD_SO_CONF, ETC_LD_SO_CONF]);
+    // /etc/ld.so.conf.d: holds the linker configuration fragments.
+    command.args(["--ro-bind-try", ETC_LD_SO_CONF_D, ETC_LD_SO_CONF_D]);
+    command.arg("--ro-bind").arg(toolchain).arg("/toolchain");
+    // Empty CARGO_HOME. Host registry/ and git/ are the only cargo binds, read-only.
+    let cargo_scratch = empty_cargo_home()?;
+    command.arg("--bind").arg(&cargo_scratch).arg("/cargo-home");
+    let registry = cargo_home.join("registry");
+    if registry.is_dir() {
+        command
+            .arg("--ro-bind")
+            .arg(&registry)
+            .arg("/cargo-home/registry");
+    }
+    let git_cache = cargo_home.join("git");
+    if git_cache.is_dir() {
+        command
+            .arg("--ro-bind")
+            .arg(&git_cache)
+            .arg("/cargo-home/git");
+    }
+    command.arg("--ro-bind").arg(rustup_home).arg("/rustup");
+    command.arg("--bind").arg(target_dir).arg("/cargo-target");
+    command.arg("--ro-bind").arg(&opts.helper).arg("/helper");
+    command
+        .arg("--ro-bind")
+        .arg(&opts.workspace)
+        .arg("/workspace");
+    command
+        .arg("--ro-bind")
+        .arg(&opts.marker)
+        .arg("/workspace/.git");
+    command.args(["--chdir", "/workspace", "--remount-ro", "/", "--"]);
+    if opts.argv.is_empty() {
+        let _ = fs::remove_dir_all(&cargo_scratch);
+        let _ = fs::remove_file(&wait_path);
+        return Err("verifier sandbox command is empty".into());
+    }
+    command
+        .arg("/helper")
+        .arg("relay-wait")
+        .arg("--wait-fd")
+        .arg("4")
+        .arg("--")
+        .args(&opts.argv);
+    let child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            let _ = fs::remove_dir_all(&cargo_scratch);
+            let _ = fs::remove_file(&wait_path);
+            format!("cannot spawn verifier sandbox: {error}")
+        })?;
+    Ok((
+        child,
+        VerifierHostBinds {
+            etc_present,
+            linker_missing,
+            cargo_home_scratch: Some(cargo_scratch),
+            wait_read: Some(wait_read),
+            wait_path: Some(wait_path),
+        },
+    ))
+}
+
+/// Host-side read end of the wait fifo. Opened before spawn so the launcher's
+/// write open does not block, and `O_CLOEXEC` so the sandbox cannot inherit it.
+fn open_wait_fifo(status: &Path) -> Result<(PathBuf, File), String> {
+    let path = status.with_extension("wait");
+    rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        &path,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )
+    .map_err(|error| format!("wait fifo: {error}"))?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(&path)
+        .map_err(|error| {
+            let _ = fs::remove_file(&path);
+            format!("wait fifo read: {error}")
+        })?;
+    use std::os::fd::AsFd;
+    let flags = rustix::io::fcntl_getfd(file.as_fd()).map_err(|error| {
+        let _ = fs::remove_file(&path);
+        format!("wait fifo flags: {error}")
+    })?;
+    if !flags.contains(rustix::io::FdFlags::CLOEXEC) {
+        let _ = fs::remove_file(&path);
+        return Err("wait fifo read is inheritable".into());
+    }
+    Ok((path, file))
+}
+
+fn empty_cargo_home() -> Result<PathBuf, String> {
+    let path = std::env::temp_dir().join(format!(
+        "switchyard-cargo-home-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(&path)
+        .map_err(|error| format!("cannot create an empty CARGO_HOME: {error}"))?;
+    Ok(path)
 }
 
 fn file_op() -> Result<(), String> {
@@ -770,6 +1362,87 @@ fn hash(bytes: &[u8]) -> String {
     format!("sha256:{}", crate::canonical::sha256_hex(bytes))
 }
 
+/// One relay line, and only when the launcher itself exited 0.
+fn read_script_wait(launcher_clean: bool, wait_read: Option<File>) -> Option<super::WaitRecord> {
+    if !launcher_clean {
+        return None;
+    }
+    let mut file = wait_read?;
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 256];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                bytes.extend_from_slice(&buf[..n]);
+                if bytes.len() > 128 {
+                    return None;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(_) => return None,
+        }
+    }
+    super::parse_wait_record(&bytes)
+}
+
+fn drain_hashed(
+    mut reader: impl Read,
+    cap: usize,
+    truncated: &AtomicBool,
+    out: &Mutex<Vec<u8>>,
+    hash_out: &Mutex<String>,
+) {
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    let mut total = 0usize;
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                hasher.update(&buf[..n]);
+                push_tail(out, &buf[..n]);
+                total += n;
+                if total > cap {
+                    truncated.store(true, Ordering::Relaxed);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => {
+                truncated.store(true, Ordering::Relaxed);
+                break;
+            }
+        }
+    }
+    if let Ok(mut slot) = hash_out.lock() {
+        *slot = sha256_prefixed(hasher.finalize().as_slice());
+    } else {
+        truncated.store(true, Ordering::Relaxed);
+    }
+}
+
+fn push_tail(out: &Mutex<Vec<u8>>, bytes: &[u8]) {
+    let Ok(mut guard) = out.lock() else {
+        return;
+    };
+    guard.extend_from_slice(bytes);
+    if guard.len() > super::VERIFIER_TAIL_BYTES {
+        let drop_n = guard.len() - super::VERIFIER_TAIL_BYTES;
+        guard.drain(..drop_n);
+    }
+}
+
+fn sha256_prefixed(digest: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::from("sha256:");
+    for byte in digest {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
+}
+
 fn drain(mut reader: impl Read, cap: usize, truncated: &AtomicBool, out: &Mutex<Vec<u8>>) {
     let mut buf = [0u8; 8192];
     let mut total = 0usize;
@@ -807,6 +1480,11 @@ fn parse_supervise() -> Result<SuperviseOpts, String> {
     let mut request = None;
     let mut result = None;
     let mut fail_launch = false;
+    let mut cargo_home = None;
+    let mut rustup_home = None;
+    let mut toolchain = None;
+    let mut target_dir = None;
+    let mut cpu_seconds = None;
     while let Some(flag) = args.next() {
         if flag == "--" {
             break;
@@ -834,6 +1512,17 @@ fn parse_supervise() -> Result<SuperviseOpts, String> {
             "--fail-launch" => {
                 fail_launch = value == "1" || value == "true";
             }
+            "--cargo-home" => cargo_home = Some(PathBuf::from(value)),
+            "--rustup-home" => rustup_home = Some(PathBuf::from(value)),
+            "--toolchain" => toolchain = Some(PathBuf::from(value)),
+            "--target-dir" => target_dir = Some(PathBuf::from(value)),
+            "--cpu-seconds" => {
+                cpu_seconds = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| "cpu-seconds is not an integer")?,
+                );
+            }
             _ => return Err(format!("unknown supervise flag {flag}")),
         }
     }
@@ -850,6 +1539,11 @@ fn parse_supervise() -> Result<SuperviseOpts, String> {
         result: result.ok_or("missing --result")?,
         argv: args.collect(),
         fail_launch,
+        cargo_home,
+        rustup_home,
+        toolchain,
+        target_dir,
+        cpu_seconds,
     })
 }
 
@@ -896,13 +1590,14 @@ fn limit_reason(path: &Path) -> Option<&'static str> {
 }
 
 fn event_value(path: &Path, key: &str) -> u64 {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                let (name, value) = line.split_once(' ')?;
-                (name == key).then(|| value.parse().ok()).flatten()
-            })
+    let text = fs::read_to_string(path).unwrap_or_default();
+    if key == "oom_kill" {
+        return super::memory_events_oom_kill(&text);
+    }
+    text.lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(' ')?;
+            (name == key).then(|| value.parse().ok()).flatten()
         })
         .unwrap_or(0)
 }
@@ -947,4 +1642,101 @@ fn cancelled_result(reason: &str, events: &str) -> Value {
         "helper": Value::Null,
         "quiescenceReason": events,
     })
+}
+
+#[cfg(all(test, unix))]
+mod etc_bind_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn scratch() -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "switchyard-etc-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn touch(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"x").unwrap();
+    }
+
+    #[test]
+    fn allowlist_is_the_four_linker_paths_without_wildcards() {
+        assert_eq!(
+            VERIFIER_ETC_ALLOWLIST,
+            [
+                "/etc/alternatives",
+                "/etc/ld.so.cache",
+                "/etc/ld.so.conf",
+                "/etc/ld.so.conf.d",
+            ]
+        );
+        assert!(
+            VERIFIER_ETC_ALLOWLIST
+                .iter()
+                .all(|path| !path.contains('*'))
+        );
+    }
+
+    #[test]
+    fn present_etc_binds_records_only_paths_that_exist() {
+        let root = scratch();
+        fs::create_dir_all(root.join("etc/alternatives")).unwrap();
+        touch(&root.join("etc/ld.so.conf"));
+        touch(&root.join("etc/passwd"));
+        let present = present_etc_binds(&root);
+        assert_eq!(
+            present,
+            vec![
+                "/etc/alternatives".to_string(),
+                "/etc/ld.so.conf".to_string()
+            ]
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unresolved_cc_names_the_path_the_profile_does_not_bind() {
+        let root = scratch();
+        let toolchain = root.join("toolchains/stable");
+        fs::create_dir_all(toolchain.join("bin")).unwrap();
+        fs::create_dir_all(root.join("usr/bin")).unwrap();
+        fs::create_dir_all(root.join("etc/alternatives")).unwrap();
+        symlink("/etc/alternatives/cc", root.join("usr/bin/cc")).unwrap();
+        symlink("/usr/bin/gcc", root.join("etc/alternatives/cc")).unwrap();
+        touch(&root.join("usr/bin/gcc"));
+        assert_eq!(
+            unresolved_sandbox_cc(&root, &toolchain, &[]).as_deref(),
+            Some("/etc/alternatives/cc")
+        );
+        let present = vec!["/etc/alternatives".into()];
+        assert_eq!(unresolved_sandbox_cc(&root, &toolchain, &present), None);
+        fs::remove_file(root.join("etc/alternatives/cc")).unwrap();
+        symlink("/opt/cc", root.join("etc/alternatives/cc")).unwrap();
+        touch(&root.join("opt/cc"));
+        assert_eq!(
+            unresolved_sandbox_cc(&root, &toolchain, &present).as_deref(),
+            Some("/opt/cc")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unresolved_cc_reports_usr_bin_cc_when_nothing_provides_it() {
+        let root = scratch();
+        let toolchain = root.join("toolchains/stable");
+        fs::create_dir_all(&toolchain).unwrap();
+        assert_eq!(
+            unresolved_sandbox_cc(&root, &toolchain, &[]).as_deref(),
+            Some("/usr/bin/cc")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
 }
