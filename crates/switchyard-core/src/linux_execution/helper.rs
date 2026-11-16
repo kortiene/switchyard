@@ -513,7 +513,9 @@ fn spawn_confined(opts: &SuperviseOpts) -> Result<std::process::Child, String> {
 ///
 /// The worktree directory is bound read-only, so a tracked symlink stays a symlink.
 /// The toolchain, `CARGO_HOME`, and `RUSTUP_HOME` are read-only. `CARGO_TARGET_DIR`
-/// is a host directory outside the tree and is the only writable bind.
+/// is a host directory outside the tree and is the only writable bind. `/usr` and
+/// `/etc` are read-only so the system linker resolves: `/usr/bin/cc` is an
+/// alternatives symlink, and without `/etc` rustc reports `linker cc not found`.
 fn spawn_verifier_sandbox(opts: &SuperviseOpts) -> Result<std::process::Child, String> {
     let cargo_home = opts
         .cargo_home
@@ -597,6 +599,9 @@ fn spawn_verifier_sandbox(opts: &SuperviseOpts) -> Result<std::process::Child, S
         "--ro-bind",
         "/usr",
         "/usr",
+        "--ro-bind",
+        "/etc",
+        "/etc",
         "--symlink",
         "usr/bin",
         "/bin",

@@ -236,7 +236,7 @@ fn host_verifier_confined_sleep_past_the_deadline_is_incomplete() {
     host.enable_linux_execution(linux_config(None)).unwrap();
     host.verifier_deadline_ms = Some(15_000);
     let (snap, outcome) = host.verify_mission(&id).unwrap();
-    assert_eq!(outcome, "incomplete");
+    assert_eq!(outcome, "incomplete", "{}", evidence(&db, &id));
     assert_eq!(snap.phase, Phase::NeedsAttention);
     assert_eq!(
         snap.attention_reason.as_deref(),
@@ -287,7 +287,7 @@ fn host_verifier_confined_mutation_during_the_run_is_incomplete() {
     });
     let (snap, outcome) = host.verify_mission(&id).unwrap();
     watcher.join().unwrap();
-    assert_eq!(outcome, "incomplete", "{snap:?}");
+    assert_eq!(outcome, "incomplete", "{}\n{snap:?}", evidence(&db, &id));
     assert_eq!(snap.phase, Phase::NeedsAttention);
 }
 
