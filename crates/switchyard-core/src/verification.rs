@@ -13,6 +13,8 @@ pub struct NewVerification {
     pub collector: VerificationCollector,
     /// Extra `body_json` fields for a host-run row. Notify rows leave this empty.
     pub host_fields: Option<Value>,
+    /// Extra `provenance_json` fields merged into the collector object.
+    pub provenance_extra: Option<Value>,
 }
 
 /// Who collected a new evidence row. Historical rows are not rewritten.
@@ -24,6 +26,15 @@ pub enum VerificationCollector {
     HostVerifier,
 }
 
+impl VerificationCollector {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::RuntimeObservation => "runtime-observation",
+            Self::HostVerifier => "switchyard-host-verifier",
+        }
+    }
+}
+
 impl NewVerification {
     pub fn provenance(&self) -> Value {
         match self.collector {
@@ -31,9 +42,20 @@ impl NewVerification {
                 "collector": "runtime-observation",
                 "runtimeClaim": true
             }),
-            VerificationCollector::HostVerifier => json!({
-                "collector": "switchyard-host-verifier"
-            }),
+            VerificationCollector::HostVerifier => {
+                let mut document = json!({
+                    "collector": "switchyard-host-verifier"
+                });
+                if let (Some(extra), Some(dest)) =
+                    (self.provenance_extra.as_ref(), document.as_object_mut())
+                    && let Some(src) = extra.as_object()
+                {
+                    for (key, value) in src {
+                        dest.insert(key.clone(), value.clone());
+                    }
+                }
+                document
+            }
         }
     }
 

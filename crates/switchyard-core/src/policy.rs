@@ -335,11 +335,16 @@ fn revalidate_resume(mission: &MissionRecord, facts: &Facts, target: Phase) -> R
 }
 
 fn require_pass(mission: &MissionRecord, facts: &Facts) -> Result<()> {
+    let host_collector = !verifier_executes(mission)
+        || facts.verification.as_ref().is_some_and(|verification| {
+            verification.collector.as_deref() == Some("switchyard-host-verifier")
+        });
     match &facts.verification {
         Some(verification)
             if verification.outcome == VerificationOutcome::Pass
                 && verification.complete
-                && verification.content_digest == mission.content_digest =>
+                && verification.content_digest == mission.content_digest
+                && host_collector =>
         {
             Ok(())
         }
@@ -347,6 +352,15 @@ fn require_pass(mission: &MissionRecord, facts: &Facts) -> Result<()> {
             "complete PASS evidence for the current content is required",
         )),
     }
+}
+
+/// `executes: true` on the frozen verifier. A document that does not parse
+/// does not turn the collector check on.
+fn verifier_executes(mission: &MissionRecord) -> bool {
+    crate::freeze::parse_object(&mission.attempt.verifier_json, "verifier definition")
+        .ok()
+        .and_then(|doc| doc.get("executes").and_then(serde_json::Value::as_bool))
+        == Some(true)
 }
 
 fn require_repairable_fail(mission: &MissionRecord, facts: &Facts) -> Result<()> {
@@ -678,6 +692,7 @@ mod tests {
                 outcome: VerificationOutcome::Fail,
                 content_digest: "digest-1".into(),
                 complete: true,
+                collector: None,
             }),
             ..Facts::default()
         };
@@ -734,6 +749,7 @@ mod tests {
                 outcome: VerificationOutcome::Pass,
                 content_digest: "digest-new".into(),
                 complete: true,
+                collector: None,
             }),
             ..Facts::default()
         };

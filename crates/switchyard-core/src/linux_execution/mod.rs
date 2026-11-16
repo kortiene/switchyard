@@ -18,6 +18,8 @@ pub const EXEC_CANCEL_SCOPE: &str = "linux.exec.cancel.v1";
 
 pub const MAX_FILE_BYTES: usize = 64 * 1024;
 pub const EXEC_OUTPUT_CAP: usize = 64 * 1024;
+/// Verifier stdout and stderr tail. Matches the frozen document's output cap.
+pub const VERIFIER_OUTPUT_CAP: usize = 1024 * 1024;
 pub const MAX_DEADLINE_MS: i64 = 60_000;
 /// Reviewed Bubblewrap package. The helper, the host, and receipts share this pin.
 pub const BUBBLEWRAP_VERSION: &str = "0.9.0";

@@ -1392,7 +1392,7 @@ impl Store {
     pub fn latest_verification(&self, mission_id: &str) -> Result<Option<VerificationFact>> {
         self.conn
             .query_row(
-                "SELECT v.outcome, v.content_digest, e.completeness
+                "SELECT v.outcome, v.content_digest, e.completeness, e.provenance_json
                  FROM verifications v
                  JOIN evidence e ON e.id = v.evidence_id
                  WHERE v.mission_id = ?1 AND v.invalidated = 0
@@ -1403,16 +1403,27 @@ impl Store {
                     let outcome: String = row.get(0)?;
                     let content_digest: String = row.get(1)?;
                     let completeness: String = row.get(2)?;
-                    Ok((outcome, content_digest, completeness))
+                    let provenance: String = row.get(3)?;
+                    Ok((outcome, content_digest, completeness, provenance))
                 },
             )
             .optional()
             .map_err(Error::storage)?
-            .map(|(outcome, content_digest, completeness)| {
+            .map(|(outcome, content_digest, completeness, provenance)| {
+                let collector =
+                    serde_json::from_str::<Value>(&provenance)
+                        .ok()
+                        .and_then(|document| {
+                            document
+                                .get("collector")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        });
                 Ok(VerificationFact {
                     outcome: outcome.parse()?,
                     content_digest,
                     complete: completeness.parse::<Completeness>()? == Completeness::Complete,
+                    collector,
                 })
             })
             .transpose()

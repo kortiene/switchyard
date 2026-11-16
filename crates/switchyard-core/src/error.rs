@@ -103,7 +103,8 @@ pub enum Error {
     #[error("verification must be collected by the host verifier")]
     VerificationNotHostRun,
 
-    /// The path gate passed. This slice does not run the verifier.
+    /// The path gate passed, and this host cannot run the confined verifier.
+    /// Nothing runs unconfined.
     #[error("verifier confinement is not available")]
     VerifierConfinementUnavailable,
 

@@ -11,8 +11,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+use sha2::{Digest, Sha256};
+
 use super::cgroup::{self, CgroupIdentity};
-use super::{EXEC_OUTPUT_CAP, MAX_FILE_BYTES};
+use super::{EXEC_OUTPUT_CAP, MAX_FILE_BYTES, VERIFIER_OUTPUT_CAP};
 
 pub fn helper_main() {
     if let Err(error) = dispatch() {
@@ -121,6 +123,11 @@ struct SuperviseOpts {
     result: PathBuf,
     argv: Vec<String>,
     fail_launch: bool,
+    cargo_home: Option<PathBuf>,
+    rustup_home: Option<PathBuf>,
+    toolchain: Option<PathBuf>,
+    target_dir: Option<PathBuf>,
+    cpu_seconds: Option<u64>,
 }
 
 fn supervise() -> Result<(), String> {
@@ -137,7 +144,7 @@ fn supervise() -> Result<(), String> {
         println!("DONE");
         return Ok(());
     }
-    let mut child = match spawn_sandbox(&opts) {
+    let mut child = match spawn_confined(&opts) {
         Ok(child) => child,
         Err(error) => {
             let quiescence = cgroup::kill_and_prove(&identity, Duration::from_secs(2))
@@ -167,18 +174,36 @@ fn supervise() -> Result<(), String> {
     let stderr_truncated = Arc::new(AtomicBool::new(false));
     let stdout_buf = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::new()));
-    let cap = if opts.mode == "exec" {
-        EXEC_OUTPUT_CAP
-    } else {
+    let cap = match opts.mode.as_str() {
+        "exec" => EXEC_OUTPUT_CAP,
+        "verifier" => VERIFIER_OUTPUT_CAP,
         // serde_json turns one byte into `\u00XX` (6 bytes), plus the envelope.
-        MAX_FILE_BYTES * 6 + 8 * 1024
+        _ => MAX_FILE_BYTES * 6 + 8 * 1024,
     };
+    let stdout_hash = Arc::new(Mutex::new(String::new()));
+    let stderr_hash = Arc::new(Mutex::new(String::new()));
     let stdout_flag = Arc::clone(&stdout_truncated);
     let stdout_out = Arc::clone(&stdout_buf);
-    let stdout_thread = thread::spawn(move || drain(stdout, cap, &stdout_flag, &stdout_out));
+    let stdout_digest = Arc::clone(&stdout_hash);
+    let verifier_stdout = opts.mode == "verifier";
+    let stdout_thread = thread::spawn(move || {
+        if verifier_stdout {
+            drain_hashed(stdout, cap, &stdout_flag, &stdout_out, &stdout_digest);
+        } else {
+            drain(stdout, cap, &stdout_flag, &stdout_out);
+        }
+    });
     let stderr_flag = Arc::clone(&stderr_truncated);
     let stderr_out = Arc::clone(&stderr_buf);
-    let stderr_thread = thread::spawn(move || drain(stderr, cap, &stderr_flag, &stderr_out));
+    let stderr_digest = Arc::clone(&stderr_hash);
+    let verifier_stderr = opts.mode == "verifier";
+    let stderr_thread = thread::spawn(move || {
+        if verifier_stderr {
+            drain_hashed(stderr, cap, &stderr_flag, &stderr_out, &stderr_digest);
+        } else {
+            drain(stderr, cap, &stderr_flag, &stderr_out);
+        }
+    });
     let parent_dead = Arc::new(AtomicBool::new(false));
     let dead_flag = Arc::clone(&parent_dead);
     thread::spawn(move || {
@@ -294,7 +319,7 @@ fn supervise() -> Result<(), String> {
             None => false,
         }
     };
-    let result = json!({
+    let mut result = json!({
         "disposition": disposition,
         "exitCode": status.code(),
         "stdout": stdout,
@@ -309,6 +334,20 @@ fn supervise() -> Result<(), String> {
         "quiescenceProven": quiescence.proven,
         "quiescenceReason": quiescence.reason,
     });
+    if opts.mode == "verifier" {
+        let stdout_sha = stdout_hash
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let stderr_sha = stderr_hash
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        if let Some(object) = result.as_object_mut() {
+            object.insert("stdoutSha256".to_string(), json!(stdout_sha));
+            object.insert("stderrSha256".to_string(), json!(stderr_sha));
+        }
+    }
     write_result(&opts.result, &result)?;
     println!("DONE");
     let _ = std::io::stdout().flush();
@@ -460,6 +499,145 @@ fn spawn_sandbox(opts: &SuperviseOpts) -> Result<std::process::Child, String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("cannot spawn sandbox launcher: {error}"))
+}
+
+fn spawn_confined(opts: &SuperviseOpts) -> Result<std::process::Child, String> {
+    if opts.mode == "verifier" {
+        spawn_verifier_sandbox(opts)
+    } else {
+        spawn_sandbox(opts)
+    }
+}
+
+/// Second profile, used only by the host verifier. The exec profile above is unchanged.
+///
+/// The worktree directory is bound read-only, so a tracked symlink stays a symlink.
+/// The toolchain, `CARGO_HOME`, and `RUSTUP_HOME` are read-only. `CARGO_TARGET_DIR`
+/// is a host directory outside the tree and is the only writable bind.
+fn spawn_verifier_sandbox(opts: &SuperviseOpts) -> Result<std::process::Child, String> {
+    let cargo_home = opts
+        .cargo_home
+        .as_ref()
+        .ok_or("verifier sandbox requires --cargo-home")?;
+    let rustup_home = opts
+        .rustup_home
+        .as_ref()
+        .ok_or("verifier sandbox requires --rustup-home")?;
+    let toolchain = opts
+        .toolchain
+        .as_ref()
+        .ok_or("verifier sandbox requires --toolchain")?;
+    let target_dir = opts
+        .target_dir
+        .as_ref()
+        .ok_or("verifier sandbox requires --target-dir")?;
+    let cpu_seconds = opts
+        .cpu_seconds
+        .ok_or("verifier sandbox requires --cpu-seconds")?;
+    let cpu = format!("--cpu={cpu_seconds}:{cpu_seconds}");
+    let mut command = Command::new(&opts.helper);
+    command
+        .arg("join")
+        .arg("--cgroup")
+        .arg(&opts.cgroup)
+        .arg("--");
+    command
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg("exec 3>\"$1\"; shift; exec \"$@\"");
+    command
+        .arg("sandbox")
+        .arg(&opts.status)
+        .arg("/usr/bin/prlimit");
+    command.args([
+        "--fsize=2147483648:2147483648",
+        cpu.as_str(),
+        "--nofile=4096:4096",
+        "--core=0:0",
+        "--",
+    ]);
+    command.arg(&opts.bwrap);
+    command.args([
+        "--unshare-user",
+        "--disable-userns",
+        "--assert-userns-disabled",
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--unshare-cgroup",
+        "--cap-drop",
+        "ALL",
+        "--die-with-parent",
+        "--new-session",
+        "--json-status-fd",
+        "3",
+        "--clearenv",
+        "--setenv",
+        "PATH",
+        "/toolchain/bin:/usr/bin:/bin",
+        "--setenv",
+        "LANG",
+        "C",
+        "--setenv",
+        "CARGO_HOME",
+        "/cargo-home",
+        "--setenv",
+        "RUSTUP_HOME",
+        "/rustup",
+        "--setenv",
+        "CARGO_TARGET_DIR",
+        "/cargo-target",
+        "--setenv",
+        "CARGO_NET_OFFLINE",
+        "true",
+        "--setenv",
+        "SWITCHYARD_SANDBOX",
+        "1",
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--symlink",
+        "usr/bin",
+        "/bin",
+        "--symlink",
+        "usr/lib",
+        "/lib",
+        "--symlink",
+        "usr/lib64",
+        "/lib64",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--size",
+        "1073741824",
+        "--tmpfs",
+        "/tmp",
+    ]);
+    command.arg("--ro-bind").arg(toolchain).arg("/toolchain");
+    command.arg("--ro-bind").arg(cargo_home).arg("/cargo-home");
+    command.arg("--ro-bind").arg(rustup_home).arg("/rustup");
+    command.arg("--bind").arg(target_dir).arg("/cargo-target");
+    command
+        .arg("--ro-bind")
+        .arg(&opts.workspace)
+        .arg("/workspace");
+    command
+        .arg("--ro-bind")
+        .arg(&opts.marker)
+        .arg("/workspace/.git");
+    command.args(["--chdir", "/workspace", "--remount-ro", "/", "--"]);
+    if opts.argv.is_empty() {
+        return Err("verifier sandbox command is empty".into());
+    }
+    command.args(&opts.argv);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("cannot spawn verifier sandbox: {error}"))
 }
 
 fn file_op() -> Result<(), String> {
@@ -770,6 +948,51 @@ fn hash(bytes: &[u8]) -> String {
     format!("sha256:{}", crate::canonical::sha256_hex(bytes))
 }
 
+fn drain_hashed(
+    mut reader: impl Read,
+    cap: usize,
+    truncated: &AtomicBool,
+    out: &Mutex<Vec<u8>>,
+    hash_out: &Mutex<String>,
+) {
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    let mut total = 0usize;
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                hasher.update(&buf[..n]);
+                if total < cap {
+                    let take = n.min(cap - total);
+                    if let Ok(mut guard) = out.lock() {
+                        guard.extend_from_slice(&buf[..take]);
+                    }
+                }
+                total += n;
+                if total > cap {
+                    truncated.store(true, Ordering::Relaxed);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    if let Ok(mut slot) = hash_out.lock() {
+        *slot = sha256_prefixed(hasher.finalize().as_slice());
+    }
+}
+
+fn sha256_prefixed(digest: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::from("sha256:");
+    for byte in digest {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
+}
+
 fn drain(mut reader: impl Read, cap: usize, truncated: &AtomicBool, out: &Mutex<Vec<u8>>) {
     let mut buf = [0u8; 8192];
     let mut total = 0usize;
@@ -807,6 +1030,11 @@ fn parse_supervise() -> Result<SuperviseOpts, String> {
     let mut request = None;
     let mut result = None;
     let mut fail_launch = false;
+    let mut cargo_home = None;
+    let mut rustup_home = None;
+    let mut toolchain = None;
+    let mut target_dir = None;
+    let mut cpu_seconds = None;
     while let Some(flag) = args.next() {
         if flag == "--" {
             break;
@@ -834,6 +1062,17 @@ fn parse_supervise() -> Result<SuperviseOpts, String> {
             "--fail-launch" => {
                 fail_launch = value == "1" || value == "true";
             }
+            "--cargo-home" => cargo_home = Some(PathBuf::from(value)),
+            "--rustup-home" => rustup_home = Some(PathBuf::from(value)),
+            "--toolchain" => toolchain = Some(PathBuf::from(value)),
+            "--target-dir" => target_dir = Some(PathBuf::from(value)),
+            "--cpu-seconds" => {
+                cpu_seconds = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| "cpu-seconds is not an integer")?,
+                );
+            }
             _ => return Err(format!("unknown supervise flag {flag}")),
         }
     }
@@ -850,6 +1089,11 @@ fn parse_supervise() -> Result<SuperviseOpts, String> {
         result: result.ok_or("missing --result")?,
         argv: args.collect(),
         fail_launch,
+        cargo_home,
+        rustup_home,
+        toolchain,
+        target_dir,
+        cpu_seconds,
     })
 }
 

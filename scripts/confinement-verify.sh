@@ -50,3 +50,5 @@ cargo clippy -p switchyard-core -p switchyard --all-targets --features linux-exe
 # S3-A4 execution and S3-A5 supersede tests. Missing delegation fails above;
 # this suite does not skip or run unconfined.
 cargo test -p switchyard --test linux_execution --features linux-execution --locked -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/linux-execution.log"
+# #199b confined host verifier. Same delegation, bubblewrap pin, and helper binary.
+cargo test -p switchyard-core --features linux-execution --locked host_verifier_confined -- --test-threads=1 --nocapture 2>&1 | tee "$SWITCHYARD_CONFINEMENT_EVIDENCE/host-verifier.log"

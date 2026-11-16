@@ -826,6 +826,8 @@ pub struct VerificationFact {
     pub outcome: VerificationOutcome,
     pub content_digest: String,
     pub complete: bool,
+    /// `evidence.provenance_json` collector. Absent when the row has none.
+    pub collector: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
