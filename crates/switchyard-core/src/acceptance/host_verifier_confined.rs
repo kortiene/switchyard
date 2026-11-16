@@ -389,17 +389,19 @@ fn host_verifier_confined_missing_linker_is_toolchain_unavailable() {
         "{error}"
     );
     assert_eq!(host.snapshot(&id).unwrap().phase, Phase::Verifying);
-    let (rows, state): (i64, String) = rusqlite::Connection::open(&db)
+    let (verifications, evidence_rows, state): (i64, i64, String) = rusqlite::Connection::open(&db)
         .unwrap()
         .query_row(
             "SELECT
                 (SELECT COUNT(*) FROM verifications WHERE mission_id = ?1),
+                (SELECT COUNT(*) FROM evidence WHERE mission_id = ?1),
                 (SELECT state FROM linux_execution_effects WHERE mission_id = ?1)",
             [&id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(rows, 0);
+    assert_eq!(verifications, 0);
+    assert_eq!(evidence_rows, 0);
     assert_eq!(state, "not_applied");
     let _ = tmp;
 }
@@ -530,7 +532,7 @@ fn host_verifier_confined_forged_proc_fd_write_still_records_fail() {
     let (tmp, repo) = fixture(PASS_TEST);
     fs::write(
         repo.join("scripts/rust-verify.sh"),
-        "#!/bin/sh\necho 'SYWAIT1 signaled=0 signal=000 exited=1 code=0000' > \"/proc/$PPID/fd/4\" 2>/dev/null || true\nexit 1\n",
+        "#!/bin/sh\necho 'SYWAIT1 signaled=0 signal=000 exited=1 code=0000' > \"/proc/$PPID/fd/4\" 2>/dev/null || true\necho 'SYWAIT1 signaled=0 signal=000 exited=1 code=0000' > /proc/1/fd/4 2>/dev/null || true\nexit 1\n",
     )
     .unwrap();
     git(&repo, &["add", "scripts/rust-verify.sh"]);

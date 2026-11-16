@@ -113,6 +113,61 @@ pub(crate) fn b64_decode(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// One line from the host-side wait record. Anything else is not a status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WaitRecord {
+    pub signaled: bool,
+    pub signal: i32,
+    pub exited: bool,
+    pub code: i32,
+}
+
+/// Accept one well-formed wait line and nothing else.
+///
+/// The line is `signaled` `signal` `exited` `code`, each `key=value`, separated
+/// by single spaces, ending in one newline, and at most 128 bytes.
+pub(crate) fn parse_wait_record(bytes: &[u8]) -> Option<WaitRecord> {
+    if bytes.is_empty() || bytes.len() > 128 {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    let line = text.strip_suffix('\n')?;
+    if line.is_empty() || line.as_bytes().contains(&b'\n') {
+        return None;
+    }
+    let mut fields = line.split(' ');
+    let signaled = flag_field(fields.next()?, "signaled")?;
+    let signal = number_field(fields.next()?, "signal")?;
+    let exited = flag_field(fields.next()?, "exited")?;
+    let code = number_field(fields.next()?, "code")?;
+    if fields.next().is_some() {
+        return None;
+    }
+    Some(WaitRecord {
+        signaled,
+        signal,
+        exited,
+        code,
+    })
+}
+
+fn flag_field(field: &str, key: &str) -> Option<bool> {
+    let value = field.strip_prefix(key)?.strip_prefix('=')?;
+    match value {
+        "0" => Some(false),
+        "1" => Some(true),
+        _ => None,
+    }
+}
+
+fn number_field(field: &str, key: &str) -> Option<i32> {
+    let value = field.strip_prefix(key)?.strip_prefix('=')?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok()
+}
+
 #[cfg(test)]
 mod memory_events_tests {
     use super::{b64_decode, b64_encode, memory_events_oom_kill};
@@ -134,6 +189,58 @@ mod memory_events_tests {
                 .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
         );
         assert_eq!(b64_decode(&encoded).as_deref(), Some(bytes.as_slice()));
+    }
+}
+
+#[cfg(test)]
+mod wait_record_tests {
+    use super::{WaitRecord, parse_wait_record};
+
+    #[test]
+    fn wait_record_accepts_only_one_well_formed_line() {
+        assert_eq!(
+            parse_wait_record(b"signaled=0 signal=000 exited=1 code=0001\n"),
+            Some(WaitRecord {
+                signaled: false,
+                signal: 0,
+                exited: true,
+                code: 1,
+            })
+        );
+        assert_eq!(
+            parse_wait_record(b"signaled=1 signal=009 exited=0 code=0000\n"),
+            Some(WaitRecord {
+                signaled: true,
+                signal: 9,
+                exited: false,
+                code: 0,
+            })
+        );
+        assert_eq!(parse_wait_record(b""), None);
+        assert_eq!(parse_wait_record(b"\n"), None);
+        let mut long = b"signaled=0 signal=000 exited=1 code=0001 ".to_vec();
+        long.extend(std::iter::repeat_n(b'0', 100));
+        long.push(b'\n');
+        assert!(long.len() > 128);
+        assert_eq!(parse_wait_record(&long), None);
+        assert_eq!(
+            parse_wait_record(
+                b"signaled=0 signal=000 exited=1 code=0001\nsignaled=1 signal=009 exited=0 code=0000\n"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_wait_record(b"signaled=2 signal=000 exited=1 code=0001\n"),
+            None
+        );
+        assert_eq!(
+            parse_wait_record(b"signaled=0 signal=000 exited=1 code=0001 trailing\n"),
+            None
+        );
+        assert_eq!(
+            parse_wait_record(b"SYWAIT1 signaled=0 signal=000 exited=1 code=0000\n"),
+            None
+        );
     }
 }
 

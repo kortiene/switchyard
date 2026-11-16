@@ -1,0 +1,11 @@
+[package]
+name = "switchyard-cloexec"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+description = "Set FD_CLOEXEC on an inherited descriptor. switchyard-core forbids unsafe."
+
+[dependencies]
+rustix = { version = "1", default-features = false, features = ["std"] }

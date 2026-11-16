@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/switchyard-core", "crates/switchyard", "tools/confinement-probe"]
+members = [
+    "crates/switchyard-cloexec",
+    "crates/switchyard-core",
+    "crates/switchyard",
+    "tools/confinement-probe",
+]
 
 # `crates/switchyard-ui` is its own workspace. It pulls the Rune UI stack
 # (wgpu, Parley, Taffy, resvg-free but still heavy) and needs Linux graphics

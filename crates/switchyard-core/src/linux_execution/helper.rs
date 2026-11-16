@@ -44,10 +44,9 @@ fn dispatch() -> Result<(), String> {
     }
 }
 
-/// Run the script and write its wait status to an `O_CLOEXEC` fd.
-/// The script does not inherit that fd, and stderr is not a wait channel.
+/// Run the script and write its wait status to the inherited status fd.
+/// `FD_CLOEXEC` is set on that fd, so the script's exec does not receive it.
 fn relay_wait() -> Result<(), String> {
-    use std::os::fd::AsFd;
     use std::os::unix::process::ExitStatusExt;
     rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
         .map_err(|error| format!("relay-wait dumpable: {error}"))?;
@@ -65,18 +64,9 @@ fn relay_wait() -> Result<(), String> {
     let Some(program) = argv.first() else {
         return Err("relay-wait command is empty".into());
     };
-    let mut record = std::fs::OpenOptions::new()
-        .write(true)
-        .custom_flags(libc::O_CLOEXEC)
-        .open(format!("/proc/self/fd/{wait_fd}"))
-        .map_err(|error| format!("relay-wait status fd: {error}"))?;
-    rustix::io::fcntl_setfd(record.as_fd(), rustix::io::FdFlags::CLOEXEC)
+    switchyard_cloexec::set_fd_cloexec(wait_fd)
         .map_err(|error| format!("relay-wait cloexec: {error}"))?;
-    let mut child = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(format!("exec {wait_fd}>&-; exec \"$@\""))
-        .arg("relay-script")
-        .arg(program)
+    let mut child = Command::new(program)
         .args(&argv[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -104,17 +94,14 @@ fn relay_wait() -> Result<(), String> {
     let signal = status.signal().unwrap_or(0);
     let exited = status.code().is_some();
     let code = status.code().unwrap_or(0);
-    writeln!(
-        record,
-        "signaled={} signal={:03} exited={} code={:04}",
+    let record = format!(
+        "signaled={} signal={:03} exited={} code={:04}\n",
         u8::from(signaled),
         signal,
         u8::from(exited),
         code
-    )
-    .map_err(|error| format!("relay-wait record: {error}"))?;
-    record
-        .flush()
+    );
+    switchyard_cloexec::write_all(wait_fd, record.as_bytes())
         .map_err(|error| format!("relay-wait record: {error}"))?;
     Ok(())
 }
@@ -1362,15 +1349,8 @@ fn hash(bytes: &[u8]) -> String {
     format!("sha256:{}", crate::canonical::sha256_hex(bytes))
 }
 
-struct ScriptWait {
-    signaled: bool,
-    signal: i32,
-    exited: bool,
-    code: i32,
-}
-
 /// One relay line, and only when the launcher itself exited 0.
-fn read_script_wait(launcher_clean: bool, wait_read: Option<File>) -> Option<ScriptWait> {
+fn read_script_wait(launcher_clean: bool, wait_read: Option<File>) -> Option<super::WaitRecord> {
     if !launcher_clean {
         return None;
     }
@@ -1391,35 +1371,7 @@ fn read_script_wait(launcher_clean: bool, wait_read: Option<File>) -> Option<Scr
             Err(_) => return None,
         }
     }
-    parse_wait_record(&bytes)
-}
-
-fn parse_wait_record(bytes: &[u8]) -> Option<ScriptWait> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let text = text.strip_suffix('\n')?;
-    if text.is_empty() || text.contains('\n') || text.contains("SYWAIT1") {
-        return None;
-    }
-    let mut signaled = None;
-    let mut signal = None;
-    let mut exited = None;
-    let mut code = None;
-    for field in text.split_whitespace() {
-        let (key, value) = field.split_once('=')?;
-        match key {
-            "signaled" => signaled = value.parse::<u8>().ok(),
-            "signal" => signal = value.parse::<i32>().ok(),
-            "exited" => exited = value.parse::<u8>().ok(),
-            "code" => code = value.parse::<i32>().ok(),
-            _ => return None,
-        }
-    }
-    Some(ScriptWait {
-        signaled: signaled? == 1,
-        signal: signal?,
-        exited: exited? == 1,
-        code: code?,
-    })
+    super::parse_wait_record(&bytes)
 }
 
 fn drain_hashed(
