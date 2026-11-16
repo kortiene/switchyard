@@ -75,7 +75,18 @@ pub(crate) struct AttemptInputPatch {
     pub verifier_json: Option<String>,
 }
 
-#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StoredVerification {
+    pub seq: i64,
+    pub outcome: String,
+    pub content_digest: String,
+    pub invalidated: bool,
+    pub completeness: String,
+    pub content_hash: String,
+    pub provenance_json: String,
+    pub body_json: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StoredDecision {
     pub action: String,
@@ -705,7 +716,6 @@ impl Store {
         Ok(ids)
     }
 
-    #[cfg(test)]
     pub(crate) fn list_decisions(&self, mission_id: &str) -> Result<Vec<StoredDecision>> {
         let mut stmt = self
             .conn
@@ -886,7 +896,8 @@ impl Store {
         self.conn
             .query_row(
                 "SELECT id, mission_id, attempt_id, kind, payload_hash, expected_revision,
-                        resulting_revision, state, request_id, origin, runtime_receipt_json, payload_canonical
+                        resulting_revision, state, request_id, origin, runtime_receipt_json,
+                        payload_canonical, seq
                  FROM commands WHERE id = ?1",
                 params![command_id],
                 map_command,
@@ -900,7 +911,8 @@ impl Store {
             .conn
             .prepare(
                 "SELECT id, mission_id, attempt_id, kind, payload_hash, expected_revision,
-                        resulting_revision, state, request_id, origin, runtime_receipt_json, payload_canonical
+                        resulting_revision, state, request_id, origin, runtime_receipt_json,
+                        payload_canonical, seq
                  FROM commands WHERE mission_id = ?1 ORDER BY seq, id",
             )
             .map_err(Error::storage)?;
@@ -1389,6 +1401,45 @@ impl Store {
         Ok(records)
     }
 
+    pub(crate) fn ledger_schema_version(&self) -> Result<i64> {
+        user_version(&self.conn)
+    }
+
+    /// Every verification row for the mission, oldest first, with its evidence.
+    /// Invalidated rows stay in the result; the export shows that flag.
+    pub(crate) fn list_verifications(&self, mission_id: &str) -> Result<Vec<StoredVerification>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT v.seq, v.outcome, v.content_digest, v.invalidated,
+                        e.completeness, e.content_hash, e.provenance_json, e.body_json
+                 FROM verifications v
+                 JOIN evidence e ON e.id = v.evidence_id
+                 WHERE v.mission_id = ?1
+                 ORDER BY v.seq",
+            )
+            .map_err(Error::storage)?;
+        let rows = stmt
+            .query_map(params![mission_id], |row| {
+                Ok(StoredVerification {
+                    seq: row.get(0)?,
+                    outcome: row.get(1)?,
+                    content_digest: row.get(2)?,
+                    invalidated: row.get::<_, i64>(3)? != 0,
+                    completeness: row.get(4)?,
+                    content_hash: row.get(5)?,
+                    provenance_json: row.get(6)?,
+                    body_json: row.get(7)?,
+                })
+            })
+            .map_err(Error::storage)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row.map_err(Error::storage)?);
+        }
+        Ok(records)
+    }
+
     pub fn latest_verification(&self, mission_id: &str) -> Result<Option<VerificationFact>> {
         self.conn
             .query_row(
@@ -1573,6 +1624,25 @@ impl Store {
             });
         }
         Ok(Some(proof))
+    }
+
+    /// One deferred read transaction. Statements inside `body` share one WAL
+    /// snapshot. This does not take a write lock; writers use [`Self::immediate`].
+    pub(crate) fn with_deferred_read<T>(&self, body: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        self.conn
+            .execute_batch("BEGIN DEFERRED")
+            .map_err(Error::storage)?;
+        let result = body(self);
+        let ended = if result.is_ok() {
+            self.conn.execute_batch("COMMIT")
+        } else {
+            self.conn.execute_batch("ROLLBACK")
+        };
+        match (result, ended) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(Error::storage(error)),
+        }
     }
 
     fn immediate(&mut self) -> Result<Transaction<'_>> {
@@ -1939,6 +2009,7 @@ fn map_command(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommandRecord> {
         request_id: row.get(8)?,
         origin: origin.parse().map_err(sqlite_error)?,
         runtime_receipt_json: row.get(10)?,
+        seq: row.get(12)?,
     })
 }
 

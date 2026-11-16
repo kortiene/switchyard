@@ -129,6 +129,11 @@ pub enum Error {
     #[error("operator write is closed in phase {phase}; approve_plan first")]
     OperatorWritePhaseClosed { phase: String },
 
+    /// `mission export --out` already exists, including when the path is a symlink.
+    /// Way out: pick a new path, or remove the file.
+    #[error("export target already exists; pick a new path, or remove the file")]
+    ExportTargetExists,
+
     /// Pi refused to admit the command and the protocol marks that refusal as
     /// definite. Transport loss and `admission: uncertain` stay [`Self::GuardFailed`]
     /// or [`Self::Storage`]. Effect outcomes use `PiEffectOutcome` separately
@@ -196,6 +201,7 @@ impl Error {
             Self::VerifierIndexFlagsSet => "verifier_index_flags_set",
             Self::OperatorWriteUnavailable => "operator_write_unavailable",
             Self::OperatorWritePhaseClosed { .. } => "operator_write_phase_closed",
+            Self::ExportTargetExists => "export_target_exists",
             Self::AdmissionRejected { .. } => "admission_rejected",
             Self::GuardFailed { .. } => "guard_failed",
             Self::UnknownNotification { .. } => "unknown_notification",

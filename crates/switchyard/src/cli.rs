@@ -176,6 +176,22 @@ pub(crate) enum MissionCommand {
         #[arg(long)]
         mission: Option<String>,
     },
+    /// Read-only ledger export. Does not take the owner lock, migrate, or dispatch.
+    ///
+    /// Without `--out`, the document is written to stdout. With `--out`, the
+    /// ledger read finishes first, the file is created with
+    /// `O_CREAT|O_EXCL|O_NOFOLLOW`, and stdout prints a receipt. An existing
+    /// path, including a symlink or a directory, is `export_target_exists`:
+    /// pick a new path, or remove it.
+    Export {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        mission: String,
+        /// New file for the document. Created only after the ledger read succeeds.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Admit a command. Dispatches pending runtime work unless `--persist-only`.
     /// `--persist-only` does not reconcile a workspace or run `git worktree add`.
     /// If the command is recorded but the workspace blocks dispatch, the process
