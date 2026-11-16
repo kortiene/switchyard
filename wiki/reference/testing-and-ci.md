@@ -78,7 +78,9 @@ The [audit package](../../runtime/pi/README.md) documents commands and limits.
 
 `pi-bridge-probe` is removed. The always-on `pi-bridge-contract` job already runs
 the same checks: pinned source rebuild, typecheck, `test/*.test.ts`, `cargo fmt --all -- --check`,
-Clippy, and `cargo test --workspace --features pi-contract --locked` with `SWITCHYARD_PI_NODE`.
+Clippy, and two `cargo test --workspace --features pi-contract --locked`
+invocations with `SWITCHYARD_PI_NODE`. Tests that flock a workspace `owner.lock`
+use `--test-threads=1`; the rest stay parallel.
 `contract.mjs` also enforces the evidence matrix. The historical
 [probe scope](../../docs/rust-first/s2-bridge-probe.md) records what that partial job covered.
 It did not replace `pi-bridge-contract` or enable live execution.

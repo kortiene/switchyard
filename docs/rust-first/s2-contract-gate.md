@@ -52,8 +52,10 @@ for library tests, and the function name for an integration test at the harness
 root. A same-named test in another module does not count. The runner executes
 the entire Node and feature-enabled Rust workspace suites, then requires every
 named case to have passed. Deleting/renaming a mandatory case without updating
-its evidence fails the gate. Skipped, ignored, filtered, cancelled and todo
-tests are refused.
+its evidence fails the gate. Ignored, cancelled, and todo tests are refused.
+Tests that flock a workspace `owner.lock` run in a second `cargo test` with
+`--test-threads=1`. A Rust test filtered out of one invocation must pass in
+the other, so the split does not drop or double-count a test.
 
 | #96 requirement | Executable evidence | Scope / interpretation |
 | --- | --- | --- |
