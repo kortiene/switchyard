@@ -2,6 +2,7 @@
 //! process so host SIGKILL closes its control pipe and `cgroup.kill` still runs.
 use std::fs::{self, File};
 use std::io::{BufRead, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,12 +44,20 @@ fn dispatch() -> Result<(), String> {
     }
 }
 
-/// Run the script inside the sandbox and append the raw wait status.
-/// The script does not hold the stderr fd this trailer is written to, so it
-/// cannot forge a signal or an exit code.
+/// Run the script and write its wait status to an `O_CLOEXEC` fd.
+/// The script does not inherit that fd, and stderr is not a wait channel.
 fn relay_wait() -> Result<(), String> {
+    use std::os::fd::AsFd;
     use std::os::unix::process::ExitStatusExt;
+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+        .map_err(|error| format!("relay-wait dumpable: {error}"))?;
     let mut args = std::env::args().skip(2);
+    let wait_fd = match (args.next().as_deref(), args.next()) {
+        (Some("--wait-fd"), Some(value)) => value
+            .parse::<i32>()
+            .map_err(|_| "relay-wait fd is not an integer".to_string())?,
+        _ => return Err("relay-wait requires --wait-fd".into()),
+    };
     if args.next().as_deref() != Some("--") {
         return Err("relay-wait requires --".into());
     }
@@ -56,7 +65,18 @@ fn relay_wait() -> Result<(), String> {
     let Some(program) = argv.first() else {
         return Err("relay-wait command is empty".into());
     };
-    let mut child = Command::new(program)
+    let mut record = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open(format!("/proc/self/fd/{wait_fd}"))
+        .map_err(|error| format!("relay-wait status fd: {error}"))?;
+    rustix::io::fcntl_setfd(record.as_fd(), rustix::io::FdFlags::CLOEXEC)
+        .map_err(|error| format!("relay-wait cloexec: {error}"))?;
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("exec {wait_fd}>&-; exec \"$@\""))
+        .arg("relay-script")
+        .arg(program)
         .args(&argv[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -84,24 +104,18 @@ fn relay_wait() -> Result<(), String> {
     let signal = status.signal().unwrap_or(0);
     let exited = status.code().is_some();
     let code = status.code().unwrap_or(0);
-    let body = format!(
-        "SYWAIT1 signaled={} signal={:03} exited={} code={:04}",
+    writeln!(
+        record,
+        "signaled={} signal={:03} exited={} code={:04}",
         u8::from(signaled),
         signal,
         u8::from(exited),
         code
-    );
-    let mut trailer = [b' '; WAIT_TRAILER];
-    let take = body.len().min(WAIT_TRAILER - 1);
-    trailer[..take].copy_from_slice(&body.as_bytes()[..take]);
-    trailer[WAIT_TRAILER - 1] = b'\n';
-    let mut stderr = std::io::stderr();
-    stderr
-        .write_all(&trailer)
-        .map_err(|error| format!("relay-wait trailer: {error}"))?;
-    stderr
+    )
+    .map_err(|error| format!("relay-wait record: {error}"))?;
+    record
         .flush()
-        .map_err(|error| format!("relay-wait trailer: {error}"))?;
+        .map_err(|error| format!("relay-wait record: {error}"))?;
     Ok(())
 }
 
@@ -254,7 +268,7 @@ fn supervise() -> Result<(), String> {
     let verifier_stdout = opts.mode == "verifier";
     let stdout_thread = thread::spawn(move || {
         if verifier_stdout {
-            drain_hashed(stdout, cap, &stdout_flag, &stdout_out, &stdout_digest, None);
+            drain_hashed(stdout, cap, &stdout_flag, &stdout_out, &stdout_digest);
         } else {
             drain(stdout, cap, &stdout_flag, &stdout_out);
         }
@@ -263,18 +277,9 @@ fn supervise() -> Result<(), String> {
     let stderr_out = Arc::clone(&stderr_buf);
     let stderr_digest = Arc::clone(&stderr_hash);
     let verifier_stderr = opts.mode == "verifier";
-    let script_wait = Arc::new(Mutex::new(None));
-    let wait_slot = Arc::clone(&script_wait);
     let stderr_thread = thread::spawn(move || {
         if verifier_stderr {
-            drain_hashed(
-                stderr,
-                cap,
-                &stderr_flag,
-                &stderr_out,
-                &stderr_digest,
-                Some(&wait_slot),
-            );
+            drain_hashed(stderr, cap, &stderr_flag, &stderr_out, &stderr_digest);
         } else {
             drain(stderr, cap, &stderr_flag, &stderr_out);
         }
@@ -365,7 +370,9 @@ fn supervise() -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let stdout = String::from_utf8_lossy(&stdout_buf.lock().expect("stdout")).into_owned();
     let stderr = String::from_utf8_lossy(&stderr_buf.lock().expect("stderr")).into_owned();
-    let helper = if opts.mode == "exec" {
+    // Verifier stdout is the script stream. Parsing it into `helper` let a
+    // failing script store a second copy of that stream and blow the result cap.
+    let helper = if opts.mode == "exec" || opts.mode == "verifier" {
         Value::Null
     } else {
         serde_json::from_str(&stdout).unwrap_or(Value::Null)
@@ -385,7 +392,7 @@ fn supervise() -> Result<(), String> {
     } else if disposition == "exited" && !status.success() {
         disposition = "runtime_failure".into();
     }
-    let settle = if opts.mode == "exec" {
+    let settle = if opts.mode == "exec" || opts.mode == "verifier" {
         true
     } else {
         match helper.get("ok").and_then(Value::as_bool) {
@@ -439,11 +446,17 @@ fn supervise() -> Result<(), String> {
             );
             object.insert("stdoutSha256".to_string(), json!(stdout_sha));
             object.insert("stderrSha256".to_string(), json!(stderr_sha));
+            object.insert("helper".to_string(), Value::Null);
             object.insert("etcBinds".to_string(), json!(host_binds.etc_present));
             if let Some(path) = host_binds.linker_missing.take() {
                 object.insert("linkerMissing".to_string(), json!(path));
             }
-            let wait = script_wait.lock().ok().and_then(|mut guard| guard.take());
+            // The launcher's own exit must be clean. A signalled relay, or a
+            // Bubblewrap status other than 0, drops the record.
+            let wait = read_script_wait(status.code() == Some(0), host_binds.wait_read.take());
+            if let Some(path) = host_binds.wait_path.take() {
+                let _ = fs::remove_file(path);
+            }
             if let Some(wait) = wait {
                 object.insert("scriptStatus".to_string(), json!(true));
                 object.insert("scriptSignaled".to_string(), json!(wait.signaled));
@@ -636,6 +649,9 @@ struct VerifierHostBinds {
     linker_missing: Option<String>,
     /// Writable empty `CARGO_HOME`. Removed after the sandbox exits.
     cargo_home_scratch: Option<PathBuf>,
+    /// Read end of the wait fifo. `O_CLOEXEC`, so the sandbox never inherits it.
+    wait_read: Option<File>,
+    wait_path: Option<PathBuf>,
 }
 
 impl VerifierHostBinds {
@@ -644,6 +660,8 @@ impl VerifierHostBinds {
             etc_present: Vec::new(),
             linker_missing: None,
             cargo_home_scratch: None,
+            wait_read: None,
+            wait_path: None,
         }
     }
 }
@@ -831,6 +849,7 @@ fn spawn_verifier_sandbox(
         .cpu_seconds
         .ok_or("verifier sandbox requires --cpu-seconds")?;
     let cpu = format!("--cpu={cpu_seconds}:{cpu_seconds}");
+    let (wait_path, wait_read) = open_wait_fifo(&opts.status)?;
     let mut command = Command::new(&opts.helper);
     command
         .arg("join")
@@ -840,10 +859,11 @@ fn spawn_verifier_sandbox(
     command
         .arg("/bin/sh")
         .arg("-c")
-        .arg("exec 3>\"$1\"; shift; exec \"$@\"");
+        .arg("exec 3>\"$1\"; exec 4>\"$2\"; shift 2; exec \"$@\"");
     command
         .arg("sandbox")
         .arg(&opts.status)
+        .arg(&wait_path)
         .arg("/usr/bin/prlimit");
     command.args([
         "--fsize=2147483648:2147483648",
@@ -958,11 +978,14 @@ fn spawn_verifier_sandbox(
     command.args(["--chdir", "/workspace", "--remount-ro", "/", "--"]);
     if opts.argv.is_empty() {
         let _ = fs::remove_dir_all(&cargo_scratch);
+        let _ = fs::remove_file(&wait_path);
         return Err("verifier sandbox command is empty".into());
     }
     command
         .arg("/helper")
         .arg("relay-wait")
+        .arg("--wait-fd")
+        .arg("4")
         .arg("--")
         .args(&opts.argv);
     let child = command
@@ -972,6 +995,7 @@ fn spawn_verifier_sandbox(
         .spawn()
         .map_err(|error| {
             let _ = fs::remove_dir_all(&cargo_scratch);
+            let _ = fs::remove_file(&wait_path);
             format!("cannot spawn verifier sandbox: {error}")
         })?;
     Ok((
@@ -980,8 +1004,40 @@ fn spawn_verifier_sandbox(
             etc_present,
             linker_missing,
             cargo_home_scratch: Some(cargo_scratch),
+            wait_read: Some(wait_read),
+            wait_path: Some(wait_path),
         },
     ))
+}
+
+/// Host-side read end of the wait fifo. Opened before spawn so the launcher's
+/// write open does not block, and `O_CLOEXEC` so the sandbox cannot inherit it.
+fn open_wait_fifo(status: &Path) -> Result<(PathBuf, File), String> {
+    let path = status.with_extension("wait");
+    rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        &path,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )
+    .map_err(|error| format!("wait fifo: {error}"))?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(&path)
+        .map_err(|error| {
+            let _ = fs::remove_file(&path);
+            format!("wait fifo read: {error}")
+        })?;
+    use std::os::fd::AsFd;
+    let flags = rustix::io::fcntl_getfd(file.as_fd()).map_err(|error| {
+        let _ = fs::remove_file(&path);
+        format!("wait fifo flags: {error}")
+    })?;
+    if !flags.contains(rustix::io::FdFlags::CLOEXEC) {
+        let _ = fs::remove_file(&path);
+        return Err("wait fifo read is inheritable".into());
+    }
+    Ok((path, file))
 }
 
 fn empty_cargo_home() -> Result<PathBuf, String> {
@@ -1306,8 +1362,6 @@ fn hash(bytes: &[u8]) -> String {
     format!("sha256:{}", crate::canonical::sha256_hex(bytes))
 }
 
-const WAIT_TRAILER: usize = 64;
-
 struct ScriptWait {
     signaled: bool,
     signal: i32,
@@ -1315,16 +1369,42 @@ struct ScriptWait {
     code: i32,
 }
 
-fn parse_wait_trailer(bytes: &[u8]) -> Option<ScriptWait> {
-    if bytes.len() != WAIT_TRAILER || *bytes.last()? != b'\n' || !bytes.starts_with(b"SYWAIT1 ") {
+/// One relay line, and only when the launcher itself exited 0.
+fn read_script_wait(launcher_clean: bool, wait_read: Option<File>) -> Option<ScriptWait> {
+    if !launcher_clean {
         return None;
     }
-    let text = std::str::from_utf8(&bytes[..WAIT_TRAILER - 1]).ok()?;
+    let mut file = wait_read?;
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 256];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                bytes.extend_from_slice(&buf[..n]);
+                if bytes.len() > 128 {
+                    return None;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(_) => return None,
+        }
+    }
+    parse_wait_record(&bytes)
+}
+
+fn parse_wait_record(bytes: &[u8]) -> Option<ScriptWait> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let text = text.strip_suffix('\n')?;
+    if text.is_empty() || text.contains('\n') || text.contains("SYWAIT1") {
+        return None;
+    }
     let mut signaled = None;
     let mut signal = None;
     let mut exited = None;
     let mut code = None;
-    for field in text.split_whitespace().skip(1) {
+    for field in text.split_whitespace() {
         let (key, value) = field.split_once('=')?;
         match key {
             "signaled" => signaled = value.parse::<u8>().ok(),
@@ -1348,32 +1428,19 @@ fn drain_hashed(
     truncated: &AtomicBool,
     out: &Mutex<Vec<u8>>,
     hash_out: &Mutex<String>,
-    trailer_out: Option<&Mutex<Option<ScriptWait>>>,
 ) {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 8192];
-    let mut pending = Vec::new();
     let mut total = 0usize;
-    let hold = if trailer_out.is_some() {
-        WAIT_TRAILER
-    } else {
-        0
-    };
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                pending.extend_from_slice(&buf[..n]);
+                hasher.update(&buf[..n]);
+                push_tail(out, &buf[..n]);
                 total += n;
                 if total > cap {
                     truncated.store(true, Ordering::Relaxed);
-                }
-                let keep = hold.min(pending.len());
-                let emit = pending.len() - keep;
-                if emit > 0 {
-                    hasher.update(&pending[..emit]);
-                    push_tail(out, &pending[..emit]);
-                    pending.drain(..emit);
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -1382,16 +1449,6 @@ fn drain_hashed(
                 break;
             }
         }
-    }
-    if let (WAIT_TRAILER, Some(slot), Some(wait)) =
-        (hold, trailer_out, parse_wait_trailer(&pending))
-    {
-        if let Ok(mut guard) = slot.lock() {
-            *guard = Some(wait);
-        }
-    } else if !pending.is_empty() {
-        hasher.update(&pending);
-        push_tail(out, &pending);
     }
     if let Ok(mut slot) = hash_out.lock() {
         *slot = sha256_prefixed(hasher.finalize().as_slice());

@@ -31,11 +31,10 @@ pub const VERIFIER_PIDS_MAX: &str = "2048";
 /// Stored stdout and stderr tails. The hash still covers the full stream.
 pub const VERIFIER_TAIL_BYTES: usize = 64 * 1024;
 
-/// Room for two base64 tails plus the result envelope.
-/// JSON escaping of a control byte is 6 bytes, so the raw tail is not stored as JSON text.
+/// Worst case is two 64 KiB tails stored as JSON text (about 6 bytes per byte)
+/// plus the envelope. Base64 keeps the common case smaller. 1 MiB covers both.
 pub fn verifier_result_cap() -> usize {
-    let encoded = VERIFIER_TAIL_BYTES.div_ceil(3) * 4;
-    encoded * 2 + 32 * 1024
+    1024 * 1024
 }
 
 /// `oom_kill` from a cgroup `memory.events` body.

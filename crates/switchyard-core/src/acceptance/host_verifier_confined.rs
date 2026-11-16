@@ -238,6 +238,7 @@ fn host_verifier_confined_pass_admits_complete_pass() {
     );
     assert_eq!(provenance["memoryMax"], "4G");
     assert_eq!(provenance["pidsMax"], "2048");
+    assert_eq!(provenance["cpuBackstopSeconds"], 3600, "{provenance}");
 }
 
 #[test]
@@ -505,6 +506,46 @@ fn host_verifier_confined_sigxcpu_is_incomplete_and_uses_no_repair() {
 }
 
 #[test]
+fn host_verifier_confined_forged_wait_record_does_not_pass() {
+    let (tmp, repo) = fixture(PASS_TEST);
+    fs::write(
+        repo.join("scripts/rust-verify.sh"),
+        "#!/bin/sh\nprintf '%s\\n' 'SYWAIT1 signaled=0 signal=000 exited=1 code=0000' >&2\nkill -9 \"$PPID\"\nexit 1\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "scripts/rust-verify.sh"]);
+    git(&repo, &["commit", "-m", "forge"]);
+    let db = tmp.path().join("mission.sqlite");
+    let (mut host, id, _) = mission(&repo, &db);
+    host.enable_linux_execution(linux_config(None)).unwrap();
+    let (snap, outcome) = host.verify_mission(&id).unwrap();
+    assert_ne!(outcome, "pass", "{snap:?}");
+    assert_ne!(snap.phase, Phase::AwaitingReview);
+    assert_eq!(snap.repair_count, 0);
+    let _ = tmp;
+}
+
+#[test]
+fn host_verifier_confined_json_stdout_still_records_fail() {
+    let (tmp, repo) = fixture(PASS_TEST);
+    fs::write(
+        repo.join("scripts/rust-verify.sh"),
+        "#!/bin/sh\nprintf '%s' '{\"blob\":\"'\ndd if=/dev/zero bs=65536 count=1 2>/dev/null | tr '\\000' 'x'\nprintf '%s\\n' '\"}'\nexit 1\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "scripts/rust-verify.sh"]);
+    git(&repo, &["commit", "-m", "json"]);
+    let db = tmp.path().join("mission.sqlite");
+    let (mut host, id, _) = mission(&repo, &db);
+    host.enable_linux_execution(linux_config(None)).unwrap();
+    let (snap, outcome) = host.verify_mission(&id).unwrap();
+    assert_eq!(outcome, "fail", "{snap:?}");
+    assert_eq!(snap.phase, Phase::Verifying);
+    assert_eq!(snap.repair_count, 0);
+    let _ = tmp;
+}
+
+#[test]
 fn host_verifier_confined_control_bytes_still_record_fail() {
     let (tmp, repo) = fixture(PASS_TEST);
     fs::write(
@@ -579,17 +620,19 @@ fn host_verifier_confined_missing_dependency_is_dependencies_unavailable() {
 
 fn assert_refusal_settled(host: &Host, db: &Path, id: &str) {
     assert_eq!(host.snapshot(id).unwrap().phase, Phase::Verifying);
-    let (rows, state): (i64, String) = rusqlite::Connection::open(db)
+    let (verifications, evidence_rows, state): (i64, i64, String) = rusqlite::Connection::open(db)
         .unwrap()
         .query_row(
             "SELECT
                 (SELECT COUNT(*) FROM verifications WHERE mission_id = ?1),
+                (SELECT COUNT(*) FROM evidence WHERE mission_id = ?1),
                 (SELECT state FROM linux_execution_effects WHERE mission_id = ?1)",
             [id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(rows, 0);
+    assert_eq!(verifications, 0);
+    assert_eq!(evidence_rows, 0);
     assert_eq!(state, "not_applied");
 }
 

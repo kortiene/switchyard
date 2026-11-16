@@ -95,6 +95,7 @@ struct RecordedRun {
     limit_killed: bool,
     result_unreadable: bool,
     script_status_missing: bool,
+    cpu_backstop_seconds: u64,
 }
 
 fn hash_ok(value: &str) -> bool {
@@ -149,6 +150,7 @@ fn hosted_run(run: &linux_execution::VerifierRun) -> RecordedRun {
         limit_killed: run.limit_killed,
         result_unreadable: run.result_unreadable,
         script_status_missing: run.script_status_missing,
+        cpu_backstop_seconds: run.cpu_backstop_seconds,
     }
 }
 
@@ -173,6 +175,7 @@ fn synthetic_run(kind: SyntheticVerifier) -> RecordedRun {
         limit_killed: false,
         result_unreadable: false,
         script_status_missing: false,
+        cpu_backstop_seconds: 0,
     };
     match kind {
         SyntheticVerifier::Timeout => {
@@ -1998,6 +2001,10 @@ impl Host {
                     object.insert(
                         "pidsMax".to_string(),
                         json!(crate::linux_execution::VERIFIER_PIDS_MAX),
+                    );
+                    object.insert(
+                        "cpuBackstopSeconds".to_string(),
+                        json!(run.cpu_backstop_seconds),
                     );
                 }
             }

@@ -29,6 +29,8 @@ pub(super) struct VerifierRun {
     pub etc_binds: Vec<String>,
     /// Sandbox path `cc` could not resolve. The profile is not widened to cover it.
     pub linker_missing: Option<String>,
+    /// `prlimit --cpu` seconds. At least twice the deadline window unless a test overrides it.
+    pub cpu_backstop_seconds: u64,
 }
 
 impl Host {
@@ -2563,8 +2565,12 @@ mod os {
         }
         let window_ms = verifier_window_ms(verifier, test_deadline_ms(host));
         let deadline_ms = crate::domain::now_ms().saturating_add(window_ms);
-        let cpu_seconds = test_cpu_seconds(host)
-            .unwrap_or_else(|| u64::try_from((window_ms.max(1) + 999) / 1000).unwrap_or(1));
+        let cpu_seconds = test_cpu_seconds(host).unwrap_or_else(|| {
+            // At least twice the deadline window, so the deadline ends a normal
+            // long run. A test may set a shorter backstop to force SIGXCPU.
+            let window_seconds = u64::try_from((window_ms.max(1) + 999) / 1000).unwrap_or(1);
+            window_seconds.saturating_mul(2)
+        });
         let effect_key = format!("verify-{}-{}", mission.revision, crate::domain::now_ms());
         let operation_id = crate::execution::operation_id(
             &mission.attempt.id,
@@ -2798,6 +2804,7 @@ mod os {
                         started,
                         &etc_binds,
                         toolchain_identity,
+                        cpu_seconds,
                     );
                 }
             };
@@ -2832,6 +2839,7 @@ mod os {
                         saw_entered,
                         &etc_binds,
                         toolchain_identity,
+                        cpu_seconds,
                     );
                 }
                 "ENTERED" => {}
@@ -3130,6 +3138,7 @@ mod os {
             started: std::time::Instant,
             etc_binds: &CheckedEtcBinds,
             toolchain_identity: &str,
+            cpu_backstop_seconds: u64,
         ) -> Result<super::VerifierLaunch> {
             let effect = self
                 .store
@@ -3172,6 +3181,7 @@ mod os {
                     result_unreadable: false,
                     script_status_missing: false,
                     toolchain_identity: Some(toolchain_identity.to_string()),
+                    cpu_backstop_seconds,
                 },
             )
         }
@@ -3187,6 +3197,7 @@ mod os {
             saw_entered: bool,
             etc_binds: &CheckedEtcBinds,
             toolchain_identity: &str,
+            cpu_backstop_seconds: u64,
         ) -> Result<super::VerifierLaunch> {
             #[cfg(test)]
             if let Some(plant) = self.verifier_result_plant.take() {
@@ -3231,6 +3242,7 @@ mod os {
                         result_unreadable: true,
                         script_status_missing: true,
                         toolchain_identity: Some(toolchain_identity.to_string()),
+                        cpu_backstop_seconds,
                     },
                 );
             };
@@ -3278,6 +3290,7 @@ mod os {
                             result_unreadable: true,
                             script_status_missing: true,
                             toolchain_identity: Some(toolchain_identity.to_string()),
+                            cpu_backstop_seconds,
                         },
                     );
                 }
@@ -3330,6 +3343,7 @@ mod os {
                     result_unreadable: false,
                     script_status_missing: !script_status,
                     toolchain_identity: Some(toolchain_identity.to_string()),
+                    cpu_backstop_seconds,
                 },
             )
         }
@@ -3384,6 +3398,7 @@ mod os {
                 script_status_missing: flags.script_status_missing,
                 etc_binds: etc_binds.present.clone(),
                 linker_missing: etc_binds.linker_missing.clone(),
+                cpu_backstop_seconds: flags.cpu_backstop_seconds,
             }))
         }
     }
@@ -3398,6 +3413,7 @@ mod os {
         result_unreadable: bool,
         script_status_missing: bool,
         toolchain_identity: Option<String>,
+        cpu_backstop_seconds: u64,
     }
 
     struct CheckedEtcBinds {
