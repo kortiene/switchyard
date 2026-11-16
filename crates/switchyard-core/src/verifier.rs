@@ -369,3 +369,22 @@ fn glob_match(pattern: &str, path: &str) -> bool {
     let path: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
     rec(&pattern, &path)
 }
+
+#[cfg(test)]
+mod line_count_tests {
+    use super::{LineRead, MAX_FILE_BYTES, line_count};
+
+    #[test]
+    fn line_count_stops_when_the_stream_passes_one_mebibyte() {
+        let dir =
+            std::env::temp_dir().join(format!("switchyard-line-count-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wide.rs");
+        let mut body = vec![b'x'; usize::try_from(MAX_FILE_BYTES).unwrap() + 8];
+        body.push(b'\n');
+        std::fs::write(&path, body).unwrap();
+        assert!(matches!(line_count(&path, 10).unwrap(), LineRead::MaxBytes));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

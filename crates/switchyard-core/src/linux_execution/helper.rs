@@ -144,7 +144,7 @@ fn supervise() -> Result<(), String> {
         println!("DONE");
         return Ok(());
     }
-    let (mut child, host_binds) = match spawn_confined(&opts) {
+    let (mut child, mut host_binds) = match spawn_confined(&opts) {
         Ok(spawned) => spawned,
         Err(error) => {
             let quiescence = cgroup::kill_and_prove(&identity, Duration::from_secs(2))
@@ -347,12 +347,15 @@ fn supervise() -> Result<(), String> {
             object.insert("stdoutSha256".to_string(), json!(stdout_sha));
             object.insert("stderrSha256".to_string(), json!(stderr_sha));
             object.insert("etcBinds".to_string(), json!(host_binds.etc_present));
-            if let Some(path) = host_binds.linker_missing {
+            if let Some(path) = host_binds.linker_missing.take() {
                 object.insert("linkerMissing".to_string(), json!(path));
             }
         }
     }
     write_result(&opts.result, &result)?;
+    if let Some(path) = host_binds.cargo_home_scratch.take() {
+        let _ = fs::remove_dir_all(path);
+    }
     println!("DONE");
     let _ = std::io::stdout().flush();
     Ok(())
@@ -521,6 +524,8 @@ const ETC_LD_SO_CONF_D: &str = "/etc/ld.so.conf.d";
 struct VerifierHostBinds {
     etc_present: Vec<String>,
     linker_missing: Option<String>,
+    /// Writable empty `CARGO_HOME`. Removed after the sandbox exits.
+    cargo_home_scratch: Option<PathBuf>,
 }
 
 impl VerifierHostBinds {
@@ -528,6 +533,7 @@ impl VerifierHostBinds {
         Self {
             etc_present: Vec::new(),
             linker_missing: None,
+            cargo_home_scratch: None,
         }
     }
 }
@@ -795,10 +801,15 @@ fn spawn_verifier_sandbox(
         "--tmpfs",
         "/tmp",
     ]);
-    let etc_present = present_etc_binds(Path::new("/"));
+    let mut etc_present = present_etc_binds(Path::new("/"));
+    if std::env::var_os("SWITCHYARD_OMIT_LINKER").is_some() {
+        etc_present.retain(|path| path != ETC_ALTERNATIVES);
+    }
     let linker_missing = unresolved_sandbox_cc(Path::new("/"), toolchain, &etc_present);
     // /etc/alternatives: /usr/bin/cc is an alternatives symlink.
-    command.args(["--ro-bind-try", ETC_ALTERNATIVES, ETC_ALTERNATIVES]);
+    if etc_present.iter().any(|path| path == ETC_ALTERNATIVES) {
+        command.args(["--ro-bind-try", ETC_ALTERNATIVES, ETC_ALTERNATIVES]);
+    }
     // /etc/ld.so.cache: the dynamic linker reads this cache.
     command.args(["--ro-bind-try", ETC_LD_SO_CACHE, ETC_LD_SO_CACHE]);
     // /etc/ld.so.conf: names the directories the linker searches.
@@ -806,7 +817,23 @@ fn spawn_verifier_sandbox(
     // /etc/ld.so.conf.d: holds the linker configuration fragments.
     command.args(["--ro-bind-try", ETC_LD_SO_CONF_D, ETC_LD_SO_CONF_D]);
     command.arg("--ro-bind").arg(toolchain).arg("/toolchain");
-    command.arg("--ro-bind").arg(cargo_home).arg("/cargo-home");
+    // Empty CARGO_HOME. Host registry/ and git/ are the only cargo binds, read-only.
+    let cargo_scratch = empty_cargo_home()?;
+    command.arg("--bind").arg(&cargo_scratch).arg("/cargo-home");
+    let registry = cargo_home.join("registry");
+    if registry.is_dir() {
+        command
+            .arg("--ro-bind")
+            .arg(&registry)
+            .arg("/cargo-home/registry");
+    }
+    let git_cache = cargo_home.join("git");
+    if git_cache.is_dir() {
+        command
+            .arg("--ro-bind")
+            .arg(&git_cache)
+            .arg("/cargo-home/git");
+    }
     command.arg("--ro-bind").arg(rustup_home).arg("/rustup");
     command.arg("--bind").arg(target_dir).arg("/cargo-target");
     command
@@ -819,24 +846,41 @@ fn spawn_verifier_sandbox(
         .arg("/workspace/.git");
     command.args(["--chdir", "/workspace", "--remount-ro", "/", "--"]);
     if opts.argv.is_empty() {
+        let _ = fs::remove_dir_all(&cargo_scratch);
         return Err("verifier sandbox command is empty".into());
     }
     command.args(&opts.argv);
-    command
+    let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map(|child| {
-            (
-                child,
-                VerifierHostBinds {
-                    etc_present,
-                    linker_missing,
-                },
-            )
-        })
-        .map_err(|error| format!("cannot spawn verifier sandbox: {error}"))
+        .map_err(|error| {
+            let _ = fs::remove_dir_all(&cargo_scratch);
+            format!("cannot spawn verifier sandbox: {error}")
+        })?;
+    Ok((
+        child,
+        VerifierHostBinds {
+            etc_present,
+            linker_missing,
+            cargo_home_scratch: Some(cargo_scratch),
+        },
+    ))
+}
+
+fn empty_cargo_home() -> Result<PathBuf, String> {
+    let path = std::env::temp_dir().join(format!(
+        "switchyard-cargo-home-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(&path)
+        .map_err(|error| format!("cannot create an empty CARGO_HOME: {error}"))?;
+    Ok(path)
 }
 
 fn file_op() -> Result<(), String> {
@@ -1162,23 +1206,36 @@ fn drain_hashed(
             Ok(0) => break,
             Ok(n) => {
                 hasher.update(&buf[..n]);
-                if total < cap {
-                    let take = n.min(cap - total);
-                    if let Ok(mut guard) = out.lock() {
-                        guard.extend_from_slice(&buf[..take]);
-                    }
-                }
+                push_tail(out, &buf[..n]);
                 total += n;
                 if total > cap {
                     truncated.store(true, Ordering::Relaxed);
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
+            Err(_) => {
+                truncated.store(true, Ordering::Relaxed);
+                break;
+            }
         }
     }
     if let Ok(mut slot) = hash_out.lock() {
         *slot = sha256_prefixed(hasher.finalize().as_slice());
+    } else {
+        truncated.store(true, Ordering::Relaxed);
+    }
+}
+
+const TAIL_BYTES: usize = 64 * 1024;
+
+fn push_tail(out: &Mutex<Vec<u8>>, bytes: &[u8]) {
+    let Ok(mut guard) = out.lock() else {
+        return;
+    };
+    guard.extend_from_slice(bytes);
+    if guard.len() > TAIL_BYTES {
+        let drop_n = guard.len() - TAIL_BYTES;
+        guard.drain(..drop_n);
     }
 }
 
@@ -1473,6 +1530,14 @@ mod etc_bind_tests {
             unresolved_sandbox_cc(&root, &toolchain, &present).as_deref(),
             Some("/opt/cc")
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_events_oom_kill_is_counted() {
+        let root = scratch();
+        fs::write(root.join("memory.events"), "low 0\noom_kill 3\n").unwrap();
+        assert_eq!(event_value(&root.join("memory.events"), "oom_kill"), 3);
         let _ = fs::remove_dir_all(&root);
     }
 

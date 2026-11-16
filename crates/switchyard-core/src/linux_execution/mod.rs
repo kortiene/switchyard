@@ -24,9 +24,57 @@ pub const MAX_DEADLINE_MS: i64 = 60_000;
 /// Reviewed Bubblewrap package. The helper, the host, and receipts share this pin.
 pub const BUBBLEWRAP_VERSION: &str = "0.9.0";
 pub const BUBBLEWRAP_BACKEND: &str = "linux-bubblewrap-0.9.0";
+/// Verifier `cpu.max`: two CPUs. Writers stay at half a CPU.
+pub const VERIFIER_CPU_MAX: &str = "200000 100000";
+pub const VERIFIER_MEMORY_MAX: &str = "4G";
+pub const VERIFIER_PIDS_MAX: &str = "2048";
 
 pub fn bubblewrap_version_line() -> String {
     format!("bubblewrap {BUBBLEWRAP_VERSION}\n")
+}
+
+/// `channel` from a rust-toolchain.toml body. A comment line is ignored.
+/// A `channel` key is accepted even when it is not under `[toolchain]`.
+pub fn toolchain_channel(text: &str) -> Option<&str> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("channel") else {
+            continue;
+        };
+        let Some(rest) = rest.trim().strip_prefix('=') else {
+            continue;
+        };
+        let rest = rest.trim().trim_matches('"').trim_matches('\'');
+        if !rest.is_empty() {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod toolchain_channel_tests {
+    use super::toolchain_channel;
+
+    #[test]
+    fn toolchain_channel_skips_the_table_header_comments_and_crlf() {
+        let text = "[toolchain]\nchannel = \"1.99.1\"\ncomponents = [\"rustfmt\", \"clippy\"]\n";
+        assert_eq!(toolchain_channel(text), Some("1.99.1"));
+        assert_eq!(toolchain_channel("channel = 'stable'\n"), Some("stable"));
+        assert_eq!(toolchain_channel("[toolchain]\n"), None);
+        assert_eq!(
+            toolchain_channel("# channel = \"ignore\"\nchannel = \"1.99.1\"\n"),
+            Some("1.99.1")
+        );
+        assert_eq!(
+            toolchain_channel("channel = \"1.99.1\"\r\n"),
+            Some("1.99.1")
+        );
+        assert_eq!(toolchain_channel("# only a comment\n[toolchain]\n"), None);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

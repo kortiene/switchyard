@@ -44,17 +44,31 @@ mod pi_linux_write;
 mod workspace;
 
 pub use export::{ExportReceipt, write_export_exclusive};
+
+/// What a confined test plants over `result.json` after the sandbox exits.
+#[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+#[derive(Clone, Copy)]
+pub(crate) enum VerifierResultPlant {
+    Symlink,
+    #[allow(dead_code)]
+    Fifo,
+}
 pub use operator_write::OperatorWrite;
 
 /// Test-only stand-in for a confined verifier result. It does not execute anything.
 #[cfg(test)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
 pub(crate) enum SyntheticVerifier {
     Timeout,
     Truncated,
     FailExit,
     Pass,
+    MissingResult,
+    Signal,
+    EmptyHash,
+    Oom,
+    ResolutionMarker,
 }
 
 enum VerifierDecision {
@@ -73,26 +87,45 @@ struct RecordedRun {
     toolchain_identity: Option<String>,
     etc_binds: Option<Vec<String>>,
     linker_missing: Option<String>,
+    timed_out: bool,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+    signaled: bool,
+    oom_killed: bool,
+    limit_killed: bool,
+    result_unreadable: bool,
 }
 
-/// Cargo could not resolve or fetch a dependency. That is incomplete evidence,
-/// not a verifier FAIL. The sandbox stays offline via `CARGO_NET_OFFLINE`.
-fn cargo_resolution_blocked(stdout: &str, stderr: &str) -> bool {
-    let mut text = String::with_capacity(stdout.len() + stderr.len() + 1);
-    text.push_str(stdout);
-    text.push('\n');
-    text.push_str(stderr);
-    const MARKERS: &[&str] = &[
-        "no matching package named",
-        "failed to download",
-        "failed to select a version for the requirement",
-        "Unable to update registry",
-        "attempting to make an HTTP request, but --offline was specified",
-        "you're using offline mode",
-        "failed to fetch `",
-        "registry index not found",
-    ];
-    MARKERS.iter().any(|marker| text.contains(marker))
+fn hash_ok(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64 && hex.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+/// A complete FAIL is only the script's own non-zero exit with complete output,
+/// both hashes, and a stable digest. Everything that prevents a verdict is
+/// incomplete. A segfault inside `cargo test` is still a FAIL: cargo exits 101.
+fn classify_verifier(run: &RecordedRun, before: &str, after: &str) -> VerifierDecision {
+    let verdict = before == after
+        && !run.timed_out
+        && !run.stdout_truncated
+        && !run.stderr_truncated
+        && !run.signaled
+        && !run.oom_killed
+        && !run.limit_killed
+        && !run.result_unreadable
+        && hash_ok(&run.stdout_sha256)
+        && hash_ok(&run.stderr_sha256)
+        && run.exit_code.is_some();
+    if !verdict {
+        return VerifierDecision::Incomplete;
+    }
+    if run.exit_code == Some(0) {
+        VerifierDecision::Pass
+    } else {
+        VerifierDecision::Fail
+    }
 }
 
 fn hosted_run(run: &linux_execution::VerifierRun) -> RecordedRun {
@@ -106,26 +139,66 @@ fn hosted_run(run: &linux_execution::VerifierRun) -> RecordedRun {
         toolchain_identity: run.toolchain_identity.clone(),
         etc_binds: Some(run.etc_binds.clone()),
         linker_missing: run.linker_missing.clone(),
+        timed_out: run.timed_out,
+        stdout_truncated: run.stdout_truncated,
+        stderr_truncated: run.stderr_truncated,
+        signaled: run.signaled,
+        oom_killed: run.oom_killed,
+        limit_killed: run.limit_killed,
+        result_unreadable: run.result_unreadable,
     }
 }
 
 #[cfg(test)]
 fn synthetic_run(kind: SyntheticVerifier) -> RecordedRun {
-    RecordedRun {
-        exit_code: match kind {
-            SyntheticVerifier::FailExit => Some(1),
-            SyntheticVerifier::Timeout => None,
-            SyntheticVerifier::Truncated | SyntheticVerifier::Pass => Some(0),
-        },
+    let hash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let mut run = RecordedRun {
+        exit_code: Some(0),
         duration_ms: 1,
         stdout_tail: String::new(),
         stderr_tail: String::new(),
-        stdout_sha256: "sha256:synthetic".into(),
-        stderr_sha256: "sha256:synthetic".into(),
+        stdout_sha256: hash.into(),
+        stderr_sha256: hash.into(),
         toolchain_identity: Some("sha256:synthetic-toolchain".into()),
         etc_binds: None,
         linker_missing: None,
+        timed_out: false,
+        stdout_truncated: false,
+        stderr_truncated: false,
+        signaled: false,
+        oom_killed: false,
+        limit_killed: false,
+        result_unreadable: false,
+    };
+    match kind {
+        SyntheticVerifier::Timeout => {
+            run.timed_out = true;
+            run.exit_code = None;
+        }
+        SyntheticVerifier::Truncated => run.stdout_truncated = true,
+        SyntheticVerifier::FailExit => run.exit_code = Some(101),
+        SyntheticVerifier::Pass => {}
+        SyntheticVerifier::MissingResult => {
+            run.result_unreadable = true;
+            run.exit_code = None;
+            run.stdout_sha256.clear();
+            run.stderr_sha256.clear();
+        }
+        SyntheticVerifier::Signal => {
+            run.signaled = true;
+            run.exit_code = None;
+        }
+        SyntheticVerifier::EmptyHash => run.stdout_sha256.clear(),
+        SyntheticVerifier::Oom => {
+            run.oom_killed = true;
+            run.exit_code = Some(137);
+        }
+        SyntheticVerifier::ResolutionMarker => {
+            run.exit_code = Some(101);
+            run.stderr_tail = "failed to download\n".into();
+        }
     }
+    run
 }
 
 /// Open the host, take the single-host lock, and reuse the active attempt.
@@ -160,6 +233,15 @@ pub struct Host {
     /// Test-only cargo target directory outside the worktree.
     #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
     pub(crate) verifier_target_dir: Option<PathBuf>,
+    /// Test-only: do not bind `/etc/alternatives`, so `cc` cannot resolve.
+    #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+    pub(crate) verifier_omit_linker: bool,
+    /// Test-only: fail after the cgroup leaf is created and remove it.
+    #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+    pub(crate) fail_prepare_verifier: bool,
+    /// Test-only: replace `result.json` with a symlink or FIFO before the host reads it.
+    #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+    pub(crate) verifier_result_plant: Option<VerifierResultPlant>,
     #[cfg(all(feature = "linux-execution", target_os = "linux"))]
     linux: Option<linux_execution::LinuxSession>,
 }
@@ -539,6 +621,12 @@ impl Host {
             verifier_rustup_home: None,
             #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
             verifier_target_dir: None,
+            #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+            verifier_omit_linker: false,
+            #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+            fail_prepare_verifier: false,
+            #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+            verifier_result_plant: None,
             #[cfg(all(feature = "linux-execution", target_os = "linux"))]
             linux: None,
         })
@@ -1479,7 +1567,7 @@ impl Host {
         if profile.settle_stops_before_reconcile && self.stop_pending(mission_id)? {
             self.dispatch_stops(mission_id)?;
         }
-        self.reconcile_execution(mission_id)?;
+        self.reconcile_execution_for_recover(mission_id)?;
         if self.store.linux_execution_blocked(mission_id)? {
             let delivered = self.dispatch_stops(mission_id)?;
             self.poll_runtime(mission_id)?;
@@ -1793,14 +1881,8 @@ impl Host {
         }
         #[cfg(test)]
         if let Some(synthetic) = self.synthetic_verifier.take() {
-            let decision = match synthetic {
-                SyntheticVerifier::Timeout | SyntheticVerifier::Truncated => {
-                    VerifierDecision::Incomplete
-                }
-                SyntheticVerifier::FailExit => VerifierDecision::Fail,
-                SyntheticVerifier::Pass => VerifierDecision::Pass,
-            };
             let run = synthetic_run(synthetic);
+            let decision = classify_verifier(&run, &before, &before);
             return self.record_verifier_decision(
                 &mission,
                 &verifier,
@@ -1812,25 +1894,17 @@ impl Host {
             );
         }
         match self.run_host_verifier(&mission, &tree, &verifier)? {
-            linux_execution::VerifierLaunch::Unavailable => {
-                Err(Error::VerifierConfinementUnavailable)
+            linux_execution::VerifierLaunch::Unavailable { detail } => {
+                let error = Error::VerifierConfinementUnavailable;
+                Err(match detail {
+                    Some(detail) => error.with_context(detail),
+                    None => error,
+                })
             }
             linux_execution::VerifierLaunch::Ran(run) => {
                 let after = crate::execution::workspace::content_digest(&tree)?;
-                let decision = if after != before
-                    || run.timed_out
-                    || run.stdout_truncated
-                    || run.stderr_truncated
-                    || run.toolchain_failed
-                    || run.linker_missing.is_some()
-                    || cargo_resolution_blocked(&run.stdout, &run.stderr)
-                {
-                    VerifierDecision::Incomplete
-                } else if run.exit_code != Some(0) {
-                    VerifierDecision::Fail
-                } else {
-                    VerifierDecision::Pass
-                };
+                let recorded = hosted_run(&run);
+                let decision = classify_verifier(&recorded, &before, &after);
                 let mission = self.store.load_mission(mission_id)?;
                 self.record_verifier_decision(
                     &mission,
@@ -1897,6 +1971,20 @@ impl Host {
                 }
                 if let Some(path) = &run.linker_missing {
                     object.insert("linkerMissing".to_string(), json!(path));
+                }
+                if run.etc_binds.is_some() {
+                    object.insert(
+                        "cpuMax".to_string(),
+                        json!(crate::linux_execution::VERIFIER_CPU_MAX),
+                    );
+                    object.insert(
+                        "memoryMax".to_string(),
+                        json!(crate::linux_execution::VERIFIER_MEMORY_MAX),
+                    );
+                    object.insert(
+                        "pidsMax".to_string(),
+                        json!(crate::linux_execution::VERIFIER_PIDS_MAX),
+                    );
                 }
             }
             provenance = Some(extra);
@@ -3010,27 +3098,6 @@ fn rationale(body: &CommandBody) -> String {
         CommandBody::Continue { activity } => format!("continue {activity}"),
         CommandBody::DetectUncertainty { reason, .. } => reason.as_str().to_string(),
         other => other.kind().as_str().to_string(),
-    }
-}
-
-#[cfg(test)]
-mod cargo_resolution_tests {
-    use super::cargo_resolution_blocked;
-
-    #[test]
-    fn a_missing_cached_dependency_is_not_a_test_failure() {
-        let missing = "error: no matching package named `libc` found\n\
-            As a reminder, you're using offline mode (`--offline` or CARGO_NET_OFFLINE=true)";
-        assert!(cargo_resolution_blocked("", missing));
-        assert!(cargo_resolution_blocked(
-            "",
-            "error: failed to download `libc v0.2.191`\n\nCaused by:\n  \
-             attempting to make an HTTP request, but --offline was specified"
-        ));
-        assert!(!cargo_resolution_blocked(
-            "test result: FAILED. 1 failed\nassertion `left == right` failed",
-            "error: this function has too many arguments"
-        ));
     }
 }
 

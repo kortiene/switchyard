@@ -7,6 +7,14 @@ pub(super) use evidence::ExecutionEvidence;
 
 impl Host {
     pub(super) fn reconcile_execution(&mut self, mission_id: &str) -> Result<()> {
+        self.reconcile_execution_mode(mission_id, false)
+    }
+
+    pub(super) fn reconcile_execution_for_recover(&mut self, mission_id: &str) -> Result<()> {
+        self.reconcile_execution_mode(mission_id, true)
+    }
+
+    fn reconcile_execution_mode(&mut self, mission_id: &str, settle_verifier: bool) -> Result<()> {
         self.store.assert_workspace_owner()?;
         // A confined Host may own a live, supervised Linux process. Its
         // reconciliation below distinguishes that from an abandoned effect.
@@ -27,7 +35,7 @@ impl Host {
                 self.uncertainty(&mission, AttentionReason::ExecutionUncertain)?;
             }
         }
-        self.reconcile_linux(mission_id)?;
+        self.reconcile_linux_mode(mission_id, settle_verifier)?;
         Ok(())
     }
 

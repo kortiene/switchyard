@@ -532,7 +532,107 @@ fn digest_mismatch_timeout_and_truncated_output_enter_needs_attention() {
             provenance["collector"], "switchyard-host-verifier",
             "{label}"
         );
+        assert_eq!(snap.repair_count, 0, "{label}");
     }
+}
+
+#[test]
+fn a_missing_result_signal_empty_hash_or_oom_is_incomplete_and_uses_no_repair() {
+    for kind in [
+        crate::service::SyntheticVerifier::MissingResult,
+        crate::service::SyntheticVerifier::Signal,
+        crate::service::SyntheticVerifier::EmptyHash,
+        crate::service::SyntheticVerifier::Oom,
+    ] {
+        let world = open_world();
+        seed(&world.repo);
+        let mut host = Host::open(&world.db).unwrap();
+        let created = host
+            .create_mission_with_verifier(request(&world.repo), Some(RUST_VERIFY_JSON.into()))
+            .unwrap();
+        to_verifying(&mut host, &created.mission_id);
+        let _tree = workspace(
+            &mut host,
+            &created.mission_id,
+            &created.attempt_id,
+            &world._tmp.path().join("ws"),
+        );
+        host.synthetic_verifier = Some(kind);
+        let (snap, outcome) = host.verify_mission(&created.mission_id).unwrap();
+        assert_eq!(outcome, "incomplete", "{kind:?} {snap:?}");
+        assert_eq!(snap.phase, Phase::NeedsAttention);
+        assert_eq!(snap.repair_count, 0);
+    }
+}
+
+#[test]
+fn a_failing_test_that_prints_a_resolution_marker_still_records_fail() {
+    let world = open_world();
+    seed(&world.repo);
+    let mut host = Host::open(&world.db).unwrap();
+    let created = host
+        .create_mission_with_verifier(request(&world.repo), Some(RUST_VERIFY_JSON.into()))
+        .unwrap();
+    to_verifying(&mut host, &created.mission_id);
+    let _tree = workspace(
+        &mut host,
+        &created.mission_id,
+        &created.attempt_id,
+        &world._tmp.path().join("ws"),
+    );
+    host.synthetic_verifier = Some(crate::service::SyntheticVerifier::ResolutionMarker);
+    let (snap, outcome) = host.verify_mission(&created.mission_id).unwrap();
+    assert_eq!(outcome, "fail");
+    assert_eq!(snap.phase, Phase::Verifying);
+    assert_eq!(snap.repair_count, 0);
+}
+
+#[test]
+fn a_corrupted_verifier_json_refuses_complete_pass() {
+    let world = open_world();
+    seed(&world.repo);
+    let mut host = Host::open(&world.db).unwrap();
+    let created = host
+        .create_mission_with_verifier(request(&world.repo), Some(RUST_VERIFY_JSON.into()))
+        .unwrap();
+    to_verifying(&mut host, &created.mission_id);
+    let _tree = workspace(
+        &mut host,
+        &created.mission_id,
+        &created.attempt_id,
+        &world._tmp.path().join("ws"),
+    );
+    rusqlite::Connection::open(&world.db)
+        .unwrap()
+        .execute(
+            "UPDATE attempts SET verifier_json = '{' WHERE id = ?1",
+            [&created.attempt_id],
+        )
+        .unwrap();
+    let snap = host.snapshot(&created.mission_id).unwrap();
+    insert_pass(
+        &world.db,
+        &created.mission_id,
+        &created.attempt_id,
+        &snap.content_digest,
+        "runtime-observation",
+    );
+    let refused = host
+        .admit(AdmitRequest {
+            command_id: None,
+            mission_id: created.mission_id.clone(),
+            attempt_id: Some(created.attempt_id.clone()),
+            expected_revision: snap.revision,
+            actor: "runtime".into(),
+            origin: crate::CommandOrigin::RuntimeObservation,
+            body: CommandBody::CompletePass,
+        })
+        .unwrap_err();
+    assert_eq!(refused.category(), "guard_failed", "{refused}");
+    assert_eq!(
+        host.snapshot(&created.mission_id).unwrap().phase,
+        Phase::Verifying
+    );
 }
 
 #[test]

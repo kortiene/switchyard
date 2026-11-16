@@ -2,7 +2,10 @@ use super::*;
 
 #[allow(dead_code)]
 pub(super) enum VerifierLaunch {
-    Unavailable,
+    /// No verdict. `detail` is `toolchain_unavailable` or `dependencies_unavailable`.
+    Unavailable {
+        detail: Option<String>,
+    },
     Ran(VerifierRun),
 }
 
@@ -17,7 +20,10 @@ pub(super) struct VerifierRun {
     pub stderr_truncated: bool,
     pub timed_out: bool,
     pub toolchain_identity: Option<String>,
-    pub toolchain_failed: bool,
+    pub signaled: bool,
+    pub oom_killed: bool,
+    pub limit_killed: bool,
+    pub result_unreadable: bool,
     /// Allowlisted `/etc` paths that existed on the host before the sandbox spawn.
     pub etc_binds: Vec<String>,
     /// Sandbox path `cc` could not resolve. The profile is not widened to cover it.
@@ -25,12 +31,17 @@ pub(super) struct VerifierRun {
 }
 
 impl Host {
-    pub(super) fn reconcile_linux(&mut self, mission_id: &str) -> Result<()> {
+    pub(super) fn reconcile_linux_mode(
+        &mut self,
+        mission_id: &str,
+        settle_verifier: bool,
+    ) -> Result<()> {
         self.hold_unknown_execution_kinds(mission_id)?;
         #[cfg(all(feature = "linux-execution", target_os = "linux"))]
         if self.linux.is_some() {
-            return self.reconcile_linux_os(mission_id);
+            return self.reconcile_linux_os(mission_id, settle_verifier);
         }
+        let _ = settle_verifier;
         self.note_unproven_linux(mission_id)
     }
 
@@ -64,7 +75,7 @@ impl Host {
             return self.run_host_verifier_os(mission, tree, verifier);
         }
         let _ = (mission, tree, verifier);
-        Ok(VerifierLaunch::Unavailable)
+        Ok(VerifierLaunch::Unavailable { detail: None })
     }
 
     pub(super) fn terminate_linux_writers(&mut self, mission_id: &str) -> Result<()> {
@@ -474,7 +485,11 @@ mod os {
             }
         }
 
-        pub(super) fn reconcile_linux_os(&mut self, mission_id: &str) -> Result<()> {
+        pub(super) fn reconcile_linux_os(
+            &mut self,
+            mission_id: &str,
+            settle_verifier: bool,
+        ) -> Result<()> {
             let views = self.store.linux_views(mission_id)?;
             for view in &views {
                 if self.runtime.linux_ledger().supervises_live_effects {
@@ -503,7 +518,12 @@ mod os {
                         continue;
                     }
                     crate::persistence::linux_execution::ExecutionKind::Verifier => {
-                        reconcile_verifier_effect(self, &view.operation_id, &effect)?;
+                        reconcile_verifier_effect(
+                            self,
+                            &view.operation_id,
+                            &effect,
+                            settle_verifier,
+                        )?;
                         continue;
                     }
                     crate::persistence::linux_execution::ExecutionKind::Writer => {}
@@ -2462,6 +2482,7 @@ mod os {
         host: &mut Host,
         id: &str,
         effect: &crate::persistence::linux_execution::LinuxEffectRecord,
+        settle_verifier: bool,
     ) -> Result<()> {
         // An abandoned in-flight run is marked uncertain on the first empty
         // proof so the next `mission verify` stays `execution_blocked`.
@@ -2490,7 +2511,9 @@ mod os {
         }
         if effect.state != "uncertain" && effect.receipt_json.is_none() {
             host.store.quarantine_linux(id)?;
-            return Ok(());
+            if !settle_verifier {
+                return Ok(());
+            }
         }
         let receipt = if let Some(text) = &effect.receipt_json {
             serde_json::from_str(text).map_err(Error::storage)?
@@ -2522,18 +2545,20 @@ mod os {
         if require_bwrap(&config.bubblewrap).is_err()
             || cgroup::validate_delegation(&config.cgroup_root).is_err()
         {
-            return Ok(super::VerifierLaunch::Unavailable);
+            return Ok(super::VerifierLaunch::Unavailable { detail: None });
         }
         let rustup_override = test_rustup_home(host);
         let layout = match toolchain_layout(tree, rustup_override.as_deref()) {
             Ok(layout) => layout,
             Err(error) if error.category() == "verifier_confinement_unavailable" => {
-                return Ok(super::VerifierLaunch::Unavailable);
+                return Ok(super::VerifierLaunch::Unavailable {
+                    detail: Some("toolchain_unavailable".into()),
+                });
             }
             Err(error) => return Err(error),
         };
         if cgroup::git_file_is_regular(tree).is_err() {
-            return Ok(super::VerifierLaunch::Unavailable);
+            return Ok(super::VerifierLaunch::Unavailable { detail: None });
         }
         let window_ms = verifier_window_ms(verifier, test_deadline_ms(host));
         let deadline_ms = crate::domain::now_ms().saturating_add(window_ms);
@@ -2563,6 +2588,7 @@ mod os {
         let leaf =
             cgroup::create_verifier_leaf(&config.cgroup_root, &cgroup::leaf_name(&operation_id)?)?;
         if !cgroup::within_root(&config.cgroup_root, &leaf.path) {
+            discard_leaf(&leaf);
             return Err(Error::guard("cgroup leaf escaped the delegated root"));
         }
         let stored = StoredCgroup {
@@ -2572,8 +2598,31 @@ mod os {
             ino: i64::try_from(leaf.ino).map_err(|_| Error::guard("cgroup inode does not fit"))?,
             boot_id: leaf.boot_id.clone(),
         };
-        host.store
-            .prepare_verifier_effect(&identity, &request_json, &stored)?;
+        let prepared = if fail_prepare_requested(host) {
+            Err(Error::guard("injected prepare failure"))
+        } else {
+            host.store
+                .prepare_verifier_effect(&identity, &request_json, &stored)
+        };
+        if let Err(error) = prepared {
+            discard_leaf(&leaf);
+            return Err(error);
+        }
+        let toolchain_identity = match host_toolchain_identity(&layout.toolchain) {
+            Ok(identity_hash) => identity_hash,
+            Err(error) => {
+                let _ = fail_verifier_launch(host, &operation_id);
+                return Ok(super::VerifierLaunch::Unavailable {
+                    detail: Some(error_detail(&error)),
+                });
+            }
+        };
+        if let Some(missing) = linker_gap(host, &layout.toolchain) {
+            let _ = fail_verifier_launch(host, &operation_id);
+            return Ok(super::VerifierLaunch::Unavailable {
+                detail: Some(format!("toolchain_unavailable: {missing}")),
+            });
+        }
         let keep_target = test_target_dir(host).is_some();
         let target = match verifier_target(tree, test_target_dir(host).as_deref()) {
             Ok(target) => target,
@@ -2589,6 +2638,30 @@ mod os {
                 return Err(error);
             }
         };
+        if let Err(error) = prepare_verifier_scratch(&scratch) {
+            let _ = fail_verifier_launch(host, &operation_id);
+            return Err(error);
+        }
+        if fs::write(scratch.join("host-toolchain"), &toolchain_identity).is_err() {
+            let _ = fail_verifier_launch(host, &operation_id);
+            return Ok(super::VerifierLaunch::Unavailable {
+                detail: Some("toolchain_unavailable".into()),
+            });
+        }
+        if let Err(reason) = run_preflight(
+            host,
+            &config,
+            &layout,
+            &leaf,
+            tree,
+            &scratch,
+            &target,
+            &operation_id,
+        ) {
+            return Ok(super::VerifierLaunch::Unavailable {
+                detail: Some(reason),
+            });
+        }
         let started = std::time::Instant::now();
         let driven = drive_verifier(
             host,
@@ -2614,7 +2687,7 @@ mod os {
         let Some(effect) = host.store.linux_effect(operation_id)? else {
             return Ok(());
         };
-        reconcile_verifier_effect(host, operation_id, &effect)
+        reconcile_verifier_effect(host, operation_id, &effect, false)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2631,13 +2704,6 @@ mod os {
         cpu_seconds: u64,
         started: std::time::Instant,
     ) -> Result<super::VerifierLaunch> {
-        fs::write(
-            scratch.join("marker"),
-            "Git administration is unavailable in this sandbox\n",
-        )
-        .map_err(Error::storage)?;
-        fs::write(scratch.join("status.json"), b"").map_err(Error::storage)?;
-        fs::write(scratch.join("result.json"), b"").map_err(Error::storage)?;
         let etc_present = crate::linux_execution::present_etc_binds(Path::new("/"));
         let etc_binds = CheckedEtcBinds {
             linker_missing: crate::linux_execution::unresolved_sandbox_cc(
@@ -2647,7 +2713,7 @@ mod os {
             ),
             present: etc_present,
         };
-        let prelude = "set -eu\nrustc -Vv > \"$CARGO_TARGET_DIR/switchyard-rustc-vv.txt\"\ncargo -V > \"$CARGO_TARGET_DIR/switchyard-cargo-v.txt\"\nexec ./scripts/rust-verify.sh\n";
+        let prelude = "exec ./scripts/rust-verify.sh\n";
         let mut proc = match spawn_verifier_supervisor(
             config,
             layout,
@@ -2658,6 +2724,7 @@ mod os {
             deadline_ms,
             cpu_seconds,
             prelude,
+            omit_linker(host),
         ) {
             Ok(proc) => proc,
             Err(error) => {
@@ -2723,9 +2790,20 @@ mod os {
             match line.as_str() {
                 "ENTERED" if !saw_entered => {
                     let start = start_time(proc.child.id()).unwrap_or_else(|_| start.clone());
-                    host.store
-                        .mark_verifier_entered(identity, proc.child.id(), &start)?;
-                    host.store.mark_verifier_running(identity)?;
+                    if let Err(error) = host
+                        .store
+                        .mark_verifier_entered(identity, proc.child.id(), &start)
+                        .and_then(|()| host.store.mark_verifier_running(identity))
+                    {
+                        drop(proc);
+                        let _ = fail_verifier_launch(host, identity.operation_id);
+                        return Err(Error::ExecutionBlocked {
+                            mission_id: identity.mission_id.to_string(),
+                            detail: format!(
+                                "verifier entry could not be recorded ({error}); mission recover"
+                            ),
+                        });
+                    }
                     saw_entered = true;
                     host.barrier("verifier-running");
                 }
@@ -2769,7 +2847,8 @@ mod os {
         )
         .map_err(|_| Error::VerifierConfinementUnavailable)?;
         let text = String::from_utf8(text).map_err(|_| Error::VerifierConfinementUnavailable)?;
-        let channel = toolchain_channel(&text).ok_or(Error::VerifierConfinementUnavailable)?;
+        let channel = crate::linux_execution::toolchain_channel(&text)
+            .ok_or(Error::VerifierConfinementUnavailable)?;
         let rustup_home = match rustup_override {
             Some(path) if path.is_dir() => path.to_path_buf(),
             Some(_) => return Err(Error::VerifierConfinementUnavailable),
@@ -2786,32 +2865,6 @@ mod os {
             rustup_home,
             toolchain,
         })
-    }
-
-    fn toolchain_channel(text: &str) -> Option<&str> {
-        for line in text.lines() {
-            let line = line.trim();
-            let Some(rest) = line.strip_prefix("channel") else {
-                continue;
-            };
-            let Some(rest) = rest.trim().strip_prefix('=') else {
-                continue;
-            };
-            let rest = rest.trim().trim_matches('"').trim_matches('\'');
-            if !rest.is_empty() {
-                return Some(rest);
-            }
-        }
-        None
-    }
-
-    #[cfg(test)]
-    #[test]
-    fn toolchain_channel_skips_the_table_header() {
-        let text = "[toolchain]\nchannel = \"1.99.1\"\ncomponents = [\"rustfmt\", \"clippy\"]\n";
-        assert_eq!(toolchain_channel(text), Some("1.99.1"));
-        assert_eq!(toolchain_channel("channel = 'stable'\n"), Some("stable"));
-        assert_eq!(toolchain_channel("[toolchain]\n"), None);
     }
 
     fn env_dir(key: &str, fallback: &str) -> Option<PathBuf> {
@@ -2955,8 +3008,14 @@ mod os {
         deadline_ms: i64,
         cpu_seconds: u64,
         prelude: &str,
+        omit_linker: bool,
     ) -> Result<VerifierProc> {
         let mut command = Command::new(&config.helper);
+        if omit_linker {
+            command.env("SWITCHYARD_OMIT_LINKER", "1");
+        } else {
+            command.env_remove("SWITCHYARD_OMIT_LINKER");
+        }
         command
             .arg("supervise")
             .arg("--cgroup")
@@ -3040,7 +3099,7 @@ mod os {
         fn finish_verifier_timeout(
             &mut self,
             identity: &crate::persistence::linux_execution::LinuxEffectIdentity,
-            target: &Path,
+            _target: &Path,
             started: std::time::Instant,
             etc_binds: &CheckedEtcBinds,
         ) -> Result<super::VerifierLaunch> {
@@ -3062,11 +3121,29 @@ mod os {
                 }
                 self.store
                     .verifier_not_applied(identity.operation_id, &proof)?;
-                return Ok(super::VerifierLaunch::Unavailable);
+                return Ok(super::VerifierLaunch::Unavailable { detail: None });
             }
             self.complete_verifier_capture(
-                identity, &proof, "deadline", None, "", "", "", "", true, false, false, started,
-                target, etc_binds,
+                identity,
+                &proof,
+                "deadline",
+                None,
+                "",
+                "",
+                "",
+                "",
+                started,
+                etc_binds,
+                &RunFlags {
+                    timed_out: true,
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                    signaled: false,
+                    oom_killed: false,
+                    limit_killed: false,
+                    result_unreadable: false,
+                    toolchain_identity: None,
+                },
             )
         }
 
@@ -3076,14 +3153,16 @@ mod os {
             identity: &crate::persistence::linux_execution::LinuxEffectIdentity,
             leaf: &CgroupIdentity,
             scratch: &Path,
-            target: &Path,
+            _target: &Path,
             started: std::time::Instant,
             saw_entered: bool,
             etc_binds: &CheckedEtcBinds,
         ) -> Result<super::VerifierLaunch> {
-            let text = fs::read_to_string(scratch.join("result.json")).unwrap_or_default();
-            let result: serde_json::Value =
-                serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+            #[cfg(test)]
+            if let Some(plant) = self.verifier_result_plant.take() {
+                plant_result(&scratch.join("result.json"), plant);
+            }
+            let parsed = read_verifier_result(&scratch.join("result.json"));
             let proved = cgroup::kill_and_prove(leaf, Duration::from_secs(5))?;
             let proof = quiescence_value(&proved, leaf);
             self.store
@@ -3098,8 +3177,32 @@ mod os {
             if !saw_entered {
                 self.store
                     .verifier_not_applied(identity.operation_id, &proof)?;
-                return Ok(super::VerifierLaunch::Unavailable);
+                return Ok(super::VerifierLaunch::Unavailable { detail: None });
             }
+            let Ok(result) = parsed else {
+                return self.complete_verifier_capture(
+                    identity,
+                    &proof,
+                    "unreadable",
+                    None,
+                    "",
+                    "",
+                    "",
+                    "",
+                    started,
+                    etc_binds,
+                    &RunFlags {
+                        timed_out: false,
+                        stdout_truncated: false,
+                        stderr_truncated: false,
+                        signaled: false,
+                        oom_killed: false,
+                        limit_killed: false,
+                        result_unreadable: true,
+                        toolchain_identity: read_host_identity(scratch),
+                    },
+                );
+            };
             let disposition = result
                 .get("disposition")
                 .and_then(serde_json::Value::as_str)
@@ -3130,6 +3233,16 @@ mod os {
                 .and_then(serde_json::Value::as_bool)
                 == Some(true);
             let binds = binds_from_result(&result, etc_binds);
+            let oom_killed = result
+                .get("oomKills")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|count| count > 0);
+            let limit_killed = result
+                .get("pidsMaxEvents")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|count| count > 0)
+                || disposition == "limit";
+            let signaled = exit_code.is_none() && disposition != "deadline";
             self.complete_verifier_capture(
                 identity,
                 &proof,
@@ -3139,12 +3252,18 @@ mod os {
                 stderr,
                 stdout_sha,
                 stderr_sha,
-                disposition == "deadline",
-                stdout_truncated,
-                stderr_truncated,
                 started,
-                target,
                 &binds,
+                &RunFlags {
+                    timed_out: disposition == "deadline",
+                    stdout_truncated,
+                    stderr_truncated,
+                    signaled,
+                    oom_killed,
+                    limit_killed,
+                    result_unreadable: false,
+                    toolchain_identity: read_host_identity(scratch),
+                },
             )
         }
 
@@ -3159,12 +3278,9 @@ mod os {
             stderr: &str,
             stdout_sha256: &str,
             stderr_sha256: &str,
-            timed_out: bool,
-            stdout_truncated: bool,
-            stderr_truncated: bool,
             started: std::time::Instant,
-            target: &Path,
             etc_binds: &CheckedEtcBinds,
+            flags: &RunFlags,
         ) -> Result<super::VerifierLaunch> {
             let receipt = json!({
                 "operationId": identity.operation_id,
@@ -3177,16 +3293,6 @@ mod os {
             });
             self.store
                 .complete_verifier_effect(identity.operation_id, &receipt, proof)?;
-            let rustc =
-                fs::read_to_string(target.join("switchyard-rustc-vv.txt")).unwrap_or_default();
-            let cargo =
-                fs::read_to_string(target.join("switchyard-cargo-v.txt")).unwrap_or_default();
-            let toolchain_failed = rustc.trim().is_empty() || cargo.trim().is_empty();
-            let toolchain_identity = if toolchain_failed {
-                None
-            } else {
-                Some(toolchain_identity_hash(&rustc, &cargo))
-            };
             let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             Ok(super::VerifierLaunch::Ran(super::VerifierRun {
                 exit_code: exit_code.and_then(|code| i32::try_from(code).ok()),
@@ -3195,15 +3301,29 @@ mod os {
                 stderr: stderr.to_string(),
                 stdout_sha256: stdout_sha256.to_string(),
                 stderr_sha256: stderr_sha256.to_string(),
-                stdout_truncated,
-                stderr_truncated,
-                timed_out,
-                toolchain_identity,
-                toolchain_failed,
+                stdout_truncated: flags.stdout_truncated,
+                stderr_truncated: flags.stderr_truncated,
+                timed_out: flags.timed_out,
+                toolchain_identity: flags.toolchain_identity.clone(),
+                signaled: flags.signaled,
+                oom_killed: flags.oom_killed,
+                limit_killed: flags.limit_killed,
+                result_unreadable: flags.result_unreadable,
                 etc_binds: etc_binds.present.clone(),
                 linker_missing: etc_binds.linker_missing.clone(),
             }))
         }
+    }
+
+    struct RunFlags {
+        timed_out: bool,
+        stdout_truncated: bool,
+        stderr_truncated: bool,
+        signaled: bool,
+        oom_killed: bool,
+        limit_killed: bool,
+        result_unreadable: bool,
+        toolchain_identity: Option<String>,
     }
 
     struct CheckedEtcBinds {
@@ -3236,6 +3356,240 @@ mod os {
             .filter(|path| crate::linux_execution::VERIFIER_ETC_ALLOWLIST.contains(path))
             .map(str::to_string)
             .collect()
+    }
+
+    fn fail_prepare_requested(host: &Host) -> bool {
+        #[cfg(test)]
+        {
+            host.fail_prepare_verifier
+        }
+        #[cfg(not(test))]
+        {
+            let _ = host;
+            false
+        }
+    }
+
+    fn discard_leaf(leaf: &CgroupIdentity) {
+        let _ = cgroup::kill_and_prove(leaf, Duration::from_secs(2));
+        let _ = fs::remove_dir(&leaf.path);
+    }
+
+    fn error_detail(error: &Error) -> String {
+        let _ = error;
+        "toolchain_unavailable".into()
+    }
+
+    fn host_toolchain_identity(toolchain: &Path) -> Result<String> {
+        let rustc = Command::new(toolchain.join("bin/rustc"))
+            .arg("-Vv")
+            .output()
+            .map_err(|_| {
+                Error::VerifierConfinementUnavailable.with_context("toolchain_unavailable")
+            })?;
+        let cargo = Command::new(toolchain.join("bin/cargo"))
+            .arg("-V")
+            .output()
+            .map_err(|_| {
+                Error::VerifierConfinementUnavailable.with_context("toolchain_unavailable")
+            })?;
+        if !rustc.status.success() || !cargo.status.success() {
+            return Err(Error::VerifierConfinementUnavailable.with_context("toolchain_unavailable"));
+        }
+        let rustc = String::from_utf8(rustc.stdout).map_err(|_| {
+            Error::VerifierConfinementUnavailable.with_context("toolchain_unavailable")
+        })?;
+        let cargo = String::from_utf8(cargo.stdout).map_err(|_| {
+            Error::VerifierConfinementUnavailable.with_context("toolchain_unavailable")
+        })?;
+        if rustc.trim().is_empty() || cargo.trim().is_empty() {
+            return Err(Error::VerifierConfinementUnavailable.with_context("toolchain_unavailable"));
+        }
+        Ok(toolchain_identity_hash(&rustc, &cargo))
+    }
+
+    fn linker_gap(host: &Host, toolchain: &Path) -> Option<String> {
+        let mut present = crate::linux_execution::present_etc_binds(Path::new("/"));
+        if omit_linker(host) {
+            present.retain(|path| path != "/etc/alternatives");
+        }
+        crate::linux_execution::unresolved_sandbox_cc(Path::new("/"), toolchain, &present)
+    }
+
+    fn prepare_verifier_scratch(scratch: &Path) -> Result<()> {
+        fs::write(
+            scratch.join("marker"),
+            "Git administration is unavailable in this sandbox\n",
+        )
+        .map_err(Error::storage)?;
+        fs::write(scratch.join("status.json"), b"").map_err(Error::storage)?;
+        fs::write(scratch.join("result.json"), b"").map_err(Error::storage)?;
+        Ok(())
+    }
+
+    fn read_host_identity(scratch: &Path) -> Option<String> {
+        let bytes =
+            crate::regular_file::read_regular_nofollow(&scratch.join("host-toolchain"), 256)
+                .ok()?;
+        let text = String::from_utf8(bytes).ok()?;
+        let text = text.trim();
+        (!text.is_empty()).then(|| text.to_string())
+    }
+
+    const RESULT_CAP: usize = 256 * 1024;
+
+    fn read_verifier_result(path: &Path) -> Result<serde_json::Value> {
+        let bytes = crate::regular_file::read_regular_nofollow(path, RESULT_CAP + 1)?;
+        if bytes.len() > RESULT_CAP {
+            return Err(Error::guard("verifier result exceeds the read cap"));
+        }
+        let text =
+            String::from_utf8(bytes).map_err(|_| Error::guard("verifier result is not utf-8"))?;
+        if text.trim().is_empty() {
+            return Err(Error::guard("verifier result is empty"));
+        }
+        serde_json::from_str(&text).map_err(|_| Error::guard("verifier result is not json"))
+    }
+
+    #[cfg(test)]
+    fn plant_result(path: &Path, plant: super::super::VerifierResultPlant) {
+        let _ = fs::remove_file(path);
+        match plant {
+            super::super::VerifierResultPlant::Symlink => {
+                let secret = path.with_file_name("result-secret");
+                let _ = fs::write(&secret, "SECRET-RESULT");
+                let _ = std::os::unix::fs::symlink(&secret, path);
+            }
+            super::super::VerifierResultPlant::Fifo => {
+                let _ = Command::new("mkfifo").arg(path).status();
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_preflight(
+        host: &mut Host,
+        config: &LinuxExecutionConfig,
+        layout: &ToolchainLayout,
+        leaf: &CgroupIdentity,
+        tree: &Path,
+        scratch: &Path,
+        target: &Path,
+        operation_id: &str,
+    ) -> std::result::Result<(), String> {
+        let identity_hash = read_host_identity(scratch).unwrap_or_default();
+        if identity_hash.is_empty() {
+            // Written by the caller before preflight. A missing file is still a toolchain gap.
+        }
+        if let Err(error) = write_probe(target) {
+            let _ = fail_verifier_launch(host, operation_id);
+            return Err(error);
+        }
+        let probe = "cd /cargo-target/probe && CARGO_TARGET_DIR=/tmp/switchyard-probe-target cargo build --offline --locked\n";
+        if !stage_ok(config, layout, leaf, tree, scratch, target, probe, host) {
+            let _ = fail_verifier_launch(host, operation_id);
+            return Err("toolchain_unavailable".into());
+        }
+        let metadata = "cargo metadata --locked --offline --format-version 1 --manifest-path /workspace/Cargo.toml >/tmp/switchyard-metadata.json\n";
+        if !stage_ok(config, layout, leaf, tree, scratch, target, metadata, host) {
+            let _ = fail_verifier_launch(host, operation_id);
+            return Err("dependencies_unavailable".into());
+        }
+        Ok(())
+    }
+
+    fn write_probe(target: &Path) -> std::result::Result<(), String> {
+        let probe = target.join("probe");
+        fs::create_dir_all(probe.join("src")).map_err(|error| error.to_string())?;
+        fs::write(
+            probe.join("Cargo.toml"),
+            "[package]\nname = \"switchyard-verifier-probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(probe.join("src/main.rs"), "fn main() {}\n")
+            .map_err(|error| error.to_string())?;
+        fs::write(
+            probe.join("Cargo.lock"),
+            "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = \"switchyard-verifier-probe\"\nversion = \"0.0.0\"\n",
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stage_ok(
+        config: &LinuxExecutionConfig,
+        layout: &ToolchainLayout,
+        leaf: &CgroupIdentity,
+        tree: &Path,
+        scratch: &Path,
+        target: &Path,
+        script: &str,
+        host: &Host,
+    ) -> bool {
+        let _ = fs::write(scratch.join("status.json"), b"");
+        let _ = fs::write(scratch.join("result.json"), b"");
+        let deadline = crate::domain::now_ms().saturating_add(120_000);
+        let Ok(mut proc) = spawn_verifier_supervisor(
+            config,
+            layout,
+            leaf,
+            tree,
+            scratch,
+            target,
+            deadline,
+            120,
+            script,
+            omit_linker(host),
+        ) else {
+            return false;
+        };
+        if wait_line(&proc.lines, Duration::from_secs(10))
+            .ok()
+            .as_deref()
+            != Some("READY")
+        {
+            return false;
+        }
+        let Some(stdin) = proc.stdin.as_mut() else {
+            return false;
+        };
+        if writeln!(stdin, "GO").and_then(|()| stdin.flush()).is_err() {
+            return false;
+        }
+        let mut done = false;
+        let wait_until = std::time::Instant::now() + Duration::from_secs(120);
+        while std::time::Instant::now() < wait_until {
+            let remaining = wait_until.saturating_duration_since(std::time::Instant::now());
+            match wait_line(&proc.lines, remaining).ok() {
+                Some(line) if line == "DONE" => {
+                    done = true;
+                    break;
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        drop(proc);
+        if !done {
+            return false;
+        }
+        let Ok(result) = read_verifier_result(&scratch.join("result.json")) else {
+            return false;
+        };
+        result.get("exitCode").and_then(serde_json::Value::as_i64) == Some(0)
+    }
+
+    fn omit_linker(host: &Host) -> bool {
+        #[cfg(test)]
+        {
+            host.verifier_omit_linker
+        }
+        #[cfg(not(test))]
+        {
+            let _ = host;
+            false
+        }
     }
 
     fn toolchain_identity_hash(rustc: &str, cargo: &str) -> String {

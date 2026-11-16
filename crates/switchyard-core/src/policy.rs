@@ -354,13 +354,19 @@ fn require_pass(mission: &MissionRecord, facts: &Facts) -> Result<()> {
     }
 }
 
-/// `executes: true` on the frozen verifier. A document that does not parse
-/// does not turn the collector check on.
+/// The host collector is required unless the frozen verifier parses and
+/// `executes` is false or absent. A parse failure or any other value keeps it.
 fn verifier_executes(mission: &MissionRecord) -> bool {
-    crate::freeze::parse_object(&mission.attempt.verifier_json, "verifier definition")
-        .ok()
-        .and_then(|doc| doc.get("executes").and_then(serde_json::Value::as_bool))
-        == Some(true)
+    let Ok(doc) =
+        crate::freeze::parse_object(&mission.attempt.verifier_json, "verifier definition")
+    else {
+        return true;
+    };
+    match doc.get("executes") {
+        None => false,
+        Some(value) if value.as_bool() == Some(false) => false,
+        Some(_) => true,
+    }
 }
 
 fn require_repairable_fail(mission: &MissionRecord, facts: &Facts) -> Result<()> {
