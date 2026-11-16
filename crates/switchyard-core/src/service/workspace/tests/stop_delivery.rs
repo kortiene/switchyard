@@ -216,7 +216,7 @@ fn stop_only_dispatch_does_not_verify_the_workspace_or_drain_work() {
     assert!(
         after["nextSteps"]
             .to_string()
-            .contains("not verified for the current owner")
+            .contains("verified by an earlier owner generation")
     );
 
     let pause_receipt = h
