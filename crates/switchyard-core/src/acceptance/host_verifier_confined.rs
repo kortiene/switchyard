@@ -670,6 +670,12 @@ fn profile_command(repo: &Path, argv: &[&str]) -> String {
 }
 
 fn profile_command_with_cargo(repo: &Path, cargo_home: Option<&Path>, argv: &[&str]) -> String {
+    // The verifier profile mounts a file over `.git`. A directory cannot take that mount.
+    let git = repo.join(".git");
+    if git.is_dir() {
+        fs::remove_dir_all(&git).unwrap();
+        fs::write(&git, "gitdir: /unavailable\n").unwrap();
+    }
     let root =
         cgroup::validate_delegation(Path::new(&require_env("SWITCHYARD_CGROUP_ROOT"))).unwrap();
     let leaf = cgroup::create_verifier_leaf(
