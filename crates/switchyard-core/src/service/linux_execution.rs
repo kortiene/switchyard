@@ -2774,31 +2774,31 @@ mod os {
         })
     }
 
-fn toolchain_channel(text: &str) -> Option<&str> {
-    for line in text.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("channel") else {
-            continue;
-        };
-        let Some(rest) = rest.trim().strip_prefix('=') else {
-            continue;
-        };
-        let rest = rest.trim().trim_matches('"').trim_matches('\'');
-        if !rest.is_empty() {
-            return Some(rest);
+    fn toolchain_channel(text: &str) -> Option<&str> {
+        for line in text.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("channel") else {
+                continue;
+            };
+            let Some(rest) = rest.trim().strip_prefix('=') else {
+                continue;
+            };
+            let rest = rest.trim().trim_matches('"').trim_matches('\'');
+            if !rest.is_empty() {
+                return Some(rest);
+            }
         }
+        None
     }
-    None
-}
 
-#[cfg(test)]
-#[test]
-fn toolchain_channel_skips_the_table_header() {
-    let text = "[toolchain]\nchannel = \"1.99.1\"\ncomponents = [\"rustfmt\", \"clippy\"]\n";
-    assert_eq!(toolchain_channel(text), Some("1.99.1"));
-    assert_eq!(toolchain_channel("channel = 'stable'\n"), Some("stable"));
-    assert_eq!(toolchain_channel("[toolchain]\n"), None);
-}
+    #[cfg(test)]
+    #[test]
+    fn toolchain_channel_skips_the_table_header() {
+        let text = "[toolchain]\nchannel = \"1.99.1\"\ncomponents = [\"rustfmt\", \"clippy\"]\n";
+        assert_eq!(toolchain_channel(text), Some("1.99.1"));
+        assert_eq!(toolchain_channel("channel = 'stable'\n"), Some("stable"));
+        assert_eq!(toolchain_channel("[toolchain]\n"), None);
+    }
 
     fn env_dir(key: &str, fallback: &str) -> Option<PathBuf> {
         if let Some(value) = std::env::var_os(key) {
