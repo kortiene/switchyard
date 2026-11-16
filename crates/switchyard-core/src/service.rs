@@ -71,6 +71,26 @@ struct RecordedRun {
     toolchain_identity: Option<String>,
 }
 
+/// Cargo could not resolve or fetch a dependency. That is incomplete evidence,
+/// not a verifier FAIL. The sandbox stays offline via `CARGO_NET_OFFLINE`.
+fn cargo_resolution_blocked(stdout: &str, stderr: &str) -> bool {
+    let mut text = String::with_capacity(stdout.len() + stderr.len() + 1);
+    text.push_str(stdout);
+    text.push('\n');
+    text.push_str(stderr);
+    const MARKERS: &[&str] = &[
+        "no matching package named",
+        "failed to download",
+        "failed to select a version for the requirement",
+        "Unable to update registry",
+        "attempting to make an HTTP request, but --offline was specified",
+        "you're using offline mode",
+        "failed to fetch `",
+        "registry index not found",
+    ];
+    MARKERS.iter().any(|marker| text.contains(marker))
+}
+
 fn hosted_run(run: &linux_execution::VerifierRun) -> RecordedRun {
     RecordedRun {
         exit_code: run.exit_code,
@@ -1785,6 +1805,7 @@ impl Host {
                     || run.stdout_truncated
                     || run.stderr_truncated
                     || run.toolchain_failed
+                    || cargo_resolution_blocked(&run.stdout, &run.stderr)
                 {
                     VerifierDecision::Incomplete
                 } else if run.exit_code != Some(0) {
@@ -2962,6 +2983,27 @@ fn rationale(body: &CommandBody) -> String {
         CommandBody::Continue { activity } => format!("continue {activity}"),
         CommandBody::DetectUncertainty { reason, .. } => reason.as_str().to_string(),
         other => other.kind().as_str().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod cargo_resolution_tests {
+    use super::cargo_resolution_blocked;
+
+    #[test]
+    fn a_missing_cached_dependency_is_not_a_test_failure() {
+        let missing = "error: no matching package named `libc` found\n\
+            As a reminder, you're using offline mode (`--offline` or CARGO_NET_OFFLINE=true)";
+        assert!(cargo_resolution_blocked("", missing));
+        assert!(cargo_resolution_blocked(
+            "",
+            "error: failed to download `libc v0.2.191`\n\nCaused by:\n  \
+             attempting to make an HTTP request, but --offline was specified"
+        ));
+        assert!(!cargo_resolution_blocked(
+            "test result: FAILED. 1 failed\nassertion `left == right` failed",
+            "error: this function has too many arguments"
+        ));
     }
 }
 

@@ -11,5 +11,5 @@ if [[ ! -f rust-toolchain.toml ]]; then
 fi
 
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked --offline -- -D warnings
-cargo test --workspace --locked --offline
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked

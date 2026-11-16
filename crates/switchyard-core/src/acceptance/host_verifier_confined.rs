@@ -88,7 +88,7 @@ fn fixture(test_body: &str) -> (tempfile::TempDir, PathBuf) {
     write_file(
         &repo,
         "scripts/rust-verify.sh",
-        "#!/usr/bin/env bash\nset -euo pipefail\ncd \"$(dirname \"$0\")/..\"\ncargo fmt --all -- --check\ncargo clippy --workspace --all-targets --locked --offline -- -D warnings\ncargo test --workspace --locked --offline\n",
+        "#!/usr/bin/env bash\nset -euo pipefail\ncd \"$(dirname \"$0\")/..\"\ncargo fmt --all -- --check\ncargo clippy --workspace --all-targets --locked -- -D warnings\ncargo test --workspace --locked\n",
     );
     let script = repo.join("scripts/rust-verify.sh");
     let mut perms = fs::metadata(&script).unwrap().permissions();
