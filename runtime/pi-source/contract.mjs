@@ -5,6 +5,7 @@ import { spawnSync, execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertRustSplit, workspaceLockFilters } from './rust-suite.mjs';
 
 const source = dirname(fileURLToPath(import.meta.url));
 const root = resolve(source, '../..');
@@ -86,19 +87,21 @@ try {
   const nodePassed = new Set([...node.matchAll(/^ok \d+ - (.+)$/gm)].map(match => match[1]));
   // Clippy warms target/. A cold cargo test on a busy runner can still exceed
   // 10 minutes while the 25-minute job has time left; the workflow also caches Cargo.
-  const rust = run('rust-tests', 'cargo', ['test', '--workspace', '--features', 'pi-contract', '--locked'], root, 1_200_000);
-  const summaries = [...rust.matchAll(/^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out;/gm)];
-  assert(summaries.length > 0, 'No Rust test summaries found');
-  for (const summary of summaries) assert(summary.slice(2).every(count => count === '0'), 'Rust tests must not fail, skip or filter');
+  // The lock-holding subset is a separate process so parallel forks cannot
+  // keep its owner.lock fds open. Each invocation filters the other's tests;
+  // the counts below require those sets to be exact complements.
+  const rustParallel = run('rust-tests', 'cargo', ['test', '--workspace', '--features', 'pi-contract', '--locked', '--', ...workspaceLockFilters.flatMap(filter => ['--skip', filter])], root, 1_200_000);
+  const rustSerial = run('rust-tests-serial', 'cargo', ['test', '--workspace', '--features', 'pi-contract', '--locked', '--', ...workspaceLockFilters, '--test-threads=1'], root, 1_200_000);
+  const rustSplit = assertRustSplit(rustParallel, rustSerial);
   // Exact cargo identifiers (full module path when the test has one). A same-named test elsewhere does not count.
-  const rustPassed = new Set([...rust.matchAll(/^test (\S+) \.\.\. ok$/gm)].map(match => match[1]));
+  const rustPassed = rustSplit.rustPassed;
   for (const [property, required] of Object.entries(cases)) {
     assert(required.node.length + required.rust.length > 0, `No evidence for ${property}`);
     for (const name of required.node) assert(nodePassed.has(name), `Missing Node evidence for ${property}: ${name}`);
     for (const name of required.rust) assert(rustPassed.has(name), `Missing Rust evidence for ${property}: ${name}`);
   }
   evidence.nodeTests = Number(node.match(/^# tests (\d+)$/m)[1]);
-  evidence.rustTests = summaries.reduce((total, match) => total + Number(match[1]), 0);
+  evidence.rustTests = rustSplit.rustTests;
   const dirtyAtEnd = gitDirty();
   evidence.dirty = dirtyAtEnd !== '';
   assertCleanCiTree(dirtyAtEnd, 'after the contract checks');
