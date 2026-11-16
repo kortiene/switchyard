@@ -20,6 +20,7 @@ use crate::transitions::target_spec;
 use crate::verification::{NewVerification, VerificationCollector};
 
 mod execution;
+mod export;
 mod linux_execution;
 mod operator_write;
 #[cfg(all(
@@ -42,6 +43,7 @@ mod pi_linux_process;
 mod pi_linux_write;
 mod workspace;
 
+pub use export::{ExportReceipt, write_export_exclusive};
 pub use operator_write::OperatorWrite;
 
 /// Test-only stand-in for a confined verifier result. It does not execute anything.
@@ -464,6 +466,15 @@ pub fn canonical_db_path(path: &Path) -> Result<PathBuf> {
         .join(name))
 }
 
+/// Ledger path for a read. A missing file, including a missing parent, is
+/// `not_found`. This does not create directories. Writers use [`canonical_db_path`].
+pub fn reader_db_path(path: &Path) -> Result<PathBuf> {
+    if !path.exists() {
+        return Err(Error::NotFound);
+    }
+    std::fs::canonicalize(path).map_err(Error::storage)
+}
+
 /// Canonical freeze of the stored attempt. Read-only: no lock, no migration,
 /// no runtime. Seeding a plan stores this text; it does not re-freeze.
 pub fn read_attempt_freeze(db_path: &Path, mission_id: &str) -> Result<String> {
@@ -556,7 +567,7 @@ impl Host {
 
     /// Read-only inspection. Does not take the owner lock, migrate, or dispatch.
     pub fn inspect(db_path: &Path, mission_id: Option<&str>) -> Result<Vec<MissionSnapshot>> {
-        let db_path = canonical_db_path(db_path)?;
+        let db_path = reader_db_path(db_path)?;
         let store = Store::open_reader(&db_path)?;
         let generation = store.generation()?;
         let ids = match mission_id {

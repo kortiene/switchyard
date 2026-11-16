@@ -159,7 +159,7 @@ S1 (#95) implements the ledger and transition kernel with the clarifications bel
 - **Successor identity.** Terminal mission rows are immutable. A successor is a new mission and attempt that reference the closed records. A restart is not a new attempt.
 - **Durability.** The mission database uses WAL and `synchronous=FULL`. Committed transactions are the process-crash boundary under test. Power loss and lost-host recovery are not claimed.
 - **Canonical hashing.** Payload hashes are `sha256:` plus hex SHA-256 of RFC 8785 JSON, restricted to null, booleans, strings, arrays, objects, and integers. Non-integer numbers are rejected. Operation IDs use the M1 formula. Full ES6 number vectors remain an S2 deliverable.
-- **Owner lock and CLI.** Mutating opens take an exclusive flock on `<database>.owner.lock` and increment a generation row. `switchyard mission status` is read-only, does not take the lock, and sets SQLite `query_only`. The fake runtime is the only adapter. Create reads Git and does not call GitHub.
+- **Owner lock and CLI.** Mutating opens take an exclusive flock on `<database>.owner.lock` and increment a generation row. `switchyard mission status` and `switchyard mission export` are read-only, do not take the lock, and set SQLite `query_only`. The fake runtime is the only adapter. Create reads Git and does not call GitHub.
 
 ## S4-A resolutions (slice 172a)
 
@@ -198,6 +198,20 @@ S1 (#95) implements the ledger and transition kernel with the clarifications bel
   3. `verifier_not_supported`, when `--verifier` is supplied and is not an exact canonical match for a document this host can run. Way out: omit the flag, or pass a supported document (`switchyard.verifier.v1` or `switchyard.verifier.rust-verify.v1`). An empty objective or acceptance is `guard_failed` at this same step. Nothing is written.
   4. `active_mission_exists`. Way out: finish or cancel that mission. A non-terminal mission counts, including a pending successor of a different source.
   5. `source_changed_during_create`. Compared inside the insert transaction before any write. Way out: nothing is written; retry.
+
+## Ledger export
+
+`switchyard mission export --db <ledger> --mission <id> [--out <file>]` writes `switchyard.ledger-export.v1`. It takes no owner lock, does not migrate, and does not dispatch. Every read of that export runs in one deferred SQLite transaction on the read-only connection, so the mission, commands, decisions, and verifications are one snapshot. `query_only` stays on. The schema stays at 12.
+
+The freeze is the exact stored `attempts.frozen_inputs_json` string plus `payload_hash` of that string (`sha256:` plus the hex SHA-256 of the canonical document). There is no parsed freeze object and no `inputsFrozen` field. A reader derives the freeze state from whether `frozenInputsJson` is null. An attempt that has not frozen yet exports both fields as null.
+
+Without `--out`, the document is written to stdout. With `--out`, the file receives the document and stdout prints a receipt `{ok, out, bytes, sha256}`. `bytes` is the number of bytes written. `sha256` is `sha256:` plus the hex SHA-256 of those bytes. The file is created with `O_CREAT|O_EXCL|O_NOFOLLOW` only after the read succeeds. A write that fails after the file is created removes that file.
+
+Refusals:
+
+1. `not_found`, when the mission id is not stored, or the ledger file is missing. A missing parent directory is the same refusal and is not created. Way out: pass a stored mission id, and point `--db` at an initialized schema-12 ledger.
+2. `storage_failed`, when the file exists but is uninitialized or has a newer schema. Way out: point `--db` at an initialized schema-12 ledger.
+3. `export_target_exists`, when `--out` is an existing path, including a symlink or a directory. The target is left unchanged. Way out: pick a new path, or remove it.
 
 ## Operator worktree write
 

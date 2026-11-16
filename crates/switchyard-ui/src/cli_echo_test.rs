@@ -182,6 +182,59 @@ fn mission_write_parses_with_the_real_cli() {
 }
 
 #[test]
+fn mission_export_parses_with_the_real_cli() {
+    let cli = match Cli::try_parse_from([
+        "switchyard",
+        "mission",
+        "export",
+        "--db",
+        "/tmp/operator's ledger/mission db.db",
+        "--mission",
+        "msn x",
+        "--out",
+        "/tmp/out.json",
+    ]) {
+        Ok(cli) => cli,
+        Err(error) => panic!("mission export did not parse:\n{error}"),
+    };
+    match cli.command {
+        Command::Mission { action } => match action {
+            MissionCommand::Export { db, mission, out } => {
+                assert_eq!(
+                    db.display().to_string(),
+                    "/tmp/operator's ledger/mission db.db"
+                );
+                assert_eq!(mission, "msn x");
+                match out {
+                    Some(path) => assert_eq!(path.display().to_string(), "/tmp/out.json"),
+                    None => panic!("export --out was dropped"),
+                }
+            }
+            other => panic!("export parsed as {other:?}"),
+        },
+    }
+
+    let stdout_only = match Cli::try_parse_from([
+        "switchyard",
+        "mission",
+        "export",
+        "--db",
+        "ledger.sqlite",
+        "--mission",
+        "m-1",
+    ]) {
+        Ok(cli) => cli,
+        Err(error) => panic!("mission export without --out did not parse:\n{error}"),
+    };
+    match stdout_only.command {
+        Command::Mission { action } => match action {
+            MissionCommand::Export { out, .. } => assert!(out.is_none()),
+            other => panic!("export parsed as {other:?}"),
+        },
+    }
+}
+
+#[test]
 fn mission_command_rejects_a_rationale_flag() {
     let rejected = Cli::try_parse_from([
         "switchyard",
