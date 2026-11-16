@@ -18,6 +18,10 @@ pub(super) struct VerifierRun {
     pub timed_out: bool,
     pub toolchain_identity: Option<String>,
     pub toolchain_failed: bool,
+    /// Allowlisted `/etc` paths that existed on the host before the sandbox spawn.
+    pub etc_binds: Vec<String>,
+    /// Sandbox path `cc` could not resolve. The profile is not widened to cover it.
+    pub linker_missing: Option<String>,
 }
 
 impl Host {
@@ -2634,6 +2638,15 @@ mod os {
         .map_err(Error::storage)?;
         fs::write(scratch.join("status.json"), b"").map_err(Error::storage)?;
         fs::write(scratch.join("result.json"), b"").map_err(Error::storage)?;
+        let etc_present = crate::linux_execution::present_etc_binds(Path::new("/"));
+        let etc_binds = CheckedEtcBinds {
+            linker_missing: crate::linux_execution::unresolved_sandbox_cc(
+                Path::new("/"),
+                &layout.toolchain,
+                &etc_present,
+            ),
+            present: etc_present,
+        };
         let prelude = "set -eu\nrustc -Vv > \"$CARGO_TARGET_DIR/switchyard-rustc-vv.txt\"\ncargo -V > \"$CARGO_TARGET_DIR/switchyard-cargo-v.txt\"\nexec ./scripts/rust-verify.sh\n";
         let mut proc = match spawn_verifier_supervisor(
             config,
@@ -2704,7 +2717,7 @@ mod os {
                 Ok(line) => line,
                 Err(_) => {
                     drop(proc);
-                    return host.finish_verifier_timeout(identity, target, started);
+                    return host.finish_verifier_timeout(identity, target, started, &etc_binds);
                 }
             };
             match line.as_str() {
@@ -2725,6 +2738,7 @@ mod os {
                         target,
                         started,
                         saw_entered,
+                        &etc_binds,
                     );
                 }
                 "ENTERED" => {}
@@ -3028,6 +3042,7 @@ mod os {
             identity: &crate::persistence::linux_execution::LinuxEffectIdentity,
             target: &Path,
             started: std::time::Instant,
+            etc_binds: &CheckedEtcBinds,
         ) -> Result<super::VerifierLaunch> {
             let effect = self
                 .store
@@ -3051,10 +3066,11 @@ mod os {
             }
             self.complete_verifier_capture(
                 identity, &proof, "deadline", None, "", "", "", "", true, false, false, started,
-                target,
+                target, etc_binds,
             )
         }
 
+        #[allow(clippy::too_many_arguments)]
         fn finish_verifier_result(
             &mut self,
             identity: &crate::persistence::linux_execution::LinuxEffectIdentity,
@@ -3063,6 +3079,7 @@ mod os {
             target: &Path,
             started: std::time::Instant,
             saw_entered: bool,
+            etc_binds: &CheckedEtcBinds,
         ) -> Result<super::VerifierLaunch> {
             let text = fs::read_to_string(scratch.join("result.json")).unwrap_or_default();
             let result: serde_json::Value =
@@ -3112,6 +3129,7 @@ mod os {
                 .get("stderrTruncated")
                 .and_then(serde_json::Value::as_bool)
                 == Some(true);
+            let binds = binds_from_result(&result, etc_binds);
             self.complete_verifier_capture(
                 identity,
                 &proof,
@@ -3126,6 +3144,7 @@ mod os {
                 stderr_truncated,
                 started,
                 target,
+                &binds,
             )
         }
 
@@ -3145,6 +3164,7 @@ mod os {
             stderr_truncated: bool,
             started: std::time::Instant,
             target: &Path,
+            etc_binds: &CheckedEtcBinds,
         ) -> Result<super::VerifierLaunch> {
             let receipt = json!({
                 "operationId": identity.operation_id,
@@ -3180,8 +3200,42 @@ mod os {
                 timed_out,
                 toolchain_identity,
                 toolchain_failed,
+                etc_binds: etc_binds.present.clone(),
+                linker_missing: etc_binds.linker_missing.clone(),
             }))
         }
+    }
+
+    struct CheckedEtcBinds {
+        present: Vec<String>,
+        linker_missing: Option<String>,
+    }
+
+    fn binds_from_result(
+        result: &serde_json::Value,
+        fallback: &CheckedEtcBinds,
+    ) -> CheckedEtcBinds {
+        let Some(items) = result.get("etcBinds").and_then(|value| value.as_array()) else {
+            return CheckedEtcBinds {
+                present: allowlisted_etc(fallback.present.iter().map(String::as_str)),
+                linker_missing: fallback.linker_missing.clone(),
+            };
+        };
+        CheckedEtcBinds {
+            present: allowlisted_etc(items.iter().filter_map(|item| item.as_str())),
+            linker_missing: result
+                .get("linkerMissing")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        }
+    }
+
+    fn allowlisted_etc<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+        paths
+            .into_iter()
+            .filter(|path| crate::linux_execution::VERIFIER_ETC_ALLOWLIST.contains(path))
+            .map(str::to_string)
+            .collect()
     }
 
     fn toolchain_identity_hash(rustc: &str, cargo: &str) -> String {

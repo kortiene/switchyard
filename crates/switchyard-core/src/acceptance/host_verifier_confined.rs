@@ -214,6 +214,24 @@ fn host_verifier_confined_pass_admits_complete_pass() {
             .unwrap()
             .starts_with("sha256:")
     );
+    let binds = provenance["etcBinds"]
+        .as_array()
+        .expect("etcBinds records the host check");
+    assert!(
+        binds.iter().all(|entry| {
+            entry.as_str().is_some_and(|path| {
+                crate::linux_execution::VERIFIER_ETC_ALLOWLIST.contains(&path)
+                    && std::path::Path::new(path).exists()
+            })
+        }),
+        "{provenance}"
+    );
+    assert!(
+        !std::path::Path::new("/etc/alternatives").exists()
+            || binds.iter().any(|entry| entry == "/etc/alternatives"),
+        "{provenance}"
+    );
+    assert!(provenance.get("linkerMissing").is_none(), "{provenance}");
 }
 
 #[test]

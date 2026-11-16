@@ -69,6 +69,8 @@ struct RecordedRun {
     stdout_sha256: String,
     stderr_sha256: String,
     toolchain_identity: Option<String>,
+    etc_binds: Option<Vec<String>>,
+    linker_missing: Option<String>,
 }
 
 /// Cargo could not resolve or fetch a dependency. That is incomplete evidence,
@@ -100,6 +102,8 @@ fn hosted_run(run: &linux_execution::VerifierRun) -> RecordedRun {
         stdout_sha256: run.stdout_sha256.clone(),
         stderr_sha256: run.stderr_sha256.clone(),
         toolchain_identity: run.toolchain_identity.clone(),
+        etc_binds: Some(run.etc_binds.clone()),
+        linker_missing: run.linker_missing.clone(),
     }
 }
 
@@ -117,6 +121,8 @@ fn synthetic_run(kind: SyntheticVerifier) -> RecordedRun {
         stdout_sha256: "sha256:synthetic".into(),
         stderr_sha256: "sha256:synthetic".into(),
         toolchain_identity: Some("sha256:synthetic-toolchain".into()),
+        etc_binds: None,
+        linker_missing: None,
     }
 }
 
@@ -1805,6 +1811,7 @@ impl Host {
                     || run.stdout_truncated
                     || run.stderr_truncated
                     || run.toolchain_failed
+                    || run.linker_missing.is_some()
                     || cargo_resolution_blocked(&run.stdout, &run.stderr)
                 {
                     VerifierDecision::Incomplete
@@ -1869,10 +1876,19 @@ impl Host {
                 object.insert("stdoutSha256".to_string(), json!(run.stdout_sha256));
                 object.insert("stdoutTail".to_string(), json!(run.stdout_tail));
             }
-            provenance = Some(json!({
+            let mut extra = json!({
                 "bubblewrap": crate::linux_execution::BUBBLEWRAP_VERSION,
                 "toolchain": run.toolchain_identity,
-            }));
+            });
+            if let Some(object) = extra.as_object_mut() {
+                if let Some(binds) = &run.etc_binds {
+                    object.insert("etcBinds".to_string(), json!(binds));
+                }
+                if let Some(path) = &run.linker_missing {
+                    object.insert("linkerMissing".to_string(), json!(path));
+                }
+            }
+            provenance = Some(extra);
         }
         let verification = NewVerification {
             outcome,

@@ -335,3 +335,5 @@ pub(crate) mod cgroup;
 mod helper;
 #[cfg(all(feature = "linux-execution", target_os = "linux"))]
 pub use helper::helper_main;
+#[cfg(all(feature = "linux-execution", target_os = "linux"))]
+pub(crate) use helper::{VERIFIER_ETC_ALLOWLIST, present_etc_binds, unresolved_sandbox_cc};

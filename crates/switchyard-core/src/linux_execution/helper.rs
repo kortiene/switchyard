@@ -144,8 +144,8 @@ fn supervise() -> Result<(), String> {
         println!("DONE");
         return Ok(());
     }
-    let mut child = match spawn_confined(&opts) {
-        Ok(child) => child,
+    let (mut child, host_binds) = match spawn_confined(&opts) {
+        Ok(spawned) => spawned,
         Err(error) => {
             let quiescence = cgroup::kill_and_prove(&identity, Duration::from_secs(2))
                 .map_err(|error| error.to_string())?;
@@ -346,6 +346,10 @@ fn supervise() -> Result<(), String> {
         if let Some(object) = result.as_object_mut() {
             object.insert("stdoutSha256".to_string(), json!(stdout_sha));
             object.insert("stderrSha256".to_string(), json!(stderr_sha));
+            object.insert("etcBinds".to_string(), json!(host_binds.etc_present));
+            if let Some(path) = host_binds.linker_missing {
+                object.insert("linkerMissing".to_string(), json!(path));
+            }
         }
     }
     write_result(&opts.result, &result)?;
@@ -501,11 +505,183 @@ fn spawn_sandbox(opts: &SuperviseOpts) -> Result<std::process::Child, String> {
         .map_err(|error| format!("cannot spawn sandbox launcher: {error}"))
 }
 
-fn spawn_confined(opts: &SuperviseOpts) -> Result<std::process::Child, String> {
+/// Allowlisted `/etc` entries the verifier may bind. No wildcards.
+pub(crate) const VERIFIER_ETC_ALLOWLIST: &[&str] = &[
+    ETC_ALTERNATIVES,
+    ETC_LD_SO_CACHE,
+    ETC_LD_SO_CONF,
+    ETC_LD_SO_CONF_D,
+];
+
+const ETC_ALTERNATIVES: &str = "/etc/alternatives";
+const ETC_LD_SO_CACHE: &str = "/etc/ld.so.cache";
+const ETC_LD_SO_CONF: &str = "/etc/ld.so.conf";
+const ETC_LD_SO_CONF_D: &str = "/etc/ld.so.conf.d";
+
+struct VerifierHostBinds {
+    etc_present: Vec<String>,
+    linker_missing: Option<String>,
+}
+
+impl VerifierHostBinds {
+    fn empty() -> Self {
+        Self {
+            etc_present: Vec::new(),
+            linker_missing: None,
+        }
+    }
+}
+
+/// Allowlisted `/etc` paths that exist on `root` now. `--ro-bind-try` skips a
+/// missing source without saying so, so the evidence records this list.
+pub(crate) fn present_etc_binds(root: &Path) -> Vec<String> {
+    VERIFIER_ETC_ALLOWLIST
+        .iter()
+        .filter(|path| root.join(path.trim_start_matches('/')).exists())
+        .map(|path| (*path).to_string())
+        .collect()
+}
+
+/// First sandbox path in the `cc` symlink chain that this profile cannot see.
+///
+/// `root` is the host directory that corresponds to the sandbox `/`. Production
+/// passes `/`. A target outside the read-only `/usr` bind and the present
+/// allowlist is returned as that path; the profile is not widened to cover it.
+pub(crate) fn unresolved_sandbox_cc(
+    root: &Path,
+    toolchain: &Path,
+    present_etc: &[String],
+) -> Option<String> {
+    let candidates = [
+        PathBuf::from("/toolchain/bin/cc"),
+        PathBuf::from("/usr/bin/cc"),
+        PathBuf::from("/bin/cc"),
+    ];
+    let mut current = None;
+    for candidate in &candidates {
+        if fs::symlink_metadata(host_path(root, candidate, toolchain)).is_ok() {
+            current = Some(candidate.clone());
+            break;
+        }
+    }
+    let mut current = current.unwrap_or_else(|| PathBuf::from("/usr/bin/cc"));
+    if fs::symlink_metadata(host_path(root, &current, toolchain)).is_err() {
+        return Some(current.display().to_string());
+    }
+    for _ in 0..32 {
+        if !sandbox_visible(&current, present_etc) {
+            return Some(current.display().to_string());
+        }
+        let host = host_path(root, &current, toolchain);
+        let meta = match fs::symlink_metadata(&host) {
+            Ok(meta) => meta,
+            Err(_) => return Some(current.display().to_string()),
+        };
+        if !meta.file_type().is_symlink() {
+            return None;
+        }
+        let target = match fs::read_link(&host) {
+            Ok(target) => target,
+            Err(_) => return Some(current.display().to_string()),
+        };
+        let next = if target.is_absolute() {
+            target
+        } else {
+            current.parent().unwrap_or(Path::new("/")).join(target)
+        };
+        current = normalize_abs(&next);
+        if fs::symlink_metadata(host_path(root, &current, toolchain)).is_err() {
+            return Some(current.display().to_string());
+        }
+    }
+    Some(current.display().to_string())
+}
+
+fn sandbox_visible(path: &Path, present_etc: &[String]) -> bool {
+    let text = path.to_string_lossy();
+    const ROOTS: &[&str] = &[
+        "/usr",
+        "/bin",
+        "/lib",
+        "/lib64",
+        "/toolchain",
+        "/tmp",
+        "/proc",
+        "/dev",
+        "/workspace",
+        "/cargo-home",
+        "/rustup",
+        "/cargo-target",
+    ];
+    if ROOTS.iter().any(|root| covers(root, &text)) {
+        return true;
+    }
+    present_etc.iter().any(|root| covers(root, &text))
+}
+
+fn covers(root: &str, path: &str) -> bool {
+    path == root || path.starts_with(&format!("{root}/"))
+}
+
+fn host_path(root: &Path, sandbox: &Path, toolchain: &Path) -> PathBuf {
+    let logical = normalize_abs(sandbox);
+    let text = logical.to_string_lossy();
+    if let Some(rest) = text.strip_prefix("/toolchain") {
+        let rel = rest.trim_start_matches('/');
+        return if rel.is_empty() {
+            toolchain.to_path_buf()
+        } else {
+            toolchain.join(rel)
+        };
+    }
+    let mapped = if let Some(rest) = strip_sandbox_prefix(&text, "/bin") {
+        PathBuf::from("/usr/bin").join(rest)
+    } else if let Some(rest) = strip_sandbox_prefix(&text, "/lib64") {
+        PathBuf::from("/usr/lib64").join(rest)
+    } else if let Some(rest) = strip_sandbox_prefix(&text, "/lib") {
+        PathBuf::from("/usr/lib").join(rest)
+    } else {
+        logical
+    };
+    if root == Path::new("/") {
+        mapped
+    } else {
+        root.join(mapped.strip_prefix("/").unwrap_or(mapped.as_path()))
+    }
+}
+
+fn strip_sandbox_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    path.strip_prefix(prefix)
+        .map(|rest| rest.trim_start_matches('/'))
+}
+
+fn normalize_abs(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::RootDir => out.push("/"),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::Normal(part) => out.push(part),
+            std::path::Component::Prefix(_) => {}
+        }
+    }
+    if out.as_os_str().is_empty() {
+        PathBuf::from("/")
+    } else {
+        out
+    }
+}
+
+fn spawn_confined(
+    opts: &SuperviseOpts,
+) -> Result<(std::process::Child, VerifierHostBinds), String> {
     if opts.mode == "verifier" {
         spawn_verifier_sandbox(opts)
     } else {
-        spawn_sandbox(opts)
+        spawn_sandbox(opts).map(|child| (child, VerifierHostBinds::empty()))
     }
 }
 
@@ -513,10 +689,12 @@ fn spawn_confined(opts: &SuperviseOpts) -> Result<std::process::Child, String> {
 ///
 /// The worktree directory is bound read-only, so a tracked symlink stays a symlink.
 /// The toolchain, `CARGO_HOME`, and `RUSTUP_HOME` are read-only. `CARGO_TARGET_DIR`
-/// is a host directory outside the tree and is the only writable bind. `/usr` and
-/// `/etc` are read-only so the system linker resolves: `/usr/bin/cc` is an
-/// alternatives symlink, and without `/etc` rustc reports `linker cc not found`.
-fn spawn_verifier_sandbox(opts: &SuperviseOpts) -> Result<std::process::Child, String> {
+/// is a host directory outside the tree and is the only writable bind. `/usr` is
+/// read-only. The linker paths below are the only `/etc` entries, each with
+/// `--ro-bind-try`.
+fn spawn_verifier_sandbox(
+    opts: &SuperviseOpts,
+) -> Result<(std::process::Child, VerifierHostBinds), String> {
     let cargo_home = opts
         .cargo_home
         .as_ref()
@@ -599,9 +777,6 @@ fn spawn_verifier_sandbox(opts: &SuperviseOpts) -> Result<std::process::Child, S
         "--ro-bind",
         "/usr",
         "/usr",
-        "--ro-bind",
-        "/etc",
-        "/etc",
         "--symlink",
         "usr/bin",
         "/bin",
@@ -620,6 +795,16 @@ fn spawn_verifier_sandbox(opts: &SuperviseOpts) -> Result<std::process::Child, S
         "--tmpfs",
         "/tmp",
     ]);
+    let etc_present = present_etc_binds(Path::new("/"));
+    let linker_missing = unresolved_sandbox_cc(Path::new("/"), toolchain, &etc_present);
+    // /etc/alternatives: /usr/bin/cc is an alternatives symlink.
+    command.args(["--ro-bind-try", ETC_ALTERNATIVES, ETC_ALTERNATIVES]);
+    // /etc/ld.so.cache: the dynamic linker reads this cache.
+    command.args(["--ro-bind-try", ETC_LD_SO_CACHE, ETC_LD_SO_CACHE]);
+    // /etc/ld.so.conf: names the directories the linker searches.
+    command.args(["--ro-bind-try", ETC_LD_SO_CONF, ETC_LD_SO_CONF]);
+    // /etc/ld.so.conf.d: holds the linker configuration fragments.
+    command.args(["--ro-bind-try", ETC_LD_SO_CONF_D, ETC_LD_SO_CONF_D]);
     command.arg("--ro-bind").arg(toolchain).arg("/toolchain");
     command.arg("--ro-bind").arg(cargo_home).arg("/cargo-home");
     command.arg("--ro-bind").arg(rustup_home).arg("/rustup");
@@ -642,6 +827,15 @@ fn spawn_verifier_sandbox(opts: &SuperviseOpts) -> Result<std::process::Child, S
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
+        .map(|child| {
+            (
+                child,
+                VerifierHostBinds {
+                    etc_present,
+                    linker_missing,
+                },
+            )
+        })
         .map_err(|error| format!("cannot spawn verifier sandbox: {error}"))
 }
 
@@ -1196,4 +1390,101 @@ fn cancelled_result(reason: &str, events: &str) -> Value {
         "helper": Value::Null,
         "quiescenceReason": events,
     })
+}
+
+#[cfg(all(test, unix))]
+mod etc_bind_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn scratch() -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "switchyard-etc-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn touch(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"x").unwrap();
+    }
+
+    #[test]
+    fn allowlist_is_the_four_linker_paths_without_wildcards() {
+        assert_eq!(
+            VERIFIER_ETC_ALLOWLIST,
+            [
+                "/etc/alternatives",
+                "/etc/ld.so.cache",
+                "/etc/ld.so.conf",
+                "/etc/ld.so.conf.d",
+            ]
+        );
+        assert!(
+            VERIFIER_ETC_ALLOWLIST
+                .iter()
+                .all(|path| !path.contains('*'))
+        );
+    }
+
+    #[test]
+    fn present_etc_binds_records_only_paths_that_exist() {
+        let root = scratch();
+        fs::create_dir_all(root.join("etc/alternatives")).unwrap();
+        touch(&root.join("etc/ld.so.conf"));
+        touch(&root.join("etc/passwd"));
+        let present = present_etc_binds(&root);
+        assert_eq!(
+            present,
+            vec![
+                "/etc/alternatives".to_string(),
+                "/etc/ld.so.conf".to_string()
+            ]
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unresolved_cc_names_the_path_the_profile_does_not_bind() {
+        let root = scratch();
+        let toolchain = root.join("toolchains/stable");
+        fs::create_dir_all(toolchain.join("bin")).unwrap();
+        fs::create_dir_all(root.join("usr/bin")).unwrap();
+        fs::create_dir_all(root.join("etc/alternatives")).unwrap();
+        symlink("/etc/alternatives/cc", root.join("usr/bin/cc")).unwrap();
+        symlink("/usr/bin/gcc", root.join("etc/alternatives/cc")).unwrap();
+        touch(&root.join("usr/bin/gcc"));
+        assert_eq!(
+            unresolved_sandbox_cc(&root, &toolchain, &[]).as_deref(),
+            Some("/etc/alternatives/cc")
+        );
+        let present = vec!["/etc/alternatives".into()];
+        assert_eq!(unresolved_sandbox_cc(&root, &toolchain, &present), None);
+        fs::remove_file(root.join("etc/alternatives/cc")).unwrap();
+        symlink("/opt/cc", root.join("etc/alternatives/cc")).unwrap();
+        touch(&root.join("opt/cc"));
+        assert_eq!(
+            unresolved_sandbox_cc(&root, &toolchain, &present).as_deref(),
+            Some("/opt/cc")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unresolved_cc_reports_usr_bin_cc_when_nothing_provides_it() {
+        let root = scratch();
+        let toolchain = root.join("toolchains/stable");
+        fs::create_dir_all(&toolchain).unwrap();
+        assert_eq!(
+            unresolved_sandbox_cc(&root, &toolchain, &[]).as_deref(),
+            Some("/usr/bin/cc")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
 }
