@@ -105,6 +105,12 @@ fn fixture(test_body: &str) -> (tempfile::TempDir, PathBuf) {
         "pub fn kept() -> i32 { 1 }\n",
     );
     write_file(&repo, "crates/demo/tests/kept.rs", test_body);
+    let formatted = Command::new("cargo")
+        .args(["fmt", "--all"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    assert!(formatted.success(), "cargo fmt");
     let status = Command::new("cargo")
         .arg("generate-lockfile")
         .arg("--offline")
@@ -180,9 +186,9 @@ fn host_verifier_confined_pass_admits_complete_pass() {
     let (mut host, id, _) = mission(&repo, &db);
     host.enable_linux_execution(linux_config(None)).unwrap();
     let (snap, outcome) = host.verify_mission(&id).unwrap();
-    assert_eq!(outcome, "pass");
-    assert_eq!(snap.phase, Phase::AwaitingReview);
     let document = evidence(&db, &id);
+    assert_eq!(outcome, "pass", "{document}");
+    assert_eq!(snap.phase, Phase::AwaitingReview);
     assert_eq!(document["outcome"], "pass");
     assert!(
         document["stdoutSha256"]
@@ -259,7 +265,7 @@ fn host_verifier_confined_mutation_during_the_run_is_incomplete() {
     let target = tmp.path().join("cargo-target");
     fs::create_dir_all(&target).unwrap();
     let (mut host, id, _) = mission(&repo, &db);
-    let tree = db.parent().unwrap().join("ws");
+    let tree = PathBuf::from(host.snapshot(&id).unwrap().workspace.unwrap().path);
     host.enable_linux_execution(linux_config(None)).unwrap();
     host.verifier_target_dir = Some(target.clone());
     host.verifier_deadline_ms = Some(60_000);
@@ -366,7 +372,7 @@ fn host_verifier_confined_kill_then_blocked_then_recover_then_verify() {
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "host_verifier_confined_kill_then_blocked_then_recover_then_verify",
+            "acceptance::host_verifier_confined::host_verifier_confined_kill_then_blocked_then_recover_then_verify",
             "--nocapture",
         ])
         .env("SW_VERIFIER_KILL", "1")
