@@ -26,6 +26,9 @@ pub fn helper_main() {
 fn dispatch() -> Result<(), String> {
     if std::env::var_os("SWITCHYARD_SANDBOX").is_some() {
         let mode = std::env::args().nth(1).unwrap_or_default();
+        if mode == "relay-wait" {
+            return relay_wait();
+        }
         if mode != "file" && mode != "probe" {
             return Err("sandbox helper refuses supervise and join".into());
         }
@@ -35,8 +38,71 @@ fn dispatch() -> Result<(), String> {
         Some("join") => join(),
         Some("file") => file_op(),
         Some("probe") => probe(),
-        _ => Err("usage: switchyard-execution-helper supervise|join|file|probe".into()),
+        Some("relay-wait") => relay_wait(),
+        _ => Err("usage: switchyard-execution-helper supervise|join|file|probe|relay-wait".into()),
     }
+}
+
+/// Run the script inside the sandbox and append the raw wait status.
+/// The script does not hold the stderr fd this trailer is written to, so it
+/// cannot forge a signal or an exit code.
+fn relay_wait() -> Result<(), String> {
+    use std::os::unix::process::ExitStatusExt;
+    let mut args = std::env::args().skip(2);
+    if args.next().as_deref() != Some("--") {
+        return Err("relay-wait requires --".into());
+    }
+    let argv: Vec<String> = args.collect();
+    let Some(program) = argv.first() else {
+        return Err("relay-wait command is empty".into());
+    };
+    let mut child = Command::new(program)
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("relay-wait spawn: {error}"))?;
+    let mut child_out = child.stdout.take().ok_or("relay-wait missing stdout")?;
+    let mut child_err = child.stderr.take().ok_or("relay-wait missing stderr")?;
+    let out_thread = thread::spawn(move || {
+        let mut stdout = std::io::stdout();
+        let _ = std::io::copy(&mut child_out, &mut stdout);
+        let _ = stdout.flush();
+    });
+    let err_thread = thread::spawn(move || {
+        let mut stderr = std::io::stderr();
+        let _ = std::io::copy(&mut child_err, &mut stderr);
+        let _ = stderr.flush();
+    });
+    let status = child
+        .wait()
+        .map_err(|error| format!("relay-wait wait: {error}"))?;
+    let _ = out_thread.join();
+    let _ = err_thread.join();
+    let signaled = status.signal().is_some();
+    let signal = status.signal().unwrap_or(0);
+    let exited = status.code().is_some();
+    let code = status.code().unwrap_or(0);
+    let body = format!(
+        "SYWAIT1 signaled={} signal={:03} exited={} code={:04}",
+        u8::from(signaled),
+        signal,
+        u8::from(exited),
+        code
+    );
+    let mut trailer = [b' '; WAIT_TRAILER];
+    let take = body.len().min(WAIT_TRAILER - 1);
+    trailer[..take].copy_from_slice(&body.as_bytes()[..take]);
+    trailer[WAIT_TRAILER - 1] = b'\n';
+    let mut stderr = std::io::stderr();
+    stderr
+        .write_all(&trailer)
+        .map_err(|error| format!("relay-wait trailer: {error}"))?;
+    stderr
+        .flush()
+        .map_err(|error| format!("relay-wait trailer: {error}"))?;
+    Ok(())
 }
 
 fn join() -> Result<(), String> {
@@ -188,7 +254,7 @@ fn supervise() -> Result<(), String> {
     let verifier_stdout = opts.mode == "verifier";
     let stdout_thread = thread::spawn(move || {
         if verifier_stdout {
-            drain_hashed(stdout, cap, &stdout_flag, &stdout_out, &stdout_digest);
+            drain_hashed(stdout, cap, &stdout_flag, &stdout_out, &stdout_digest, None);
         } else {
             drain(stdout, cap, &stdout_flag, &stdout_out);
         }
@@ -197,9 +263,18 @@ fn supervise() -> Result<(), String> {
     let stderr_out = Arc::clone(&stderr_buf);
     let stderr_digest = Arc::clone(&stderr_hash);
     let verifier_stderr = opts.mode == "verifier";
+    let script_wait = Arc::new(Mutex::new(None));
+    let wait_slot = Arc::clone(&script_wait);
     let stderr_thread = thread::spawn(move || {
         if verifier_stderr {
-            drain_hashed(stderr, cap, &stderr_flag, &stderr_out, &stderr_digest);
+            drain_hashed(
+                stderr,
+                cap,
+                &stderr_flag,
+                &stderr_out,
+                &stderr_digest,
+                Some(&wait_slot),
+            );
         } else {
             drain(stderr, cap, &stderr_flag, &stderr_out);
         }
@@ -344,11 +419,46 @@ fn supervise() -> Result<(), String> {
             .map(|guard| guard.clone())
             .unwrap_or_default();
         if let Some(object) = result.as_object_mut() {
+            let stdout_bytes = stdout_buf
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default();
+            let stderr_bytes = stderr_buf
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default();
+            object.insert("stdout".to_string(), json!(""));
+            object.insert("stderr".to_string(), json!(""));
+            object.insert(
+                "stdoutB64".to_string(),
+                json!(super::b64_encode(&stdout_bytes)),
+            );
+            object.insert(
+                "stderrB64".to_string(),
+                json!(super::b64_encode(&stderr_bytes)),
+            );
             object.insert("stdoutSha256".to_string(), json!(stdout_sha));
             object.insert("stderrSha256".to_string(), json!(stderr_sha));
             object.insert("etcBinds".to_string(), json!(host_binds.etc_present));
             if let Some(path) = host_binds.linker_missing.take() {
                 object.insert("linkerMissing".to_string(), json!(path));
+            }
+            let wait = script_wait.lock().ok().and_then(|mut guard| guard.take());
+            if let Some(wait) = wait {
+                object.insert("scriptStatus".to_string(), json!(true));
+                object.insert("scriptSignaled".to_string(), json!(wait.signaled));
+                object.insert("scriptSignal".to_string(), json!(wait.signal));
+                object.insert("scriptExited".to_string(), json!(wait.exited));
+                object.insert(
+                    "scriptExit".to_string(),
+                    if wait.exited {
+                        json!(wait.code)
+                    } else {
+                        Value::Null
+                    },
+                );
+            } else {
+                object.insert("scriptStatus".to_string(), json!(false));
             }
         }
     }
@@ -836,6 +946,7 @@ fn spawn_verifier_sandbox(
     }
     command.arg("--ro-bind").arg(rustup_home).arg("/rustup");
     command.arg("--bind").arg(target_dir).arg("/cargo-target");
+    command.arg("--ro-bind").arg(&opts.helper).arg("/helper");
     command
         .arg("--ro-bind")
         .arg(&opts.workspace)
@@ -849,7 +960,11 @@ fn spawn_verifier_sandbox(
         let _ = fs::remove_dir_all(&cargo_scratch);
         return Err("verifier sandbox command is empty".into());
     }
-    command.args(&opts.argv);
+    command
+        .arg("/helper")
+        .arg("relay-wait")
+        .arg("--")
+        .args(&opts.argv);
     let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1191,25 +1306,74 @@ fn hash(bytes: &[u8]) -> String {
     format!("sha256:{}", crate::canonical::sha256_hex(bytes))
 }
 
+const WAIT_TRAILER: usize = 64;
+
+struct ScriptWait {
+    signaled: bool,
+    signal: i32,
+    exited: bool,
+    code: i32,
+}
+
+fn parse_wait_trailer(bytes: &[u8]) -> Option<ScriptWait> {
+    if bytes.len() != WAIT_TRAILER || *bytes.last()? != b'\n' || !bytes.starts_with(b"SYWAIT1 ") {
+        return None;
+    }
+    let text = std::str::from_utf8(&bytes[..WAIT_TRAILER - 1]).ok()?;
+    let mut signaled = None;
+    let mut signal = None;
+    let mut exited = None;
+    let mut code = None;
+    for field in text.split_whitespace().skip(1) {
+        let (key, value) = field.split_once('=')?;
+        match key {
+            "signaled" => signaled = value.parse::<u8>().ok(),
+            "signal" => signal = value.parse::<i32>().ok(),
+            "exited" => exited = value.parse::<u8>().ok(),
+            "code" => code = value.parse::<i32>().ok(),
+            _ => return None,
+        }
+    }
+    Some(ScriptWait {
+        signaled: signaled? == 1,
+        signal: signal?,
+        exited: exited? == 1,
+        code: code?,
+    })
+}
+
 fn drain_hashed(
     mut reader: impl Read,
     cap: usize,
     truncated: &AtomicBool,
     out: &Mutex<Vec<u8>>,
     hash_out: &Mutex<String>,
+    trailer_out: Option<&Mutex<Option<ScriptWait>>>,
 ) {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 8192];
+    let mut pending = Vec::new();
     let mut total = 0usize;
+    let hold = if trailer_out.is_some() {
+        WAIT_TRAILER
+    } else {
+        0
+    };
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                hasher.update(&buf[..n]);
-                push_tail(out, &buf[..n]);
+                pending.extend_from_slice(&buf[..n]);
                 total += n;
                 if total > cap {
                     truncated.store(true, Ordering::Relaxed);
+                }
+                let keep = hold.min(pending.len());
+                let emit = pending.len() - keep;
+                if emit > 0 {
+                    hasher.update(&pending[..emit]);
+                    push_tail(out, &pending[..emit]);
+                    pending.drain(..emit);
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -1219,6 +1383,16 @@ fn drain_hashed(
             }
         }
     }
+    if let (WAIT_TRAILER, Some(slot), Some(wait)) =
+        (hold, trailer_out, parse_wait_trailer(&pending))
+    {
+        if let Ok(mut guard) = slot.lock() {
+            *guard = Some(wait);
+        }
+    } else if !pending.is_empty() {
+        hasher.update(&pending);
+        push_tail(out, &pending);
+    }
     if let Ok(mut slot) = hash_out.lock() {
         *slot = sha256_prefixed(hasher.finalize().as_slice());
     } else {
@@ -1226,15 +1400,13 @@ fn drain_hashed(
     }
 }
 
-const TAIL_BYTES: usize = 64 * 1024;
-
 fn push_tail(out: &Mutex<Vec<u8>>, bytes: &[u8]) {
     let Ok(mut guard) = out.lock() else {
         return;
     };
     guard.extend_from_slice(bytes);
-    if guard.len() > TAIL_BYTES {
-        let drop_n = guard.len() - TAIL_BYTES;
+    if guard.len() > super::VERIFIER_TAIL_BYTES {
+        let drop_n = guard.len() - super::VERIFIER_TAIL_BYTES;
         guard.drain(..drop_n);
     }
 }
@@ -1396,13 +1568,14 @@ fn limit_reason(path: &Path) -> Option<&'static str> {
 }
 
 fn event_value(path: &Path, key: &str) -> u64 {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                let (name, value) = line.split_once(' ')?;
-                (name == key).then(|| value.parse().ok()).flatten()
-            })
+    let text = fs::read_to_string(path).unwrap_or_default();
+    if key == "oom_kill" {
+        return super::memory_events_oom_kill(&text);
+    }
+    text.lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(' ')?;
+            (name == key).then(|| value.parse().ok()).flatten()
         })
         .unwrap_or(0)
 }
@@ -1530,14 +1703,6 @@ mod etc_bind_tests {
             unresolved_sandbox_cc(&root, &toolchain, &present).as_deref(),
             Some("/opt/cc")
         );
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn memory_events_oom_kill_is_counted() {
-        let root = scratch();
-        fs::write(root.join("memory.events"), "low 0\noom_kill 3\n").unwrap();
-        assert_eq!(event_value(&root.join("memory.events"), "oom_kill"), 3);
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -278,16 +278,10 @@ fn host_verifier_confined_network_is_denied() {
     let result = profile_command(&repo, &["/usr/bin/bash", "-c", &script]);
     let accepted = listener.accept().is_ok();
     assert!(!accepted, "sandbox connected: {result}");
-    assert!(
-        result.contains("ENTERED") && result.contains("DONE"),
-        "{result}"
-    );
+    assert!(result.contains("UP:true"), "{result}");
     let control = profile_command(&repo, &["/bin/echo", "ok"]);
-    assert!(
-        control.contains("ENTERED") && control.contains("DONE"),
-        "{control}"
-    );
-    assert!(control.contains("ok"), "{control}");
+    assert!(control.contains("UP:true"), "{control}");
+    assert!(control.contains("STDOUT:ok\n"), "{control}");
     let _ = tmp;
 }
 
@@ -335,15 +329,13 @@ fn host_verifier_confined_symlink_outside_the_worktree_cannot_be_followed() {
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-m", "symlink"]);
     let result = profile_command(&repo, &["/bin/cat", "crates/demo/tests/outside"]);
-    assert!(
-        result.contains("ENTERED") && result.contains("DONE"),
-        "{result}"
-    );
+    assert!(result.contains("UP:true"), "{result}");
     assert!(
         !result.contains("TOP-SECRET-BYTES"),
         "sandbox followed the symlink: {result}"
     );
     let control = profile_command(&repo, &["/bin/cat", "crates/demo/src/lib.rs"]);
+    assert!(control.contains("UP:true"), "{control}");
     assert!(control.contains("fn kept"), "{control}");
 }
 
@@ -418,15 +410,18 @@ fn host_verifier_confined_credentials_are_not_in_the_sandbox() {
     fs::create_dir_all(cargo_home.join("registry")).unwrap();
     fs::create_dir_all(cargo_home.join("git")).unwrap();
     fs::write(cargo_home.join("credentials.toml"), "SECRET-TOKEN\n").unwrap();
-    let result = profile_command_with_cargo(
-        &repo,
-        Some(&cargo_home),
-        &["/bin/cat", "/cargo-home/credentials.toml"],
-    );
-    assert!(
-        result.contains("ENTERED") && result.contains("DONE"),
-        "{result}"
-    );
+    let result = profile_command_with_cargo(&repo, Some(&cargo_home), &["/bin/ls", "/cargo-home"]);
+    assert!(result.contains("UP:true"), "{result}");
+    let stdout = result
+        .split("STDOUT:")
+        .nth(1)
+        .unwrap_or("")
+        .split("\nSTDERR:")
+        .next()
+        .unwrap_or("");
+    let mut names: Vec<_> = stdout.lines().filter(|line| !line.is_empty()).collect();
+    names.sort();
+    assert_eq!(names, ["git", "registry"], "{result}");
     assert!(!result.contains("SECRET-TOKEN"), "{result}");
     let _ = tmp;
 }
@@ -435,11 +430,18 @@ fn host_verifier_confined_credentials_are_not_in_the_sandbox() {
 fn host_verifier_confined_etc_lists_only_the_allowlist() {
     let (tmp, repo) = fixture(PASS_TEST);
     let result = profile_command(&repo, &["/bin/ls", "/etc"]);
+    assert!(result.contains("UP:true"), "{result}");
+    let stdout = result
+        .split("STDOUT:")
+        .nth(1)
+        .unwrap_or("")
+        .split("\nSTDERR:")
+        .next()
+        .unwrap_or("");
     assert!(
-        result.contains("ENTERED") && result.contains("DONE"),
-        "{result}"
+        !Path::new("/etc/ld.so.cache").exists() || stdout.contains("ld.so.cache"),
+        "sandbox /etc did not list the present linker cache: {result}"
     );
-    let stdout = result.split("\"stdout\":\"").nth(1).unwrap_or(&result);
     for name in ["passwd", "shadow", "netrc", "gitconfig"] {
         assert!(
             !stdout.contains(name),
@@ -478,6 +480,117 @@ fn host_verifier_confined_prepare_failure_removes_the_leaf() {
     let after = fs::read_dir(&root).unwrap().count();
     assert_eq!(after, before, "cgroup leaf leaked");
     let _ = tmp;
+}
+
+#[test]
+fn host_verifier_confined_sigxcpu_is_incomplete_and_uses_no_repair() {
+    let (tmp, repo) = fixture(PASS_TEST);
+    fs::write(
+        repo.join("scripts/rust-verify.sh"),
+        "#!/bin/sh\nwhile true; do :; done\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "scripts/rust-verify.sh"]);
+    git(&repo, &["commit", "-m", "spin"]);
+    let db = tmp.path().join("mission.sqlite");
+    let (mut host, id, _) = mission(&repo, &db);
+    host.enable_linux_execution(linux_config(None)).unwrap();
+    host.verifier_cpu_seconds = Some(1);
+    host.verifier_deadline_ms = Some(60_000);
+    let (snap, outcome) = host.verify_mission(&id).unwrap();
+    assert_eq!(outcome, "incomplete", "{snap:?}");
+    assert_eq!(snap.phase, Phase::NeedsAttention);
+    assert_eq!(snap.repair_count, 0);
+    let _ = tmp;
+}
+
+#[test]
+fn host_verifier_confined_control_bytes_still_record_fail() {
+    let (tmp, repo) = fixture(PASS_TEST);
+    fs::write(
+        repo.join("scripts/rust-verify.sh"),
+        "#!/bin/sh\ndd if=/dev/zero bs=65536 count=1 2>/dev/null | tr '\\000' '\\001'\nexit 1\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "scripts/rust-verify.sh"]);
+    git(&repo, &["commit", "-m", "noise"]);
+    let db = tmp.path().join("mission.sqlite");
+    let (mut host, id, _) = mission(&repo, &db);
+    host.enable_linux_execution(linux_config(None)).unwrap();
+    let (snap, outcome) = host.verify_mission(&id).unwrap();
+    assert_eq!(outcome, "fail", "{snap:?}");
+    assert_eq!(snap.phase, Phase::Verifying);
+    assert_eq!(snap.repair_count, 0);
+    let _ = tmp;
+}
+
+#[test]
+fn host_verifier_confined_probe_build_failure_is_toolchain_unavailable() {
+    let (tmp, repo) = fixture(PASS_TEST);
+    let db = tmp.path().join("mission.sqlite");
+    let (mut host, id, _) = mission(&repo, &db);
+    host.enable_linux_execution(linux_config(None)).unwrap();
+    host.verifier_break_probe = true;
+    let error = host.verify_mission(&id).unwrap_err();
+    assert_eq!(
+        error.category(),
+        "verifier_confinement_unavailable",
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("toolchain_unavailable"),
+        "{error}"
+    );
+    assert_refusal_settled(&host, &db, &id);
+    let _ = tmp;
+}
+
+#[test]
+fn host_verifier_confined_missing_dependency_is_dependencies_unavailable() {
+    let (tmp, repo) = fixture(PASS_TEST);
+    fs::write(
+        repo.join("crates/demo/Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nswitchyard-missing-dep = \"=0.0.1\"\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"demo\"\nversion = \"0.1.0\"\ndependencies = [\"switchyard-missing-dep\"]\n\n[[package]]\nname = \"switchyard-missing-dep\"\nversion = \"0.0.1\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"1111111111111111111111111111111111111111111111111111111111111111\"\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "crates/demo/Cargo.toml", "Cargo.lock"]);
+    git(&repo, &["commit", "-m", "missing dep"]);
+    let db = tmp.path().join("mission.sqlite");
+    let (mut host, id, _) = mission(&repo, &db);
+    host.enable_linux_execution(linux_config(None)).unwrap();
+    let error = host.verify_mission(&id).unwrap_err();
+    assert_eq!(
+        error.category(),
+        "verifier_confinement_unavailable",
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("dependencies_unavailable"),
+        "{error}"
+    );
+    assert_refusal_settled(&host, &db, &id);
+    let _ = tmp;
+}
+
+fn assert_refusal_settled(host: &Host, db: &Path, id: &str) {
+    assert_eq!(host.snapshot(id).unwrap().phase, Phase::Verifying);
+    let (rows, state): (i64, String) = rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM verifications WHERE mission_id = ?1),
+                (SELECT state FROM linux_execution_effects WHERE mission_id = ?1)",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(rows, 0);
+    assert_eq!(state, "not_applied");
 }
 
 #[test]
@@ -763,5 +876,19 @@ fn profile_command_with_cargo(repo: &Path, cargo_home: Option<&Path>, argv: &[&s
     let _ = child.wait();
     let _ = cgroup::kill_and_prove(&leaf, Duration::from_secs(2));
     let result = fs::read_to_string(scratch.path().join("result.json")).unwrap_or_default();
-    format!("{lines:?}\n{result}")
+    let value: serde_json::Value = serde_json::from_str(&result).unwrap_or(serde_json::Value::Null);
+    let up = value.get("scriptStatus").and_then(|item| item.as_bool()) == Some(true);
+    let decode = |key: &str| {
+        value
+            .get(key)
+            .and_then(|item| item.as_str())
+            .and_then(crate::linux_execution::b64_decode)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default()
+    };
+    format!(
+        "LINES:{lines:?}\nUP:{up}\nSTDOUT:{}\nSTDERR:{}\n",
+        decode("stdoutB64"),
+        decode("stderrB64")
+    )
 }

@@ -28,6 +28,115 @@ pub const BUBBLEWRAP_BACKEND: &str = "linux-bubblewrap-0.9.0";
 pub const VERIFIER_CPU_MAX: &str = "200000 100000";
 pub const VERIFIER_MEMORY_MAX: &str = "4G";
 pub const VERIFIER_PIDS_MAX: &str = "2048";
+/// Stored stdout and stderr tails. The hash still covers the full stream.
+pub const VERIFIER_TAIL_BYTES: usize = 64 * 1024;
+
+/// Room for two base64 tails plus the result envelope.
+/// JSON escaping of a control byte is 6 bytes, so the raw tail is not stored as JSON text.
+pub fn verifier_result_cap() -> usize {
+    let encoded = VERIFIER_TAIL_BYTES.div_ceil(3) * 4;
+    encoded * 2 + 32 * 1024
+}
+
+/// `oom_kill` from a cgroup `memory.events` body.
+pub fn memory_events_oom_kill(text: &str) -> u64 {
+    text.lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(' ')?;
+            (name == "oom_kill").then(|| value.parse::<u64>().ok())?
+        })
+        .unwrap_or(0)
+}
+
+pub(crate) fn b64_encode(bytes: &[u8]) -> String {
+    const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut index = 0;
+    while index + 3 <= bytes.len() {
+        let n = u32::from(bytes[index]) << 16
+            | u32::from(bytes[index + 1]) << 8
+            | u32::from(bytes[index + 2]);
+        out.push(char::from(ALPHA[((n >> 18) & 63) as usize]));
+        out.push(char::from(ALPHA[((n >> 12) & 63) as usize]));
+        out.push(char::from(ALPHA[((n >> 6) & 63) as usize]));
+        out.push(char::from(ALPHA[(n & 63) as usize]));
+        index += 3;
+    }
+    if bytes.len() - index == 1 {
+        let n = u32::from(bytes[index]) << 16;
+        out.push(char::from(ALPHA[((n >> 18) & 63) as usize]));
+        out.push(char::from(ALPHA[((n >> 12) & 63) as usize]));
+        out.push('=');
+        out.push('=');
+    } else if bytes.len() - index == 2 {
+        let n = u32::from(bytes[index]) << 16 | u32::from(bytes[index + 1]) << 8;
+        out.push(char::from(ALPHA[((n >> 18) & 63) as usize]));
+        out.push(char::from(ALPHA[((n >> 12) & 63) as usize]));
+        out.push(char::from(ALPHA[((n >> 6) & 63) as usize]));
+        out.push('=');
+    }
+    out
+}
+
+pub(crate) fn b64_decode(text: &str) -> Option<Vec<u8>> {
+    fn val(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        let pad = (bytes[index + 2] == b'=') as usize + (bytes[index + 3] == b'=') as usize;
+        let a = val(bytes[index])?;
+        let b = val(bytes[index + 1])?;
+        let c = if pad == 2 { 0 } else { val(bytes[index + 2])? };
+        let d = if pad >= 1 { 0 } else { val(bytes[index + 3])? };
+        let n = (u32::from(a) << 18) | (u32::from(b) << 12) | (u32::from(c) << 6) | u32::from(d);
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+        index += 4;
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod memory_events_tests {
+    use super::{b64_decode, b64_encode, memory_events_oom_kill};
+
+    #[test]
+    fn memory_events_oom_kill_is_counted() {
+        assert_eq!(memory_events_oom_kill("low 0\noom_kill 3\n"), 3);
+        assert_eq!(memory_events_oom_kill("oom 1\n"), 0);
+        assert_eq!(memory_events_oom_kill(""), 0);
+    }
+
+    #[test]
+    fn base64_round_trip_keeps_control_bytes() {
+        let bytes: Vec<u8> = (0..256).map(|value| value as u8).collect();
+        let encoded = b64_encode(&bytes);
+        assert!(
+            encoded
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        );
+        assert_eq!(b64_decode(&encoded).as_deref(), Some(bytes.as_slice()));
+    }
+}
 
 pub fn bubblewrap_version_line() -> String {
     format!("bubblewrap {BUBBLEWRAP_VERSION}\n")

@@ -24,6 +24,7 @@ pub(super) struct VerifierRun {
     pub oom_killed: bool,
     pub limit_killed: bool,
     pub result_unreadable: bool,
+    pub script_status_missing: bool,
     /// Allowlisted `/etc` paths that existed on the host before the sandbox spawn.
     pub etc_binds: Vec<String>,
     /// Sandbox path `cc` could not resolve. The profile is not widened to cover it.
@@ -2562,7 +2563,8 @@ mod os {
         }
         let window_ms = verifier_window_ms(verifier, test_deadline_ms(host));
         let deadline_ms = crate::domain::now_ms().saturating_add(window_ms);
-        let cpu_seconds = u64::try_from((window_ms.max(1) + 999) / 1000).unwrap_or(1);
+        let cpu_seconds = test_cpu_seconds(host)
+            .unwrap_or_else(|| u64::try_from((window_ms.max(1) + 999) / 1000).unwrap_or(1));
         let effect_key = format!("verify-{}-{}", mission.revision, crate::domain::now_ms());
         let operation_id = crate::execution::operation_id(
             &mission.attempt.id,
@@ -2610,10 +2612,10 @@ mod os {
         }
         let toolchain_identity = match host_toolchain_identity(&layout.toolchain) {
             Ok(identity_hash) => identity_hash,
-            Err(error) => {
+            Err(_) => {
                 let _ = fail_verifier_launch(host, &operation_id);
                 return Ok(super::VerifierLaunch::Unavailable {
-                    detail: Some(error_detail(&error)),
+                    detail: Some("toolchain_unavailable".into()),
                 });
             }
         };
@@ -2635,18 +2637,16 @@ mod os {
             Ok(scratch) => scratch,
             Err(error) => {
                 fail_verifier_launch(host, &operation_id)?;
+                if !keep_target {
+                    let _ = fs::remove_dir_all(&target);
+                }
                 return Err(error);
             }
         };
         if let Err(error) = prepare_verifier_scratch(&scratch) {
             let _ = fail_verifier_launch(host, &operation_id);
+            release_verifier_dirs(&target, &scratch, keep_target);
             return Err(error);
-        }
-        if fs::write(scratch.join("host-toolchain"), &toolchain_identity).is_err() {
-            let _ = fail_verifier_launch(host, &operation_id);
-            return Ok(super::VerifierLaunch::Unavailable {
-                detail: Some("toolchain_unavailable".into()),
-            });
         }
         if let Err(reason) = run_preflight(
             host,
@@ -2658,6 +2658,8 @@ mod os {
             &target,
             &operation_id,
         ) {
+            let _ = fail_verifier_launch(host, &operation_id);
+            release_verifier_dirs(&target, &scratch, keep_target);
             return Ok(super::VerifierLaunch::Unavailable {
                 detail: Some(reason),
             });
@@ -2675,12 +2677,17 @@ mod os {
             deadline_ms,
             cpu_seconds,
             started,
+            &toolchain_identity,
         );
-        if !keep_target {
-            let _ = fs::remove_dir_all(&target);
-        }
-        let _ = fs::remove_dir_all(&scratch);
+        release_verifier_dirs(&target, &scratch, keep_target);
         driven
+    }
+
+    fn release_verifier_dirs(target: &Path, scratch: &Path, keep_target: bool) {
+        if !keep_target {
+            let _ = fs::remove_dir_all(target);
+        }
+        let _ = fs::remove_dir_all(scratch);
     }
 
     fn fail_verifier_launch(host: &mut Host, operation_id: &str) -> Result<()> {
@@ -2703,6 +2710,7 @@ mod os {
         deadline_ms: i64,
         cpu_seconds: u64,
         started: std::time::Instant,
+        toolchain_identity: &str,
     ) -> Result<super::VerifierLaunch> {
         let etc_present = crate::linux_execution::present_etc_binds(Path::new("/"));
         let etc_binds = CheckedEtcBinds {
@@ -2784,7 +2792,13 @@ mod os {
                 Ok(line) => line,
                 Err(_) => {
                     drop(proc);
-                    return host.finish_verifier_timeout(identity, target, started, &etc_binds);
+                    return host.finish_verifier_timeout(
+                        identity,
+                        target,
+                        started,
+                        &etc_binds,
+                        toolchain_identity,
+                    );
                 }
             };
             match line.as_str() {
@@ -2817,6 +2831,7 @@ mod os {
                         started,
                         saw_entered,
                         &etc_binds,
+                        toolchain_identity,
                     );
                 }
                 "ENTERED" => {}
@@ -2932,6 +2947,18 @@ mod os {
             return Err(Error::VerifierConfinementUnavailable);
         }
         Ok(dir)
+    }
+
+    fn test_cpu_seconds(host: &Host) -> Option<u64> {
+        #[cfg(test)]
+        {
+            host.verifier_cpu_seconds
+        }
+        #[cfg(not(test))]
+        {
+            let _ = host;
+            None
+        }
     }
 
     fn test_deadline_ms(host: &Host) -> Option<i64> {
@@ -3102,6 +3129,7 @@ mod os {
             _target: &Path,
             started: std::time::Instant,
             etc_binds: &CheckedEtcBinds,
+            toolchain_identity: &str,
         ) -> Result<super::VerifierLaunch> {
             let effect = self
                 .store
@@ -3142,7 +3170,8 @@ mod os {
                     oom_killed: false,
                     limit_killed: false,
                     result_unreadable: false,
-                    toolchain_identity: None,
+                    script_status_missing: false,
+                    toolchain_identity: Some(toolchain_identity.to_string()),
                 },
             )
         }
@@ -3157,6 +3186,7 @@ mod os {
             started: std::time::Instant,
             saw_entered: bool,
             etc_binds: &CheckedEtcBinds,
+            toolchain_identity: &str,
         ) -> Result<super::VerifierLaunch> {
             #[cfg(test)]
             if let Some(plant) = self.verifier_result_plant.take() {
@@ -3199,7 +3229,8 @@ mod os {
                         oom_killed: false,
                         limit_killed: false,
                         result_unreadable: true,
-                        toolchain_identity: read_host_identity(scratch),
+                        script_status_missing: true,
+                        toolchain_identity: None,
                     },
                 );
             };
@@ -3207,15 +3238,50 @@ mod os {
                 .get("disposition")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("runtime_failure");
-            let exit_code = result.get("exitCode").and_then(serde_json::Value::as_i64);
-            let stdout = result
-                .get("stdout")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            let stderr = result
-                .get("stderr")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
+            let script_status = result
+                .get("scriptStatus")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            let script_signaled = result
+                .get("scriptSignaled")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            let exit_code = if script_signaled {
+                None
+            } else {
+                result.get("scriptExit").and_then(serde_json::Value::as_i64)
+            };
+            let (stdout, stderr) = match (
+                decode_tail(&result, "stdoutB64"),
+                decode_tail(&result, "stderrB64"),
+            ) {
+                (Ok(stdout), Ok(stderr)) => (stdout, stderr),
+                _ => {
+                    return self.complete_verifier_capture(
+                        identity,
+                        &proof,
+                        "unreadable",
+                        None,
+                        "",
+                        "",
+                        "",
+                        "",
+                        started,
+                        etc_binds,
+                        &RunFlags {
+                            timed_out: disposition == "deadline",
+                            stdout_truncated: false,
+                            stderr_truncated: false,
+                            signaled: false,
+                            oom_killed: false,
+                            limit_killed: false,
+                            result_unreadable: true,
+                            script_status_missing: true,
+                            toolchain_identity: Some(toolchain_identity.to_string()),
+                        },
+                    );
+                }
+            };
             let stdout_sha = result
                 .get("stdoutSha256")
                 .and_then(serde_json::Value::as_str)
@@ -3242,14 +3308,14 @@ mod os {
                 .and_then(serde_json::Value::as_u64)
                 .is_some_and(|count| count > 0)
                 || disposition == "limit";
-            let signaled = exit_code.is_none() && disposition != "deadline";
+            let signaled = script_signaled;
             self.complete_verifier_capture(
                 identity,
                 &proof,
                 disposition,
                 exit_code,
-                stdout,
-                stderr,
+                &stdout,
+                &stderr,
                 stdout_sha,
                 stderr_sha,
                 started,
@@ -3262,7 +3328,8 @@ mod os {
                     oom_killed,
                     limit_killed,
                     result_unreadable: false,
-                    toolchain_identity: read_host_identity(scratch),
+                    script_status_missing: !script_status,
+                    toolchain_identity: Some(toolchain_identity.to_string()),
                 },
             )
         }
@@ -3293,6 +3360,11 @@ mod os {
             });
             self.store
                 .complete_verifier_effect(identity.operation_id, &receipt, proof)?;
+            if flags.toolchain_identity.as_deref().unwrap_or("").is_empty() {
+                return Ok(super::VerifierLaunch::Unavailable {
+                    detail: Some("toolchain_unavailable".into()),
+                });
+            }
             let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             Ok(super::VerifierLaunch::Ran(super::VerifierRun {
                 exit_code: exit_code.and_then(|code| i32::try_from(code).ok()),
@@ -3309,6 +3381,7 @@ mod os {
                 oom_killed: flags.oom_killed,
                 limit_killed: flags.limit_killed,
                 result_unreadable: flags.result_unreadable,
+                script_status_missing: flags.script_status_missing,
                 etc_binds: etc_binds.present.clone(),
                 linker_missing: etc_binds.linker_missing.clone(),
             }))
@@ -3323,6 +3396,7 @@ mod os {
         oom_killed: bool,
         limit_killed: bool,
         result_unreadable: bool,
+        script_status_missing: bool,
         toolchain_identity: Option<String>,
     }
 
@@ -3375,11 +3449,6 @@ mod os {
         let _ = fs::remove_dir(&leaf.path);
     }
 
-    fn error_detail(error: &Error) -> String {
-        let _ = error;
-        "toolchain_unavailable".into()
-    }
-
     fn host_toolchain_identity(toolchain: &Path) -> Result<String> {
         let rustc = Command::new(toolchain.join("bin/rustc"))
             .arg("-Vv")
@@ -3427,20 +3496,13 @@ mod os {
         Ok(())
     }
 
-    fn read_host_identity(scratch: &Path) -> Option<String> {
-        let bytes =
-            crate::regular_file::read_regular_nofollow(&scratch.join("host-toolchain"), 256)
-                .ok()?;
-        let text = String::from_utf8(bytes).ok()?;
-        let text = text.trim();
-        (!text.is_empty()).then(|| text.to_string())
+    fn result_cap() -> usize {
+        crate::linux_execution::verifier_result_cap()
     }
 
-    const RESULT_CAP: usize = 256 * 1024;
-
     fn read_verifier_result(path: &Path) -> Result<serde_json::Value> {
-        let bytes = crate::regular_file::read_regular_nofollow(path, RESULT_CAP + 1)?;
-        if bytes.len() > RESULT_CAP {
+        let bytes = crate::regular_file::read_regular_nofollow(path, result_cap() + 1)?;
+        if bytes.len() > result_cap() {
             return Err(Error::guard("verifier result exceeds the read cap"));
         }
         let text =
@@ -3477,11 +3539,7 @@ mod os {
         target: &Path,
         operation_id: &str,
     ) -> std::result::Result<(), String> {
-        let identity_hash = read_host_identity(scratch).unwrap_or_default();
-        if identity_hash.is_empty() {
-            // Written by the caller before preflight. A missing file is still a toolchain gap.
-        }
-        if let Err(error) = write_probe(target) {
+        if let Err(error) = write_probe(target, break_probe(host)) {
             let _ = fail_verifier_launch(host, operation_id);
             return Err(error);
         }
@@ -3498,7 +3556,7 @@ mod os {
         Ok(())
     }
 
-    fn write_probe(target: &Path) -> std::result::Result<(), String> {
+    fn write_probe(target: &Path, broken: bool) -> std::result::Result<(), String> {
         let probe = target.join("probe");
         fs::create_dir_all(probe.join("src")).map_err(|error| error.to_string())?;
         fs::write(
@@ -3506,8 +3564,12 @@ mod os {
             "[package]\nname = \"switchyard-verifier-probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
         )
         .map_err(|error| error.to_string())?;
-        fs::write(probe.join("src/main.rs"), "fn main() {}\n")
-            .map_err(|error| error.to_string())?;
+        let source = if broken {
+            "fn main( {\n"
+        } else {
+            "fn main() {}\n"
+        };
+        fs::write(probe.join("src/main.rs"), source).map_err(|error| error.to_string())?;
         fs::write(
             probe.join("Cargo.lock"),
             "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = \"switchyard-verifier-probe\"\nversion = \"0.0.0\"\n",
@@ -3577,7 +3639,36 @@ mod os {
         let Ok(result) = read_verifier_result(&scratch.join("result.json")) else {
             return false;
         };
-        result.get("exitCode").and_then(serde_json::Value::as_i64) == Some(0)
+        result
+            .get("scriptStatus")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && result
+                .get("scriptSignaled")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            && result.get("scriptExit").and_then(serde_json::Value::as_i64) == Some(0)
+    }
+
+    fn decode_tail(result: &serde_json::Value, key: &str) -> Result<String> {
+        let Some(text) = result.get(key).and_then(serde_json::Value::as_str) else {
+            return Err(Error::guard("verifier tail is missing"));
+        };
+        let bytes = crate::linux_execution::b64_decode(text)
+            .ok_or_else(|| Error::guard("verifier tail is not base64"))?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn break_probe(host: &Host) -> bool {
+        #[cfg(test)]
+        {
+            host.verifier_break_probe
+        }
+        #[cfg(not(test))]
+        {
+            let _ = host;
+            false
+        }
     }
 
     fn omit_linker(host: &Host) -> bool {

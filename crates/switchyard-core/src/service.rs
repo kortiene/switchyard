@@ -94,6 +94,7 @@ struct RecordedRun {
     oom_killed: bool,
     limit_killed: bool,
     result_unreadable: bool,
+    script_status_missing: bool,
 }
 
 fn hash_ok(value: &str) -> bool {
@@ -115,6 +116,7 @@ fn classify_verifier(run: &RecordedRun, before: &str, after: &str) -> VerifierDe
         && !run.oom_killed
         && !run.limit_killed
         && !run.result_unreadable
+        && !run.script_status_missing
         && hash_ok(&run.stdout_sha256)
         && hash_ok(&run.stderr_sha256)
         && run.exit_code.is_some();
@@ -146,6 +148,7 @@ fn hosted_run(run: &linux_execution::VerifierRun) -> RecordedRun {
         oom_killed: run.oom_killed,
         limit_killed: run.limit_killed,
         result_unreadable: run.result_unreadable,
+        script_status_missing: run.script_status_missing,
     }
 }
 
@@ -169,6 +172,7 @@ fn synthetic_run(kind: SyntheticVerifier) -> RecordedRun {
         oom_killed: false,
         limit_killed: false,
         result_unreadable: false,
+        script_status_missing: false,
     };
     match kind {
         SyntheticVerifier::Timeout => {
@@ -242,6 +246,12 @@ pub struct Host {
     /// Test-only: replace `result.json` with a symlink or FIFO before the host reads it.
     #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
     pub(crate) verifier_result_plant: Option<VerifierResultPlant>,
+    /// Test-only CPU rlimit in seconds, independent of the wall-clock deadline.
+    #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+    pub(crate) verifier_cpu_seconds: Option<u64>,
+    /// Test-only: the embedded probe source does not compile.
+    #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+    pub(crate) verifier_break_probe: bool,
     #[cfg(all(feature = "linux-execution", target_os = "linux"))]
     linux: Option<linux_execution::LinuxSession>,
 }
@@ -627,6 +637,10 @@ impl Host {
             fail_prepare_verifier: false,
             #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
             verifier_result_plant: None,
+            #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+            verifier_cpu_seconds: None,
+            #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
+            verifier_break_probe: false,
             #[cfg(all(feature = "linux-execution", target_os = "linux"))]
             linux: None,
         })
