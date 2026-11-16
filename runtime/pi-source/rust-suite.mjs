@@ -1,12 +1,15 @@
 // Split for the pi-bridge-contract Rust suite. See contract.mjs.
 import assert from 'node:assert/strict';
 
-// Tests that flock a workspace owner.lock in the test process. libtest runs
-// one binary on many threads; a sibling fork keeps that fd until exec, so the
-// parent's close does not release the lock and the next try_lock is
-// WorkspaceBusy (#184). Each test already uses its own directory. These
-// substrings are the pi-contract tests that take the lock. linux-execution
-// tests are not part of this job.
+// Tests that flock a workspace owner.lock in the test process. owner.lock is
+// never explicitly unlocked, by design (workspace.rs:16), and is close-on-exec,
+// which is why only this lock needs serializing. libtest runs one binary on
+// many threads; a sibling fork keeps that fd until exec, so the parent's close
+// does not release the lock and the next try_lock is WorkspaceBusy (#184).
+// Each test already uses its own directory. These substrings are the
+// pi-contract tests that take the lock. linux-execution tests are not part of
+// this job.
+// New tests that take owner.lock in-process must be added here.
 export const workspaceLockFilters = [
   'service::execution::tests',
   'service::workspace::tests',
@@ -28,6 +31,10 @@ export function rustOutcome(output, label) {
     passed += Number(summary[1]);
     filtered += Number(summary[5]);
   }
+  // Assumes no child process writes to stdout mid-test in the serial run.
+  // A line shaped like libtest's `test <name> ... ok` would be counted as a
+  // passed test the summary did not record. Breaking that assumption fails
+  // safe: the complement check fails the job.
   const names = [...output.matchAll(/^test (\S+) \.\.\. ok$/gm)].map(match => match[1]);
   return { passed, filtered, names };
 }

@@ -58,12 +58,32 @@ test('workspace-lock filters are complements and keep the evidence names', () =>
 test('a dropped, doubled, or failed Rust test refuses the split', () => {
   const okParallel = harness(['keep_parallel'], 1);
   const okSerial = harness(['service::execution::tests::one'], 1);
-  assert.throws(() => assertRustSplit(okParallel, harness(['service::execution::tests::one', 'extra'], 1), ['service::execution::tests']));
-  assert.throws(() => assertRustSplit(harness(['service::execution::tests::one'], 0), okSerial, ['service::execution::tests']));
-  assert.throws(() => assertRustSplit(
-    'test result: ok. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out;\n',
-    okSerial,
-    ['service::execution::tests'],
-  ));
-  assert.throws(() => assertRustSplit(okParallel, harness(['unrelated'], 1), ['service::execution::tests']));
+  assert.throws(
+    () => assertRustSplit(okParallel, harness(['service::execution::tests::one', 'extra'], 1), ['service::execution::tests']),
+    /serial Rust tests \(2\) are not the tests filtered from the parallel run \(1\)/,
+  );
+  assert.throws(
+    () => assertRustSplit(harness(['service::execution::tests::one'], 0), okSerial, ['service::execution::tests']),
+    /serial Rust tests \(1\) are not the tests filtered from the parallel run \(0\)/,
+  );
+  assert.throws(
+    () => assertRustSplit(
+      'test result: ok. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out;\n',
+      okSerial,
+      ['service::execution::tests'],
+    ),
+    /parallel Rust tests must not fail, ignore, or measure/,
+  );
+  assert.throws(
+    () => assertRustSplit(okParallel, harness(['unrelated'], 1), ['service::execution::tests']),
+    /serial Rust run executed no test matching service::execution::tests/,
+  );
+  assert.throws(
+    () => assertRustSplit(
+      harness(['keep_parallel', 'shared'], 2),
+      harness(['service::execution::tests::one', 'shared'], 2),
+      ['service::execution::tests'],
+    ),
+    /Rust test ran in both invocations: shared/,
+  );
 });
