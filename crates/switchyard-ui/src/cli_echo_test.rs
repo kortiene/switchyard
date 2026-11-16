@@ -235,6 +235,98 @@ fn mission_export_parses_with_the_real_cli() {
 }
 
 #[test]
+fn mission_plan_parses_with_the_real_cli() {
+    let cli = match Cli::try_parse_from([
+        "switchyard",
+        "mission",
+        "plan",
+        "--db",
+        "/tmp/operator's ledger/mission db.db",
+        "--mission",
+        "msn x",
+        "--file",
+        "/tmp/plan.txt",
+        "--quiescent",
+        "true",
+    ]) {
+        Ok(cli) => cli,
+        Err(error) => panic!("mission plan did not parse:\n{error}"),
+    };
+    match cli.command {
+        Command::Mission { action } => match action {
+            MissionCommand::Plan {
+                db,
+                mission,
+                file,
+                quiescent,
+            } => {
+                assert_eq!(
+                    db.display().to_string(),
+                    "/tmp/operator's ledger/mission db.db"
+                );
+                assert_eq!(mission, "msn x");
+                assert_eq!(file.display().to_string(), "/tmp/plan.txt");
+                assert!(quiescent);
+            }
+            other => panic!("plan parsed as {other:?}"),
+        },
+    }
+
+    let false_cli = match Cli::try_parse_from([
+        "switchyard",
+        "mission",
+        "plan",
+        "--db",
+        "ledger.sqlite",
+        "--mission",
+        "m-1",
+        "--file",
+        "plan.txt",
+        "--quiescent",
+        "false",
+    ]) {
+        Ok(cli) => cli,
+        Err(error) => panic!("mission plan --quiescent false did not parse:\n{error}"),
+    };
+    match false_cli.command {
+        Command::Mission { action } => match action {
+            MissionCommand::Plan { quiescent, .. } => assert!(!quiescent),
+            other => panic!("plan parsed as {other:?}"),
+        },
+    }
+
+    let missing = Cli::try_parse_from([
+        "switchyard",
+        "mission",
+        "plan",
+        "--db",
+        "ledger.sqlite",
+        "--mission",
+        "m-1",
+        "--file",
+        "plan.txt",
+    ]);
+    assert!(
+        missing.is_err(),
+        "--quiescent is required and has no default"
+    );
+    let yes = Cli::try_parse_from([
+        "switchyard",
+        "mission",
+        "plan",
+        "--db",
+        "ledger.sqlite",
+        "--mission",
+        "m-1",
+        "--file",
+        "plan.txt",
+        "--quiescent",
+        "yes",
+    ]);
+    assert!(yes.is_err(), "quiescent accepts only true or false");
+}
+
+#[test]
 fn mission_command_rejects_a_rationale_flag() {
     let rejected = Cli::try_parse_from([
         "switchyard",

@@ -1663,10 +1663,44 @@ impl Host {
     ///
     /// The notification type has no mission phase. Illegal observations leave
     /// the stored phase unchanged because the transition transaction rolls back.
+    /// The recorded actor is `runtime-observation`.
     pub fn apply_notification(
         &mut self,
         mission_id: &str,
         notification: RuntimeNotification,
+    ) -> Result<NotifyOutcome> {
+        self.apply_notification_with(mission_id, notification, "runtime-observation")
+    }
+
+    /// Admit `plan_completed` from a regular file on the fake runtime.
+    ///
+    /// The file is refused before admission, so a bad file does not enter
+    /// `needs_attention`. Admitted bytes are verbatim. The observation still
+    /// uses origin `runtime_observation`. The actor is `operator-plan-file`,
+    /// which is not part of the payload, so `planDigest` and the payload hash
+    /// match [`Self::apply_notification`] for the same text.
+    pub fn apply_plan_file(
+        &mut self,
+        mission_id: &str,
+        path: &Path,
+        quiescent: bool,
+    ) -> Result<NotifyOutcome> {
+        let plan = read_plan_file(path)?;
+        self.apply_notification_with(
+            mission_id,
+            RuntimeNotification::PlanCompleted { plan, quiescent },
+            "operator-plan-file",
+        )
+    }
+
+    /// Same admission path as [`Self::apply_notification`]. `actor` is stored
+    /// on the `plan_completed` row only; other observations keep
+    /// `runtime-observation`.
+    fn apply_notification_with(
+        &mut self,
+        mission_id: &str,
+        notification: RuntimeNotification,
+        actor: &str,
     ) -> Result<NotifyOutcome> {
         if self.runtime.fake_mut().is_none() {
             return Err(Error::guard(
@@ -1682,8 +1716,12 @@ impl Host {
                 {
                     return Ok(unchanged(&mission));
                 }
-                self.admit_observation(&mission, CommandBody::PlanCompleted { plan, quiescent })
-                    .map(NotifyOutcome::Transition)
+                self.admit_observation(
+                    &mission,
+                    CommandBody::PlanCompleted { plan, quiescent },
+                    actor,
+                )
+                .map(NotifyOutcome::Transition)
             }
             RuntimeNotification::ImplementationSettled { quiescent } => {
                 if mission.phase == Phase::Verifying
@@ -1697,8 +1735,12 @@ impl Host {
                 {
                     return Ok(unchanged(&mission));
                 }
-                self.admit_observation(&mission, CommandBody::RequestVerification { quiescent })
-                    .map(NotifyOutcome::Transition)
+                self.admit_observation(
+                    &mission,
+                    CommandBody::RequestVerification { quiescent },
+                    "runtime-observation",
+                )
+                .map(NotifyOutcome::Transition)
             }
             RuntimeNotification::VerificationPass {
                 content_digest,
@@ -2201,13 +2243,14 @@ impl Host {
         &mut self,
         mission: &MissionRecord,
         body: CommandBody,
+        actor: &str,
     ) -> Result<AdmitResult> {
         self.admit(AdmitRequest {
             command_id: None,
             mission_id: mission.id.clone(),
             attempt_id: Some(mission.attempt.id.clone()),
             expected_revision: mission.revision,
-            actor: "runtime-observation".into(),
+            actor: actor.to_string(),
             origin: CommandOrigin::RuntimeObservation,
             body,
         })
@@ -2312,6 +2355,7 @@ impl Host {
                 reason,
                 content_digest: None,
             },
+            "runtime-observation",
         )
         .map(NotifyOutcome::Transition)
     }
@@ -2530,7 +2574,7 @@ impl Host {
                 });
             };
             return self
-                .admit_observation(&current, body)
+                .admit_observation(&current, body, "runtime-observation")
                 .map(NotifyOutcome::Transition);
         }
         let observation_id = operation_id(
@@ -2636,6 +2680,33 @@ impl Host {
             generation: self.lock.generation,
         }
     }
+}
+
+/// Plan-file refusals. Each one returns before admission.
+///
+/// Read errors (missing, unreadable, not a regular file) share one way out.
+/// Size is checked before UTF-8 because the read is capped at one byte over
+/// the limit, so a truncated buffer is not a character-encoding result.
+fn read_plan_file(path: &Path) -> Result<String> {
+    let limit = crate::linux_execution::MAX_FILE_BYTES.saturating_add(1);
+    let bytes = crate::regular_file::read_regular_nofollow(path, limit).map_err(|_| {
+        Error::guard(
+            "plan file is missing, unreadable, or not a regular file; fix the path and rerun",
+        )
+    })?;
+    if bytes.len() > crate::linux_execution::MAX_FILE_BYTES {
+        return Err(Error::guard(
+            "plan file exceeds 64 KiB; shorten the plan and rerun",
+        ));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| Error::guard("plan file is not UTF-8; re-encode and rerun"))?;
+    if text.trim().is_empty() {
+        return Err(Error::guard(
+            "plan file is empty or whitespace; write the plan and rerun",
+        ));
+    }
+    Ok(text)
 }
 
 struct ResolvedSuccessor {

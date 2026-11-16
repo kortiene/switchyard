@@ -377,6 +377,21 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     "mission": host.snapshot(&mission)?.to_json(),
                 }))
             }
+            MissionCommand::Plan {
+                db,
+                mission,
+                file,
+                quiescent,
+            } => {
+                let mut host = open_host(&db, runtime)?;
+                let outcome = host.apply_plan_file(&mission, &file, quiescent)?;
+                Ok(json!({
+                    "ok": true,
+                    "phase": outcome.phase().as_str(),
+                    "revision": outcome.revision(),
+                    "mission": host.snapshot(&mission)?.to_json(),
+                }))
+            }
             MissionCommand::Lock { db } => {
                 let host = open_host(&db, runtime)?;
                 println!(
