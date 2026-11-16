@@ -44,9 +44,10 @@ fn dispatch() -> Result<(), String> {
     }
 }
 
-/// Run the script and write its wait status to the inherited status fd.
-/// `FD_CLOEXEC` is set on that fd, so the script's exec does not receive it.
+/// Run the script and write its wait status to an `O_CLOEXEC` fd.
+/// The script does not inherit that fd, and stderr is not a wait channel.
 fn relay_wait() -> Result<(), String> {
+    use std::os::fd::AsFd;
     use std::os::unix::process::ExitStatusExt;
     rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
         .map_err(|error| format!("relay-wait dumpable: {error}"))?;
@@ -64,9 +65,18 @@ fn relay_wait() -> Result<(), String> {
     let Some(program) = argv.first() else {
         return Err("relay-wait command is empty".into());
     };
-    switchyard_cloexec::set_fd_cloexec(wait_fd)
+    let mut record = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open(format!("/proc/self/fd/{wait_fd}"))
+        .map_err(|error| format!("relay-wait status fd: {error}"))?;
+    rustix::io::fcntl_setfd(record.as_fd(), rustix::io::FdFlags::CLOEXEC)
         .map_err(|error| format!("relay-wait cloexec: {error}"))?;
-    let mut child = Command::new(program)
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("exec {wait_fd}>&-; exec \"$@\""))
+        .arg("relay-script")
+        .arg(program)
         .args(&argv[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -94,14 +104,17 @@ fn relay_wait() -> Result<(), String> {
     let signal = status.signal().unwrap_or(0);
     let exited = status.code().is_some();
     let code = status.code().unwrap_or(0);
-    let record = format!(
-        "signaled={} signal={:03} exited={} code={:04}\n",
+    writeln!(
+        record,
+        "signaled={} signal={:03} exited={} code={:04}",
         u8::from(signaled),
         signal,
         u8::from(exited),
         code
-    );
-    switchyard_cloexec::write_all(wait_fd, record.as_bytes())
+    )
+    .map_err(|error| format!("relay-wait record: {error}"))?;
+    record
+        .flush()
         .map_err(|error| format!("relay-wait record: {error}"))?;
     Ok(())
 }

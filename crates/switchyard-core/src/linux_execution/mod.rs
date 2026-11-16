@@ -218,7 +218,12 @@ mod wait_record_tests {
         );
         assert_eq!(parse_wait_record(b""), None);
         assert_eq!(parse_wait_record(b"\n"), None);
-        let mut long = b"signaled=0 signal=000 exited=1 code=0001 ".to_vec();
+        assert_eq!(
+            parse_wait_record(b"signaled=0 signal=000 exited=1 code=0001"),
+            None
+        );
+        assert_eq!(parse_wait_record(b"signaled=0 signal=000 exited=1\n"), None);
+        let mut long = b"signaled=0 signal=000 exited=1 code=".to_vec();
         long.extend(std::iter::repeat_n(b'0', 100));
         long.push(b'\n');
         assert!(long.len() > 128);

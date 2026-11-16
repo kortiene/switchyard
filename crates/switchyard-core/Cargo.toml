@@ -9,14 +9,13 @@ description = "Switchyard mission authority: transitions, ledger, and fake runti
 
 [features]
 pi-contract = []
-linux-execution = ["dep:rustix", "dep:switchyard-cloexec"]
+linux-execution = ["dep:rustix"]
 # `busy-once` only. Not a default, and not enabled by the product CLI.
 # The confinement probe's dev-dependency is the only enabler.
 test-fixtures = []
 
 [dependencies]
 libc = "0.2.191"
-switchyard-cloexec = { path = "../switchyard-cloexec", optional = true }
 rusqlite = { version = "0.37", features = ["bundled"] }
 rustix = { version = "1", optional = true, default-features = false, features = ["std", "fs", "process"] }
 serde_json = "1"

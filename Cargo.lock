@@ -495,13 +495,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "switchyard-cloexec"
-version = "0.1.0"
-dependencies = [
- "rustix",
-]
-
-[[package]]
 name = "switchyard-confinement-probe"
 version = "0.1.0"
 dependencies = [
@@ -520,7 +513,6 @@ dependencies = [
  "rustix",
  "serde_json",
  "sha2",
- "switchyard-cloexec",
  "tempfile",
  "thiserror",
  "uuid",
