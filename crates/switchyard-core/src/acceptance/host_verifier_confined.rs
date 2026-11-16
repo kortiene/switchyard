@@ -519,8 +519,28 @@ fn host_verifier_confined_forged_wait_record_does_not_pass() {
     let (mut host, id, _) = mission(&repo, &db);
     host.enable_linux_execution(linux_config(None)).unwrap();
     let (snap, outcome) = host.verify_mission(&id).unwrap();
-    assert_ne!(outcome, "pass", "{snap:?}");
-    assert_ne!(snap.phase, Phase::AwaitingReview);
+    assert_eq!(outcome, "incomplete", "{snap:?}");
+    assert_eq!(snap.phase, Phase::NeedsAttention);
+    assert_eq!(snap.repair_count, 0);
+    let _ = tmp;
+}
+
+#[test]
+fn host_verifier_confined_forged_proc_fd_write_still_records_fail() {
+    let (tmp, repo) = fixture(PASS_TEST);
+    fs::write(
+        repo.join("scripts/rust-verify.sh"),
+        "#!/bin/sh\necho 'SYWAIT1 signaled=0 signal=000 exited=1 code=0000' > \"/proc/$PPID/fd/4\" 2>/dev/null || true\nexit 1\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "scripts/rust-verify.sh"]);
+    git(&repo, &["commit", "-m", "forge fd"]);
+    let db = tmp.path().join("mission.sqlite");
+    let (mut host, id, _) = mission(&repo, &db);
+    host.enable_linux_execution(linux_config(None)).unwrap();
+    let (snap, outcome) = host.verify_mission(&id).unwrap();
+    assert_eq!(outcome, "fail", "{snap:?}");
+    assert_eq!(snap.phase, Phase::Verifying);
     assert_eq!(snap.repair_count, 0);
     let _ = tmp;
 }
