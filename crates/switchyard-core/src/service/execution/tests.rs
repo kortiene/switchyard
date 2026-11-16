@@ -1859,6 +1859,7 @@ fn simulated_no_row_error_is_transient(error: &Error) -> bool {
         | Error::VerifierIndexFlagsSet
         | Error::OperatorWriteUnavailable
         | Error::OperatorWritePhaseClosed { .. }
+        | Error::ExportTargetExists
         | Error::AdmissionRejected { .. }
         | Error::GuardFailed { .. }
         | Error::UnknownNotification { .. }
@@ -1945,6 +1946,7 @@ fn execute_fake_operation_pins_is_transient_for_every_error_it_can_return() {
         Error::OperatorWritePhaseClosed {
             phase: "draft".into(),
         },
+        Error::ExportTargetExists,
         Error::AdmissionRejected {
             category: "busy".into(),
         },

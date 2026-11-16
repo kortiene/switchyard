@@ -805,6 +805,8 @@ pub struct CommandRecord {
     pub request_id: String,
     pub origin: CommandOrigin,
     pub runtime_receipt_json: Option<String>,
+    /// `commands.seq`. Insertion order within the ledger.
+    pub seq: i64,
 }
 
 #[derive(Clone, Debug)]

@@ -1915,3 +1915,584 @@ fn mission_write_copies_one_file_and_refuses_a_closed_phase() {
     assert_eq!(digest, stdout["write"]["sha256"]);
     assert_eq!(command_id, None);
 }
+
+fn data_version(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row("PRAGMA data_version", [], |row| row.get(0))
+        .unwrap()
+}
+
+fn assert_no_inputs_frozen(value: &Value) {
+    assert!(
+        !value.to_string().contains("\"inputsFrozen\""),
+        "export document must not carry inputsFrozen: {value}"
+    );
+}
+
+#[test]
+fn export_matches_the_stored_freeze_and_status_stays_compact() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap();
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "198",
+        "--objective",
+        "Export the freeze",
+        "--acceptance",
+        "The freeze document matches the ledger",
+        "--admit",
+        "start_planning",
+        "--persist-only",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let (code, status, error) = run(&["mission", "status", "--db", db_arg, "--mission", mission]);
+    assert_eq!(code, 0, "{error}");
+    assert!(status["missions"][0].get("frozenInputsJson").is_none());
+    assert_eq!(status["missions"][0]["inputsFrozen"], true);
+
+    let out = tmp.path().join("export.json");
+    let (code, export, error) = run(&[
+        "mission",
+        "export",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let stored: String = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT frozen_inputs_json FROM attempts WHERE mission_id = ?1",
+            [mission],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        export["attempt"]["frozenInputsJson"].as_str(),
+        Some(stored.as_str())
+    );
+    let parsed: Value = serde_json::from_str(&stored).unwrap();
+    let digest = switchyard_core::payload_hash(&parsed).unwrap();
+    assert_eq!(
+        export["attempt"]["frozenInputsDigest"].as_str(),
+        Some(digest.as_str())
+    );
+    assert!(export["attempt"].get("frozenInputs").is_none());
+    assert_no_inputs_frozen(&export);
+    assert!(export["mission"].get("linuxExecutionEffects").is_some());
+    assert!(export["mission"].get("executionResolutions").is_some());
+    assert!(export["mission"].get("executionBlocked").is_some());
+    assert!(export["mission"].get("piHost").is_none());
+    assert!(export["mission"].get("quarantine").is_none());
+    assert_eq!(export["schema"], "switchyard.ledger-export.v1");
+    assert_eq!(export["ledgerSchemaVersion"].as_i64(), Some(12));
+    assert_eq!(export["hostVersion"], env!("CARGO_PKG_VERSION"));
+    let (seq, payload, kind): (i64, String, String) = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT seq, payload_canonical, kind FROM commands WHERE mission_id = ?1 ORDER BY seq LIMIT 1",
+            [mission],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(export["commands"][0]["seq"].as_i64(), Some(seq));
+    assert_eq!(
+        export["commands"][0]["payloadCanonical"].as_str(),
+        Some(payload.as_str())
+    );
+    assert_eq!(export["commands"][0]["kind"], kind);
+    assert!(export["commands"][0].get("receipt").is_some());
+    let file: Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+    assert_eq!(file, export);
+}
+
+#[test]
+fn export_reads_while_the_owner_lock_is_held_and_skips_out_when_the_read_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap();
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "198",
+        "--objective",
+        "Read under the lock",
+        "--acceptance",
+        "Export does not take the owner lock",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut child = Command::new(bin())
+        .args(["mission", "lock", "--db", db_arg])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let holding: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(holding["holding"], true);
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let before = data_version(&conn);
+    let out = tmp.path().join("held.json");
+    let (code, export, error) = run(&[
+        "mission",
+        "export",
+        "--db",
+        db_arg,
+        "--mission",
+        &mission,
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(export["mission"]["missionId"], mission);
+    assert_eq!(export["attempt"]["frozenInputsJson"], Value::Null);
+    assert_eq!(export["attempt"]["frozenInputsDigest"], Value::Null);
+    assert_no_inputs_frozen(&export);
+    assert_eq!(data_version(&conn), before, "export opened a write");
+    assert!(out.is_file());
+
+    let missing_out = tmp.path().join("missing-mission.json");
+    let (code, stdout, stderr) = run(&[
+        "mission",
+        "export",
+        "--db",
+        db_arg,
+        "--mission",
+        "m-missing",
+        "--out",
+        missing_out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2, "{stdout}");
+    assert_eq!(stderr["error"]["category"], "not_found");
+    assert!(!missing_out.exists());
+    assert_eq!(data_version(&conn), before);
+
+    child.stdin.take().unwrap().write_all(b"\n").unwrap();
+    assert!(child.wait().unwrap().success());
+
+    let absent = tmp.path().join("no-ledger.sqlite");
+    let absent_out = tmp.path().join("no-ledger.json");
+    let (code, _, stderr) = run(&[
+        "mission",
+        "export",
+        "--db",
+        absent.to_str().unwrap(),
+        "--mission",
+        &mission,
+        "--out",
+        absent_out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2);
+    assert_eq!(stderr["error"]["category"], "not_found");
+    assert!(!absent_out.exists());
+
+    let empty = tmp.path().join("empty.sqlite");
+    std::fs::write(&empty, b"").unwrap();
+    let empty_out = tmp.path().join("empty.json");
+    let (code, _, stderr) = run(&[
+        "mission",
+        "export",
+        "--db",
+        empty.to_str().unwrap(),
+        "--mission",
+        &mission,
+        "--out",
+        empty_out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2);
+    assert_eq!(stderr["error"]["category"], "storage_failed");
+    assert!(!empty_out.exists());
+}
+
+#[test]
+fn export_of_an_unfrozen_draft_has_null_freeze_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap();
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "198",
+        "--objective",
+        "Draft",
+        "--acceptance",
+        "Not frozen yet",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(created["mission"]["phase"], "draft");
+    assert_eq!(created["mission"]["inputsFrozen"], false);
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let (code, status, error) = run(&["mission", "status", "--db", db_arg, "--mission", mission]);
+    assert_eq!(code, 0, "{error}");
+    assert!(status["missions"][0].get("frozenInputsJson").is_none());
+    assert_eq!(status["missions"][0]["inputsFrozen"], false);
+    let (code, export, error) = run(&["mission", "export", "--db", db_arg, "--mission", mission]);
+    assert_eq!(code, 0, "{error}");
+    assert!(export["attempt"]["frozenInputsJson"].is_null());
+    assert!(export["attempt"]["frozenInputsDigest"].is_null());
+    assert_no_inputs_frozen(&export);
+    assert_eq!(export["mission"]["phase"], "draft");
+}
+
+#[test]
+fn export_after_drift_shows_frozen_input_drift_and_detect_uncertainty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap();
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "198",
+        "--objective",
+        "Show drift",
+        "--acceptance",
+        "Export the drift exit",
+        "--admit",
+        "start_planning",
+        "--persist-only",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let attempt = created["mission"]["attemptId"].as_str().unwrap();
+    let revision = created["mission"]["revision"].as_u64().unwrap().to_string();
+    let changed = rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE attempts SET base_sha = 'deadbeef' WHERE id = ?1",
+            [attempt],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    let (code, stdout, stderr) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--kind",
+        "pause",
+        "--expected-revision",
+        &revision,
+        "--persist-only",
+    ]);
+    assert_eq!(code, 2, "{stdout} {stderr}");
+    assert_eq!(stderr["error"]["category"], "frozen_input_drift");
+    let (code, export, error) = run(&["mission", "export", "--db", db_arg, "--mission", mission]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(export["mission"]["attentionReason"], "frozen_input_drift");
+    assert_eq!(export["mission"]["phase"], "needs_attention");
+    assert!(
+        export["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command["kind"] == "detect_uncertainty"),
+        "{export}"
+    );
+    let stored: String = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT frozen_inputs_json FROM attempts WHERE mission_id = ?1",
+            [mission],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        export["attempt"]["frozenInputsJson"].as_str(),
+        Some(stored.as_str())
+    );
+}
+
+#[test]
+fn export_includes_the_operator_write_decision_and_the_host_verifier_fail() {
+    const RUST: &str = concat!(
+        r#"{"allowedPaths":["crates/*/tests/**","docs/**"],"argv":["./scripts/rust-verify.sh"],"#,
+        r#""confinement":"linux-bubblewrap-0.9.0","deniedPaths":["crates/switchyard-core/tests/pi_bridge.rs","#,
+        r#""crates/switchyard/tests/linux_execution.rs","crates/switchyard/tests/cli_confined.rs"],"#,
+        r#""executes":true,"frozen":true,"id":"switchyard.verifier.rust-verify.v1","maxAddedLines":400,"#,
+        r#""outputCapBytes":1048576,"timeoutSeconds":1800}"#
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    let root = tmp.path().join("workspaces");
+    std::fs::create_dir(&root).unwrap();
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap();
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "198",
+        "--objective",
+        "Record the write and the gate",
+        "--acceptance",
+        "Export both rows",
+        "--verifier",
+        RUST,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let attempt = created["mission"]["attemptId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (code, workspace, error) = run(&[
+        "mission",
+        "workspace",
+        "--db",
+        db_arg,
+        "--mission",
+        &mission,
+        "--attempt",
+        &attempt,
+        "--root",
+        root.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mut revision = created["mission"]["revision"].as_u64().unwrap().to_string();
+    let (code, _started, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db_arg,
+        "--mission",
+        &mission,
+        "--kind",
+        "start_planning",
+        "--expected-revision",
+        &revision,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let (code, planned, error) = run(&[
+        "mission",
+        "notify",
+        "--db",
+        db_arg,
+        "--mission",
+        &mission,
+        "--json-body",
+        r#"{"kind":"plan_completed","plan":"write the file","quiescent":true}"#,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let digest = planned["mission"]["planDigest"].as_str().unwrap();
+    let payload = format!(r#"{{"planDigest":"{digest}"}}"#);
+    revision = planned["mission"]["revision"].as_u64().unwrap().to_string();
+    let (code, approved, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db_arg,
+        "--mission",
+        &mission,
+        "--kind",
+        "approve_plan",
+        "--expected-revision",
+        &revision,
+        "--payload",
+        &payload,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(approved["mission"]["phase"], "implementing");
+    let from = tmp.path().join("body.txt");
+    std::fs::write(&from, b"hello").unwrap();
+    let (code, wrote, error) = run(&[
+        "mission",
+        "write",
+        "--db",
+        db_arg,
+        "--mission",
+        &mission,
+        "--attempt",
+        &attempt,
+        "--path",
+        "src/note.txt",
+        "--from",
+        from.to_str().unwrap(),
+        "--actor",
+        "sam",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(wrote["write"]["actor"], "sam");
+    let (code, verifying, error) = run(&[
+        "mission",
+        "notify",
+        "--db",
+        db_arg,
+        "--mission",
+        &mission,
+        "--json-body",
+        r#"{"kind":"implementation_settled","quiescent":true}"#,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(verifying["mission"]["phase"], "verifying");
+    let tree = workspace["workspace"]["path"].as_str().unwrap();
+    std::fs::create_dir_all(Path::new(tree).join("scripts")).unwrap();
+    std::fs::write(
+        Path::new(tree).join("scripts/rust-verify.sh"),
+        "#!/bin/sh\n",
+    )
+    .unwrap();
+    let (code, verified, error) =
+        run(&["mission", "verify", "--db", db_arg, "--mission", &mission]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(verified["outcome"], "fail");
+    let (code, export, error) = run(&["mission", "export", "--db", db_arg, "--mission", &mission]);
+    assert_eq!(code, 0, "{error}");
+    let writes: Vec<_> = export["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["action"] == "operator_write")
+        .collect();
+    assert_eq!(writes.len(), 1, "{export}");
+    assert_eq!(writes[0]["actor"], "sam");
+    assert!(writes[0]["commandId"].is_null());
+    let fails: Vec<_> = export["verifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["outcome"] == "fail")
+        .collect();
+    assert_eq!(fails.len(), 1, "{export}");
+    assert_eq!(
+        fails[0]["evidence"]["provenance"]["collector"],
+        "switchyard-host-verifier"
+    );
+}
+
+#[test]
+fn export_refuses_an_existing_out_path_and_a_symlink() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap();
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "198",
+        "--objective",
+        "Do not clobber",
+        "--acceptance",
+        "Existing paths stay put",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let out = tmp.path().join("export.json");
+    std::fs::write(&out, b"keep-me").unwrap();
+    let (code, stdout, stderr) = run(&[
+        "mission",
+        "export",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2, "{stdout}");
+    assert_eq!(stderr["error"]["category"], "export_target_exists");
+    assert!(
+        stderr["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("remove the file"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&out).unwrap(), b"keep-me");
+
+    let secret = tmp.path().join("secret");
+    std::fs::write(&secret, b"secret").unwrap();
+    let link = tmp.path().join("link.json");
+    std::os::unix::fs::symlink(&secret, &link).unwrap();
+    let (code, stdout, stderr) = run(&[
+        "mission",
+        "export",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--out",
+        link.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2, "{stdout}");
+    assert_eq!(stderr["error"]["category"], "export_target_exists");
+    assert_eq!(std::fs::read(&secret).unwrap(), b"secret");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    std::fs::remove_file(&out).unwrap();
+    let (code, export, error) = run(&[
+        "mission",
+        "export",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(export["schema"], "switchyard.ledger-export.v1");
+    assert!(out.is_file());
+}

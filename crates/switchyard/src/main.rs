@@ -14,7 +14,7 @@ use cli::{Cli, Command, MissionCommand, RuntimeSelection};
 use serde_json::{Value, json};
 use switchyard_core::{
     AdmitRequest, CommandBody, CommandKind, CommandOrigin, CreateMission, EffectProof, Error, Host,
-    Phase, SuccessorChanges,
+    Phase, SuccessorChanges, write_export_exclusive,
 };
 
 fn main() -> ExitCode {
@@ -228,6 +228,14 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     "readOnly": true,
                     "missions": snapshots.iter().map(|snapshot| snapshot.to_json()).collect::<Vec<_>>(),
                 }))
+            }
+            MissionCommand::Export { db, mission, out } => {
+                let document = Host::export_document(&db, &mission, env!("CARGO_PKG_VERSION"))?;
+                if let Some(path) = out {
+                    let text = format!("{document}\n");
+                    write_export_exclusive(&path, text.as_bytes())?;
+                }
+                Ok(document)
             }
             MissionCommand::Command {
                 db,

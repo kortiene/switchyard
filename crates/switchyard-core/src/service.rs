@@ -20,6 +20,7 @@ use crate::transitions::target_spec;
 use crate::verification::{NewVerification, VerificationCollector};
 
 mod execution;
+mod export;
 mod linux_execution;
 mod operator_write;
 #[cfg(all(
@@ -42,6 +43,7 @@ mod pi_linux_process;
 mod pi_linux_write;
 mod workspace;
 
+pub use export::write_export_exclusive;
 pub use operator_write::OperatorWrite;
 
 /// Open the host, take the single-host lock, and reuse the active attempt.
