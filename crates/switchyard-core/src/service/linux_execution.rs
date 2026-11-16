@@ -3230,7 +3230,7 @@ mod os {
                         limit_killed: false,
                         result_unreadable: true,
                         script_status_missing: true,
-                        toolchain_identity: None,
+                        toolchain_identity: Some(toolchain_identity.to_string()),
                     },
                 );
             };
