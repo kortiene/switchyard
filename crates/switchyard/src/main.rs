@@ -231,11 +231,17 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
             }
             MissionCommand::Export { db, mission, out } => {
                 let document = Host::export_document(&db, &mission, env!("CARGO_PKG_VERSION"))?;
-                if let Some(path) = out {
-                    let text = format!("{document}\n");
-                    write_export_exclusive(&path, text.as_bytes())?;
-                }
-                Ok(document)
+                let Some(path) = out else {
+                    return Ok(document);
+                };
+                let text = format!("{document}\n");
+                let written = write_export_exclusive(&path, text.as_bytes())?;
+                Ok(json!({
+                    "ok": true,
+                    "out": path.display().to_string(),
+                    "bytes": written.bytes,
+                    "sha256": written.sha256,
+                }))
             }
             MissionCommand::Command {
                 db,

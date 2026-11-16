@@ -1928,6 +1928,26 @@ fn assert_no_inputs_frozen(value: &Value) {
     );
 }
 
+fn assert_export_receipt(receipt: &Value, out: &Path, file_bytes: &[u8]) {
+    assert_eq!(receipt["ok"], true, "{receipt}");
+    assert!(receipt.get("schema").is_none(), "{receipt}");
+    assert!(receipt.get("mission").is_none(), "{receipt}");
+    assert_eq!(receipt["out"], out.display().to_string());
+    assert_eq!(
+        receipt["bytes"].as_u64(),
+        Some(u64::try_from(file_bytes.len()).unwrap())
+    );
+    let hashed = Command::new("sha256sum").arg(out).output().unwrap();
+    assert!(
+        hashed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&hashed.stderr)
+    );
+    let hex = String::from_utf8(hashed.stdout).unwrap();
+    let hex = hex.split_whitespace().next().unwrap();
+    assert_eq!(receipt["sha256"], format!("sha256:{hex}"));
+}
+
 #[test]
 fn export_matches_the_stored_freeze_and_status_stays_compact() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1960,7 +1980,7 @@ fn export_matches_the_stored_freeze_and_status_stays_compact() {
     assert_eq!(status["missions"][0]["inputsFrozen"], true);
 
     let out = tmp.path().join("export.json");
-    let (code, export, error) = run(&[
+    let (code, receipt, error) = run(&[
         "mission",
         "export",
         "--db",
@@ -1971,6 +1991,9 @@ fn export_matches_the_stored_freeze_and_status_stays_compact() {
         out.to_str().unwrap(),
     ]);
     assert_eq!(code, 0, "{error}");
+    let file_bytes = std::fs::read(&out).unwrap();
+    assert_export_receipt(&receipt, &out, &file_bytes);
+    let export: Value = serde_json::from_slice(&file_bytes).unwrap();
     let stored: String = rusqlite::Connection::open(&db)
         .unwrap()
         .query_row(
@@ -2014,8 +2037,6 @@ fn export_matches_the_stored_freeze_and_status_stays_compact() {
     );
     assert_eq!(export["commands"][0]["kind"], kind);
     assert!(export["commands"][0].get("receipt").is_some());
-    let file: Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
-    assert_eq!(file, export);
 }
 
 #[test]
@@ -2061,7 +2082,7 @@ fn export_reads_while_the_owner_lock_is_held_and_skips_out_when_the_read_fails()
     let conn = rusqlite::Connection::open(&db).unwrap();
     let before = data_version(&conn);
     let out = tmp.path().join("held.json");
-    let (code, export, error) = run(&[
+    let (code, receipt, error) = run(&[
         "mission",
         "export",
         "--db",
@@ -2072,12 +2093,14 @@ fn export_reads_while_the_owner_lock_is_held_and_skips_out_when_the_read_fails()
         out.to_str().unwrap(),
     ]);
     assert_eq!(code, 0, "{error}");
+    let file_bytes = std::fs::read(&out).unwrap();
+    assert_export_receipt(&receipt, &out, &file_bytes);
+    let export: Value = serde_json::from_slice(&file_bytes).unwrap();
     assert_eq!(export["mission"]["missionId"], mission);
     assert_eq!(export["attempt"]["frozenInputsJson"], Value::Null);
     assert_eq!(export["attempt"]["frozenInputsDigest"], Value::Null);
     assert_no_inputs_frozen(&export);
     assert_eq!(data_version(&conn), before, "export opened a write");
-    assert!(out.is_file());
 
     let missing_out = tmp.path().join("missing-mission.json");
     let (code, stdout, stderr) = run(&[
@@ -2481,8 +2504,24 @@ fn export_refuses_an_existing_out_path_and_a_symlink() {
             .is_symlink()
     );
 
+    let dir = tmp.path().join("outdir");
+    std::fs::create_dir(&dir).unwrap();
+    let (code, stdout, stderr) = run(&[
+        "mission",
+        "export",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--out",
+        dir.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2, "{stdout}");
+    assert_eq!(stderr["error"]["category"], "export_target_exists");
+    assert!(dir.is_dir());
+
     std::fs::remove_file(&out).unwrap();
-    let (code, export, error) = run(&[
+    let (code, receipt, error) = run(&[
         "mission",
         "export",
         "--db",
@@ -2493,6 +2532,131 @@ fn export_refuses_an_existing_out_path_and_a_symlink() {
         out.to_str().unwrap(),
     ]);
     assert_eq!(code, 0, "{error}");
+    let file_bytes = std::fs::read(&out).unwrap();
+    assert_export_receipt(&receipt, &out, &file_bytes);
+    let export: Value = serde_json::from_slice(&file_bytes).unwrap();
     assert_eq!(export["schema"], "switchyard.ledger-export.v1");
-    assert!(out.is_file());
+}
+
+#[test]
+fn export_revision_matches_the_latest_command_on_a_quiet_ledger() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap();
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "198",
+        "--objective",
+        "One snapshot",
+        "--acceptance",
+        "Revision matches the latest command",
+        "--admit",
+        "start_planning",
+        "--persist-only",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let (code, export, error) = run(&["mission", "export", "--db", db_arg, "--mission", mission]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(export["schema"], "switchyard.ledger-export.v1");
+    let revision = export["mission"]["revision"].as_u64().unwrap();
+    let max_resulting = export["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|command| command["resultingRevision"].as_u64())
+        .max()
+        .unwrap();
+    assert_eq!(revision, max_resulting, "{export}");
+}
+
+#[test]
+fn export_of_a_missing_ledger_under_a_missing_parent_creates_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = tmp.path().join("missing-parent");
+    let db = parent.join("mission.sqlite");
+    let out = tmp.path().join("export.json");
+    let (code, stdout, stderr) = run(&[
+        "mission",
+        "export",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        "m-missing",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2, "{stdout}");
+    assert_eq!(stderr["error"]["category"], "not_found");
+    assert!(!db.exists());
+    assert!(!parent.exists());
+    assert!(!out.exists());
+
+    let (code, stdout, stderr) = run(&[
+        "mission",
+        "status",
+        "--db",
+        db.to_str().unwrap(),
+        "--mission",
+        "m-missing",
+    ]);
+    assert_eq!(code, 2, "{stdout}");
+    assert_eq!(stderr["error"]["category"], "not_found");
+    assert!(!db.exists());
+    assert!(!parent.exists());
+}
+
+#[test]
+fn export_out_prints_a_receipt_and_stdout_without_out_is_the_document() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap();
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "198",
+        "--objective",
+        "Receipt",
+        "--acceptance",
+        "Stdout stays the document until --out",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let (code, document, error) = run(&["mission", "export", "--db", db_arg, "--mission", mission]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(document["schema"], "switchyard.ledger-export.v1");
+    assert_eq!(document["mission"]["missionId"], mission);
+    assert!(document.get("ok").is_none());
+
+    let out = tmp.path().join("export.json");
+    let (code, receipt, error) = run(&[
+        "mission",
+        "export",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let file_bytes = std::fs::read(&out).unwrap();
+    assert_export_receipt(&receipt, &out, &file_bytes);
+    let filed: Value = serde_json::from_slice(&file_bytes).unwrap();
+    assert_eq!(filed, document);
 }

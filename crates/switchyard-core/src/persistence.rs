@@ -1626,6 +1626,25 @@ impl Store {
         Ok(Some(proof))
     }
 
+    /// One deferred read transaction. Statements inside `body` share one WAL
+    /// snapshot. This does not take a write lock; writers use [`Self::immediate`].
+    pub(crate) fn with_deferred_read<T>(&self, body: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        self.conn
+            .execute_batch("BEGIN DEFERRED")
+            .map_err(Error::storage)?;
+        let result = body(self);
+        let ended = if result.is_ok() {
+            self.conn.execute_batch("COMMIT")
+        } else {
+            self.conn.execute_batch("ROLLBACK")
+        };
+        match (result, ended) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(Error::storage(error)),
+        }
+    }
+
     fn immediate(&mut self) -> Result<Transaction<'_>> {
         let expected = self.owner_generation;
         let tx = self

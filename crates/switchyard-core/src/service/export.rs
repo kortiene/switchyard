@@ -11,7 +11,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use super::{Error, Host, Result, canonical_db_path, snapshot_from};
+use super::{Error, Host, Result, reader_db_path, snapshot_from};
 use crate::canonical::payload_hash;
 use crate::domain::CommandRecord;
 use crate::persistence::{Store, StoredDecision, StoredVerification};
@@ -22,34 +22,45 @@ impl Host {
     /// Uses [`Store::open_reader`] and the same snapshot path as [`Host::inspect`].
     /// Does not take the owner lock, migrate, or dispatch.
     pub fn export_document(db_path: &Path, mission_id: &str, host_version: &str) -> Result<Value> {
-        let db_path = canonical_db_path(db_path)?;
+        let db_path = reader_db_path(db_path)?;
         let store = Store::open_reader(&db_path)?;
-        let generation = store.generation()?;
-        let snapshot = snapshot_from(&store, mission_id, generation, None)?;
-        let schema_version = store.ledger_schema_version()?;
-        let mut commands = Vec::new();
-        for command in store.list_commands(mission_id)? {
-            commands.push(command_json(&command));
-        }
-        let mut decisions = Vec::new();
-        for decision in store.list_decisions(mission_id)? {
-            decisions.push(decision_json(&decision));
-        }
-        let mut verifications = Vec::new();
-        for row in store.list_verifications(mission_id)? {
-            verifications.push(verification_json(&row)?);
-        }
-        Ok(json!({
-            "schema": "switchyard.ledger-export.v1",
-            "ledgerSchemaVersion": schema_version,
-            "hostVersion": host_version,
-            "mission": mission_json(&snapshot),
-            "attempt": attempt_json(&snapshot)?,
-            "commands": commands,
-            "decisions": decisions,
-            "verifications": verifications,
-        }))
+        store.with_deferred_read(|store| {
+            let generation = store.generation()?;
+            let snapshot = snapshot_from(store, mission_id, generation, None)?;
+            let schema_version = store.ledger_schema_version()?;
+            let mut commands = Vec::new();
+            for command in store.list_commands(mission_id)? {
+                commands.push(command_json(&command));
+            }
+            let mut decisions = Vec::new();
+            for decision in store.list_decisions(mission_id)? {
+                decisions.push(decision_json(&decision));
+            }
+            let mut verifications = Vec::new();
+            for row in store.list_verifications(mission_id)? {
+                verifications.push(verification_json(&row)?);
+            }
+            Ok(json!({
+                "schema": "switchyard.ledger-export.v1",
+                "ledgerSchemaVersion": schema_version,
+                "hostVersion": host_version,
+                "mission": mission_json(&snapshot),
+                "attempt": attempt_json(&snapshot)?,
+                "commands": commands,
+                "decisions": decisions,
+                "verifications": verifications,
+            }))
+        })
     }
+}
+
+/// Receipt for a document written by [`write_export_exclusive`].
+///
+/// `sha256` is `sha256:` plus the hex SHA-256 of the bytes just written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportReceipt {
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 /// Create `path` with `O_CREAT|O_EXCL|O_NOFOLLOW` and write `bytes`.
@@ -58,11 +69,15 @@ impl Host {
 /// The caller must finish the ledger read before calling this. A write error
 /// removes the file this call created, so the next try is not
 /// `export_target_exists`.
-pub fn write_export_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn write_export_exclusive(path: &Path, bytes: &[u8]) -> Result<ExportReceipt> {
     let mut file = create_export_target(path)?;
     let result = persist_export(&mut file, path, bytes);
     drop(file);
-    result
+    result?;
+    Ok(ExportReceipt {
+        bytes: u64::try_from(bytes.len()).map_err(|_| Error::storage("export is too large"))?,
+        sha256: format!("sha256:{}", crate::canonical::sha256_hex(bytes)),
+    })
 }
 
 fn mission_json(snapshot: &super::MissionSnapshot) -> Value {

@@ -178,10 +178,11 @@ pub(crate) enum MissionCommand {
     },
     /// Read-only ledger export. Does not take the owner lock, migrate, or dispatch.
     ///
-    /// Without `--out`, JSON is written to stdout. With `--out`, the ledger
-    /// read finishes first. The file is then created with
-    /// `O_CREAT|O_EXCL|O_NOFOLLOW`. An existing path, including a symlink, is
-    /// `export_target_exists`: pick a new path, or remove the file.
+    /// Without `--out`, the document is written to stdout. With `--out`, the
+    /// ledger read finishes first, the file is created with
+    /// `O_CREAT|O_EXCL|O_NOFOLLOW`, and stdout prints a receipt. An existing
+    /// path, including a symlink or a directory, is `export_target_exists`:
+    /// pick a new path, or remove it.
     Export {
         #[arg(long)]
         db: PathBuf,
