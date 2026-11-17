@@ -239,6 +239,30 @@ pub(crate) enum MissionCommand {
         #[arg(long)]
         json_body: String,
     },
+    /// Admit a `plan_completed` observation from a file.
+    ///
+    /// The file bytes are the plan text verbatim: nothing is trimmed and
+    /// newlines are not normalized. This differs from successor
+    /// `--acceptance @path`, which strips one trailing newline.
+    Plan {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        mission: String,
+        /// Regular file of at most 64 KiB. A symlink leaf is refused; a
+        /// symlinked parent directory is followed. Bytes are kept verbatim,
+        /// including a trailing newline.
+        #[arg(long)]
+        file: PathBuf,
+        /// Required. `true` or `false`. There is no default.
+        #[arg(
+            long,
+            action = clap::ArgAction::Set,
+            value_name = "true|false",
+            value_parser = parse_quiescent
+        )]
+        quiescent: bool,
+    },
     /// Hold the owner lock until stdin closes.
     Lock {
         #[arg(long)]
@@ -299,3 +323,22 @@ pub(crate) enum MissionCommand {
         actor: String,
     },
 }
+
+fn parse_quiescent(value: &str) -> Result<bool, QuiescentError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(QuiescentError),
+    }
+}
+
+#[derive(Debug)]
+struct QuiescentError;
+
+impl std::fmt::Display for QuiescentError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("expected true or false")
+    }
+}
+
+impl std::error::Error for QuiescentError {}

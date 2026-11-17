@@ -2685,6 +2685,295 @@ fn export_out_prints_a_receipt_and_stdout_without_out_is_the_document() {
     assert_eq!(filed, document);
 }
 
+fn copy_ledger(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::copy(from, to).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let mut src = from.as_os_str().to_owned();
+        src.push(suffix);
+        let src = std::path::PathBuf::from(src);
+        if src.exists() {
+            let mut dst = to.as_os_str().to_owned();
+            dst.push(suffix);
+            std::fs::copy(&src, std::path::PathBuf::from(dst)).unwrap();
+        }
+    }
+}
+
+#[test]
+fn mission_plan_matches_notify_and_notify_still_works() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap();
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "197",
+        "--objective",
+        "plan from a file",
+        "--acceptance",
+        "digest matches notify",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let revision = created["mission"]["revision"].as_u64().unwrap().to_string();
+    let (code, _started, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db_arg,
+        "--mission",
+        &mission,
+        "--kind",
+        "start_planning",
+        "--expected-revision",
+        &revision,
+    ]);
+    assert_eq!(code, 0, "{error}");
+
+    let notify_db = tmp.path().join("notify.sqlite");
+    copy_ledger(&db, &notify_db);
+    let plan = "implement the ledger\n";
+    let file = tmp.path().join("plan.txt");
+    std::fs::write(&file, plan).unwrap();
+    let body = serde_json::json!({
+        "kind": "plan_completed",
+        "plan": plan,
+        "quiescent": true,
+    })
+    .to_string();
+    let (code, notified, error) = run(&[
+        "mission",
+        "notify",
+        "--db",
+        notify_db.to_str().unwrap(),
+        "--mission",
+        &mission,
+        "--json-body",
+        &body,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(notified["phase"], "awaiting_plan_approval");
+    assert_eq!(notified["mission"]["phase"], "awaiting_plan_approval");
+
+    let (code, filed, error) = run(&[
+        "mission",
+        "plan",
+        "--db",
+        db_arg,
+        "--mission",
+        &mission,
+        "--file",
+        file.to_str().unwrap(),
+        "--quiescent",
+        "true",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(filed["mission"]["phase"], "awaiting_plan_approval");
+    assert_eq!(
+        filed["mission"]["planDigest"],
+        notified["mission"]["planDigest"]
+    );
+    assert!(
+        filed["mission"]["planDigest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+
+    let (code, exported, error) =
+        run(&["mission", "export", "--db", db_arg, "--mission", &mission]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(exported["ledgerSchemaVersion"], 12);
+    assert_eq!(exported["attempt"]["planBody"], plan);
+    let decision = exported["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["action"] == "plan_completed")
+        .unwrap();
+    assert_eq!(decision["actor"], "operator-plan-file");
+    let command = exported["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["kind"] == "plan_completed")
+        .unwrap();
+    assert_eq!(command["origin"], "runtime_observation");
+    assert!(
+        !command["payloadCanonical"]
+            .as_str()
+            .unwrap()
+            .contains("operator-plan-file")
+    );
+
+    let (code, notify_export, error) = run(&[
+        "mission",
+        "export",
+        "--db",
+        notify_db.to_str().unwrap(),
+        "--mission",
+        &mission,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let notify_decision = notify_export["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["action"] == "plan_completed")
+        .unwrap();
+    assert_eq!(notify_decision["actor"], "runtime-observation");
+    assert_eq!(notify_export["attempt"]["planBody"], plan);
+    assert_eq!(
+        notify_export["attempt"]["planDigest"],
+        exported["attempt"]["planDigest"]
+    );
+    let notify_command = notify_export["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["kind"] == "plan_completed")
+        .unwrap();
+    assert_eq!(notify_command["payloadHash"], command["payloadHash"]);
+}
+
+#[test]
+fn mission_plan_refuses_a_bad_file_and_a_missing_quiescent_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap();
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "197",
+        "--objective",
+        "refuse a bad plan file",
+        "--acceptance",
+        "state stays planning",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let revision = created["mission"]["revision"].as_u64().unwrap().to_string();
+    let (code, started, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db_arg,
+        "--mission",
+        &mission,
+        "--kind",
+        "start_planning",
+        "--expected-revision",
+        &revision,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let planning_revision = started["mission"]["revision"].clone();
+
+    let missing = tmp.path().join("missing.txt");
+    let (code, stdout, stderr) = run(&[
+        "mission",
+        "plan",
+        "--db",
+        db_arg,
+        "--mission",
+        &mission,
+        "--file",
+        missing.to_str().unwrap(),
+        "--quiescent",
+        "true",
+    ]);
+    assert_eq!(code, 2, "{stdout}");
+    assert_eq!(stderr["error"]["category"], "guard_failed");
+    assert!(
+        stderr["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("fix the path and rerun"),
+        "{stderr}"
+    );
+
+    let file = tmp.path().join("plan.txt");
+    std::fs::write(&file, "implement the ledger").unwrap();
+    let (code, stdout, stderr) = run(&[
+        "mission",
+        "plan",
+        "--db",
+        db_arg,
+        "--mission",
+        &mission,
+        "--file",
+        file.to_str().unwrap(),
+        "--quiescent",
+        "false",
+    ]);
+    assert_eq!(code, 2, "{stdout}");
+    assert!(
+        stderr["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not quiescent"),
+        "{stderr}"
+    );
+
+    let (code, status, error) = run(&["mission", "status", "--db", db_arg, "--mission", &mission]);
+    assert_eq!(code, 0, "{error}");
+    let mission_status = &status["missions"][0];
+    assert_eq!(mission_status["phase"], "planning");
+    assert_eq!(mission_status["revision"], planning_revision);
+    assert!(mission_status["planDigest"].is_null());
+
+    let (code, stdout, _) = run(&[
+        "mission",
+        "plan",
+        "--db",
+        db_arg,
+        "--mission",
+        &mission,
+        "--file",
+        file.to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0);
+    assert!(stdout.is_null());
+}
+
+#[test]
+fn mission_plan_help_notes_verbatim_bytes() {
+    let help = Command::new(bin())
+        .args(["mission", "plan", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("verbatim"), "{help}");
+    assert!(help.contains("--acceptance @path"), "{help}");
+    assert!(help.contains("strips one trailing newline"), "{help}");
+    assert!(help.contains("--quiescent"), "{help}");
+    assert!(help.contains("<true|false>"), "{help}");
+}
+
 const EARLIER_OWNER_HINT: &str = "Workspace was verified by an earlier owner generation; it is reconciled automatically by the next `mission command`, or by `mission verify` while verifying.";
 
 struct OwnerBump {
