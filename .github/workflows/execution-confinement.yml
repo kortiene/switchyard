@@ -14,7 +14,7 @@ jobs:
   # B6 plus composed S3 evidence. Acceptance review and product enablement stay separate.
   execution-confinement:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45 # #214
     env:
       SWITCHYARD_BWRAP: /usr/local/libexec/switchyard-bwrap
       SWITCHYARD_CONFINEMENT_EVIDENCE: ${{ github.workspace }}/confinement-evidence
