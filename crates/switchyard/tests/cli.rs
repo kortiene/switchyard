@@ -2685,6 +2685,368 @@ fn export_out_prints_a_receipt_and_stdout_without_out_is_the_document() {
     assert_eq!(filed, document);
 }
 
+const EARLIER_OWNER_HINT: &str = "Workspace was verified by an earlier owner generation; it is reconciled automatically by the next `mission command`, or by `mission verify` while verifying.";
+
+struct OwnerBump {
+    _tmp: tempfile::TempDir,
+    db: String,
+    mission_id: String,
+    planned: Value,
+}
+
+fn plan_completed_owner_bump() -> OwnerBump {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    let root = tmp.path().join("workspaces");
+    std::fs::create_dir(&root).unwrap();
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap().to_string();
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        &db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "200",
+        "--objective",
+        "status hint",
+        "--acceptance",
+        "a generation bump is not explicit recovery",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission_id = created["mission"]["missionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let attempt = created["mission"]["attemptId"].as_str().unwrap();
+    let revision = created["mission"]["revision"].as_u64().unwrap().to_string();
+    let (code, _prepared, error) = run(&[
+        "mission",
+        "workspace",
+        "--db",
+        &db_arg,
+        "--mission",
+        &mission_id,
+        "--attempt",
+        attempt,
+        "--root",
+        root.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let (code, _started, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        &db_arg,
+        "--mission",
+        &mission_id,
+        "--kind",
+        "start_planning",
+        "--expected-revision",
+        &revision,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let (code, planned, error) = run(&[
+        "mission",
+        "notify",
+        "--db",
+        &db_arg,
+        "--mission",
+        &mission_id,
+        "--json-body",
+        r#"{"kind":"plan_completed","plan":"implement","quiescent":true}"#,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(planned["mission"]["phase"], "awaiting_plan_approval");
+    OwnerBump {
+        _tmp: tmp,
+        db: db_arg,
+        mission_id,
+        planned,
+    }
+}
+
+fn mission_status(db: &str, mission_id: &str) -> Value {
+    let (code, status, error) = run(&["mission", "status", "--db", db, "--mission", mission_id]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(status["readOnly"], true);
+    status["missions"][0].clone()
+}
+
+fn generations(mission: &Value) -> (u64, u64) {
+    (
+        mission["workspace"]["verifiedGeneration"].as_u64().unwrap(),
+        mission["recordedOwnerGeneration"].as_u64().unwrap(),
+    )
+}
+
+fn assert_earlier_owner_hint(mission: &Value) {
+    let (verified, recorded) = generations(mission);
+    assert!(verified < recorded, "{mission}");
+    assert_eq!(mission["workspace"]["state"], "ready");
+    let steps = mission["nextSteps"].to_string();
+    assert!(steps.contains(EARLIER_OWNER_HINT), "{steps}");
+    assert!(!steps.contains("Explicit recovery is required"), "{steps}");
+    assert!(steps.contains("Status is read-only"), "{steps}");
+}
+
+fn assert_single_invocation_bump(mission: &Value) {
+    let (verified, recorded) = generations(mission);
+    assert_eq!(verified + 1, recorded, "{mission}");
+}
+
+fn assert_reconciled(mission: &Value) {
+    let (verified, recorded) = generations(mission);
+    assert_eq!(verified, recorded, "{mission}");
+    assert_eq!(mission["workspace"]["state"], "ready");
+    let steps = mission["nextSteps"].to_string();
+    assert!(!steps.contains("earlier owner generation"), "{steps}");
+    assert!(!steps.contains("Explicit recovery is required"), "{steps}");
+}
+
+fn stored_generations(db: &str) -> (i64, i64) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let verified: i64 = conn
+        .query_row("SELECT verified_generation FROM workspaces", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let recorded: i64 = conn
+        .query_row("SELECT generation FROM host_owner", [], |row| row.get(0))
+        .unwrap();
+    (verified, recorded)
+}
+
+fn approve_plan(bump: &OwnerBump) -> Value {
+    let digest = bump.planned["mission"]["planDigest"].as_str().unwrap();
+    let payload = format!(r#"{{"planDigest":"{digest}"}}"#);
+    let revision = bump.planned["mission"]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let (code, approved, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        &bump.db,
+        "--mission",
+        &bump.mission_id,
+        "--kind",
+        "approve_plan",
+        "--expected-revision",
+        &revision,
+        "--payload",
+        &payload,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    approved
+}
+
+fn implementation_settled(db: &str, mission_id: &str) -> Value {
+    let (code, settled, error) = run(&[
+        "mission",
+        "notify",
+        "--db",
+        db,
+        "--mission",
+        mission_id,
+        "--json-body",
+        r#"{"kind":"implementation_settled","quiescent":true}"#,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(settled["mission"]["phase"], "verifying");
+    settled
+}
+
+/// #200 decision 5: the 8/9-style bump after plan_completed and after a later notify.
+#[test]
+fn status_names_automatic_dispatch_after_plan_completed_and_a_later_notify() {
+    let bump = plan_completed_owner_bump();
+    let after_plan = mission_status(&bump.db, &bump.mission_id);
+    assert_earlier_owner_hint(&after_plan);
+    assert_single_invocation_bump(&after_plan);
+    assert_eq!(after_plan["phase"], "awaiting_plan_approval");
+    assert_eq!(
+        generations(&after_plan),
+        generations(&bump.planned["mission"])
+    );
+
+    approve_plan(&bump);
+    let settled = implementation_settled(&bump.db, &bump.mission_id);
+    let after_notify = mission_status(&bump.db, &bump.mission_id);
+    assert_earlier_owner_hint(&after_notify);
+    assert_single_invocation_bump(&after_notify);
+    assert_eq!(after_notify["phase"], "verifying");
+    assert_eq!(generations(&after_notify), generations(&settled["mission"]));
+}
+
+/// #200 decision 5: status does not bump or reconcile the owner generations.
+#[test]
+fn status_leaves_owner_generations_unchanged() {
+    let bump = plan_completed_owner_bump();
+    let before = stored_generations(&bump.db);
+    assert!(before.0 < before.1, "{before:?}");
+    let first = mission_status(&bump.db, &bump.mission_id);
+    assert_earlier_owner_hint(&first);
+    assert_eq!(
+        stored_generations(&bump.db),
+        before,
+        "status wrote the owner generation or the verified generation"
+    );
+    let second = mission_status(&bump.db, &bump.mission_id);
+    assert_eq!(stored_generations(&bump.db), before);
+    assert_eq!(generations(&first), generations(&second));
+    assert_eq!(first["workspace"], second["workspace"]);
+    assert_eq!(first["revision"], second["revision"]);
+    assert_eq!(generations(&first), (before.0 as u64, before.1 as u64));
+}
+
+/// Hint clause: `mission command` (not `--persist-only`) reconciles to N/N.
+#[test]
+fn dispatch_reconciles_a_ready_owner_bump_to_matching_generations() {
+    let bump = plan_completed_owner_bump();
+    let before = mission_status(&bump.db, &bump.mission_id);
+    assert_earlier_owner_hint(&before);
+    let (verified_before, recorded_before) = generations(&before);
+
+    let approved = approve_plan(&bump);
+    assert_eq!(approved["mission"]["phase"], "implementing");
+    assert_reconciled(&approved["mission"]);
+    let (verified, recorded) = generations(&approved["mission"]);
+    assert!(recorded > recorded_before, "{approved}");
+    assert_eq!(verified, recorded);
+
+    let settled = implementation_settled(&bump.db, &bump.mission_id);
+    assert_earlier_owner_hint(&settled["mission"]);
+    assert_single_invocation_bump(&settled["mission"]);
+    let revision = settled["mission"]["revision"].as_u64().unwrap().to_string();
+    let (code, paused, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        &bump.db,
+        "--mission",
+        &bump.mission_id,
+        "--kind",
+        "pause",
+        "--expected-revision",
+        &revision,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(paused["mission"]["phase"], "pausing");
+    assert_reconciled(&paused["mission"]);
+    let (verified, recorded) = generations(&paused["mission"]);
+    assert_eq!(verified, recorded);
+    assert!(verified > verified_before);
+}
+
+/// #200 decision 6: notify does not reconcile a ready owner bump.
+#[test]
+fn notify_does_not_reconcile_a_ready_owner_bump() {
+    let bump = plan_completed_owner_bump();
+    let before = mission_status(&bump.db, &bump.mission_id);
+    assert_earlier_owner_hint(&before);
+    assert_single_invocation_bump(&before);
+    let (verified_before, recorded_before) = generations(&before);
+    let (code, notified, error) = run(&[
+        "mission",
+        "notify",
+        "--db",
+        &bump.db,
+        "--mission",
+        &bump.mission_id,
+        "--json-body",
+        r#"{"kind":"idle"}"#,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let (verified, recorded) = generations(&notified["mission"]);
+    assert_eq!(verified, verified_before);
+    assert!(recorded > recorded_before, "{notified}");
+    assert_ne!(verified, recorded);
+    assert_earlier_owner_hint(&notified["mission"]);
+    let after = mission_status(&bump.db, &bump.mission_id);
+    assert_eq!(generations(&after), (verified, recorded));
+}
+
+/// #200 decision 6: verify does not reconcile until the mission is verifying.
+#[test]
+fn verify_does_not_reconcile_a_ready_owner_bump_before_verifying() {
+    let bump = plan_completed_owner_bump();
+    let before = mission_status(&bump.db, &bump.mission_id);
+    assert_earlier_owner_hint(&before);
+    let (verified_before, recorded_before) = generations(&before);
+    let (code, stdout, stderr) = run(&[
+        "mission",
+        "verify",
+        "--db",
+        &bump.db,
+        "--mission",
+        &bump.mission_id,
+    ]);
+    assert_eq!(code, 2, "{stdout} {stderr}");
+    assert_eq!(stderr["error"]["category"], "illegal_transition");
+    let after = mission_status(&bump.db, &bump.mission_id);
+    let (verified, recorded) = generations(&after);
+    assert_eq!(verified, verified_before);
+    assert!(recorded > recorded_before, "{after}");
+    assert_ne!(verified, recorded);
+    assert_earlier_owner_hint(&after);
+}
+
+/// Hint clause: `mission verify` reconciles while the phase is verifying.
+#[test]
+fn verify_reconciles_a_ready_owner_bump_while_verifying() {
+    let bump = plan_completed_owner_bump();
+    approve_plan(&bump);
+    let settled = implementation_settled(&bump.db, &bump.mission_id);
+    assert_earlier_owner_hint(&settled["mission"]);
+    assert_single_invocation_bump(&settled["mission"]);
+    let (code, stdout, stderr) = run(&[
+        "mission",
+        "verify",
+        "--db",
+        &bump.db,
+        "--mission",
+        &bump.mission_id,
+    ]);
+    assert_eq!(code, 2, "{stdout} {stderr}");
+    assert_eq!(stderr["error"]["category"], "verifier_gate_unavailable");
+    let after = mission_status(&bump.db, &bump.mission_id);
+    assert_reconciled(&after);
+    assert_eq!(after["phase"], "verifying");
+}
+
+/// A terminal mission keeps the plain read-only status text. The reconcile
+/// hint would name commands that cannot run.
+#[test]
+fn status_omits_the_reconcile_hint_on_a_terminal_mission() {
+    let bump = plan_completed_owner_bump();
+    let before = mission_status(&bump.db, &bump.mission_id);
+    assert_earlier_owner_hint(&before);
+    let changed = rusqlite::Connection::open(&bump.db)
+        .unwrap()
+        .execute(
+            "UPDATE missions SET phase = 'cancelled' WHERE id = ?1",
+            [&bump.mission_id],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    let after = mission_status(&bump.db, &bump.mission_id);
+    assert_eq!(after["phase"], "cancelled");
+    assert_eq!(after["workspace"]["state"], "ready");
+    assert_eq!(generations(&after), generations(&before));
+    let (verified, recorded) = generations(&after);
+    assert!(verified < recorded, "{after}");
+    let steps = after["nextSteps"].to_string();
+    assert!(steps.contains("Status is read-only"), "{steps}");
+    assert!(!steps.contains(EARLIER_OWNER_HINT), "{steps}");
+    assert!(!steps.contains("earlier owner generation"), "{steps}");
+    assert!(!steps.contains("Explicit recovery is required"), "{steps}");
+}
+
 #[test]
 fn create_refuses_missing_empty_and_whitespace_acceptance_without_a_mission() {
     let tmp = tempfile::tempdir().unwrap();
