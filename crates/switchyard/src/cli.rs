@@ -23,6 +23,17 @@ pub(crate) struct Cli {
     /// prerequisites are missing. It is never selected from the environment.
     #[arg(long, value_enum, global = true)]
     pub(crate) runtime: Option<RuntimeSelection>,
+    /// Model endpoint. Valid only with `--runtime confined-pi`; any other
+    /// runtime is refused before the host opens. Omitted keeps egress denied.
+    ///
+    /// The host must be a loopback IP literal (`127.0.0.0/8` or `::1`), with
+    /// or without a port. Hostnames, including `localhost`, are refused with
+    /// no DNS lookup. The same value is required for the mission's lifetime;
+    /// a mismatch is refused, and re-supplying the original value is the way
+    /// out. The URL, including its path, is stored in the mission database
+    /// and the launch record and must not carry a key.
+    #[arg(long, global = true, value_name = "URL")]
+    pub(crate) model_endpoint: Option<String>,
     #[command(subcommand)]
     pub(crate) command: Command,
 }
@@ -32,7 +43,7 @@ pub(crate) enum RuntimeSelection {
     /// FakeRuntime. Product default when `--runtime` is omitted.
     Fake,
     /// Credential-free confined Pi runtime. Runs the composed `s3-acceptance`
-    /// scenario and does not select a model endpoint.
+    /// scenario. A model endpoint is selected only by `--model-endpoint`.
     #[value(name = "confined-pi")]
     ConfinedPi,
 }

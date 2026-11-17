@@ -9,7 +9,9 @@ FakeRuntime remains the product and CLI default. `Host::open` is unchanged,
 and there is no new Cargo feature. Pi is never selected implicitly. The CLI
 flag `--runtime confined-pi` is the explicit opt-in: it calls
 `Host::open_confined_pi` with the credential-free `s3-acceptance` fixture (the
-composed scenario) and does not set a model endpoint. Linux confinement
+composed scenario). A model endpoint is set only by `--model-endpoint` on that
+same command; omitting the flag keeps egress denied
+([s3-model-endpoint-wiring.md](s3-model-endpoint-wiring.md)). Linux confinement
 prerequisites (`SWITCHYARD_PI_RUNTIME`, `SWITCHYARD_BWRAP`,
 `SWITCHYARD_CGROUP_ROOT`, `SWITCHYARD_PI_NODE`, `SWITCHYARD_BRIDGE_LAUNCHER`,
 `SWITCHYARD_BRIDGE_POLICY`, and `SWITCHYARD_EXECUTION_HELPER`) are required;
@@ -145,8 +147,9 @@ fixtures from the relocated tree.
 
 ## Limits
 
-This does not install a production bridge or select a model endpoint. The CLI
-selects this runtime only with `--runtime confined-pi`; FakeRuntime remains
-the default. The native policy library remains `config.policy`. Workspace
+This does not install a production bridge. The CLI selects this runtime only
+with `--runtime confined-pi`; a model endpoint is the separate
+`--model-endpoint` flag on that runtime. FakeRuntime remains the default.
+The native policy library remains `config.policy`. Workspace
 confinement is unchanged. Reboot, power-loss, and a compromised host are not
 claimed.

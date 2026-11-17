@@ -47,6 +47,9 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> switchyard_core::Result<Value> {
     let runtime = cli.runtime.unwrap_or(RuntimeSelection::Fake);
+    // Flags only. Opening the host first would take the owner lock and
+    // create the database. Same shape as the empty-acceptance refusal.
+    let model_endpoint = model_endpoint_from_flag(runtime, cli.model_endpoint.as_deref())?;
     match cli.command {
         Command::Mission { action } => match action {
             MissionCommand::AbandonExecution {
@@ -61,7 +64,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 actor,
                 rationale,
             } => {
-                let mut host = open_host(&db, runtime)?;
+                let mut host = open_host(&db, runtime, model_endpoint.as_ref())?;
                 let audit =
                     host.resolve_fake_execution(&switchyard_core::ExecutionResolutionRequest {
                         command_id,
@@ -98,7 +101,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 actor,
                 rationale,
             } => {
-                let mut host = open_host(&db, runtime)?;
+                let mut host = open_host(&db, runtime, model_endpoint.as_ref())?;
                 let audit =
                     host.supersede_execution(&switchyard_core::ExecutionSupersessionRequest {
                         command_id,
@@ -132,7 +135,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 attempt,
                 root,
             } => {
-                let mut host = open_host(&db, runtime)?;
+                let mut host = open_host(&db, runtime, model_endpoint.as_ref())?;
                 let workspace = host.prepare_workspace(&mission, &attempt, &root)?;
                 Ok(json!({"ok": true, "workspace": workspace.to_json()}))
             }
@@ -144,7 +147,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 from,
                 actor,
             } => {
-                let mut host = open_host(&db, runtime)?;
+                let mut host = open_host(&db, runtime, model_endpoint.as_ref())?;
                 let write = host.operator_write(&mission, &attempt, &path, &from, &actor)?;
                 Ok(json!({
                     "ok": true,
@@ -180,7 +183,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 if acceptance.trim().is_empty() {
                     return Err(Error::guard("acceptance criteria is required"));
                 }
-                let mut host = open_host(&db, runtime)?;
+                let mut host = open_host(&db, runtime, model_endpoint.as_ref())?;
                 let snapshot = host.create_mission_with_verifier(
                     CreateMission {
                         repo,
@@ -259,7 +262,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 payload,
                 persist_only,
             } => {
-                let mut host = open_host(&db, runtime)?;
+                let mut host = open_host(&db, runtime, model_endpoint.as_ref())?;
                 let body = command_body(
                     &kind,
                     &serde_json::from_str(&payload)
@@ -362,7 +365,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 ))
             }
             MissionCommand::Recover { db, mission } => {
-                let mut host = open_host(&db, runtime)?;
+                let mut host = open_host(&db, runtime, model_endpoint.as_ref())?;
                 let snapshot = host.recover(&mission)?;
                 Ok(json!({"ok": true, "mission": snapshot.to_json()}))
             }
@@ -371,7 +374,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 mission,
                 json_body,
             } => {
-                let mut host = open_host(&db, runtime)?;
+                let mut host = open_host(&db, runtime, model_endpoint.as_ref())?;
                 let value: Value = serde_json::from_str(&json_body)
                     .map_err(|error| Error::guard(format!("notification is not JSON: {error}")))?;
                 let outcome = host.apply_notification_json(&mission, &value)?;
@@ -388,7 +391,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 file,
                 quiescent,
             } => {
-                let mut host = open_host(&db, runtime)?;
+                let mut host = open_host(&db, runtime, model_endpoint.as_ref())?;
                 let outcome = host.apply_plan_file(&mission, &file, quiescent)?;
                 Ok(json!({
                     "ok": true,
@@ -398,7 +401,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 }))
             }
             MissionCommand::Lock { db } => {
-                let host = open_host(&db, runtime)?;
+                let host = open_host(&db, runtime, model_endpoint.as_ref())?;
                 println!(
                     "{}",
                     json!({
@@ -426,7 +429,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 // host open bumps host_owner.generation. Omitting the flag
                 // still copies the source, inside the host.
                 let acceptance = acceptance_override(&acceptance)?;
-                let mut host = open_host(&db, runtime)?;
+                let mut host = open_host(&db, runtime, model_endpoint.as_ref())?;
                 let snapshot = host.create_successor_with(
                     &mission,
                     &actor,
@@ -441,7 +444,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 Ok(json!({"ok": true, "mission": snapshot.to_json()}))
             }
             MissionCommand::Verify { db, mission } => {
-                let mut host = open_host(&db, runtime)?;
+                let mut host = open_host(&db, runtime, model_endpoint.as_ref())?;
                 let (snapshot, outcome) = host.verify_mission(&mission)?;
                 Ok(json!({
                     "ok": true,
@@ -456,7 +459,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 expected_revision,
                 actor,
             } => {
-                let mut host = open_host(&db, runtime)?;
+                let mut host = open_host(&db, runtime, model_endpoint.as_ref())?;
                 let snapshot =
                     host.note_content_digest(&mission, expected_revision, &digest, &actor)?;
                 Ok(json!({"ok": true, "mission": snapshot.to_json()}))
@@ -465,10 +468,29 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
     }
 }
 
-fn open_host(db: &Path, runtime: RuntimeSelection) -> switchyard_core::Result<Host> {
+/// Parsed endpoint once `pi-contract` and `linux-execution` are both enabled.
+/// Other builds keep the flag checks and refuse the runtime before launch.
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
+type CliModelEndpoint = switchyard_core::ModelEndpoint;
+#[cfg(not(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+)))]
+type CliModelEndpoint = ();
+
+fn open_host(
+    db: &Path,
+    runtime: RuntimeSelection,
+    model_endpoint: Option<&CliModelEndpoint>,
+) -> switchyard_core::Result<Host> {
     match runtime {
         RuntimeSelection::Fake => Host::open(db).map_err(suggest_confined_runtime),
-        RuntimeSelection::ConfinedPi => open_confined(db),
+        RuntimeSelection::ConfinedPi => open_confined(db, model_endpoint.cloned()),
     }
 }
 
@@ -487,9 +509,15 @@ fn suggest_confined_runtime(error: Error) -> Error {
     feature = "linux-execution",
     target_os = "linux"
 ))]
-fn open_confined(db: &Path) -> switchyard_core::Result<Host> {
+fn open_confined(
+    db: &Path,
+    model_endpoint: Option<switchyard_core::ModelEndpoint>,
+) -> switchyard_core::Result<Host> {
     use switchyard_core::{ConfinedPiConfig, LinuxExecutionConfig};
 
+    // The endpoint was parsed from `--model-endpoint` before this open.
+    // Unset keeps default-deny egress. This fixture is the faux provider;
+    // it records the pin and does not send model traffic.
     let pi_runtime = env_path("SWITCHYARD_PI_RUNTIME")?;
     let bubblewrap = env_path("SWITCHYARD_BWRAP")?;
     let cgroup_root = env_path("SWITCHYARD_CGROUP_ROOT")?;
@@ -498,8 +526,9 @@ fn open_confined(db: &Path) -> switchyard_core::Result<Host> {
     let policy = env_path("SWITCHYARD_BRIDGE_POLICY")?;
     let helper = env_path("SWITCHYARD_EXECUTION_HELPER")?;
     let root = bridge_root(db)?;
-    // The composed scenario's trusted fixture. No model endpoint, credential,
-    // or TLS route is configured on this path.
+    // The composed scenario's trusted fixture (`s3-acceptance`, the faux
+    // provider). Nothing on this path is model egress. Egress stays denied
+    // when the flag is omitted. No credential or TLS route is configured.
     Host::open_confined_pi(
         db,
         ConfinedPiConfig {
@@ -510,7 +539,7 @@ fn open_confined(db: &Path) -> switchyard_core::Result<Host> {
             bubblewrap: bubblewrap.clone(),
             launcher,
             policy,
-            model_endpoint: None,
+            model_endpoint,
         },
         LinuxExecutionConfig {
             cgroup_root,
@@ -529,8 +558,8 @@ fn open_confined(db: &Path) -> switchyard_core::Result<Host> {
     feature = "linux-execution",
     target_os = "linux"
 )))]
-fn open_confined(db: &Path) -> switchyard_core::Result<Host> {
-    let _ = db;
+fn open_confined(db: &Path, model_endpoint: Option<()>) -> switchyard_core::Result<Host> {
+    let _ = (db, model_endpoint);
     Err(Error::guard(
         "confined Pi runtime requires Linux with the pi-contract and linux-execution build; refusing to fall back to FakeRuntime",
     ))
@@ -554,6 +583,108 @@ fn env_path(key: &str) -> switchyard_core::Result<PathBuf> {
         )));
     }
     Ok(path)
+}
+
+/// `--model-endpoint` is a `String`, so clap rejects a non-Unicode argument
+/// before `run`. There is no `OsString` branch and this function never sees
+/// those bytes.
+fn model_endpoint_from_flag(
+    runtime: RuntimeSelection,
+    value: Option<&str>,
+) -> switchyard_core::Result<Option<CliModelEndpoint>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if runtime != RuntimeSelection::ConfinedPi {
+        return Err(Error::guard(
+            "--model-endpoint is valid only with --runtime confined-pi",
+        ));
+    }
+    if !endpoint_host_is_loopback_literal(value) {
+        return Err(Error::guard(
+            "--model-endpoint accepts only a loopback IP literal in 127.0.0.0/8 or ::1, with or without a port; hostnames and other addresses are refused without a DNS lookup",
+        ));
+    }
+    Ok(Some(parse_pinned_loopback(value)?))
+}
+
+/// True only for an `http` or `https` URL whose host is an IPv4 address in
+/// `127.0.0.0/8` or the IPv6 address `::1`.
+///
+/// This never resolves a name. [`parse_pinned_loopback`] calls
+/// `ModelEndpoint::parse` only after this returns true, and only an IP
+/// literal reaches that parser, so `to_socket_addrs` does not query DNS.
+fn endpoint_host_is_loopback_literal(input: &str) -> bool {
+    let Some((scheme, rest)) = input.split_once("://") else {
+        return false;
+    };
+    if scheme != "http" && scheme != "https" {
+        return false;
+    }
+    // Userinfo, query, fragment, and escapes are not a loopback literal.
+    // Rejecting them here avoids handing a non-literal to the resolver.
+    if rest.contains(['@', '\\', '#', '?', '%'])
+        || rest.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return false;
+    }
+    let authority = rest
+        .split_once('/')
+        .map(|(authority, _)| authority)
+        .unwrap_or(rest);
+    let host = if let Some(body) = authority.strip_prefix('[') {
+        let Some((host, after)) = body.split_once(']') else {
+            return false;
+        };
+        if !(after.is_empty() || after.starts_with(':')) {
+            return false;
+        }
+        host
+    } else if authority.matches(':').count() > 1 {
+        return false;
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port))
+                if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                host
+            }
+            Some(_) => return false,
+            None => authority,
+        }
+    };
+    if host.is_empty() {
+        return false;
+    }
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        return ip.is_loopback();
+    }
+    host.parse::<std::net::Ipv6Addr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Pins a loopback literal. Callers have already rejected every hostname.
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
+fn parse_pinned_loopback(value: &str) -> switchyard_core::Result<switchyard_core::ModelEndpoint> {
+    // Return the parser's guard unchanged. Wrapping `error.to_string()`
+    // prints "guard failed" twice, because that display already includes it.
+    switchyard_core::ModelEndpoint::parse(value)
+}
+
+#[cfg(not(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+)))]
+fn parse_pinned_loopback(value: &str) -> switchyard_core::Result<()> {
+    // The shape is a loopback literal. This build has no `ModelEndpoint`;
+    // `open_confined` refuses the runtime before launch.
+    let _ = value;
+    Ok(())
 }
 
 #[cfg(all(

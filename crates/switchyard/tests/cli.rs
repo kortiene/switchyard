@@ -1207,6 +1207,202 @@ fn confined_pi_flag_fails_closed_without_prerequisites() {
     assert!(!tmp.path().join("mission.sqlite.pi-bridge").exists());
 }
 
+fn model_endpoint_output(args: &[&str]) -> std::process::Output {
+    Command::new(bin())
+        .args(args)
+        .env_remove("SWITCHYARD_MODEL_ENDPOINT")
+        .env_remove("SWITCHYARD_PI_RUNTIME")
+        .env_remove("SWITCHYARD_BWRAP")
+        .env_remove("SWITCHYARD_CGROUP_ROOT")
+        .env_remove("SWITCHYARD_PI_NODE")
+        .env_remove("SWITCHYARD_BRIDGE_LAUNCHER")
+        .env_remove("SWITCHYARD_BRIDGE_POLICY")
+        .env_remove("SWITCHYARD_EXECUTION_HELPER")
+        .output()
+        .unwrap()
+}
+
+fn assert_model_endpoint_guard(output: &std::process::Output, db: &Path, needle: &str) -> String {
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr: Value = serde_json::from_slice(&output.stderr).expect("stderr is JSON");
+    assert_eq!(stderr["ok"], false);
+    assert_eq!(stderr["error"]["category"], "guard_failed");
+    let message = stderr["error"]["message"].as_str().unwrap().to_string();
+    assert!(message.contains(needle), "{message}");
+    assert_eq!(message.matches("guard failed").count(), 1, "{message}");
+    assert!(!db.exists(), "{message}");
+    assert!(!owner_lock(db).exists(), "{message}");
+    message
+}
+
+#[test]
+fn model_endpoint_flag_without_confined_pi_is_refused_before_any_database() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+    let repo_arg = repo.to_str().unwrap();
+    let secret = "http://127.0.0.1:9/v1/sk-do-not-echo";
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "omitted-runtime.sqlite",
+            &[
+                "mission",
+                "create",
+                "--model-endpoint",
+                secret,
+                "--db",
+                "DB",
+                "--repo",
+                "REPO",
+                "--issue",
+                "216",
+                "--objective",
+                "flag requires confined-pi",
+                "--acceptance",
+                "no database",
+            ],
+        ),
+        (
+            "explicit-fake.sqlite",
+            &[
+                "--model-endpoint",
+                secret,
+                "mission",
+                "create",
+                "--runtime",
+                "fake",
+                "--db",
+                "DB",
+                "--repo",
+                "REPO",
+                "--issue",
+                "216",
+                "--objective",
+                "flag requires confined-pi",
+                "--acceptance",
+                "no database",
+            ],
+        ),
+    ];
+    for (name, template) in cases {
+        let db = tmp.path().join(name);
+        let db_arg = db.to_str().unwrap().to_string();
+        let args: Vec<String> = template
+            .iter()
+            .map(|arg| match *arg {
+                "DB" => db_arg.clone(),
+                "REPO" => repo_arg.to_string(),
+                other => (*other).to_string(),
+            })
+            .collect();
+        let output = model_endpoint_output(&args.iter().map(String::as_str).collect::<Vec<_>>());
+        let message = assert_model_endpoint_guard(
+            &output,
+            &db,
+            "--model-endpoint is valid only with --runtime confined-pi",
+        );
+        assert!(!message.contains("sk-do-not-echo"), "{message}");
+        assert!(!message.contains("127.0.0.1"), "{message}");
+        assert!(!message.contains(secret), "{message}");
+    }
+}
+
+#[test]
+fn model_endpoint_flag_refuses_hostnames_and_non_loopback_addresses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+    let repo_arg = repo.to_str().unwrap();
+    let refused = [
+        ("localhost.sqlite", "http://localhost:8000/v1", "localhost"),
+        (
+            "hostname.sqlite",
+            "http://model.example.invalid/v1",
+            "model.example.invalid",
+        ),
+        ("public.sqlite", "http://8.8.8.8:9/v1", "8.8.8.8"),
+        ("rfc1918.sqlite", "http://10.1.2.3/v1", "10.1.2.3"),
+        ("mapped.sqlite", "http://[::ffff:127.0.0.1]:9/v1", "::ffff"),
+    ];
+    for (name, endpoint, hidden) in refused {
+        let db = tmp.path().join(name);
+        let output = model_endpoint_output(&[
+            "mission",
+            "create",
+            "--runtime",
+            "confined-pi",
+            "--model-endpoint",
+            endpoint,
+            "--db",
+            db.to_str().unwrap(),
+            "--repo",
+            repo_arg,
+            "--issue",
+            "216",
+            "--objective",
+            "no dns",
+            "--acceptance",
+            "no database",
+        ]);
+        let message = assert_model_endpoint_guard(
+            &output,
+            &db,
+            "--model-endpoint accepts only a loopback IP literal in 127.0.0.0/8 or ::1, with or without a port; hostnames and other addresses are refused without a DNS lookup",
+        );
+        assert!(!message.contains(hidden), "{endpoint}: {message}");
+        assert!(!message.contains(endpoint), "{endpoint}: {message}");
+        assert!(
+            !message.contains("not a single address"),
+            "{endpoint}: {message}"
+        );
+        let bridge = tmp.path().join(format!(
+            "{}.pi-bridge",
+            db.file_name().unwrap().to_str().unwrap()
+        ));
+        assert!(!bridge.exists(), "{bridge:?}");
+    }
+}
+
+#[test]
+fn model_endpoint_loopback_literals_pass_argument_checks_without_creating_a_database() {
+    let tmp = tempfile::tempdir().unwrap();
+    let literals = [
+        "http://127.0.0.1:9/v1",
+        "http://127.0.0.1/v1",
+        "http://[::1]:9/v1",
+        "http://[::1]/v1",
+        "http://127.255.255.254:9/v1",
+    ];
+    for (index, endpoint) in literals.iter().enumerate() {
+        let db = tmp.path().join(format!("missing-{index}.sqlite"));
+        let output = model_endpoint_output(&[
+            "mission",
+            "status",
+            "--runtime",
+            "confined-pi",
+            "--model-endpoint",
+            endpoint,
+            "--db",
+            db.to_str().unwrap(),
+        ]);
+        assert_eq!(output.status.code(), Some(2), "{endpoint} {output:?}");
+        assert!(output.stdout.is_empty(), "{endpoint} {output:?}");
+        let stderr: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(
+            stderr["error"]["category"], "not_found",
+            "{endpoint} {stderr}"
+        );
+        let message = stderr["error"]["message"].as_str().unwrap();
+        assert!(
+            !message.contains("loopback IP literal"),
+            "{endpoint}: {message}"
+        );
+        assert!(!message.contains(endpoint), "{endpoint}: {message}");
+        assert!(!db.exists(), "{endpoint}");
+    }
+}
+
 #[test]
 fn successor_flags_copy_overrides_and_refuse_a_live_source() {
     let tmp = tempfile::tempdir().unwrap();
