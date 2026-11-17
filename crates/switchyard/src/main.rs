@@ -175,6 +175,11 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 payload,
                 verifier,
             } => {
+                // This refusal uses only the flag. Opening the host first would
+                // take the owner lock and bump host_owner.generation.
+                if acceptance.trim().is_empty() {
+                    return Err(Error::guard("acceptance criteria is required"));
+                }
                 let mut host = open_host(&db, runtime)?;
                 let snapshot = host.create_mission_with_verifier(
                     CreateMission {
@@ -402,13 +407,17 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 max_plan_revisions,
                 verifier,
             } => {
+                // An acceptance override is CLI input. Refuse it before the
+                // host open bumps host_owner.generation. Omitting the flag
+                // still copies the source, inside the host.
+                let acceptance = acceptance_override(&acceptance)?;
                 let mut host = open_host(&db, runtime)?;
                 let snapshot = host.create_successor_with(
                     &mission,
                     &actor,
                     &SuccessorChanges {
                         objective,
-                        acceptance: acceptance_override(&acceptance)?,
+                        acceptance,
                         max_repairs,
                         max_plan_revisions,
                         verifier_json: verifier,

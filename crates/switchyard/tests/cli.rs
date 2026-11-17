@@ -53,16 +53,21 @@ fn count_rows(db: &Path, sql: &str) -> i64 {
         .unwrap()
 }
 
-fn assert_ledger_has_no_mission(db: &Path) {
-    assert!(db.is_file(), "{db:?} should exist after the host opens");
-    for sql in [
-        "SELECT COUNT(*) FROM missions",
-        "SELECT COUNT(*) FROM tasks",
-        "SELECT COUNT(*) FROM attempts",
-        "SELECT COUNT(*) FROM decisions",
-    ] {
-        assert_eq!(count_rows(db, sql), 0, "{sql}");
-    }
+fn owner_lock(db: &Path) -> std::path::PathBuf {
+    let mut name = db.as_os_str().to_os_string();
+    name.push(".owner.lock");
+    std::path::PathBuf::from(name)
+}
+
+fn host_generation(db: &Path) -> i64 {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT generation FROM host_owner WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 fn head(repo: &Path) -> String {
@@ -2741,10 +2746,68 @@ fn create_refuses_missing_empty_and_whitespace_acceptance_without_a_mission() {
                 .contains("acceptance criteria is required"),
             "{error}"
         );
-        assert_ledger_has_no_mission(&db);
+        assert!(!db.exists(), "{db:?} {error}");
+        assert!(!owner_lock(&db).exists(), "{error}");
     };
     refuse("empty.sqlite", "");
     refuse("whitespace.sqlite", " \t\n ");
+}
+
+#[test]
+fn refused_create_on_an_existing_ledger_leaves_generation_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap();
+    let repo_arg = repo.to_str().unwrap();
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db_arg,
+        "--repo",
+        repo_arg,
+        "--issue",
+        "201",
+        "--objective",
+        "keep acceptance required",
+        "--acceptance",
+        "a real acceptance string",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(created["mission"]["runtimeAdapter"], "fake");
+    let missions = count_rows(&db, "SELECT COUNT(*) FROM missions");
+    let generation = host_generation(&db);
+    assert_eq!(missions, 1);
+    for acceptance in ["", " \t\n "] {
+        let (code, stdout, error) = run(&[
+            "mission",
+            "create",
+            "--db",
+            db_arg,
+            "--repo",
+            repo_arg,
+            "--issue",
+            "201",
+            "--objective",
+            "keep acceptance required",
+            "--acceptance",
+            acceptance,
+        ]);
+        assert_eq!(code, 2, "{stdout} {error}");
+        assert!(stdout.is_null(), "{stdout}");
+        assert_eq!(error["error"]["category"], "guard_failed");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("acceptance criteria is required"),
+            "{error}"
+        );
+        assert_eq!(count_rows(&db, "SELECT COUNT(*) FROM missions"), missions);
+        assert_eq!(host_generation(&db), generation);
+    }
 }
 
 #[test]
@@ -2863,4 +2926,86 @@ fn successor_omitting_acceptance_copies_the_source() {
     let payload: Value = serde_json::from_str(&rationale).unwrap();
     assert_eq!(payload["overridden"], serde_json::json!([]));
     assert_eq!(count_rows(&db, "SELECT COUNT(*) FROM missions"), 2);
+}
+
+#[test]
+fn refused_successor_acceptance_leaves_generation_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap();
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "201",
+        "--objective",
+        "source objective",
+        "--acceptance",
+        "source acceptance copied forward",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let (code, cancelled, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--kind",
+        "cancel",
+        "--expected-revision",
+        "1",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let revision = cancelled["mission"]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let (code, confirmed, error) = run(&[
+        "mission",
+        "command",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--kind",
+        "confirm_cancelled",
+        "--expected-revision",
+        &revision,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(confirmed["mission"]["phase"], "cancelled");
+    let missions = count_rows(&db, "SELECT COUNT(*) FROM missions");
+    let generation = host_generation(&db);
+    assert_eq!(missions, 1);
+
+    let refuse = |extra: &[&str]| {
+        let mut args = vec!["mission", "successor", "--db", db_arg, "--mission", mission];
+        args.extend_from_slice(extra);
+        let (code, stdout, error) = run(&args);
+        assert_eq!(code, 2, "{stdout} {error}");
+        assert!(stdout.is_null(), "{stdout}");
+        assert_eq!(error["error"]["category"], "guard_failed");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("acceptance criteria is required"),
+            "{error}"
+        );
+        assert_eq!(count_rows(&db, "SELECT COUNT(*) FROM missions"), missions);
+        assert_eq!(host_generation(&db), generation);
+    };
+    refuse(&["--acceptance", ""]);
+    let empty = tmp.path().join("empty-acceptance.txt");
+    std::fs::write(&empty, "").unwrap();
+    let file_arg = format!("@{}", empty.display());
+    refuse(&["--acceptance", &file_arg]);
 }
