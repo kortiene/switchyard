@@ -48,6 +48,9 @@ fn run(args: &[&str]) -> (i32, Value, Value) {
             "ANTHROPIC_API_KEY",
             "SENTINEL_ANTHROPIC_KEY_SHOULD_NOT_PERSIST",
         )
+        // The endpoint is the flag alone. A leftover environment value must
+        // not change the composed fixture's `network: denied` record.
+        .env_remove("SWITCHYARD_MODEL_ENDPOINT")
         .output()
         .unwrap();
     let stdout = serde_json::from_slice::<Value>(&output.stdout).unwrap_or(Value::Null);
@@ -204,6 +207,8 @@ fn cli_confined_pi_runs_composed_s3_acceptance_scenario() {
     assert_eq!(config["adapter"], "pi-confined-v1");
     assert_eq!(config["credentials"], "none");
     assert_eq!(config["fixture"], "s3-acceptance");
+    // No `--model-endpoint` flag. `run` also clears `SWITCHYARD_MODEL_ENDPOINT`
+    // so this denial does not depend on the process environment.
     assert_eq!(config["network"], "denied");
     assert!(
         !config
@@ -222,10 +227,8 @@ fn cli_confined_pi_runs_composed_s3_acceptance_scenario() {
     assert!(message.contains("--runtime confined-pi"), "{error}");
 }
 
-/// The endpoint parses before the `SWITCHYARD_*` path prerequisites, so these
-/// tests stay deterministic without the confined runtime installed: an
-/// invalid value fails closed with its own guard, and a valid
-/// credential-free loopback URL flows past the endpoint check.
+/// The endpoint is parsed before the `SWITCHYARD_*` path prerequisites, so
+/// these tests stay deterministic without the confined runtime installed.
 fn run_without_prerequisites(repo: &Path, db: &Path, endpoint: &str) -> std::process::Output {
     Command::new(bin())
         .args([
@@ -233,6 +236,8 @@ fn run_without_prerequisites(repo: &Path, db: &Path, endpoint: &str) -> std::pro
             "create",
             "--runtime",
             "confined-pi",
+            "--model-endpoint",
+            endpoint,
             "--db",
             db.to_str().unwrap(),
             "--repo",
@@ -244,7 +249,7 @@ fn run_without_prerequisites(repo: &Path, db: &Path, endpoint: &str) -> std::pro
             "--acceptance",
             "one write",
         ])
-        .env("SWITCHYARD_MODEL_ENDPOINT", endpoint)
+        .env_remove("SWITCHYARD_MODEL_ENDPOINT")
         .env_remove("SWITCHYARD_PI_RUNTIME")
         .env_remove("SWITCHYARD_BWRAP")
         .env_remove("SWITCHYARD_CGROUP_ROOT")
@@ -256,42 +261,163 @@ fn run_without_prerequisites(repo: &Path, db: &Path, endpoint: &str) -> std::pro
         .unwrap()
 }
 
+fn guard_message(output: &std::process::Output) -> String {
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["ok"], false);
+    assert_eq!(stderr["error"]["category"], "guard_failed");
+    stderr["error"]["message"].as_str().unwrap().to_string()
+}
+
 #[test]
-fn model_endpoint_env_fails_closed_on_invalid_value() {
+fn model_endpoint_flag_fails_closed_on_https_loopback() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     let db = tmp.path().join("mission.sqlite");
     init_repo(&repo);
-    let output = run_without_prerequisites(&repo, &db, "https://api.x.ai/v1");
-    assert_eq!(output.status.code(), Some(2), "{output:?}");
-    assert!(output.stdout.is_empty(), "{output:?}");
-    let stderr: Value = serde_json::from_slice(&output.stderr).unwrap();
-    let message = stderr["error"]["message"].as_str().unwrap();
-    assert_eq!(stderr["ok"], false);
-    assert_eq!(stderr["error"]["category"], "guard_failed");
-    assert!(message.contains("SWITCHYARD_MODEL_ENDPOINT"), "{message}");
+    let output = run_without_prerequisites(&repo, &db, "https://127.0.0.1/v1");
+    let message = guard_message(&output);
+    assert_eq!(message.matches("guard failed").count(), 1, "{message}");
     assert!(message.contains("TLS client"), "{message}");
+    assert!(!message.contains("https://127.0.0.1"), "{message}");
+    assert!(!message.contains("SWITCHYARD_MODEL_ENDPOINT"), "{message}");
     assert!(!db.exists());
     assert!(!tmp.path().join("mission.sqlite.pi-bridge").exists());
 }
 
 #[test]
-fn model_endpoint_env_parses_credential_free_loopback_url() {
+fn model_endpoint_loopback_literals_pass_parse_before_path_prerequisites() {
+    let literals = [
+        "http://127.0.0.1:8000/v1",
+        "http://127.0.0.1/v1",
+        "http://[::1]:8000/v1",
+        "http://[::1]/v1",
+        "http://127.42.1.2:9/v1",
+    ];
+    for endpoint in literals {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let db = tmp.path().join("mission.sqlite");
+        init_repo(&repo);
+        let output = run_without_prerequisites(&repo, &db, endpoint);
+        let message = guard_message(&output);
+        assert!(
+            message.contains("SWITCHYARD_PI_RUNTIME"),
+            "{endpoint}: {message}"
+        );
+        assert!(
+            !message.contains("loopback IP literal"),
+            "{endpoint}: {message}"
+        );
+        assert!(!message.contains("TLS client"), "{endpoint}: {message}");
+        assert!(!message.contains("SWITCHYARD_MODEL_ENDPOINT"), "{message}");
+        assert!(!db.exists(), "{endpoint}");
+        assert!(!tmp.path().join("mission.sqlite.pi-bridge").exists());
+    }
+}
+
+/// Create stores the pin. A later `cancel` reopens the host, so a different
+/// flag fails in that open and the original flag is admitted. Both need the
+/// confined-execution prerequisites, same as the composed scenario above,
+/// and run in the `execution-confinement` job. `cancel --persist-only` still
+/// opens the host; it does not dispatch the faux bridge.
+#[test]
+fn model_endpoint_reopen_refuses_a_different_value_and_accepts_the_original() {
+    for key in [
+        "SWITCHYARD_PI_RUNTIME",
+        "SWITCHYARD_BWRAP",
+        "SWITCHYARD_CGROUP_ROOT",
+        "SWITCHYARD_PI_NODE",
+        "SWITCHYARD_BRIDGE_LAUNCHER",
+        "SWITCHYARD_BRIDGE_POLICY",
+        "SWITCHYARD_EXECUTION_HELPER",
+    ] {
+        require_env(key);
+    }
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     let db = tmp.path().join("mission.sqlite");
     init_repo(&repo);
-    // A valid S3-B6 endpoint passes its own check; the run still fails
-    // closed on the missing prerequisites, never on the endpoint itself.
-    let output = run_without_prerequisites(&repo, &db, "http://127.0.0.1:8000/v1");
-    assert_eq!(output.status.code(), Some(2), "{output:?}");
-    assert!(output.stdout.is_empty(), "{output:?}");
-    let stderr: Value = serde_json::from_slice(&output.stderr).unwrap();
-    let message = stderr["error"]["message"].as_str().unwrap();
-    assert_eq!(stderr["ok"], false);
-    assert_eq!(stderr["error"]["category"], "guard_failed");
-    assert!(message.contains("SWITCHYARD_PI_RUNTIME"), "{message}");
-    assert!(!message.contains("SWITCHYARD_MODEL_ENDPOINT"), "{message}");
-    assert!(!db.exists());
-    assert!(!tmp.path().join("mission.sqlite.pi-bridge").exists());
+    let db_arg = db.to_str().unwrap();
+    let endpoint = "http://127.0.0.1:8000/v1";
+    let other = "http://127.0.0.2:8000/v1";
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--runtime",
+        "confined-pi",
+        "--model-endpoint",
+        endpoint,
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "97",
+        "--objective",
+        "pin the model endpoint for the mission lifetime",
+        "--acceptance",
+        "reopen with the same literal",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let revision = created["mission"]["revision"].as_u64().unwrap().to_string();
+    let config: String = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT runtime_config_json FROM attempts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let config: Value = serde_json::from_str(&config).unwrap();
+    assert_eq!(config["network"]["mode"], "model-endpoint");
+    assert_eq!(config["network"]["url"], endpoint);
+    assert_eq!(config["network"]["pinned"], "127.0.0.1:8000");
+    assert!(config["network"]["url"].as_str().unwrap().contains("/v1"));
+
+    let (code, stdout, error) = run(&[
+        "mission",
+        "command",
+        "--runtime",
+        "confined-pi",
+        "--model-endpoint",
+        other,
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--kind",
+        "cancel",
+        "--expected-revision",
+        &revision,
+    ]);
+    assert_eq!(code, 2, "{stdout} {error}");
+    let message = error["error"]["message"].as_str().unwrap();
+    assert_eq!(error["error"]["category"], "guard_failed");
+    assert!(message.contains("network"), "{message}");
+    assert!(message.contains("no adapter replacement"), "{message}");
+    let (code, status, error) = run(&["mission", "status", "--db", db_arg, "--mission", mission]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(status["missions"][0]["phase"], "draft");
+
+    let (code, cancelled, error) = run(&[
+        "mission",
+        "command",
+        "--runtime",
+        "confined-pi",
+        "--model-endpoint",
+        endpoint,
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--kind",
+        "cancel",
+        "--expected-revision",
+        &revision,
+        "--persist-only",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(cancelled["ok"], true);
+    assert_eq!(cancelled["mission"]["phase"], "cancelling");
 }
