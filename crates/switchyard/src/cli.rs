@@ -138,6 +138,7 @@ pub(crate) enum MissionCommand {
         actor: String,
     },
     /// Create a draft mission and one attempt from a local Git repository.
+    /// `--acceptance` is required and must not be empty or whitespace-only.
     Create {
         #[arg(long)]
         db: PathBuf,
@@ -149,6 +150,8 @@ pub(crate) enum MissionCommand {
         issue_title: String,
         #[arg(long)]
         objective: String,
+        /// Required and must not be empty or whitespace-only. There is no
+        /// default. The value is frozen into the mission contract.
         #[arg(long)]
         acceptance: String,
         #[arg(long, default_value = "operator")]
@@ -258,10 +261,10 @@ pub(crate) enum MissionCommand {
         /// Replace the source objective.
         #[arg(long)]
         objective: Option<String>,
-        /// Replace acceptance criteria. Repeat the flag, or pass `@path` to
-        /// read one value from a file. A value that starts with `@` is read
-        /// as a file path. Empty values are refused. Values are joined with
-        /// newlines.
+        /// Replace acceptance criteria. Omitting this flag copies the source
+        /// mission's acceptance. Repeat the flag, or pass `@path` to read one
+        /// value from a file. A value that starts with `@` is read as a file
+        /// path. Empty values are refused. Values are joined with newlines.
         #[arg(long)]
         acceptance: Vec<String>,
         /// Replace the source repair limit.

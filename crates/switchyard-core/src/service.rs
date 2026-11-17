@@ -264,6 +264,7 @@ pub struct CreateMission {
     pub issue_number: u64,
     pub issue_title: String,
     pub objective: String,
+    /// Frozen acceptance criteria. Empty or whitespace-only text is refused.
     pub acceptance: String,
     pub actor: String,
     pub max_repairs: u32,
@@ -708,6 +709,9 @@ impl Host {
         request: CreateMission,
         verifier_json: Option<String>,
     ) -> Result<MissionSnapshot> {
+        // Defense in depth for callers outside the CLI. The CLI refuses the
+        // same empty or whitespace-only value before it opens the host.
+        require_override(&request.acceptance, "acceptance criteria")?;
         let verifier_json = match verifier_json {
             Some(raw) => Some(canonical_verifier(&raw)?),
             None => None,
@@ -3128,6 +3132,37 @@ fn rationale(body: &CommandBody) -> String {
         CommandBody::Continue { activity } => format!("continue {activity}"),
         CommandBody::DetectUncertainty { reason, .. } => reason.as_str().to_string(),
         other => other.kind().as_str().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod create_acceptance_tests {
+    use super::{CreateMission, Host};
+
+    #[test]
+    fn whitespace_only_acceptance_is_guard_failed_and_creates_no_mission() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut host = Host::open(&dir.path().join("mission.sqlite")).unwrap();
+        let error = host
+            .create_mission(CreateMission {
+                repo: dir.path().join("missing-repo"),
+                issue_number: 201,
+                issue_title: String::new(),
+                objective: "keep the contract".into(),
+                acceptance: " \t\n ".into(),
+                actor: "operator".into(),
+                max_repairs: 2,
+                max_plan_revisions: 3,
+            })
+            .unwrap_err();
+        assert_eq!(error.category(), "guard_failed");
+        assert!(
+            error
+                .to_string()
+                .contains("acceptance criteria is required"),
+            "{error}"
+        );
+        assert!(host.store.list_mission_ids().unwrap().is_empty());
     }
 }
 
