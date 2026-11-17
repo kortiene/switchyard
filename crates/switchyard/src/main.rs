@@ -490,6 +490,9 @@ fn suggest_confined_runtime(error: Error) -> Error {
 fn open_confined(db: &Path) -> switchyard_core::Result<Host> {
     use switchyard_core::{ConfinedPiConfig, LinuxExecutionConfig};
 
+    // Parsed before the path prerequisites so a malformed endpoint fails
+    // closed with its own guard instead of a half-configured launch.
+    let model_endpoint = env_model_endpoint()?;
     let pi_runtime = env_path("SWITCHYARD_PI_RUNTIME")?;
     let bubblewrap = env_path("SWITCHYARD_BWRAP")?;
     let cgroup_root = env_path("SWITCHYARD_CGROUP_ROOT")?;
@@ -498,7 +501,8 @@ fn open_confined(db: &Path) -> switchyard_core::Result<Host> {
     let policy = env_path("SWITCHYARD_BRIDGE_POLICY")?;
     let helper = env_path("SWITCHYARD_EXECUTION_HELPER")?;
     let root = bridge_root(db)?;
-    // The composed scenario's trusted fixture. No model endpoint, credential,
+    // The composed scenario's trusted fixture. Egress stays denied unless the
+    // operator sets one credential-free HTTP model endpoint; no credential
     // or TLS route is configured on this path.
     Host::open_confined_pi(
         db,
@@ -510,7 +514,7 @@ fn open_confined(db: &Path) -> switchyard_core::Result<Host> {
             bubblewrap: bubblewrap.clone(),
             launcher,
             policy,
-            model_endpoint: None,
+            model_endpoint,
         },
         LinuxExecutionConfig {
             cgroup_root,
@@ -554,6 +558,32 @@ fn env_path(key: &str) -> switchyard_core::Result<PathBuf> {
         )));
     }
     Ok(path)
+}
+
+/// Operator-selected model endpoint. The value comes only from the host
+/// environment; repository files, `case.json`, and protocol frames cannot
+/// set it. Unset keeps default-deny egress. A set value must satisfy the
+/// S3-B6 endpoint policy, which pins it before launch.
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
+fn env_model_endpoint() -> switchyard_core::Result<Option<switchyard_core::ModelEndpoint>> {
+    let value = match std::env::var("SWITCHYARD_MODEL_ENDPOINT") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(_) => {
+            return Err(Error::guard(
+                "confined Pi runtime requires SWITCHYARD_MODEL_ENDPOINT to be valid Unicode; refusing to fall back to denied egress",
+            ));
+        }
+    };
+    switchyard_core::ModelEndpoint::parse(&value).map(Some).map_err(|error| {
+        Error::guard(format!(
+            "confined Pi runtime requires SWITCHYARD_MODEL_ENDPOINT to be one credential-free HTTP model endpoint ({error}); refusing to fall back to denied egress"
+        ))
+    })
 }
 
 #[cfg(all(

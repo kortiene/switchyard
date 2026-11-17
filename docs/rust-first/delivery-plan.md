@@ -268,6 +268,17 @@ acceptance remained; the bounded decision is recorded above.
 [#151's retention follow-up](s3-bridge-cgroup-retention.md) handles recorded
 obsolete cgroup leaves.
 
+### Operator model-endpoint wiring (CLI env)
+
+The [endpoint wiring](s3-model-endpoint-wiring.md) adds one optional
+operator environment variable, `SWITCHYARD_MODEL_ENDPOINT`, for the existing
+S3-B6 policy: unset keeps default-deny egress, and a set value must be one
+credential-free HTTP model URL parsed and pinned before launch, failing
+closed on its own guard. It records the keyless loopback rehearsal route
+(zero spend, not live acceptance) and the Linux x86_64 bridge-policy
+requirement. No TLS client, provider credential, or default change: #166
+and #167 stay open.
+
 ### Confined operator-stop admission (tests only)
 
 [s3-pi-stop-admission.md](s3-pi-stop-admission.md) adds `pi_host_dispatch`

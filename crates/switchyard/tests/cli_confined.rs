@@ -221,3 +221,77 @@ fn cli_confined_pi_runs_composed_s3_acceptance_scenario() {
     assert!(message.contains("no adapter replacement"), "{error}");
     assert!(message.contains("--runtime confined-pi"), "{error}");
 }
+
+/// The endpoint parses before the `SWITCHYARD_*` path prerequisites, so these
+/// tests stay deterministic without the confined runtime installed: an
+/// invalid value fails closed with its own guard, and a valid
+/// credential-free loopback URL flows past the endpoint check.
+fn run_without_prerequisites(repo: &Path, db: &Path, endpoint: &str) -> std::process::Output {
+    Command::new(bin())
+        .args([
+            "mission",
+            "create",
+            "--runtime",
+            "confined-pi",
+            "--db",
+            db.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--issue",
+            "97",
+            "--objective",
+            "model endpoint guard",
+            "--acceptance",
+            "one write",
+        ])
+        .env("SWITCHYARD_MODEL_ENDPOINT", endpoint)
+        .env_remove("SWITCHYARD_PI_RUNTIME")
+        .env_remove("SWITCHYARD_BWRAP")
+        .env_remove("SWITCHYARD_CGROUP_ROOT")
+        .env_remove("SWITCHYARD_PI_NODE")
+        .env_remove("SWITCHYARD_BRIDGE_LAUNCHER")
+        .env_remove("SWITCHYARD_BRIDGE_POLICY")
+        .env_remove("SWITCHYARD_EXECUTION_HELPER")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn model_endpoint_env_fails_closed_on_invalid_value() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    let output = run_without_prerequisites(&repo, &db, "https://api.x.ai/v1");
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr: Value = serde_json::from_slice(&output.stderr).unwrap();
+    let message = stderr["error"]["message"].as_str().unwrap();
+    assert_eq!(stderr["ok"], false);
+    assert_eq!(stderr["error"]["category"], "guard_failed");
+    assert!(message.contains("SWITCHYARD_MODEL_ENDPOINT"), "{message}");
+    assert!(message.contains("TLS client"), "{message}");
+    assert!(!db.exists());
+    assert!(!tmp.path().join("mission.sqlite.pi-bridge").exists());
+}
+
+#[test]
+fn model_endpoint_env_parses_credential_free_loopback_url() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    init_repo(&repo);
+    // A valid S3-B6 endpoint passes its own check; the run still fails
+    // closed on the missing prerequisites, never on the endpoint itself.
+    let output = run_without_prerequisites(&repo, &db, "http://127.0.0.1:8000/v1");
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr: Value = serde_json::from_slice(&output.stderr).unwrap();
+    let message = stderr["error"]["message"].as_str().unwrap();
+    assert_eq!(stderr["ok"], false);
+    assert_eq!(stderr["error"]["category"], "guard_failed");
+    assert!(message.contains("SWITCHYARD_PI_RUNTIME"), "{message}");
+    assert!(!message.contains("SWITCHYARD_MODEL_ENDPOINT"), "{message}");
+    assert!(!db.exists());
+    assert!(!tmp.path().join("mission.sqlite.pi-bridge").exists());
+}
