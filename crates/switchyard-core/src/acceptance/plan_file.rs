@@ -226,6 +226,10 @@ fn each_plan_file_refusal_leaves_state_unchanged() {
     let mut mode = fs::metadata(&unreadable).unwrap().permissions();
     mode.set_mode(0o000);
     fs::set_permissions(&unreadable, mode).unwrap();
+    // Root can read a mode-000 file. Skipping that case keeps the later
+    // refusals on an unchanged planning mission.
+    let unreadable_is_refused =
+        crate::regular_file::read_regular_nofollow(&unreadable, 64).is_err();
     fs::write(dir.join("empty.txt"), "").unwrap();
     fs::write(dir.join("blank.txt"), " \t\r\n").unwrap();
     fs::write(dir.join("newline.txt"), "\n").unwrap();
@@ -240,7 +244,6 @@ fn each_plan_file_refusal_leaves_state_unchanged() {
         (dir.join("missing.txt"), "fix the path and rerun"),
         (link, "fix the path and rerun"),
         (folder, "fix the path and rerun"),
-        (unreadable, "fix the path and rerun"),
         (dir.join("empty.txt"), "write the plan and rerun"),
         (dir.join("blank.txt"), "write the plan and rerun"),
         (dir.join("newline.txt"), "write the plan and rerun"),
@@ -262,6 +265,17 @@ fn each_plan_file_refusal_leaves_state_unchanged() {
         );
         assert_eq!(fingerprint(&host, &mission), before, "{path:?}");
         assert_ne!(fingerprint(&host, &mission).phase, Phase::NeedsAttention);
+    }
+    if unreadable_is_refused {
+        let error = host
+            .apply_plan_file(&mission, &unreadable, true)
+            .expect_err("mode 000");
+        assert_eq!(error.category(), "storage_failed", "{error}");
+        assert!(
+            error.to_string().contains("storage failed"),
+            "the storage cause is kept: {error}"
+        );
+        assert_eq!(fingerprint(&host, &mission), before);
     }
 }
 
@@ -308,6 +322,151 @@ fn plan_file_false_quiescent_and_wrong_phase_leave_state() {
     let error = host.apply_plan_file(&mission, &other, true).unwrap_err();
     assert_eq!(error.category(), "illegal_transition");
     assert_eq!(fingerprint(&host, &mission), admitted);
+}
+
+#[test]
+fn plan_file_drift_is_refused_before_quiescent_policy() {
+    let (world, mission) = planning();
+    let path = world._tmp.path().join("plan.txt");
+    fs::write(&path, "implement the ledger").unwrap();
+    let mut host = Host::open(&world.db).unwrap();
+    host.tamper_attempt_base_sha(&mission, "deadbeef").unwrap();
+    let before_revision = host.snapshot(&mission).unwrap().revision;
+    // quiescent false would be a policy refusal if it ran first. Drift is earlier.
+    let error = host.apply_plan_file(&mission, &path, false).unwrap_err();
+    assert_eq!(error.category(), "frozen_input_drift", "{error}");
+    let attention = host.snapshot(&mission).unwrap();
+    assert_eq!(attention.phase, Phase::NeedsAttention);
+    assert_eq!(
+        attention.attention_reason.as_deref(),
+        Some("frozen_input_drift")
+    );
+    assert!(attention.plan_body.is_none());
+    assert!(attention.plan_digest.is_none());
+    assert!(attention.revision > before_revision);
+    assert!(
+        attention
+            .commands
+            .iter()
+            .all(|command| command.kind != "plan_completed")
+    );
+}
+
+#[test]
+fn plan_file_then_approve_plan_binds_the_host_digest() {
+    let (world, mission) = planning();
+    let text = "implement the ledger\n";
+    let path = world._tmp.path().join("plan.txt");
+    fs::write(&path, text).unwrap();
+    let mut host = Host::open(&world.db).unwrap();
+    host.apply_plan_file(&mission, &path, true).unwrap();
+    let stored = host.snapshot(&mission).unwrap();
+    let digest = stored.plan_digest.clone().unwrap();
+    assert_eq!(stored.plan_body.as_deref(), Some(text));
+    assert_eq!(stored.phase, Phase::AwaitingPlanApproval);
+    let wrong = admit_result(
+        &mut host,
+        &mission,
+        CommandBody::ApprovePlan {
+            plan_digest: "sha256:not-the-host-digest".into(),
+        },
+    );
+    assert_eq!(wrong.unwrap_err().category(), "stale_plan_digest");
+    let still = host.snapshot(&mission).unwrap();
+    assert_eq!(still.phase, Phase::AwaitingPlanApproval);
+    assert_eq!(still.plan_digest.as_deref(), Some(digest.as_str()));
+    assert_eq!(still.revision, stored.revision);
+    admit(
+        &mut host,
+        &mission,
+        CommandBody::ApprovePlan {
+            plan_digest: digest.clone(),
+        },
+    );
+    let implementing = host.snapshot(&mission).unwrap();
+    assert_eq!(implementing.phase, Phase::Implementing);
+    assert_eq!(implementing.plan_digest.as_deref(), Some(digest.as_str()));
+    assert_eq!(implementing.plan_body.as_deref(), Some(text));
+}
+
+fn admit_result(host: &mut Host, mission: &str, body: CommandBody) -> crate::Result<()> {
+    let snap = host.snapshot(mission).unwrap();
+    host.admit(crate::AdmitRequest {
+        command_id: None,
+        mission_id: mission.to_string(),
+        attempt_id: None,
+        expected_revision: snap.revision,
+        actor: "operator".into(),
+        origin: crate::CommandOrigin::Operator,
+        body,
+    })
+    .map(|_| ())
+}
+
+#[test]
+#[cfg(feature = "pi-contract")]
+fn plan_file_refused_off_fake() {
+    // The default build's only runtime is Fake, so this refusal runs only with pi-contract.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "--initial-branch=main"]);
+    git(&["config", "user.email", "switchyard@example.com"]);
+    git(&["config", "user.name", "Switchyard"]);
+    git(&["commit", "--allow-empty", "-m", "init"]);
+    let db = tmp.path().join("mission.sqlite");
+    let node = Path::new("/bin/true");
+    let node = if node.exists() {
+        node
+    } else {
+        Path::new("/usr/bin/true")
+    };
+    let mut host = Host::open_pi_probe(&db, node).unwrap();
+    let created = host
+        .create_mission(crate::CreateMission {
+            repo,
+            issue_number: 197,
+            issue_title: "plan".into(),
+            objective: "off fake".into(),
+            acceptance: "fake only".into(),
+            actor: "operator".into(),
+            max_repairs: 1,
+            max_plan_revisions: 1,
+        })
+        .unwrap();
+    let before = host.snapshot(&created.mission_id).unwrap();
+    // A missing file would be a path refusal if the read ran first.
+    let missing = tmp.path().join("missing-plan.txt");
+    let error = host
+        .apply_plan_file(&created.mission_id, &missing, true)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("fake observations cannot certify Pi mission facts"),
+        "{error}"
+    );
+    assert_eq!(error.category(), "guard_failed");
+    let after = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(after.phase, before.phase);
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.plan_body, before.plan_body);
+    assert_eq!(after.plan_digest, before.plan_digest);
+    assert_eq!(after.commands.len(), before.commands.len());
+    assert!(!missing.exists());
 }
 
 #[derive(PartialEq, Debug)]

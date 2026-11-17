@@ -1674,17 +1674,23 @@ impl Host {
 
     /// Admit `plan_completed` from a regular file on the fake runtime.
     ///
-    /// The file is refused before admission, so a bad file does not enter
-    /// `needs_attention`. Admitted bytes are verbatim. The observation still
-    /// uses origin `runtime_observation`. The actor is `operator-plan-file`,
-    /// which is not part of the payload, so `planDigest` and the payload hash
-    /// match [`Self::apply_notification`] for the same text.
+    /// The fake-runtime guard runs before the file is opened. A bad file is
+    /// then refused before admission, so it does not enter `needs_attention`.
+    /// Admitted bytes are verbatim. The observation still uses origin
+    /// `runtime_observation`. The actor is `operator-plan-file`, which is not
+    /// part of the payload, so `planDigest` and the payload hash match
+    /// [`Self::apply_notification`] for the same text.
     pub fn apply_plan_file(
         &mut self,
         mission_id: &str,
         path: &Path,
         quiescent: bool,
     ) -> Result<NotifyOutcome> {
+        if self.runtime.fake_mut().is_none() {
+            return Err(Error::guard(
+                "fake observations cannot certify Pi mission facts",
+            ));
+        }
         let plan = read_plan_file(path)?;
         self.apply_notification_with(
             mission_id,
@@ -1693,14 +1699,14 @@ impl Host {
         )
     }
 
-    /// Same admission path as [`Self::apply_notification`]. `actor` is stored
-    /// on the `plan_completed` row only; other observations keep
+    /// Same admission path as [`Self::apply_notification`]. `plan_actor` is
+    /// stored on the `plan_completed` row only; other observations keep
     /// `runtime-observation`.
     fn apply_notification_with(
         &mut self,
         mission_id: &str,
         notification: RuntimeNotification,
-        actor: &str,
+        plan_actor: &str,
     ) -> Result<NotifyOutcome> {
         if self.runtime.fake_mut().is_none() {
             return Err(Error::guard(
@@ -1719,7 +1725,7 @@ impl Host {
                 self.admit_observation(
                     &mission,
                     CommandBody::PlanCompleted { plan, quiescent },
-                    actor,
+                    plan_actor,
                 )
                 .map(NotifyOutcome::Transition)
             }
@@ -2689,8 +2695,8 @@ impl Host {
 /// the limit, so a truncated buffer is not a character-encoding result.
 fn read_plan_file(path: &Path) -> Result<String> {
     let limit = crate::linux_execution::MAX_FILE_BYTES.saturating_add(1);
-    let bytes = crate::regular_file::read_regular_nofollow(path, limit).map_err(|_| {
-        Error::guard(
+    let bytes = crate::regular_file::read_regular_nofollow(path, limit).map_err(|error| {
+        error.with_context(
             "plan file is missing, unreadable, or not a regular file; fix the path and rerun",
         )
     })?;
