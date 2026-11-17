@@ -2661,7 +2661,7 @@ fn export_out_prints_a_receipt_and_stdout_without_out_is_the_document() {
     assert_eq!(filed, document);
 }
 
-const EARLIER_OWNER_HINT: &str = "Workspace was verified by an earlier owner generation; it is reconciled automatically on the next dispatch.";
+const EARLIER_OWNER_HINT: &str = "Workspace was verified by an earlier owner generation; it is reconciled automatically by the next `mission command`, or by `mission verify` while verifying.";
 
 struct OwnerBump {
     _tmp: tempfile::TempDir,
@@ -2880,7 +2880,7 @@ fn status_leaves_owner_generations_unchanged() {
     assert_eq!(generations(&first), (before.0 as u64, before.1 as u64));
 }
 
-/// #200 decisions 5 and 6: dispatch reconciles a ready owner bump to N/N.
+/// Hint clause: `mission command` (not `--persist-only`) reconciles to N/N.
 #[test]
 fn dispatch_reconciles_a_ready_owner_bump_to_matching_generations() {
     let bump = plan_completed_owner_bump();
@@ -2972,7 +2972,7 @@ fn verify_does_not_reconcile_a_ready_owner_bump_before_verifying() {
     assert_earlier_owner_hint(&after);
 }
 
-/// #200 decision 6: verify reconciles once the phase is already verifying.
+/// Hint clause: `mission verify` reconciles while the phase is verifying.
 #[test]
 fn verify_reconciles_a_ready_owner_bump_while_verifying() {
     let bump = plan_completed_owner_bump();
@@ -2993,4 +2993,32 @@ fn verify_reconciles_a_ready_owner_bump_while_verifying() {
     let after = mission_status(&bump.db, &bump.mission_id);
     assert_reconciled(&after);
     assert_eq!(after["phase"], "verifying");
+}
+
+/// A terminal mission keeps the plain read-only status text. The reconcile
+/// hint would name commands that cannot run.
+#[test]
+fn status_omits_the_reconcile_hint_on_a_terminal_mission() {
+    let bump = plan_completed_owner_bump();
+    let before = mission_status(&bump.db, &bump.mission_id);
+    assert_earlier_owner_hint(&before);
+    let changed = rusqlite::Connection::open(&bump.db)
+        .unwrap()
+        .execute(
+            "UPDATE missions SET phase = 'cancelled' WHERE id = ?1",
+            [&bump.mission_id],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    let after = mission_status(&bump.db, &bump.mission_id);
+    assert_eq!(after["phase"], "cancelled");
+    assert_eq!(after["workspace"]["state"], "ready");
+    assert_eq!(generations(&after), generations(&before));
+    let (verified, recorded) = generations(&after);
+    assert!(verified < recorded, "{after}");
+    let steps = after["nextSteps"].to_string();
+    assert!(steps.contains("Status is read-only"), "{steps}");
+    assert!(!steps.contains(EARLIER_OWNER_HINT), "{steps}");
+    assert!(!steps.contains("earlier owner generation"), "{steps}");
+    assert!(!steps.contains("Explicit recovery is required"), "{steps}");
 }

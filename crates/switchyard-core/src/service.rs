@@ -480,9 +480,11 @@ impl MissionSnapshot {
                 .verified_generation
                 .is_some_and(|verified| verified < self.recorded_owner_generation)
             {
-                // Ready, and the only mismatch is a later owner generation.
-                // Dispatch reconciles that bump. Status does not.
-                steps.push("Workspace was verified by an earlier owner generation; it is reconciled automatically on the next dispatch.".into());
+                // One sentence. A terminal mission cannot run either command,
+                // so the promise stays off and status keeps its plain text.
+                if !self.phase.is_terminal() {
+                    steps.push("Workspace was verified by an earlier owner generation; it is reconciled automatically by the next `mission command`, or by `mission verify` while verifying.".into());
+                }
             } else if workspace.verified_generation != Some(self.recorded_owner_generation) {
                 steps.push("Workspace is not verified for the current owner. Explicit recovery is required before work dispatch.".into());
             }

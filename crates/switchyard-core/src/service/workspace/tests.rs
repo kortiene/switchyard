@@ -1267,8 +1267,9 @@ fn ready_earlier_owner_uses_the_dispatch_hint_and_other_mismatches_do_not() {
         bumped.contains("verified by an earlier owner generation"),
         "{bumped}"
     );
+    assert!(bumped.contains("next `mission command`"), "{bumped}");
     assert!(
-        bumped.contains("reconciled automatically on the next dispatch"),
+        bumped.contains("`mission verify` while verifying"),
         "{bumped}"
     );
     assert!(
@@ -1331,6 +1332,46 @@ fn ready_earlier_owner_uses_the_dispatch_hint_and_other_mismatches_do_not() {
         !uncertain.contains("Explicit recovery is required"),
         "{uncertain}"
     );
+}
+
+/// A terminal mission cannot run `mission command` or `mission verify`.
+/// The owner-bump hint stays off; status keeps its plain read-only text.
+#[test]
+fn terminal_owner_bump_keeps_plain_status_text() {
+    for phase in ["published", "rejected", "cancelled"] {
+        let w = world();
+        let mut h = Host::open(&w.db).unwrap();
+        let m = mission(&mut h, &w);
+        prepare(&mut h, &m, &w);
+        drop(h);
+        Connection::open(&w.db)
+            .unwrap()
+            .execute(
+                "UPDATE missions SET phase = ?1 WHERE id = ?2",
+                rusqlite::params![phase, m.mission_id.as_str()],
+            )
+            .unwrap();
+        let h = Host::open(&w.db).unwrap();
+        let snap = h.snapshot(&m.mission_id).unwrap().to_json();
+        assert_eq!(snap["phase"], phase);
+        assert_eq!(snap["workspace"]["state"], "ready");
+        assert!(
+            snap["workspace"]["verifiedGeneration"].as_u64().unwrap()
+                < snap["recordedOwnerGeneration"].as_u64().unwrap(),
+            "{phase} {snap}"
+        );
+        let steps = snap["nextSteps"].to_string();
+        assert!(steps.contains("Status is read-only"), "{phase} {steps}");
+        assert!(
+            !steps.contains("earlier owner generation"),
+            "{phase} {steps}"
+        );
+        assert!(
+            !steps.contains("Explicit recovery is required"),
+            "{phase} {steps}"
+        );
+        assert!(!steps.contains("mission command"), "{phase} {steps}");
+    }
 }
 
 mod stop_delivery;
