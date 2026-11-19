@@ -816,48 +816,60 @@ impl Host {
             }
             return Ok(0);
         }
-        self.confined_history(&mission)?;
+        // Ctrl-C abandoned the in-flight tool call. Another bridge request
+        // returns immediately while that flag is set, so it cannot deliver
+        // abort. `stop` terminates and runs `rekill_and_prove`.
+        // `confirm_cancelled` is still admitted only when that proof is
+        // `proven`.
+        let interrupted = crate::operator_stop_requested();
         let mut count = 0;
-        for command in stops {
-            let request = RuntimeRequest {
-                binding: binding.clone(),
-                request_id: command.request_id,
-                payload_hash: command.payload_hash,
-                method: "abort",
-            };
-            let payload =
-                serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
-            let receipt = match self.confined_receipt(&request, &payload)? {
-                Some(r) => r,
-                None => self.confined_send(&request, &payload)?,
-            };
-            self.store
-                .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
-            count += 1;
+        if !interrupted {
+            self.confined_history(&mission)?;
+            for command in &stops {
+                let request = RuntimeRequest {
+                    binding: binding.clone(),
+                    request_id: command.request_id.clone(),
+                    payload_hash: command.payload_hash.clone(),
+                    method: "abort",
+                };
+                let payload =
+                    serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+                let receipt = match self.confined_receipt(&request, &payload)? {
+                    Some(r) => r,
+                    None => self.confined_send(&request, &payload)?,
+                };
+                self.store
+                    .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
+                count += 1;
+            }
         }
         // An abort may follow work whose Pi acknowledgement was lost. Preserve
         // that original receipt before closing the transport; only absent work
         // may be superseded. Never resubmit it merely to discover its receipt.
-        for command in self.store.list_commands(mission_id)? {
-            if command.state != CommandState::Pending || !is_runtime_work(command.kind) {
-                continue;
-            }
-            let request = RuntimeRequest {
-                binding: binding.clone(),
-                request_id: command.request_id.clone(),
-                payload_hash: command.payload_hash.clone(),
-                method: RuntimeAdapter::runtime_method(command.kind),
-            };
-            let payload =
-                serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
-            if let Some(receipt) = self.confined_receipt(&request, &payload)? {
-                self.store
-                    .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
-            } else {
-                self.store.supersede_pending(
-                    &command.id,
-                    "admission closed before runtime accepted this command",
-                )?;
+        // The interrupted path has no abort receipt to preserve. Pending work
+        // is superseded after the fresh proof, with the stop acknowledgement.
+        if !interrupted {
+            for command in self.store.list_commands(mission_id)? {
+                if command.state != CommandState::Pending || !is_runtime_work(command.kind) {
+                    continue;
+                }
+                let request = RuntimeRequest {
+                    binding: binding.clone(),
+                    request_id: command.request_id.clone(),
+                    payload_hash: command.payload_hash.clone(),
+                    method: RuntimeAdapter::runtime_method(command.kind),
+                };
+                let payload =
+                    serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+                if let Some(receipt) = self.confined_receipt(&request, &payload)? {
+                    self.store
+                        .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
+                } else {
+                    self.store.supersede_pending(
+                        &command.id,
+                        "admission closed before runtime accepted this command",
+                    )?;
+                }
             }
         }
         // Fold bridge-alive time before `stop`. Proof stays `stop` then
@@ -893,6 +905,23 @@ impl Host {
         )?;
         self.reconcile_execution(mission_id)?;
         if proof["proven"] == true && !self.store.ops_blocked(mission_id)? {
+            if interrupted {
+                for command in &stops {
+                    self.store.acknowledge(
+                        &command.id,
+                        &host_settle_acknowledgement(&command.request_id),
+                    )?;
+                    count += 1;
+                }
+                for command in self.store.list_commands(mission_id)? {
+                    if command.state == CommandState::Pending && is_runtime_work(command.kind) {
+                        self.store.supersede_pending(
+                            &command.id,
+                            "admission closed before runtime accepted this command",
+                        )?;
+                    }
+                }
+            }
             let current = self.store.load_mission(mission_id)?;
             let body = match current.phase {
                 Phase::Pausing => Some(CommandBody::ConfirmStopped),
