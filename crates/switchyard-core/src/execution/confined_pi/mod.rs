@@ -198,6 +198,9 @@ impl ConfinedPiSession {
             "configuration":installed,"phase":"prepared","recovered":recovered,"requiresExisting":require_existing,
             "cgroup":{"path":leaf.path,"dev":leaf.dev,"ino":leaf.ino,"boot":leaf.boot_id}});
         if let Some(proxy) = &proxy {
+            // Host path of the model-proxy directory. `stop` drops the proxy
+            // and removes this directory. The field stays on the lifecycle
+            // record so a later reader can see which socket was closed.
             record["proxyDirectory"] = json!(proxy.directory().display().to_string());
         }
         control.write("current.json", &record)?;

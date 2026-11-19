@@ -382,47 +382,17 @@ impl Host {
         request: AdmitRequest,
     ) -> Result<AdmitResult> {
         let mission = self.store.load_mission(&request.mission_id)?;
-        let attempt_id = request
-            .attempt_id
-            .clone()
-            .unwrap_or_else(|| mission.attempt.id.clone());
-        if attempt_id != mission.attempt.id {
-            return Err(Error::BindingMismatch {
-                detail: "attempt does not match the mission's active attempt".into(),
-            });
-        }
-        if mission.phase.is_terminal() {
-            return Err(Error::TerminalImmutable {
-                phase: mission.phase.to_string(),
-            });
-        }
-        if request.expected_revision != mission.revision {
-            return Err(Error::StaleRevision {
-                expected: request.expected_revision,
-                actual: mission.revision,
-            });
-        }
+        // Same gates as [`Host::admit_checked`]. The operator body is still
+        // not admitted; only the host fact is, after the proof.
+        let _attempt = require_active_attempt(&mission, &request)?;
+        self.refuse_terminal_or_stale(&mission, request.expected_revision)?;
         if mission.phase != Phase::Implementing {
             return Err(Error::IllegalTransition {
                 from: mission.phase.to_string(),
                 command: "request_verification".into(),
             });
         }
-        if self.frozen_input_drifted(&mission)?
-            && !crate::freeze::drift_exit(mission.phase, CommandKind::RequestVerification)
-        {
-            return self.refuse_frozen_input_drift(&mission);
-        }
-        if self.plan_digest_mismatched(&mission)?
-            && !crate::freeze::drift_exit(mission.phase, CommandKind::RequestVerification)
-        {
-            if mission.phase != Phase::NeedsAttention && !mission.phase.is_terminal() {
-                self.record_plan_digest_mismatch(&mission)?;
-            }
-            return Err(Error::guard(
-                "stored plan digest does not match the plan body; the command was not applied",
-            ));
-        }
+        self.refuse_drift_or_plan_mismatch(&mission, CommandKind::RequestVerification)?;
         self.ensure_confined_session(&mission.id)?;
         let binding = self.binding(&mission);
         if self.confined_mut()?.is_released(&binding.session_id) {
@@ -462,6 +432,42 @@ impl Host {
         Ok(session.lifecycle()["termination"]["proven"] == true)
     }
 
+    /// Re-run the cgroup proof on a bridge settle already stopped, and store it.
+    /// The session goes back in the map before any error returns.
+    fn reprove_and_store(&mut self, binding: &RuntimeBinding) -> Result<Value> {
+        let session_id = binding.session_id.clone();
+        let mut session = self
+            .confined_mut()?
+            .sessions
+            .remove(&session_id)
+            .ok_or_else(|| Error::guard("confined session is unavailable"))?;
+        let proof = match session.reprove() {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                self.confined_mut()?.sessions.insert(session_id, session);
+                return Err(error);
+            }
+        };
+        let lifecycle = session.lifecycle();
+        let observation = match self.store.pi_host_view(&binding.attempt_id) {
+            Ok(view) => view
+                .map(|view| view["observation"].clone())
+                .unwrap_or(Value::Null),
+            Err(error) => {
+                self.confined_mut()?.sessions.insert(session_id, session);
+                return Err(error);
+            }
+        };
+        self.confined_mut()?.sessions.insert(session_id, session);
+        self.store.save_pi_host(
+            &binding.attempt_id,
+            binding.generation,
+            &lifecycle,
+            &observation,
+        )?;
+        Ok(proof)
+    }
+
     /// Abort, then `stop`. `stop` drops the model proxy after the bridge dies
     /// and runs `rekill_and_prove`. A retry calls `reprove` so an unproven
     /// leaf is proved again. This does not record `needs_attention`.
@@ -490,14 +496,24 @@ impl Host {
         }
         let proof = match session.stop() {
             Ok(evidence) => evidence,
-            Err(_) => session.reprove()?,
+            Err(stop_error) => match session.reprove() {
+                Ok(evidence) => evidence,
+                Err(reprove_error) => {
+                    self.confined_mut()?.sessions.insert(session_id, session);
+                    return Err(stop_error.with_context(reprove_error.to_string()));
+                }
+            },
         };
         let lifecycle = session.lifecycle();
-        let observation = self
-            .store
-            .pi_host_view(&binding.attempt_id)?
-            .map(|view| view["observation"].clone())
-            .unwrap_or(Value::Null);
+        let observation = match self.store.pi_host_view(&binding.attempt_id) {
+            Ok(view) => view
+                .map(|view| view["observation"].clone())
+                .unwrap_or(Value::Null),
+            Err(error) => {
+                self.confined_mut()?.sessions.insert(session_id, session);
+                return Err(error);
+            }
+        };
         self.confined_mut()?.sessions.insert(session_id, session);
         self.store.save_pi_host(
             &binding.attempt_id,
@@ -667,37 +683,32 @@ impl Host {
         self.stop_confined_linux_writers(mission_id)?;
         self.reconcile_execution(mission_id)?;
         let mut count = 0;
-        // A settle that already proved the bridge empty leaves the session
-        // stopped. Cancel still uses this path: kill writers, acknowledge the
-        // stop from that proof, then confirm. No second protocol call, no DNS,
-        // and no credential read.
+        // Settle already stopped this bridge. Prove the cgroup again before
+        // confirming. The acknowledgement is a host marker, not a runtime
+        // receipt: the runtime never received this abort. No DNS and no
+        // credential read. An unproven leaf leaves the stop pending so a
+        // retry runs `reprove` again.
         if self.bridge_termination_proven(&binding)? {
-            for command in &stops {
-                let request = RuntimeRequest {
-                    binding: binding.clone(),
-                    request_id: command.request_id.clone(),
-                    payload_hash: command.payload_hash.clone(),
-                    method: "abort",
-                };
-                let receipt = RuntimeReceipt {
-                    receipt_id: request.request_id.clone(),
-                    request_id: request.request_id.clone(),
-                    payload_hash: request.payload_hash.clone(),
-                };
-                self.store
-                    .acknowledge(&command.id, &receipt_json(&receipt, self.runtime.name()))?;
-                count += 1;
-            }
-            for command in self.store.list_commands(mission_id)? {
-                if command.state == CommandState::Pending && is_runtime_work(command.kind) {
-                    self.store.supersede_pending(
-                        &command.id,
-                        "admission closed before runtime accepted this command",
-                    )?;
-                }
-            }
+            let proof = self.reprove_and_store(&binding)?;
             self.reconcile_execution(mission_id)?;
-            if !self.store.ops_blocked(mission_id)? {
+            if proof.get("proven").and_then(Value::as_bool) == Some(true)
+                && !self.store.ops_blocked(mission_id)?
+            {
+                for command in &stops {
+                    self.store.acknowledge(
+                        &command.id,
+                        &host_settle_acknowledgement(&command.request_id),
+                    )?;
+                    count += 1;
+                }
+                for command in self.store.list_commands(mission_id)? {
+                    if command.state == CommandState::Pending && is_runtime_work(command.kind) {
+                        self.store.supersede_pending(
+                            &command.id,
+                            "admission closed before runtime accepted this command",
+                        )?;
+                    }
+                }
                 let current = self.store.load_mission(mission_id)?;
                 let body = match current.phase {
                     Phase::Pausing => Some(CommandBody::ConfirmStopped),
@@ -707,8 +718,8 @@ impl Host {
                 if let Some(body) = body {
                     self.admit_host_fact(&current, body)?;
                 }
+                self.release_finished_sessions()?;
             }
-            self.release_finished_sessions()?;
             return Ok(count);
         }
         self.confined_history(&mission)?;
@@ -828,6 +839,17 @@ impl Host {
         self.reconcile_execution(mission_id)?;
         Ok(vec![unchanged(&self.store.load_mission(mission_id)?)])
     }
+}
+
+/// Host record that a stop was proved here, not delivered to the runtime.
+/// This is not a `RuntimeReceipt` and must not use the runtime adapter name.
+fn host_settle_acknowledgement(request_id: &str) -> String {
+    json!({
+        "adapter": "host-settle-proof",
+        "delivered": false,
+        "requestId": request_id,
+    })
+    .to_string()
 }
 
 enum ConfinedEffectRoute {

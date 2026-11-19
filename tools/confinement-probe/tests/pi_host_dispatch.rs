@@ -468,13 +468,34 @@ fn live_writer_is_settle_not_proven_until_cancel_or_retry() {
         Phase::Implementing
     );
 
+    let observed_before = host.snapshot(&world.mission).unwrap().to_json()["piHost"]["observedAt"]
+        .as_i64()
+        .unwrap();
     admit(&mut host, &world.mission, CommandBody::Cancel);
     host.dispatch_stops(&world.mission).unwrap();
     let cancelled = host.snapshot(&world.mission).unwrap();
     assert_eq!(cancelled.phase, Phase::Cancelled);
-    assert_eq!(
-        cancelled.to_json()["piHost"]["lifecycle"]["termination"]["proven"],
-        true
+    let after = cancelled.to_json();
+    assert_eq!(after["piHost"]["lifecycle"]["termination"]["proven"], true);
+    assert!(
+        after["piHost"]["observedAt"].as_i64().unwrap() > observed_before,
+        "cancel must store a fresh termination proof"
+    );
+    let conn = rusqlite::Connection::open(world.db()).unwrap();
+    let receipt: String = conn
+        .query_row(
+            "SELECT runtime_receipt_json FROM commands WHERE mission_id=?1 AND kind='cancel'",
+            [&world.mission],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let marker: Value = serde_json::from_str(&receipt).unwrap();
+    assert_eq!(marker["adapter"], "host-settle-proof");
+    assert_eq!(marker["delivered"], false);
+    assert!(marker.get("receiptId").is_none(), "{marker}");
+    assert!(
+        !receipt.contains("pi-confined-v1") && !receipt.contains("receiptId"),
+        "{receipt}"
     );
 }
 

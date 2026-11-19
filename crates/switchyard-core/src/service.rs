@@ -834,6 +834,48 @@ impl Host {
         self.admit_attached(request, None)
     }
 
+    fn refuse_terminal_or_stale(
+        &self,
+        mission: &MissionRecord,
+        expected_revision: u64,
+    ) -> Result<()> {
+        if mission.phase.is_terminal() {
+            return Err(Error::TerminalImmutable {
+                phase: mission.phase.to_string(),
+            });
+        }
+        if expected_revision != mission.revision {
+            return Err(Error::StaleRevision {
+                expected: expected_revision,
+                actual: mission.revision,
+            });
+        }
+        Ok(())
+    }
+
+    /// Drift and a plan-digest mismatch share this refusal. The first drift or
+    /// mismatch still records `needs_attention`. Settle calls this before it
+    /// aborts the bridge, and [`Self::admit_checked`] calls it before apply.
+    fn refuse_drift_or_plan_mismatch(
+        &mut self,
+        mission: &MissionRecord,
+        kind: CommandKind,
+    ) -> Result<()> {
+        if self.frozen_input_drifted(mission)? && !crate::freeze::drift_exit(mission.phase, kind) {
+            return self.refuse_frozen_input_drift(mission);
+        }
+        if self.plan_digest_mismatched(mission)? && !crate::freeze::drift_exit(mission.phase, kind)
+        {
+            if mission.phase != Phase::NeedsAttention && !mission.phase.is_terminal() {
+                self.record_plan_digest_mismatch(mission)?;
+            }
+            return Err(Error::guard(
+                "stored plan digest does not match the plan body; the command was not applied",
+            ));
+        }
+        Ok(())
+    }
+
     /// Confined `request_verification`. Reads [`AuthorityProfile::host_proves_settle`]
     /// only; the caller already checked it. The operator body is not admitted.
     fn settle_under_proof(&mut self, request: AdmitRequest) -> Result<AdmitResult> {
@@ -873,15 +915,7 @@ impl Host {
         host_fact: bool,
     ) -> Result<AdmitResult> {
         let mission = self.store.load_mission(&request.mission_id)?;
-        let attempt_id = request
-            .attempt_id
-            .clone()
-            .unwrap_or_else(|| mission.attempt.id.clone());
-        if attempt_id != mission.attempt.id {
-            return Err(Error::BindingMismatch {
-                detail: "attempt does not match the mission's active attempt".into(),
-            });
-        }
+        let attempt_id = require_active_attempt(&mission, &request)?;
         let payload = request.body.payload(&mission.id, &attempt_id);
         let canonical = canonicalize(&payload)?;
         let hash = payload_hash(&payload)?;
@@ -947,17 +981,7 @@ impl Host {
                 idempotent: true,
             });
         }
-        if mission.phase.is_terminal() {
-            return Err(Error::TerminalImmutable {
-                phase: mission.phase.to_string(),
-            });
-        }
-        if request.expected_revision != mission.revision {
-            return Err(Error::StaleRevision {
-                expected: request.expected_revision,
-                actual: mission.revision,
-            });
-        }
+        self.refuse_terminal_or_stale(&mission, request.expected_revision)?;
         if matches!(request.body, CommandBody::ApprovePlan { .. })
             && mission.phase == Phase::AwaitingPlanApproval
             && mission.attempt.frozen_inputs_json.is_none()
@@ -982,21 +1006,7 @@ impl Host {
             self.store.insert_refused_command(&command, &receipt)?;
             return Err(Error::FrozenInputsMissing);
         }
-        if self.frozen_input_drifted(&mission)?
-            && !crate::freeze::drift_exit(mission.phase, request.body.kind())
-        {
-            return self.refuse_frozen_input_drift(&mission);
-        }
-        if self.plan_digest_mismatched(&mission)?
-            && !crate::freeze::drift_exit(mission.phase, request.body.kind())
-        {
-            if mission.phase != Phase::NeedsAttention && !mission.phase.is_terminal() {
-                self.record_plan_digest_mismatch(&mission)?;
-            }
-            return Err(Error::guard(
-                "stored plan digest does not match the plan body; the command was not applied",
-            ));
-        }
+        self.refuse_drift_or_plan_mismatch(&mission, request.body.kind())?;
         if is_runtime_observation(request.body.kind())
             && request.origin != CommandOrigin::RuntimeObservation
             && !(host_pass && request.origin == CommandOrigin::HostSupervisor)
@@ -3196,6 +3206,19 @@ fn restore_observation(
         Ok(()) => original,
         Err(requeue) => original.with_context(requeue.to_string()),
     }
+}
+
+fn require_active_attempt(mission: &MissionRecord, request: &AdmitRequest) -> Result<String> {
+    let attempt_id = request
+        .attempt_id
+        .clone()
+        .unwrap_or_else(|| mission.attempt.id.clone());
+    if attempt_id != mission.attempt.id {
+        return Err(Error::BindingMismatch {
+            detail: "attempt does not match the mission's active attempt".into(),
+        });
+    }
+    Ok(attempt_id)
 }
 
 fn rejection_json(category: &str, adapter: &str) -> String {
