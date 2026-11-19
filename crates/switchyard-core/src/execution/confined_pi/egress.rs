@@ -12,7 +12,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -27,6 +27,10 @@ pub(super) const SOCKET_NAME: &str = "endpoint.sock";
 pub(super) const EGRESS_ENV: &str = "SWITCHYARD_BRIDGE_EGRESS";
 pub(super) const EGRESS_VALUE: &str = "model-socket";
 const MAX_SPLICE: usize = 8;
+
+/// Connections this generation may splice until #218 passes the frozen
+/// remaining mission budget. The recorded scope stays `generation`.
+pub(super) const UNWIRED_CONNECTION_ALLOWANCE: u32 = 40;
 
 /// One operator-selected model URL and the only address the proxy may dial.
 ///
@@ -168,6 +172,50 @@ pub(super) struct ModelProxy {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     splices: Arc<SpliceSet>,
+    cap: Arc<GenerationCap>,
+}
+
+/// Per-generation connection allowance. A splice counts only after the
+/// pinned dial succeeds and the sockets are registered. Scope stays
+/// `generation` until #218 records a mission budget.
+struct GenerationCap {
+    allowance: u32,
+    accepted: AtomicU32,
+    refused: AtomicU32,
+    exhausted: AtomicBool,
+}
+
+impl GenerationCap {
+    fn new(allowance: u32) -> Self {
+        Self {
+            allowance,
+            accepted: AtomicU32::new(0),
+            refused: AtomicU32::new(0),
+            exhausted: AtomicBool::new(false),
+        }
+    }
+
+    fn has_room(&self) -> bool {
+        self.accepted.load(Ordering::Relaxed) < self.allowance
+    }
+
+    fn record_splice(&self) {
+        self.accepted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn refuse(&self) {
+        self.refused.fetch_add(1, Ordering::Relaxed);
+        self.exhausted.store(true, Ordering::Relaxed);
+    }
+
+    fn counts(&self) -> Value {
+        json!({
+            "allowance": self.allowance,
+            "accepted": self.accepted.load(Ordering::Relaxed),
+            "refused": self.refused.load(Ordering::Relaxed),
+            "scope": "generation",
+        })
+    }
 }
 
 /// In-flight splices only. A finished worker drops its sockets before it
@@ -180,7 +228,7 @@ struct SpliceSet {
 }
 
 impl ModelProxy {
-    pub(super) fn start(endpoint: &ModelEndpoint) -> Result<Self> {
+    pub(super) fn start(endpoint: &ModelEndpoint, allowance: u32) -> Result<Self> {
         let directory = create_proxy_dir()?;
         let socket_path = directory.join(SOCKET_NAME);
         // Linux `sun_path` is 108 bytes including the trailing NUL.
@@ -216,6 +264,8 @@ impl ModelProxy {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let inflight = Arc::new(AtomicUsize::new(0));
+        let cap = Arc::new(GenerationCap::new(allowance));
+        let cap_for_accept = Arc::clone(&cap);
         let splices = Arc::new(SpliceSet {
             next_id: AtomicU64::new(1),
             workers: Mutex::new(Vec::new()),
@@ -224,8 +274,16 @@ impl ModelProxy {
         let splices_for_accept = Arc::clone(&splices);
         let thread = match thread::Builder::new()
             .name("model-endpoint-proxy".into())
-            .spawn(move || accept_loop(listener, pinned, flag, inflight, splices_for_accept))
-        {
+            .spawn(move || {
+                accept_loop(
+                    listener,
+                    pinned,
+                    flag,
+                    inflight,
+                    splices_for_accept,
+                    cap_for_accept,
+                )
+            }) {
             Ok(thread) => thread,
             Err(error) => {
                 let _ = fs::remove_file(&socket_path);
@@ -238,11 +296,26 @@ impl ModelProxy {
             stop,
             thread: Some(thread),
             splices,
+            cap,
         })
     }
 
     pub(super) fn directory(&self) -> &Path {
         &self.directory
+    }
+
+    /// Generation totals for the session record. `reason` is present only
+    /// after a connection was refused at the allowance.
+    pub(super) fn counts(&self) -> Value {
+        let mut counts = self.cap.counts();
+        if self.exhausted() {
+            counts["reason"] = json!("runtime_budget_exhausted");
+        }
+        counts
+    }
+
+    pub(super) fn exhausted(&self) -> bool {
+        self.cap.exhausted.load(Ordering::Relaxed)
     }
 }
 
@@ -323,16 +396,27 @@ fn accept_loop(
     stop: Arc<AtomicBool>,
     inflight: Arc<AtomicUsize>,
     splices: Arc<SpliceSet>,
+    cap: Arc<GenerationCap>,
 ) {
     while !stop.load(Ordering::Relaxed) {
         reap_finished(&splices);
         match listener.accept() {
             Ok((client, _)) => {
+                // Count a connection only after its dial succeeds and the
+                // splice is registered. At `accepted == allowance`, close
+                // without dialing. A full in-flight table or a failed dial
+                // does not count and does not exhaust the allowance.
+                if !cap.has_room() {
+                    cap.refuse();
+                    continue;
+                }
                 if inflight.fetch_add(1, Ordering::Relaxed) >= MAX_SPLICE {
                     inflight.fetch_sub(1, Ordering::Relaxed);
                     continue;
                 }
-                if !start_splice(client, pinned, &inflight, &splices) {
+                if start_splice(client, pinned, &inflight, &splices) {
+                    cap.record_splice();
+                } else {
                     inflight.fetch_sub(1, Ordering::Relaxed);
                 }
             }
@@ -345,7 +429,9 @@ fn accept_loop(
     reap_finished(&splices);
 }
 
-const SPLICE_IO_TIMEOUT: Duration = Duration::from_secs(30);
+/// Idle bound on both sockets, read and write. Below the 20-minute bridge
+/// wall. [`Drop`] shuts the sockets down without waiting for it.
+const SPLICE_IO_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Connect on this thread, register both sockets, then spawn the copy. [`Drop`]
 /// shuts the registered sockets down and joins the copy, so a hung upstream
@@ -548,9 +634,10 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::os::unix::net::UnixStream;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, mpsc};
     use std::thread;
+    use std::time::Instant;
 
     use super::*;
 
@@ -698,7 +785,7 @@ mod tests {
         stub.set_nonblocking(true).unwrap();
         let endpoint =
             ModelEndpoint::parse(&format!("http://{}/", stub.local_addr().unwrap())).unwrap();
-        let proxy = ModelProxy::start(&endpoint).unwrap();
+        let proxy = ModelProxy::start(&endpoint, 16).unwrap();
         let splices = Arc::clone(&proxy.splices);
         let mut clients = Vec::new();
         let mut upstreams = Vec::new();
@@ -762,7 +849,7 @@ mod tests {
         decoy.set_nonblocking(true).unwrap();
         let port = stub.local_addr().unwrap().port();
         let endpoint = ModelEndpoint::parse(&format!("http://127.0.0.1:{port}/v1")).unwrap();
-        let proxy = ModelProxy::start(&endpoint).unwrap();
+        let proxy = ModelProxy::start(&endpoint, 2).unwrap();
         let socket_dir = proxy.directory().to_path_buf();
         assert!(super::proxy_dir_is_ours(&socket_dir));
         let args = mount_args(proxy.directory()).unwrap();
@@ -831,7 +918,7 @@ mod tests {
         let stub = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = stub.local_addr().unwrap().port();
         let endpoint = ModelEndpoint::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
-        let proxy = ModelProxy::start(&endpoint).unwrap();
+        let proxy = ModelProxy::start(&endpoint, 2).unwrap();
         let mut client = UnixStream::connect(proxy.directory().join(SOCKET_NAME)).unwrap();
         let (_stuck, _) = stub.accept().unwrap();
         client.write_all(b"still-open").unwrap();
@@ -850,7 +937,7 @@ mod tests {
         stub.set_nonblocking(true).unwrap();
         let port = stub.local_addr().unwrap().port();
         let endpoint = ModelEndpoint::parse(&format!("http://127.0.0.1:{port}/v1")).unwrap();
-        let proxy = ModelProxy::start(&endpoint).unwrap();
+        let proxy = ModelProxy::start(&endpoint, 128).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let server = thread::spawn(move || {
@@ -929,6 +1016,233 @@ mod tests {
         );
         stop.store(true, Ordering::Relaxed);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn confined_pi_splice_returns_the_whole_response_after_a_45s_stall() {
+        assert_eq!(SPLICE_IO_TIMEOUT, Duration::from_secs(300));
+        let stub = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = ModelEndpoint::parse(&format!(
+            "http://127.0.0.1:{}/v1",
+            stub.local_addr().unwrap().port()
+        ))
+        .unwrap();
+        let proxy = ModelProxy::start(&endpoint, 2).unwrap();
+        let body = b"whole-response-body";
+        let response = format!(
+            "HTTP/1.0 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+        let expected = response.as_bytes().to_vec();
+        let (done, result) = mpsc::channel();
+        thread::spawn(move || {
+            let (mut stream, _) = stub.accept().unwrap();
+            let request = read_headers(&mut stream);
+            if !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let _ = done.send(Err("request headers incomplete"));
+                return;
+            }
+            // Stay silent for 45s. A 30s request-direction timeout would
+            // half-close this socket before the reply is written.
+            stream
+                .set_read_timeout(Some(Duration::from_secs(45)))
+                .unwrap();
+            let silence = Instant::now();
+            let mut extra = [0u8; 1];
+            match stream.read(&mut extra) {
+                // Linux reports `SO_RCVTIMEO` as `WouldBlock` (EAGAIN). Either
+                // idle error means the proxy did not half-close the upstream.
+                Err(error)
+                    if error.kind() == io::ErrorKind::TimedOut
+                        || error.kind() == io::ErrorKind::WouldBlock =>
+                {
+                    if silence.elapsed() < Duration::from_secs(40) {
+                        let _ = done.send(Err("upstream silence ended before 45s"));
+                        return;
+                    }
+                }
+                Ok(0) => {
+                    let _ = done.send(Err("proxy half-closed before the reply"));
+                    return;
+                }
+                Ok(_) => {
+                    let _ = done.send(Err("proxy wrote during the stall"));
+                    return;
+                }
+                Err(_) => {
+                    let _ = done.send(Err("stall read failed"));
+                    return;
+                }
+            }
+            if stream.write_all(response.as_bytes()).is_err()
+                || stream.shutdown(Shutdown::Write).is_err()
+            {
+                let _ = done.send(Err("reply failed"));
+                return;
+            }
+            let _ = done.send(Ok(()));
+        });
+        let mut client = UnixStream::connect(proxy.directory().join(SOCKET_NAME)).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(70)))
+            .unwrap();
+        client
+            .write_all(b"GET /v1 HTTP/1.0\r\nHost: stub\r\n\r\n")
+            .unwrap();
+        let started = Instant::now();
+        let mut received = Vec::new();
+        client.read_to_end(&mut received).unwrap();
+        let elapsed = started.elapsed();
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .expect("stub did not finish")
+            .expect("stall was cut short");
+        assert!(
+            elapsed >= Duration::from_secs(40) && elapsed < Duration::from_secs(90),
+            "45s stall took {elapsed:?}"
+        );
+        assert_eq!(received, expected);
+    }
+
+    #[test]
+    fn confined_pi_model_proxy_refuses_the_connection_past_the_allowance() {
+        let stub = TcpListener::bind("127.0.0.1:0").unwrap();
+        stub.set_nonblocking(true).unwrap();
+        let endpoint =
+            ModelEndpoint::parse(&format!("http://{}/v1", stub.local_addr().unwrap())).unwrap();
+        let proxy = ModelProxy::start(&endpoint, 40).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let served = Arc::new(AtomicUsize::new(0));
+        let flag = Arc::clone(&stop);
+        let served_thread = Arc::clone(&served);
+        let server = thread::spawn(move || {
+            while !flag.load(Ordering::Relaxed) {
+                match stub.accept() {
+                    Ok((mut stream, _)) => {
+                        served_thread.fetch_add(1, Ordering::Relaxed);
+                        let _ = read_headers(&mut stream);
+                        let body = b"ok";
+                        let header = format!(
+                            "HTTP/1.0 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(body);
+                        let _ = stream.shutdown(Shutdown::Both);
+                    }
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            || error.kind() == io::ErrorKind::Interrupted =>
+                    {
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        for index in 0..40 {
+            let mut client = UnixStream::connect(proxy.directory().join(SOCKET_NAME)).unwrap();
+            client
+                .write_all(b"GET / HTTP/1.0\r\nHost: stub\r\n\r\n")
+                .unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).unwrap();
+            assert!(
+                response.windows(2).any(|window| window == b"ok"),
+                "exchange {index} failed: {response:?}"
+            );
+        }
+        let open = proxy.counts();
+        assert_eq!(open["allowance"], serde_json::json!(40));
+        assert_eq!(open["accepted"], serde_json::json!(40));
+        assert_eq!(open["refused"], serde_json::json!(0));
+        assert_eq!(open["scope"], "generation");
+        assert!(open.get("reason").is_none());
+        assert!(!proxy.exhausted());
+        let mut overflow = UnixStream::connect(proxy.directory().join(SOCKET_NAME)).unwrap();
+        overflow
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut byte = [0u8; 1];
+        match overflow.read(&mut byte) {
+            Ok(0) => {}
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+            result => panic!("41st connection was not refused: {result:?}"),
+        }
+        assert!(proxy.exhausted());
+        let counts = proxy.counts();
+        assert_eq!(counts["allowance"], serde_json::json!(40));
+        assert_eq!(counts["accepted"], serde_json::json!(40));
+        assert_eq!(counts["refused"], serde_json::json!(1));
+        assert_eq!(counts["scope"], "generation");
+        assert_eq!(counts["reason"], "runtime_budget_exhausted");
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            assert_eq!(
+                served.load(Ordering::Relaxed),
+                40,
+                "the 41st connection was spliced"
+            );
+            if Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        stop.store(true, Ordering::Relaxed);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn confined_pi_model_proxy_drop_during_a_45s_stall_returns_promptly() {
+        let stub = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = stub.local_addr().unwrap().port();
+        let endpoint = ModelEndpoint::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let proxy = ModelProxy::start(&endpoint, 2).unwrap();
+        let (eof, upstream_eof) = mpsc::channel();
+        thread::spawn(move || {
+            let (mut upstream, _) = stub.accept().unwrap();
+            upstream
+                .set_read_timeout(Some(Duration::from_secs(45)))
+                .unwrap();
+            let mut buf = [0u8; 64];
+            loop {
+                match upstream.read(&mut buf) {
+                    Ok(0) => {
+                        let _ = eof.send(true);
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => {
+                        let _ = eof.send(false);
+                        break;
+                    }
+                }
+            }
+        });
+        let mut client = UnixStream::connect(proxy.directory().join(SOCKET_NAME)).unwrap();
+        client.write_all(b"still-open").unwrap();
+        thread::sleep(Duration::from_secs(1));
+        let started = Instant::now();
+        drop(proxy);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "drop during a 45s stall took {elapsed:?}"
+        );
+        assert!(
+            upstream_eof.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "upstream did not read EOF"
+        );
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut byte = [0u8; 8];
+        assert_eq!(client.read(&mut byte).unwrap(), 0);
     }
 
     fn host_fd_count() -> usize {
