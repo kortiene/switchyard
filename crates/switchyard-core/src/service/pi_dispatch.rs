@@ -848,8 +848,6 @@ impl Host {
         // An abort may follow work whose Pi acknowledgement was lost. Preserve
         // that original receipt before closing the transport; only absent work
         // may be superseded. Never resubmit it merely to discover its receipt.
-        // The interrupted path has no abort receipt to preserve. Pending work
-        // is superseded after the fresh proof, with the stop acknowledgement.
         if !interrupted {
             for command in self.store.list_commands(mission_id)? {
                 if command.state != CommandState::Pending || !is_runtime_work(command.kind) {
@@ -871,6 +869,37 @@ impl Host {
                         &command.id,
                         "admission closed before runtime accepted this command",
                     )?;
+                }
+            }
+        }
+        if interrupted {
+            // The flag would make this inspect return immediately. The handler
+            // already restored the default Ctrl-C disposition. A receipt is
+            // acknowledged. Absence of a receipt is the only case superseded.
+            // An inspect error is not proof, so that command stays pending.
+            crate::clear_operator_stop();
+            for command in self.store.list_commands(mission_id)? {
+                if command.state != CommandState::Pending || !is_runtime_work(command.kind) {
+                    continue;
+                }
+                let request = RuntimeRequest {
+                    binding: binding.clone(),
+                    request_id: command.request_id.clone(),
+                    payload_hash: command.payload_hash.clone(),
+                    method: RuntimeAdapter::runtime_method(command.kind),
+                };
+                let payload =
+                    serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+                match self.confined_receipt(&request, &payload) {
+                    Ok(Some(receipt)) => {
+                        self.store
+                            .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
+                    }
+                    Ok(None) => {
+                        self.store
+                            .supersede_pending(&command.id, super::OPERATOR_STOP_NO_RECEIPT)?;
+                    }
+                    Err(_) => {}
                 }
             }
         }
@@ -914,14 +943,6 @@ impl Host {
                         &host_settle_acknowledgement(&command.request_id),
                     )?;
                     count += 1;
-                }
-                for command in self.store.list_commands(mission_id)? {
-                    if command.state == CommandState::Pending && is_runtime_work(command.kind) {
-                        self.store.supersede_pending(
-                            &command.id,
-                            "operator stop ended the turn before runtime accepted this command",
-                        )?;
-                    }
                 }
             }
             let current = self.store.load_mission(mission_id)?;

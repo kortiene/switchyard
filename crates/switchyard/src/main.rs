@@ -393,11 +393,24 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                         }
                     }
                 }
-                let scenario = if runtime == RuntimeSelection::ConfinedPi
+                let enters_wait = runtime == RuntimeSelection::ConfinedPi
                     && (approve_plan || repair)
                     && !persist_only
-                    && workspace_error.is_none()
-                {
+                    && workspace_error.is_none();
+                // A command that does not enter the foreground wait would
+                // otherwise print ok and exit 0 with no cancel admitted.
+                if ctrl_c_during_dispatch_admits_cancel(
+                    switchyard_core::operator_stop_requested(),
+                    enters_wait,
+                ) {
+                    let stopped = host.interrupt_operator(&mission)?;
+                    if stopped.phase != Phase::Cancelled {
+                        return Err(Error::guard(
+                            "operator stop was requested during dispatch and cancel was not confirmed",
+                        ));
+                    }
+                }
+                let scenario = if enters_wait {
                     Some(settle_confined(&mut host, &mission, approve_plan))
                 } else {
                     None
@@ -906,6 +919,15 @@ fn latest_repair_state(snapshot: &switchyard_core::MissionSnapshot) -> Option<&s
         .map(|command| command.state.as_str())
 }
 
+/// Ctrl-C during a dispatch that will not enter the foreground wait must
+/// admit cancel. The wait path admits it itself.
+fn ctrl_c_during_dispatch_admits_cancel(
+    stop_requested: bool,
+    enters_foreground_wait: bool,
+) -> bool {
+    stop_requested && !enters_foreground_wait
+}
+
 fn settle_confined(host: &mut Host, mission: &str, require_composed: bool) -> &'static str {
     #[cfg(all(
         feature = "pi-contract",
@@ -951,14 +973,14 @@ fn settle_confined(host: &mut Host, mission: &str, require_composed: bool) -> &'
             let pending = has_pending_runtime_work(&snapshot);
             let failed_or_unanswered = value["piHost"]["observation"]["runFailure"].is_string();
             if require_composed {
-                if switchyard_core::foreground_run_complete(
+                if let Some(outcome) = switchyard_core::plan_wait_outcome(
                     s3_acceptance,
                     idle,
                     pending,
                     composed_scenario_settled(&value),
                     failed_or_unanswered,
                 ) {
-                    return "complete";
+                    return outcome;
                 }
             } else if let Some(outcome) = switchyard_core::repair_wait_outcome(
                 idle,
@@ -1162,6 +1184,32 @@ mod operator_stop_tests {
         assert_eq!(max_repairs, 1);
         assert_eq!(max_plan_revisions, 2);
         assert!(cli.runtime.is_none(), "FakeRuntime stays the default");
+    }
+
+    #[test]
+    fn ctrl_c_outside_the_foreground_wait_admits_cancel() {
+        assert!(super::ctrl_c_during_dispatch_admits_cancel(true, false));
+        assert!(!super::ctrl_c_during_dispatch_admits_cancel(true, true));
+        assert!(!super::ctrl_c_during_dispatch_admits_cancel(false, false));
+    }
+
+    #[cfg(all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn unknown_confined_fixture_is_refused() {
+        let previous = std::env::var("SWITCHYARD_CONFINED_FIXTURE").ok();
+        unsafe {
+            std::env::set_var("SWITCHYARD_CONFINED_FIXTURE", "not-a-fixture");
+        }
+        let error = super::confined_fixture().unwrap_err();
+        match previous {
+            Some(value) => unsafe { std::env::set_var("SWITCHYARD_CONFINED_FIXTURE", value) },
+            None => unsafe { std::env::remove_var("SWITCHYARD_CONFINED_FIXTURE") },
+        }
+        assert!(error.to_string().contains("not a CLI fixture"), "{error}");
     }
 
     #[test]

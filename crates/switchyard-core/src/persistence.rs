@@ -2754,6 +2754,26 @@ mod tests {
         assert!(store.list_commands("m-1").unwrap().is_empty());
     }
 
+    #[test]
+    fn create_with_a_model_endpoint_stores_model_harness() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mission.sqlite");
+        let mut store = Store::open_writer(&db).unwrap();
+        store.migrate().unwrap();
+        let mut created = sample_mission();
+        created.model_endpoint = true;
+        store.create_mission(created).unwrap();
+        let policy: String = store
+            .conn
+            .query_row("SELECT policy_json FROM attempts", [], |row| row.get(0))
+            .unwrap();
+        let policy: serde_json::Value = serde_json::from_str(&policy).unwrap();
+        assert_eq!(policy["modelHarness"]["retryEnabled"], false);
+        assert_eq!(policy["modelHarness"]["retryMaxRetries"], 0);
+        assert_eq!(policy["modelHarness"]["streamMaxRetries"], 0);
+        assert!(policy["modelHarness"].get("restartLimit").is_none());
+    }
+
     fn sample_mission() -> CreatedMission {
         CreatedMission {
             runtime_config: r#"{"adapter":"fake","credentials":"none"}"#.into(),

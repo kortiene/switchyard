@@ -3248,6 +3248,28 @@ pub(crate) fn is_post_settle_repair(kind: CommandKind) -> bool {
     )
 }
 
+/// Used only after an inspect found no Pi receipt. It does not claim that
+/// Pi had not accepted the command when the inspect itself failed.
+pub const OPERATOR_STOP_NO_RECEIPT: &str = "no Pi receipt was present before the operator stop";
+
+/// Plan foreground wait. A failed or unanswered run ends immediately.
+/// `None` means keep waiting. This does not wait out the bridge wall.
+pub fn plan_wait_outcome(
+    s3_acceptance: bool,
+    idle: bool,
+    pending_work: bool,
+    composed: bool,
+    failed_or_unanswered: bool,
+) -> Option<&'static str> {
+    if failed_or_unanswered {
+        return Some("failed");
+    }
+    if foreground_run_complete(s3_acceptance, idle, pending_work, composed, false) {
+        return Some("complete");
+    }
+    None
+}
+
 /// Product mode completes when the runtime is idle and nothing is pending.
 /// The composed `s3-acceptance` replay still waits for its three effects.
 pub fn foreground_run_complete(

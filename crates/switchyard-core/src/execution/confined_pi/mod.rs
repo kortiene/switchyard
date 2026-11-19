@@ -115,10 +115,11 @@ pub(crate) struct OpenLimits {
 /// egress. After wiring, `UNWIRED_CONNECTION_ALLOWANCE` has zero uses. Freeze
 /// `maxRetries` 0. Endpoint missions already open the harness with
 /// `retry: { enabled: false, maxRetries: 0 }` and `stream.maxRetries: 0`, and
-/// freeze `modelHarness`. `restartLimit` stays at pi-durable's default: `0`
-/// ends a tool-phase crash, and the composed evidence gate still replays that
-/// crash. No-endpoint missions keep every default. The product wait does not
-/// treat an unanswered or failed run as complete. Do not edit `egress.rs`.
+/// freeze `modelHarness`. pi-durable 1.4.0 treats `restartLimit` below 1 as
+/// the default 5 (`agent.ts` `restartLimit`), so it is not set. Retries off
+/// is what stops a cut-off model request from being sent again.
+/// No-endpoint missions keep every default. The product wait does not treat
+/// an unanswered or failed run as complete. Do not edit `egress.rs`.
 fn start_model_proxy(
     endpoint: &egress::ModelEndpoint,
     model_request_cap: u64,

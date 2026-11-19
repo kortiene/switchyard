@@ -183,6 +183,27 @@ fn product_mode_completes_when_idle_with_no_pending_work() {
         !crate::foreground_run_complete(false, true, false, true, true),
         "a failed or unanswered run is not complete"
     );
+    assert_eq!(
+        crate::plan_wait_outcome(false, true, false, true, true),
+        Some("failed"),
+        "a failed or unanswered plan wait ends without the bridge wall"
+    );
+    assert_eq!(
+        crate::plan_wait_outcome(false, false, true, false, true),
+        Some("failed")
+    );
+    assert_eq!(
+        crate::plan_wait_outcome(false, true, false, true, false),
+        Some("complete")
+    );
+    assert_eq!(
+        crate::plan_wait_outcome(true, true, false, false, false),
+        None
+    );
+    assert!(
+        !crate::OPERATOR_STOP_NO_RECEIPT.contains("before runtime accepted"),
+        "the stop reason must not claim the command was not accepted"
+    );
 }
 
 #[test]

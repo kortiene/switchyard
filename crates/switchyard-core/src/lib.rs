@@ -74,7 +74,9 @@ pub use service::{
     MissionSnapshot, NotifyOutcome, OperatorWrite, SuccessorChanges, journal_path,
     write_export_exclusive,
 };
-pub use service::{foreground_run_complete, repair_wait_outcome};
+pub use service::{
+    OPERATOR_STOP_NO_RECEIPT, foreground_run_complete, plan_wait_outcome, repair_wait_outcome,
+};
 
 #[cfg(test)]
 mod acceptance;

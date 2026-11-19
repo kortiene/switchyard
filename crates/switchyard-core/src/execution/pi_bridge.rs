@@ -314,7 +314,7 @@ impl PiBridge {
 
     /// Calls never replay after a transport failure. The owner reconciles the
     /// original durable command/operation identity before deciding what to send.
-    /// The response timeout restarts after each effect receipt; trusted callback
+    /// The response deadline is reset after each effect receipt; trusted callback
     /// execution time is excluded. The peer retains its separate effect timeout.
     pub fn call(
         &mut self,
