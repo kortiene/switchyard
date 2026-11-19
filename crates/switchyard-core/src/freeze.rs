@@ -11,6 +11,56 @@ use crate::error::{Error, Result};
 pub(crate) const ATTEMPT_FREEZE_SCHEMA: &str = "switchyard.attempt-freeze.v1";
 pub(crate) const PLAN_DIGEST_SCHEMA: &str = "switchyard.plan-digest.v1";
 
+/// Who writes the plan. Frozen on the attempt at `start_planning`.
+///
+/// Absent on a stored freeze, or absent from attempt policy before that write,
+/// means [`PlanSource::Runtime`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanSource {
+    /// The runtime writes the plan. This is the default, including Fake `#213`.
+    Runtime,
+    /// The operator writes the plan. Planning freezes and enqueues no runtime work.
+    Operator,
+}
+
+impl PlanSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Runtime => "runtime",
+            Self::Operator => "operator",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self> {
+        match text {
+            "runtime" => Ok(Self::Runtime),
+            "operator" => Ok(Self::Operator),
+            _ => Err(Error::guard("planSource must be operator or runtime")),
+        }
+    }
+}
+
+/// Plan source the host acts on.
+///
+/// The stored freeze wins after `start_planning`. A missing `planSource` is
+/// [`PlanSource::Runtime`]. Before the freeze, the attempt policy is the source,
+/// and a missing key is the same default.
+pub(crate) fn planning_plan_source(mission: &MissionRecord) -> Result<PlanSource> {
+    if let Some(frozen) = &mission.attempt.frozen_inputs_json {
+        return plan_source_value(frozen, "frozen inputs");
+    }
+    plan_source_value(&mission.attempt.policy_json, "sandbox policy")
+}
+
+fn plan_source_value(raw: &str, label: &str) -> Result<PlanSource> {
+    let value = parse_object(raw, label)?;
+    match value.get("planSource") {
+        None => Ok(PlanSource::Runtime),
+        Some(Value::String(text)) => PlanSource::parse(text),
+        Some(_) => Err(Error::guard("planSource must be operator or runtime")),
+    }
+}
+
 /// Canonical frozen-input document for one attempt.
 ///
 /// The encoding is RFC 8785 JSON (`canonicalize`): object keys sorted by
@@ -23,6 +73,7 @@ pub(crate) fn frozen_document(mission: &MissionRecord) -> Result<Value> {
     require_text(&mission.acceptance_criteria, "acceptance criteria")?;
     require_text(&mission.attempt.base_sha, "base SHA")?;
     require_text(&mission.source_issue.provider, "issue snapshot")?;
+    let plan_source = plan_source_value(&mission.attempt.policy_json, "sandbox policy")?;
     Ok(json!({
         "acceptanceCriteria": mission.acceptance_criteria,
         "baseSha": mission.attempt.base_sha,
@@ -37,6 +88,7 @@ pub(crate) fn frozen_document(mission: &MissionRecord) -> Result<Value> {
             "title": mission.source_issue.title,
         },
         "objective": mission.objective,
+        "planSource": plan_source.as_str(),
         "runtimeConfig": runtime_configuration(&mission.attempt.runtime_config_json)?,
         "sandboxPolicy": sandbox_policy(
             &mission.attempt.environment_json,
@@ -132,6 +184,7 @@ fn sandbox_policy(environment_json: &str, policy_json: &str) -> Result<Value> {
     if let Some(object) = policy.as_object_mut() {
         object.remove("maxRepairs");
         object.remove("maxPlanRevisions");
+        object.remove("planSource");
     }
     Ok(json!({
         "environment": environment,
@@ -276,5 +329,28 @@ mod tests {
                 .is_none()
         );
         assert!(document["sandboxPolicy"].get("host").is_none());
+        assert_eq!(document["planSource"], "runtime");
+        assert!(
+            document["sandboxPolicy"]["policy"]
+                .get("planSource")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn operator_plan_source_is_frozen_and_kept_out_of_sandbox_policy() {
+        let mut record = mission();
+        record.attempt.policy_json = r#"{"credentials":"none","maxPlanRevisions":3,"maxRepairs":2,"planSource":"operator","planningTools":"read-only"}"#.into();
+        let document = frozen_document(&record).unwrap();
+        assert_eq!(document["planSource"], "operator");
+        assert!(
+            document["sandboxPolicy"]["policy"]
+                .get("planSource")
+                .is_none()
+        );
+        assert_eq!(
+            document["sandboxPolicy"]["policy"]["planningTools"],
+            "read-only"
+        );
     }
 }

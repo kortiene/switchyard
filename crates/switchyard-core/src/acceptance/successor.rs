@@ -442,6 +442,7 @@ fn overrides_land_in_the_fresh_freeze_and_the_create_decision() {
                 max_repairs: Some(9),
                 max_plan_revisions: Some(11),
                 verifier_json: Some(verifier.into()),
+                plan_source: None,
             },
         )
         .unwrap();

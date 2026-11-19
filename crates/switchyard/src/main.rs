@@ -14,7 +14,7 @@ use cli::{Cli, Command, MissionCommand, RuntimeSelection};
 use serde_json::{Value, json};
 use switchyard_core::{
     AdmitRequest, CommandBody, CommandKind, CommandOrigin, CreateMission, EffectProof, Error, Host,
-    Phase, SuccessorChanges, write_export_exclusive,
+    Phase, PlanSource, SuccessorChanges, write_export_exclusive,
 };
 
 fn main() -> ExitCode {
@@ -177,6 +177,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 persist_only,
                 payload,
                 verifier,
+                plan_source,
             } => {
                 // This refusal uses only the flag. Opening the host first would
                 // take the owner lock and bump host_owner.generation.
@@ -197,6 +198,9 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     },
                     verifier,
                 )?;
+                if plan_source == "operator" {
+                    host.set_plan_source(&snapshot.mission_id, PlanSource::Operator)?;
+                }
                 let schedule_scenario = runtime == RuntimeSelection::ConfinedPi
                     && !persist_only
                     && admit.as_deref() == Some("approve_plan");
@@ -424,6 +428,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 max_repairs,
                 max_plan_revisions,
                 verifier,
+                plan_source,
             } => {
                 // An acceptance override is CLI input. Refuse it before the
                 // host open bumps host_owner.generation. Omitting the flag
@@ -439,6 +444,10 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                         max_repairs,
                         max_plan_revisions,
                         verifier_json: verifier,
+                        plan_source: match plan_source {
+                            Some(value) => Some(PlanSource::parse(&value)?),
+                            None => None,
+                        },
                     },
                 )?;
                 Ok(json!({"ok": true, "mission": snapshot.to_json()}))
