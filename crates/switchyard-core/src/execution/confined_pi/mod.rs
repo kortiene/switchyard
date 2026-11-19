@@ -448,13 +448,29 @@ impl ConfinedPiSession {
         self.leaf.boot_id = "missing".into();
     }
 
+    /// Run the cgroup proof again after [`Self::stop`]. The bridge stays stopped.
+    /// A later settle uses this instead of the recorded `proven` flag.
+    /// Returns the new evidence even when it is still unproven.
+    pub fn reprove(&mut self) -> Result<Value> {
+        if !self.stopped {
+            return self.stop();
+        }
+        let proof = cgroup::rekill_and_prove(&self.leaf, Duration::from_secs(5))?;
+        self.record["phase"] = json!(if proof.proven { "stopped" } else { "uncertain" });
+        let evidence = json!({"proven":proof.proven,"reason":proof.reason,"events":proof.events,
+            "generation":self.binding().generation,"cgroup":self.record["cgroup"]});
+        self.record["termination"] = evidence.clone();
+        self.control.write("current.json", &self.record)?;
+        Ok(evidence)
+    }
+
     /// Reap the direct child and prove the recorded leaf empty.
     ///
-    /// A later call always runs `rekill_and_prove` again. The fresh result
-    /// decides; a stored `proven` flag is not reused.
+    /// A later call runs [`Self::reprove`]. The fresh result decides; a stored
+    /// `proven` flag is not reused.
     pub fn stop(&mut self) -> Result<Value> {
         if self.stopped {
-            return self.reprove_stopped_leaf();
+            return self.reprove();
         }
         if let Some((done, watchdog)) = self.watchdog.take() {
             let _ = done.send(());
@@ -493,19 +509,6 @@ impl ConfinedPiSession {
         if !proof.proven {
             return Err(Error::guard("confined bridge termination remains unproven"));
         }
-        Ok(evidence)
-    }
-
-    /// Fresh `rekill_and_prove` after an unproven stop in this process.
-    /// Returns the new evidence even when it is still unproven, so cancel can
-    /// refuse to confirm without treating the old flag as the decision.
-    fn reprove_stopped_leaf(&mut self) -> Result<Value> {
-        let proof = cgroup::rekill_and_prove(&self.leaf, Duration::from_secs(5))?;
-        self.record["phase"] = json!(if proof.proven { "stopped" } else { "uncertain" });
-        let evidence = json!({"proven":proof.proven,"reason":proof.reason,"events":proof.events,
-            "generation":self.binding().generation,"cgroup":self.record["cgroup"]});
-        self.record["termination"] = evidence.clone();
-        self.control.write("current.json", &self.record)?;
         Ok(evidence)
     }
 

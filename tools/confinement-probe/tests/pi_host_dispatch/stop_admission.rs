@@ -82,7 +82,9 @@ fn pending_busy_continue() -> (World, Host, String) {
         },
     );
     let error = host.dispatch_pending(&world.mission).unwrap_err();
-    assert_eq!(error.category(), "guard_failed", "{error}");
+    // Protocol category `busy`. Not a durable refusal, so pause and cancel
+    // can still be delivered while this continue stays pending.
+    assert_eq!(error.category(), "busy", "{error}");
     assert!(error.rejected_admission().is_none(), "{error}");
     assert!(error.to_string().contains("bridge: busy"), "{error}");
     let value = host.snapshot(&world.mission).unwrap().to_json();

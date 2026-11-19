@@ -314,14 +314,11 @@ export class Runtime {
 }
 
 function liveRunName(run: unknown): string | null {
-  if (run == null) return null;
-  if (typeof run === 'string' && run.length > 0) return run;
-  if (typeof run === 'object') {
-    const id = (run as { id?: unknown }).id;
-    if (typeof id === 'string' && id.length > 0) return id;
-    return 'pi.live.run';
-  }
-  return 'pi.live.run';
+  if (run == null || typeof run !== 'object') return null;
+  const taskId = (run as { taskId?: unknown }).taskId;
+  if (typeof taskId === 'string' && taskId.length > 0) return taskId;
+  if (taskId != null) return 'pi.live.run';
+  return null;
 }
 
 function observedStorageError(error: unknown, seen = new Set<unknown>()): boolean {

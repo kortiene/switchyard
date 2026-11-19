@@ -151,6 +151,13 @@ pub enum Error {
     #[error("operator write is closed in phase {phase}; approve_plan first")]
     OperatorWritePhaseClosed { phase: String },
 
+    /// The bridge cgroup is unproven, a writer is still blocked, or an effect
+    /// is unreconciled. The phase does not change and no `needs_attention` row
+    /// is written. The bridge stays stopped.
+    /// Way out: retry request_verification, or cancel.
+    #[error("settle was not proven; retry request_verification, or cancel")]
+    SettleNotProven,
+
     /// `mission export --out` already exists, including when the path is a symlink.
     /// Way out: pick a new path, or remove the file.
     #[error("export target already exists; pick a new path, or remove the file")]
@@ -221,6 +228,7 @@ impl Error {
             Self::PlanRevisionLimitReached { .. } => "plan_revision_limit_reached",
             Self::RuntimeBudgetExhausted => "runtime_budget_exhausted",
             Self::RepairAfterSettle => "repair_after_settle",
+            Self::SettleNotProven => "settle_not_proven",
             Self::SuccessorSourceNotTerminal => "successor_source_not_terminal",
             Self::SuccessorExists { .. } => "successor_exists",
             Self::SourceChangedDuringCreate => "source_changed_during_create",

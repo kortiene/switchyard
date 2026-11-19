@@ -187,8 +187,27 @@ fn unproven_writer_leaf_blocks_confirm_cancelled() {
 /// only when that fresh proof is `proven`.
 #[test]
 fn unproven_settle_then_cancel_reproves_in_the_same_process() {
-    let (world, mut host) = World::new("process-hold");
+    // `answer` finishes with no blocking linux effect, so the workspace is
+    // verified before the unproven stop. `process-hold` leaves an effect in
+    // `running` and `dispatch_pending` returns `execution_blocked` before the
+    // cancel re-proof.
+    let (world, mut host) = World::new("answer");
     host.dispatch_pending(&world.mission).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        host.poll_runtime(&world.mission).unwrap();
+        let value = host.snapshot(&world.mission).unwrap().to_json();
+        if value["piHost"]["observation"]["runtimeIdle"] == true
+            && !value["executionBlocked"].as_bool().unwrap_or(true)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "workspace was not verified: {value}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let unproven = host
         .settle_unproven_bridge_for_test(&world.mission)
         .unwrap();
@@ -215,7 +234,8 @@ fn unproven_reproof_leaves_cancel_pending() {
     assert_eq!(unproven["proven"], false, "{unproven}");
     host.miss_bridge_leaf_for_test(&world.mission).unwrap();
     admit(&mut host, &world.mission, CommandBody::Cancel);
-    host.dispatch_pending(&world.mission).unwrap();
+    let error = host.dispatch_pending(&world.mission).unwrap_err();
+    assert_eq!(error.category(), "settle_not_proven", "{error}");
     let settled = host.snapshot(&world.mission).unwrap();
     assert_eq!(settled.phase, Phase::Cancelling);
     let value = settled.to_json();
