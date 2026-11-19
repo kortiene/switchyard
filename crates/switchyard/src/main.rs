@@ -8,15 +8,6 @@ use std::path::Path;
 ))]
 use std::path::PathBuf;
 use std::process::ExitCode;
-#[cfg(any(
-    test,
-    all(
-        feature = "pi-contract",
-        feature = "linux-execution",
-        target_os = "linux"
-    )
-))]
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
 use cli::{Cli, Command, MissionCommand, RuntimeSelection};
@@ -26,18 +17,9 @@ use switchyard_core::{
     Phase, PlanSource, SuccessorChanges, write_export_exclusive,
 };
 
-/// Set by SIGINT and SIGTERM in this process. The waiting command admits
-/// `cancel` as the operator and uses the existing confined stop proof.
-#[cfg(any(
-    test,
-    all(
-        feature = "pi-contract",
-        feature = "linux-execution",
-        target_os = "linux"
-    )
-))]
-static OPERATOR_STOP: AtomicBool = AtomicBool::new(false);
-
+/// SIGINT and SIGTERM in this process. The handler records the stop on the
+/// shared flag the bridge read polls, then the waiting command admits
+/// `cancel` and uses the existing confined stop proof.
 #[cfg(any(
     test,
     all(
@@ -47,7 +29,7 @@ static OPERATOR_STOP: AtomicBool = AtomicBool::new(false);
     )
 ))]
 extern "C" fn on_operator_stop(_: libc::c_int) {
-    OPERATOR_STOP.store(true, Ordering::SeqCst);
+    switchyard_core::request_operator_stop();
     // The next Ctrl-C uses the default disposition and ends the process.
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_DFL);
@@ -83,7 +65,7 @@ fn arm_operator_stop() {
     )
 ))]
 fn operator_stop_requested() -> bool {
-    OPERATOR_STOP.load(Ordering::SeqCst)
+    switchyard_core::operator_stop_requested()
 }
 
 fn main() -> ExitCode {
@@ -349,7 +331,9 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 // and both dispatches, so it cannot create a worktree.
                 // Isolated workspace failures still allow admission and stop
                 // delivery. Never drain earlier work before admitting a stop.
-                let workspace_error = if persist_only {
+                // A stop does not verify the workspace. An unresolved process
+                // from a killed host would otherwise refuse cancel.
+                let workspace_error = if persist_only || is_stop {
                     None
                 } else {
                     match host.recover_workspace(&mission) {
@@ -383,7 +367,22 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                             }
                         })?;
                     } else {
-                        host.dispatch_reconciled(&mission)?;
+                        // Arm before the bridge read. `process-hold` does not
+                        // return from dispatch, so the wait loop is not running
+                        // yet when Ctrl-C arrives.
+                        #[cfg(all(
+                            feature = "pi-contract",
+                            feature = "linux-execution",
+                            target_os = "linux"
+                        ))]
+                        if runtime == RuntimeSelection::ConfinedPi {
+                            arm_operator_stop();
+                        }
+                        if let Err(error) = host.dispatch_reconciled(&mission)
+                            && !switchyard_core::operator_stop_requested()
+                        {
+                            return Err(error);
+                        }
                     }
                 }
                 let scenario = if runtime == RuntimeSelection::ConfinedPi
@@ -906,7 +905,6 @@ fn settle_confined(host: &mut Host, mission: &str, require_composed: bool) -> &'
         target_os = "linux"
     ))]
     {
-        OPERATOR_STOP.store(false, Ordering::SeqCst);
         arm_operator_stop();
         let budgets = host.frozen_budgets(mission).ok().flatten();
         let s3_acceptance = host.s3_acceptance_replay(mission);
@@ -1117,9 +1115,8 @@ fn command_body(kind: &str, payload: &Value) -> switchyard_core::Result<CommandB
 
 #[cfg(test)]
 mod operator_stop_tests {
-    use super::{OPERATOR_STOP, arm_operator_stop, operator_stop_requested};
+    use super::{arm_operator_stop, operator_stop_requested};
     use clap::Parser;
-    use std::sync::atomic::Ordering;
 
     #[test]
     fn create_defaults_are_the_section_3_4_limits() {
@@ -1155,8 +1152,8 @@ mod operator_stop_tests {
 
     #[test]
     fn sigint_sets_the_operator_stop_flag() {
+        switchyard_core::clear_operator_stop();
         arm_operator_stop();
-        OPERATOR_STOP.store(false, Ordering::SeqCst);
         unsafe {
             libc::raise(libc::SIGINT);
         }
@@ -1170,7 +1167,7 @@ mod operator_stop_tests {
             libc::SIG_DFL,
             "the first Ctrl-C restores the default disposition"
         );
-        OPERATOR_STOP.store(false, Ordering::SeqCst);
+        switchyard_core::clear_operator_stop();
         unsafe {
             let mut action: libc::sigaction = std::mem::zeroed();
             action.sa_sigaction = libc::SIG_DFL;

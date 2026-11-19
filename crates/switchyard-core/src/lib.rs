@@ -48,7 +48,8 @@ pub use workspace::WorkspaceView;
 pub use budget::{
     ATTEMPT_WALL_COUNTS_VERIFIER, ATTEMPT_WALL_SECONDS, BRIDGE_CPU_SECONDS, BRIDGE_WALL_SECONDS,
     DEFAULT_MAX_PLAN_REVISIONS, DEFAULT_MAX_REPAIRS, FrozenBudgets, MAX_MODEL_REQUESTS,
-    MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, attempt_wall_charge,
+    MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, attempt_wall_charge, clear_operator_stop,
+    operator_stop_requested, request_operator_stop,
 };
 pub use canonical::{canonicalize, payload_hash};
 pub use delivery::{proof_matches, publication_operation_id};

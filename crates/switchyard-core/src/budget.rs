@@ -4,9 +4,27 @@
 //! Exhaustion is `detect_uncertainty` / `runtime_budget_exhausted`, then
 //! `needs_attention`. This module does not admit `request_verification`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
+
+/// Set from the CLI signal handler. The bridge read polls this so Ctrl-C is
+/// observed while a tool call is still in flight, before the foreground wait
+/// loop starts. An atomic store is async-signal-safe.
+static OPERATOR_STOP: AtomicBool = AtomicBool::new(false);
+
+pub fn request_operator_stop() {
+    OPERATOR_STOP.store(true, Ordering::SeqCst);
+}
+
+pub fn operator_stop_requested() -> bool {
+    OPERATOR_STOP.load(Ordering::SeqCst)
+}
+
+pub fn clear_operator_stop() {
+    OPERATOR_STOP.store(false, Ordering::SeqCst);
+}
 
 /// CLI default. Frozen from the attempt; a later change is a successor.
 pub const DEFAULT_MAX_PLAN_REVISIONS: u32 = 2;
