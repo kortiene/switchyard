@@ -197,6 +197,12 @@ impl ConfinedPiSession {
         let mut record = json!({"version":1,"identity":identity(&binding),"generation":binding.generation,
             "configuration":installed,"phase":"prepared","recovered":recovered,"requiresExisting":require_existing,
             "cgroup":{"path":leaf.path,"dev":leaf.dev,"ino":leaf.ino,"boot":leaf.boot_id}});
+        if let Some(proxy) = &proxy {
+            // Host path of the model-proxy directory. `stop` drops the proxy
+            // and removes this directory. The field stays on the lifecycle
+            // record so a later reader can see which socket was closed.
+            record["proxyDirectory"] = json!(proxy.directory().display().to_string());
+        }
         control.write("current.json", &record)?;
         // Only this durable handoff makes the former current leaf obsolete.
         // Settle allocation/retirement journals before any launcher can start.
@@ -359,6 +365,21 @@ impl ConfinedPiSession {
         if !proof.proven {
             return Err(Error::guard("confined bridge termination remains unproven"));
         }
+        Ok(evidence)
+    }
+
+    /// Run the cgroup proof again after [`Self::stop`]. The bridge stays stopped.
+    /// A later settle uses this when the first proof was not empty yet.
+    pub fn reprove(&mut self) -> Result<Value> {
+        if !self.stopped {
+            return self.stop();
+        }
+        let proof = cgroup::rekill_and_prove(&self.leaf, Duration::from_secs(5))?;
+        self.record["phase"] = json!(if proof.proven { "stopped" } else { "uncertain" });
+        let evidence = json!({"proven":proof.proven,"reason":proof.reason,"events":proof.events,
+            "generation":self.binding().generation,"cgroup":self.record["cgroup"]});
+        self.record["termination"] = evidence.clone();
+        self.control.write("current.json", &self.record)?;
         Ok(evidence)
     }
 

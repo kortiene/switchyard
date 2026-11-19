@@ -888,7 +888,81 @@ impl Host {
     }
 
     pub fn admit(&mut self, request: AdmitRequest) -> Result<AdmitResult> {
+        // The profile is the only branch. The operator command is not a ledger
+        // row: the settle routine admits the host fact after the proof.
+        if self.runtime.authority().host_proves_settle
+            && request.origin == CommandOrigin::Operator
+            && matches!(request.body, CommandBody::RequestVerification { .. })
+        {
+            return self.settle_under_proof(request);
+        }
         self.admit_attached(request, None)
+    }
+
+    fn refuse_terminal_or_stale(
+        &self,
+        mission: &MissionRecord,
+        expected_revision: u64,
+    ) -> Result<()> {
+        if mission.phase.is_terminal() {
+            return Err(Error::TerminalImmutable {
+                phase: mission.phase.to_string(),
+            });
+        }
+        if expected_revision != mission.revision {
+            return Err(Error::StaleRevision {
+                expected: expected_revision,
+                actual: mission.revision,
+            });
+        }
+        Ok(())
+    }
+
+    /// Drift and a plan-digest mismatch share this refusal. The first drift or
+    /// mismatch still records `needs_attention`. Settle calls this before it
+    /// aborts the bridge, and [`Self::admit_checked`] calls it before apply.
+    fn refuse_drift_or_plan_mismatch(
+        &mut self,
+        mission: &MissionRecord,
+        kind: CommandKind,
+    ) -> Result<()> {
+        if self.frozen_input_drifted(mission)? && !crate::freeze::drift_exit(mission.phase, kind) {
+            return self.refuse_frozen_input_drift(mission);
+        }
+        if self.plan_digest_mismatched(mission)? && !crate::freeze::drift_exit(mission.phase, kind)
+        {
+            if mission.phase != Phase::NeedsAttention && !mission.phase.is_terminal() {
+                self.record_plan_digest_mismatch(mission)?;
+            }
+            return Err(Error::guard(
+                "stored plan digest does not match the plan body; the command was not applied",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Confined `request_verification`. Reads [`AuthorityProfile::host_proves_settle`]
+    /// only; the caller already checked it. The operator body is not admitted.
+    fn settle_under_proof(&mut self, request: AdmitRequest) -> Result<AdmitResult> {
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        {
+            self.settle_confined_under_proof(request)
+        }
+        #[cfg(not(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        )))]
+        {
+            // Unreachable. Only the confined adapter sets `host_proves_settle`,
+            // and that variant exists only in the cfg arm above.
+            let _ = request;
+            Err(Error::guard("settle proof requires a confined session"))
+        }
     }
 
     fn admit_attached(
@@ -916,15 +990,7 @@ impl Host {
         operator_plan_file: bool,
     ) -> Result<AdmitResult> {
         let mission = self.store.load_mission(&request.mission_id)?;
-        let attempt_id = request
-            .attempt_id
-            .clone()
-            .unwrap_or_else(|| mission.attempt.id.clone());
-        if attempt_id != mission.attempt.id {
-            return Err(Error::BindingMismatch {
-                detail: "attempt does not match the mission's active attempt".into(),
-            });
-        }
+        let attempt_id = require_active_attempt(&mission, &request)?;
         let payload = request.body.payload(&mission.id, &attempt_id);
         let canonical = canonicalize(&payload)?;
         let hash = payload_hash(&payload)?;
@@ -936,8 +1002,12 @@ impl Host {
         let host_pass = host_verifier_pass(&request.body, verification, &mission.content_digest);
         if host_fact {
             // The body allowlist lives in [`host_supervisor_fact`].
+            // `RequestVerification{quiescent:true}` also requires the profile.
             if request.origin != CommandOrigin::HostSupervisor
-                || !(host_supervisor_fact(&request.body) || host_pass)
+                || !(host_supervisor_fact(
+                    &request.body,
+                    self.runtime.authority().host_proves_settle,
+                ) || host_pass)
             {
                 return Err(Error::guard(
                     "host facts are limited to supervisor stop and uncertainty proofs",
@@ -986,17 +1056,7 @@ impl Host {
                 idempotent: true,
             });
         }
-        if mission.phase.is_terminal() {
-            return Err(Error::TerminalImmutable {
-                phase: mission.phase.to_string(),
-            });
-        }
-        if request.expected_revision != mission.revision {
-            return Err(Error::StaleRevision {
-                expected: request.expected_revision,
-                actual: mission.revision,
-            });
-        }
+        self.refuse_terminal_or_stale(&mission, request.expected_revision)?;
         if matches!(request.body, CommandBody::ApprovePlan { .. })
             && mission.phase == Phase::AwaitingPlanApproval
             && mission.attempt.frozen_inputs_json.is_none()
@@ -1021,21 +1081,7 @@ impl Host {
             self.store.insert_refused_command(&command, &receipt)?;
             return Err(Error::FrozenInputsMissing);
         }
-        if self.frozen_input_drifted(&mission)?
-            && !crate::freeze::drift_exit(mission.phase, request.body.kind())
-        {
-            return self.refuse_frozen_input_drift(&mission);
-        }
-        if self.plan_digest_mismatched(&mission)?
-            && !crate::freeze::drift_exit(mission.phase, request.body.kind())
-        {
-            if mission.phase != Phase::NeedsAttention && !mission.phase.is_terminal() {
-                self.record_plan_digest_mismatch(&mission)?;
-            }
-            return Err(Error::guard(
-                "stored plan digest does not match the plan body; the command was not applied",
-            ));
-        }
+        self.refuse_drift_or_plan_mismatch(&mission, request.body.kind())?;
         let operator_authored_plan = operator_plan_file
             && request.origin == CommandOrigin::Operator
             && matches!(request.body, CommandBody::PlanCompleted { .. })
@@ -2382,7 +2428,7 @@ impl Host {
         mission: &MissionRecord,
         body: CommandBody,
     ) -> Result<AdmitResult> {
-        if !host_supervisor_fact(&body) {
+        if !host_supervisor_fact(&body, self.runtime.authority().host_proves_settle) {
             return Err(Error::guard("unsupported Host-owned fact"));
         }
         self.admit_checked(
@@ -3287,13 +3333,17 @@ fn host_verifier_pass(
 
 /// Supervisor facts the Host may record. Runtime observations and operator
 /// commands never use this list.
-fn host_supervisor_fact(body: &CommandBody) -> bool {
-    matches!(
-        body,
+///
+/// `RequestVerification{quiescent:true}` is the one extra body, and only when
+/// `host_proves_settle` is set. `quiescent:false` stays off the list.
+fn host_supervisor_fact(body: &CommandBody, host_proves_settle: bool) -> bool {
+    match body {
         CommandBody::DetectUncertainty { .. }
-            | CommandBody::ConfirmStopped
-            | CommandBody::ConfirmCancelled
-    )
+        | CommandBody::ConfirmStopped
+        | CommandBody::ConfirmCancelled => true,
+        CommandBody::RequestVerification { quiescent: true } => host_proves_settle,
+        _ => false,
+    }
 }
 
 /// Put a popped observation back. The apply or quarantine error stays
@@ -3307,6 +3357,19 @@ fn restore_observation(
         Ok(()) => original,
         Err(requeue) => original.with_context(requeue.to_string()),
     }
+}
+
+fn require_active_attempt(mission: &MissionRecord, request: &AdmitRequest) -> Result<String> {
+    let attempt_id = request
+        .attempt_id
+        .clone()
+        .unwrap_or_else(|| mission.attempt.id.clone());
+    if attempt_id != mission.attempt.id {
+        return Err(Error::BindingMismatch {
+            detail: "attempt does not match the mission's active attempt".into(),
+        });
+    }
+    Ok(attempt_id)
 }
 
 fn rejection_json(category: &str, adapter: &str) -> String {
@@ -3396,23 +3459,55 @@ mod create_acceptance_tests {
 
 #[cfg(test)]
 mod host_fact_tests {
-    use super::host_supervisor_fact;
+    use super::{Host, host_supervisor_fact};
     use crate::domain::{AttentionReason, CommandBody};
 
     #[test]
-    fn host_supervisor_facts_are_only_stop_and_uncertainty() {
-        assert!(host_supervisor_fact(&CommandBody::ConfirmStopped));
-        assert!(host_supervisor_fact(&CommandBody::ConfirmCancelled));
-        assert!(host_supervisor_fact(&CommandBody::DetectUncertainty {
+    fn host_supervisor_facts_are_stop_uncertainty_and_a_proven_settle() {
+        let stop = |body: &CommandBody| host_supervisor_fact(body, false);
+        assert!(stop(&CommandBody::ConfirmStopped));
+        assert!(stop(&CommandBody::ConfirmCancelled));
+        assert!(stop(&CommandBody::DetectUncertainty {
             reason: AttentionReason::ExecutionUncertain,
             content_digest: None,
         }));
-        assert!(!host_supervisor_fact(&CommandBody::Pause));
-        assert!(!host_supervisor_fact(&CommandBody::Cancel));
-        assert!(!host_supervisor_fact(&CommandBody::Steer {
-            content: "later".into(),
-        }));
-        assert!(!host_supervisor_fact(&CommandBody::CompletePass));
+        assert!(host_supervisor_fact(
+            &CommandBody::RequestVerification { quiescent: true },
+            true
+        ));
+        assert!(!host_supervisor_fact(
+            &CommandBody::RequestVerification { quiescent: true },
+            false
+        ));
+        assert!(!host_supervisor_fact(
+            &CommandBody::RequestVerification { quiescent: false },
+            true
+        ));
+        assert!(!host_supervisor_fact(
+            &CommandBody::RequestVerification { quiescent: false },
+            false
+        ));
+        assert!(!host_supervisor_fact(&CommandBody::Pause, true));
+        assert!(!host_supervisor_fact(&CommandBody::Cancel, true));
+        assert!(!host_supervisor_fact(
+            &CommandBody::Steer {
+                content: "later".into(),
+            },
+            true
+        ));
+        assert!(!host_supervisor_fact(&CommandBody::CompletePass, true));
+    }
+
+    #[test]
+    fn ledger_schema_stays_12() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mission.sqlite");
+        let _host = Host::open(&db).unwrap();
+        let version: i64 = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 12);
     }
 
     #[test]

@@ -89,10 +89,15 @@ impl GuidanceProfile {
 /// plan shape, digest, or freeze. Those stay in Host admission. Planning
 /// tool admission reads [`PlanningToolProfile`], not this flag and not the
 /// adapter name. Plan approval itself stays a Host operation.
+///
+/// `host_proves_settle` is set in every `authority` arm. Confined is true.
+/// The Pi probe and Fake are false. Fake never reaches that path:
+/// `certifies_mission_facts` short-circuits admission first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AuthorityProfile {
     pub(crate) certifies_mission_facts: bool,
     pub(crate) command_check: CommandCheck,
+    pub(crate) host_proves_settle: bool,
 }
 
 /// How [`RuntimeAdapter::validate_command`] checks a runtime-bound command.
@@ -268,11 +273,13 @@ impl RuntimeAdapter {
             Self::Fake(_) => AuthorityProfile {
                 certifies_mission_facts: true,
                 command_check: CommandCheck::Simulated,
+                host_proves_settle: false,
             },
             #[cfg(feature = "pi-contract")]
             Self::Pi(_) => AuthorityProfile {
                 certifies_mission_facts: false,
                 command_check: CommandCheck::PiProtocol,
+                host_proves_settle: false,
             },
             #[cfg(all(
                 feature = "pi-contract",
@@ -282,6 +289,7 @@ impl RuntimeAdapter {
             Self::Confined(_) => AuthorityProfile {
                 certifies_mission_facts: false,
                 command_check: CommandCheck::PiProtocol,
+                host_proves_settle: true,
             },
         }
     }
@@ -750,6 +758,7 @@ mod tests {
         );
         assert!(fake.guidance().operator_resolution_hint);
         assert!(fake.authority().certifies_mission_facts);
+        assert!(!fake.authority().host_proves_settle);
         assert_eq!(fake.authority().command_check, CommandCheck::Simulated);
         assert!(fake.execution_profile().simulated);
         assert!(
@@ -775,6 +784,7 @@ mod tests {
             assert_eq!(pi.linux_ledger(), LinuxLedgerProfile::default());
             assert_eq!(pi.guidance(), GuidanceProfile::default());
             assert!(!pi.authority().certifies_mission_facts);
+            assert!(!pi.authority().host_proves_settle);
             assert_eq!(pi.authority().command_check, CommandCheck::PiProtocol);
             assert!(!pi.execution_profile().simulated);
             assert_declared(&pi);
@@ -812,9 +822,44 @@ mod tests {
         assert!(linux.supervises_live_effects);
         assert_eq!(confined.guidance(), GuidanceProfile::default());
         assert!(!confined.authority().certifies_mission_facts);
+        assert!(confined.authority().host_proves_settle);
         assert_eq!(confined.authority().command_check, CommandCheck::PiProtocol);
         assert!(!confined.execution_profile().simulated);
         assert_declared(&confined);
+    }
+
+    #[cfg(all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn confined_pi_host_proves_settle_is_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake =
+            RuntimeAdapter::Fake(FakeRuntime::open(&dir.path().join("fake-runtime.json")).unwrap());
+        assert!(!fake.authority().host_proves_settle);
+        let node = std::env::current_exe().unwrap();
+        let pi = RuntimeAdapter::Pi(Box::new(
+            crate::execution::PiRuntime::new(&dir.path().join("ledger.sqlite"), &node).unwrap(),
+        ));
+        assert!(!pi.authority().host_proves_settle);
+        let path = || std::path::PathBuf::from("/uninstalled-conformance-fixture");
+        let runtime = crate::execution::confined_pi::fixture_runtime(dir.path(), "settle-profile");
+        let config = crate::execution::confined_pi::ConfinedPiConfig {
+            root: path(),
+            cgroup_root: path(),
+            runtime,
+            node: path(),
+            bubblewrap: path(),
+            launcher: path(),
+            policy: path(),
+            model_endpoint: None,
+        };
+        let confined = RuntimeAdapter::Confined(Box::new(
+            crate::execution::confined_runtime::ConfinedRuntime::new(config, "answer").unwrap(),
+        ));
+        assert!(confined.authority().host_proves_settle);
     }
 
     fn bare_request() -> RuntimeRequest {
@@ -899,6 +944,15 @@ mod tests {
                 )
                 .contains(guard)
             );
+            assert!(
+                authority_error(
+                    &pi,
+                    &CommandBody::RequestVerification { quiescent: true },
+                    CommandOrigin::Operator
+                )
+                .contains(guard)
+            );
+            assert!(!pi.authority().host_proves_settle);
             pi.validate_admission(&CommandBody::StartPlanning, CommandOrigin::Operator)
                 .unwrap();
             assert!(pi.validate_command(&bare_request(), &json!({})).is_err());
