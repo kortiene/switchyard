@@ -405,15 +405,52 @@ impl ConfinedPiSession {
         result
     }
 
-    /// Reap the direct child and prove the recorded leaf empty. A second call
-    /// returns the recorded termination evidence and does not kill or rewrite it.
+    /// The session has already run `stop`. This is the in-process fact.
+    /// `termination.proven` is not: a later cancel re-proves when that flag
+    /// is false.
+    pub fn is_stopped(&self) -> bool {
+        self.stopped
+    }
+
+    /// Record an unproven stop without `rekill_and_prove`. The confinement
+    /// probe uses this so a later cancel in the same process has to re-prove.
+    /// `cfg(test)` is not set when that probe builds this crate.
+    #[cfg(feature = "test-fixtures")]
+    pub fn settle_unproven_for_test(&mut self) -> Result<()> {
+        if let Some((done, watchdog)) = self.watchdog.take() {
+            let _ = done.send(());
+            let _ = watchdog.join();
+        }
+        self.bridge.terminate();
+        self.proxy.take();
+        self.record["phase"] = json!("uncertain");
+        self.record["termination"] = json!({
+            "proven": false,
+            "reason": "nonempty",
+            "events": "",
+            "generation": self.binding().generation,
+            "cgroup": self.record["cgroup"]
+        });
+        self.control.write("current.json", &self.record)?;
+        self.stopped = true;
+        if let Some(mut supervisor) = self.launch_supervisor.take() {
+            let _ = supervisor.shutdown();
+        }
+        Ok(())
+    }
+
+    /// Reap the direct child and prove the recorded leaf empty.
+    ///
+    /// A second call keeps the recorded evidence when that proof is `proven`.
+    /// An unproven stop runs `rekill_and_prove` again. The fresh result
+    /// decides; the earlier flag does not.
     pub fn stop(&mut self) -> Result<Value> {
         if self.stopped {
-            let evidence = self.record["termination"].clone();
-            if evidence["proven"] != true {
-                return Err(Error::guard("confined bridge termination remains unproven"));
+            let recorded = self.record["termination"].clone();
+            if recorded["proven"] == true {
+                return Ok(recorded);
             }
-            return Ok(evidence);
+            return self.reprove_stopped_leaf();
         }
         if let Some((done, watchdog)) = self.watchdog.take() {
             let _ = done.send(());
@@ -452,6 +489,19 @@ impl ConfinedPiSession {
         if !proof.proven {
             return Err(Error::guard("confined bridge termination remains unproven"));
         }
+        Ok(evidence)
+    }
+
+    /// Fresh `rekill_and_prove` after an unproven stop in this process.
+    /// Returns the new evidence even when it is still unproven, so cancel can
+    /// refuse to confirm without treating the old flag as the decision.
+    fn reprove_stopped_leaf(&mut self) -> Result<Value> {
+        let proof = cgroup::rekill_and_prove(&self.leaf, Duration::from_secs(5))?;
+        self.record["phase"] = json!(if proof.proven { "stopped" } else { "uncertain" });
+        let evidence = json!({"proven":proof.proven,"reason":proof.reason,"events":proof.events,
+            "generation":self.binding().generation,"cgroup":self.record["cgroup"]});
+        self.record["termination"] = evidence.clone();
+        self.control.write("current.json", &self.record)?;
         Ok(evidence)
     }
 

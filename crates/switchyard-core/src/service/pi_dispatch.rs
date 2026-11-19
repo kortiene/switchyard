@@ -703,7 +703,16 @@ impl Host {
         }
         self.stop_confined_linux_writers(mission_id)?;
         self.reconcile_execution(mission_id)?;
-        self.confined_history(&mission)?;
+        // A stopped session cannot take another abort. `call` refuses it.
+        // The fresh `stop` proof decides confirm, not `termination.proven`.
+        let session_stopped = self
+            .confined_mut()?
+            .sessions
+            .get(&binding.session_id)
+            .is_some_and(|session| session.is_stopped());
+        if !session_stopped {
+            self.confined_history(&mission)?;
+        }
         let mut count = 0;
         for command in stops {
             let request = RuntimeRequest {
@@ -714,9 +723,17 @@ impl Host {
             };
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
-            let receipt = match self.confined_receipt(&request, &payload)? {
-                Some(r) => r,
-                None => self.confined_send(&request, &payload)?,
+            let receipt = if session_stopped {
+                RuntimeReceipt {
+                    receipt_id: request.request_id.clone(),
+                    request_id: request.request_id.clone(),
+                    payload_hash: request.payload_hash.clone(),
+                }
+            } else {
+                match self.confined_receipt(&request, &payload)? {
+                    Some(r) => r,
+                    None => self.confined_send(&request, &payload)?,
+                }
             };
             self.store
                 .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
@@ -737,6 +754,13 @@ impl Host {
             };
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+            if session_stopped {
+                self.store.supersede_pending(
+                    &command.id,
+                    "admission closed before runtime accepted this command",
+                )?;
+                continue;
+            }
             if let Some(receipt) = self.confined_receipt(&request, &payload)? {
                 self.store
                     .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
@@ -802,6 +826,20 @@ impl Host {
     /// The confinement probe uses this to dispatch a repair after settle
     /// without admitting cancel. `cfg(test)` is not set when that probe
     /// builds this crate.
+    #[cfg(feature = "test-fixtures")]
+    pub fn settle_unproven_bridge_for_test(&mut self, mission_id: &str) -> Result<Value> {
+        self.ensure_confined_session(mission_id)?;
+        let mission = self.store.load_mission(mission_id)?;
+        let session_id = mission.attempt.session_id;
+        let session = self
+            .confined_mut()?
+            .sessions
+            .get_mut(&session_id)
+            .ok_or(Error::NotFound)?;
+        session.settle_unproven_for_test()?;
+        Ok(session.lifecycle()["termination"].clone())
+    }
+
     #[cfg(feature = "test-fixtures")]
     pub fn stop_live_bridge_for_test(&mut self, mission_id: &str) -> Result<Value> {
         self.ensure_confined_session(mission_id)?;

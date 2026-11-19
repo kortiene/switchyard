@@ -7,9 +7,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use switchyard_core::{Host, Phase};
+use switchyard_core::{CommandBody, Host, Phase};
 
-use super::{World, bridge, linux};
+use super::{World, admit, bridge, linux};
 
 static OPERATOR_STOP: AtomicBool = AtomicBool::new(false);
 
@@ -180,6 +180,27 @@ fn unproven_writer_leaf_blocks_confirm_cancelled() {
         "{value}"
     );
     let _ = std::fs::remove_dir_all(&leaf);
+}
+
+/// An unproven stop leaves the session stopped in this process. Cancel must
+/// not abort that bridge. It re-proves, and `confirm_cancelled` is recorded
+/// only when that fresh proof is `proven`.
+#[test]
+fn unproven_settle_then_cancel_reproves_in_the_same_process() {
+    let (world, mut host) = World::new("process-hold");
+    host.dispatch_pending(&world.mission).unwrap();
+    let unproven = host
+        .settle_unproven_bridge_for_test(&world.mission)
+        .unwrap();
+    assert_eq!(unproven["proven"], false, "{unproven}");
+    admit(&mut host, &world.mission, CommandBody::Cancel);
+    host.dispatch_pending(&world.mission)
+        .expect("cancel must re-prove a stopped session instead of refusing the abort");
+    let settled = host.snapshot(&world.mission).unwrap();
+    assert_eq!(settled.phase, Phase::Cancelled);
+    let receipt = confirm_receipt(&world.db(), &world.mission);
+    assert_eq!(receipt["proven"], true, "{receipt}");
+    assert!(receipt["cgroup"].is_object(), "{receipt}");
 }
 
 #[test]
