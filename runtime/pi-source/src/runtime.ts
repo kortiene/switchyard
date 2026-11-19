@@ -191,10 +191,13 @@ export class Runtime {
         || state.attemptId !== this.binding.attemptId || state.source !== SOURCE || state.adapter !== ADAPTER)) throw new ProtocolError('binding_mismatch');
       if (state.sessionId && this.binding.generation <= state.generation) throw new ProtocolError('stale_generation');
       // Host generation only. Do not clear `pi.live.run`. startRun writes it
-      // (pi-durable generation.ts:1149 onto live.ts:194). Only endRun deletes
-      // live.run and live.generation (live.ts:290, :312, :314). A killed bridge
-      // never calls endRun, so the next submit stays ConversationBusy
-      // (submissions.ts:255, thrown at :265). The host records unsettled_turn.
+      // (generation.ts:1149 onto live.ts:194). Only endRun deletes live.run
+      // and live.generation (live.ts:290, :312, :314). A killed bridge never
+      // calls endRun. With a model endpoint the host admits unsettled_turn
+      // before replay, so a mid-stream kill is not re-sent (generation.ts:265,
+      // :494-534). With no endpoint, only a tool that is still open and has
+      // no receipt is unsettled_turn. A present run with no taskId is still
+      // reported as `pi.live.run`.
       Object.assign(state, this.binding);
     }, BACKGROUND_CONTEXT);
     this.root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: 'faux', modelId: 'faux-1' },
@@ -317,8 +320,7 @@ function liveRunName(run: unknown): string | null {
   if (run == null || typeof run !== 'object') return null;
   const taskId = (run as { taskId?: unknown }).taskId;
   if (typeof taskId === 'string' && taskId.length > 0) return taskId;
-  if (taskId != null) return 'pi.live.run';
-  return null;
+  return 'pi.live.run';
 }
 
 function observedStorageError(error: unknown, seen = new Set<unknown>()): boolean {

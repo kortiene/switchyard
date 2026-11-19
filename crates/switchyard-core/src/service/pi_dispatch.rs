@@ -287,19 +287,21 @@ impl Host {
         let Some(turn) = snapshot["liveRun"].as_str().filter(|turn| !turn.is_empty()) else {
             return Ok(());
         };
-        // `pi.live.run` survives SIGKILL because endRun never ran. Crash
-        // recovery still has to replay the admitted submission and finish a
-        // tool that already captured its receipt; flagging here blocks that
-        // and the mission never goes idle. The stuck case is a tool that is
-        // still entered, running, or uncertain and has no receipt: that run
-        // cannot finish, and the next submit would be protocol `busy`.
-        let stuck_tool = self.store.linux_views(mission_id)?.iter().any(|view| {
-            !view.superseded
-                && !view.receipt_retained
-                && matches!(view.state.as_str(), "entered" | "running" | "uncertain")
-        });
-        if !stuck_tool {
-            return Ok(());
+        // `pi.live.run` survives SIGKILL because endRun never ran. With a
+        // model endpoint, replay would re-send that request before any tool
+        // exists. Flag here, before replay. The way out is cancel, then
+        // `confirm_cancelled`. With no endpoint, keep the stuck-tool rule so
+        // a captured receipt can still be replayed.
+        let has_endpoint = self.confined_mut()?.config.model_endpoint.is_some();
+        if !has_endpoint {
+            let stuck_tool = self.store.linux_views(mission_id)?.iter().any(|view| {
+                !view.superseded
+                    && !view.receipt_retained
+                    && matches!(view.state.as_str(), "entered" | "running" | "uncertain")
+            });
+            if !stuck_tool {
+                return Ok(());
+            }
         }
         let mission = self.store.load_mission(mission_id)?;
         self.admit_unsettled_turn(&mission, turn)?;
@@ -609,8 +611,9 @@ impl Host {
             return Ok(count);
         }
         if matches!(mission.phase, Phase::Pausing | Phase::Cancelling) {
-            // The stop was not confirmed. Leave runtime work pending.
-            return Err(Error::SettleNotProven);
+            // The stop is already in progress. Leave runtime work pending.
+            // `mission recover` re-proves. This is not `settle_not_proven`.
+            return Ok(count);
         }
         self.ensure_confined_session(mission_id)?;
         if self.store.load_mission(mission_id)?.phase == Phase::NeedsAttention {
@@ -868,6 +871,11 @@ impl Host {
         // No frozen budget, or a prior generation with egress and no recorded
         // count, is allowance 0. Persist that generation's `modelEgress`
         // before the next open. Freeze `maxRetries` 0. No second counter.
+        // `Harness.open` must then pass `retry: { enabled: false, maxRetries: 0 }`,
+        // `stream.maxRetries: 0`, and `restartLimit: 0`. Not set in this slice:
+        // `restartLimit` 0 ends a crashed generation instead of replaying it,
+        // which the no-endpoint SIGKILL tests still require. The product wait
+        // must not treat an unanswered or failed run as complete.
         let mut lifecycle = self
             .confined_mut()?
             .sessions

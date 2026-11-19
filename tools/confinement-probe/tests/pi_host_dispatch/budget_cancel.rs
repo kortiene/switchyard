@@ -234,8 +234,8 @@ fn unproven_reproof_leaves_cancel_pending() {
     assert_eq!(unproven["proven"], false, "{unproven}");
     host.miss_bridge_leaf_for_test(&world.mission).unwrap();
     admit(&mut host, &world.mission, CommandBody::Cancel);
-    let error = host.dispatch_pending(&world.mission).unwrap_err();
-    assert_eq!(error.category(), "settle_not_proven", "{error}");
+    host.dispatch_pending(&world.mission)
+        .expect("an unproven stop stays pending; recover re-proves");
     let settled = host.snapshot(&world.mission).unwrap();
     assert_eq!(settled.phase, Phase::Cancelling);
     let value = settled.to_json();

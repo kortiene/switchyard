@@ -120,6 +120,9 @@ mod tests {
         assert!(!production_host_fixture("busy-once"));
         assert!(host_fixture_allowed("busy-once", true));
         assert!(!host_fixture_allowed("busy-once", false));
+        assert!(!production_host_fixture("slow-stream"));
+        assert!(host_fixture_allowed("slow-stream", true));
+        assert!(!host_fixture_allowed("slow-stream", false));
         for fixture in ["s3-acceptance", "busy-once"] {
             let runtime = if fixture == "busy-once" {
                 ConfinedRuntime::new_for_harness(config.clone(), fixture).unwrap()

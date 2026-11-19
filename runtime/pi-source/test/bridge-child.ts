@@ -6,6 +6,7 @@ import { defineDoc, defineTool, type ToolRegistration } from '@earendil-works/pi
 import type { SqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite';
 import { awaitWithContext } from '@earendil-works/chord/context';
 import { appendFileSync, existsSync, writeSync } from 'node:fs';
+import { createConnection } from 'node:net';
 import { forwarders } from '../src/forwarders.ts';
 import { ProtocolError, type Binding } from '../src/protocol.ts';
 import { Runtime } from '../src/runtime.ts';
@@ -16,7 +17,7 @@ if (!database || !bindingJson || !['answer', 'file-write', 'process-fast', 'proc
   'crash-after-abort-recorded', 'crash-after-abort-settled', 'hold-abort', 'ignore-abort', 'cooperative-wait',
   'storage-submit', 'storage-abort-intent', 'storage-abort-cancel', 'storage-abort-settlement', 'storage-background', 'storage-close',
   'storage-background-hang', 'gated-tools',
-  'busy-once', 'stopping-once', 'mismatch'].includes(mode)) throw new Error('Invalid launcher arguments');
+  'busy-once', 'stopping-once', 'mismatch', 'slow-stream'].includes(mode)) throw new Error('Invalid launcher arguments');
 const binding = JSON.parse(bindingJson) as Binding;
 const faux = fauxProvider();
 const waitingTool = () => fauxAssistantMessage([fauxToolCall('uncooperative', {})], { stopReason: 'toolUse' });
@@ -69,7 +70,24 @@ const responses: FauxResponseStep[] = mode === 'cooperative-wait' ? Array.from({
 ] : [fauxAssistantMessage('done')];
 // The faux queue is process-local. Choose a script step from the durable
 // transcript so reopen cannot issue a second fresh start/write after replay.
-if (['file-write', 'tools', 's3-acceptance', 'process-fast', 'process-wait', 'process-hold', 'process-cancel'].includes(mode)) {
+function holdModelStream(): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    const socket = createConnection('/model-proxy/endpoint.sock');
+    socket.on('error', error => {
+      socket.destroy();
+      reject(error);
+    });
+    socket.on('connect', () => {
+      socket.write('POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\n{}');
+    });
+    // The first body byte means the stream has started. Stay there. No tool
+    // call is returned, so a replay is another connection to the stub.
+    socket.on('data', () => {});
+  });
+}
+if (mode === 'slow-stream') {
+  faux.setResponses([() => holdModelStream().then(() => fauxAssistantMessage('done'))]);
+} else if (['file-write', 'tools', 's3-acceptance', 'process-fast', 'process-wait', 'process-hold', 'process-cancel'].includes(mode)) {
   const response: FauxResponseFactory = (context, options, state, model) => {
     const completedTurns = context.messages.filter(message =>
       message.role === 'assistant' && message.stopReason === 'toolUse').length;

@@ -20,10 +20,10 @@ pub use runtime::{
 
 pub(crate) use adapter::{RecoveryProfile, RuntimeAdapter, ToolEffect};
 
-/// Stop-admission fixture. It is not on a production allowlist.
+/// Fixtures that are not on a production allowlist.
 #[cfg(feature = "pi-contract")]
 pub(crate) fn is_busy_once_fixture(fixture: &str) -> bool {
-    fixture == "busy-once"
+    fixture == "busy-once" || fixture == "slow-stream"
 }
 #[cfg(feature = "pi-contract")]
 pub(crate) use pi_runtime::{AcknowledgedCheck, PiRuntime};
