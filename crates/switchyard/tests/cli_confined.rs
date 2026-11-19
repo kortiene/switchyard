@@ -261,12 +261,12 @@ fn run_without_prerequisites(repo: &Path, db: &Path, endpoint: &str) -> std::pro
         .unwrap()
 }
 
-fn guard_message(output: &std::process::Output) -> String {
+fn error_message(output: &std::process::Output, category: &str) -> String {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
     let stderr: Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(stderr["ok"], false);
-    assert_eq!(stderr["error"]["category"], "guard_failed");
+    assert_eq!(stderr["error"]["category"], category, "{stderr}");
     stderr["error"]["message"].as_str().unwrap().to_string()
 }
 
@@ -277,8 +277,8 @@ fn model_endpoint_flag_fails_closed_on_https_loopback() {
     let db = tmp.path().join("mission.sqlite");
     init_repo(&repo);
     let output = run_without_prerequisites(&repo, &db, "https://127.0.0.1/v1");
-    let message = guard_message(&output);
-    assert_eq!(message.matches("guard failed").count(), 1, "{message}");
+    let message = error_message(&output, "model_endpoint_not_allowed");
+    assert!(!message.contains("guard failed"), "{message}");
     assert!(message.contains("TLS client"), "{message}");
     assert!(!message.contains("https://127.0.0.1"), "{message}");
     assert!(!message.contains("SWITCHYARD_MODEL_ENDPOINT"), "{message}");
@@ -301,7 +301,7 @@ fn model_endpoint_loopback_literals_pass_parse_before_path_prerequisites() {
         let db = tmp.path().join("mission.sqlite");
         init_repo(&repo);
         let output = run_without_prerequisites(&repo, &db, endpoint);
-        let message = guard_message(&output);
+        let message = error_message(&output, "guard_failed");
         assert!(
             message.contains("SWITCHYARD_PI_RUNTIME"),
             "{endpoint}: {message}"
@@ -370,6 +370,7 @@ fn model_endpoint_reopen_refuses_a_different_value_and_accepts_the_original() {
         })
         .unwrap();
     let config: Value = serde_json::from_str(&config).unwrap();
+    assert_eq!(config["fixture"], "product");
     assert_eq!(config["network"]["mode"], "model-endpoint");
     assert_eq!(config["network"]["url"], endpoint);
     assert_eq!(config["network"]["pinned"], "127.0.0.1:8000");
@@ -395,6 +396,8 @@ fn model_endpoint_reopen_refuses_a_different_value_and_accepts_the_original() {
     let message = error["error"]["message"].as_str().unwrap();
     assert_eq!(error["error"]["category"], "guard_failed");
     assert!(message.contains("network"), "{message}");
+    assert!(message.contains("frozen"), "{message}");
+    assert!(message.contains("supplied"), "{message}");
     assert!(message.contains("no adapter replacement"), "{message}");
     let (code, status, error) = run(&["mission", "status", "--db", db_arg, "--mission", mission]);
     assert_eq!(code, 0, "{error}");

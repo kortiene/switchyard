@@ -41,6 +41,10 @@ pub struct RuntimeRequest {
     pub request_id: String,
     pub payload_hash: String,
     pub method: &'static str,
+    /// Canonical `switchyard.work-brief.v1` bytes for the three model commands.
+    /// Absent for every other method, and absent when the freeze or plan is
+    /// not available yet. Not part of the command payload.
+    pub work_brief: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

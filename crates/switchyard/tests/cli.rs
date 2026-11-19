@@ -1227,10 +1227,10 @@ fn assert_model_endpoint_guard(output: &std::process::Output, db: &Path, needle:
     assert!(output.stdout.is_empty(), "{output:?}");
     let stderr: Value = serde_json::from_slice(&output.stderr).expect("stderr is JSON");
     assert_eq!(stderr["ok"], false);
-    assert_eq!(stderr["error"]["category"], "guard_failed");
+    assert_eq!(stderr["error"]["category"], "model_endpoint_not_allowed");
     let message = stderr["error"]["message"].as_str().unwrap().to_string();
     assert!(message.contains(needle), "{message}");
-    assert_eq!(message.matches("guard failed").count(), 1, "{message}");
+    assert!(!message.contains("guard failed"), "{message}");
     assert!(!db.exists(), "{message}");
     assert!(!owner_lock(db).exists(), "{message}");
     message
@@ -1305,6 +1305,130 @@ fn model_endpoint_flag_without_confined_pi_is_refused_before_any_database() {
         assert!(!message.contains("sk-do-not-echo"), "{message}");
         assert!(!message.contains("127.0.0.1"), "{message}");
         assert!(!message.contains(secret), "{message}");
+    }
+}
+
+#[test]
+fn model_address_is_refused_for_every_value_and_runtime_before_any_database() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+    let repo_arg = repo.to_str().unwrap();
+    let cases = [
+        ("omitted.sqlite", None, "http://127.0.0.1:9"),
+        ("fake.sqlite", Some("fake"), "localhost"),
+        ("confined.sqlite", Some("confined-pi"), "127.0.0.1"),
+        ("public.sqlite", Some("fake"), "8.8.8.8"),
+        ("empty.sqlite", Some("confined-pi"), ""),
+    ];
+    for (name, runtime, address) in cases {
+        let db = tmp.path().join(name);
+        let mut args = vec!["mission".to_string(), "create".to_string()];
+        if let Some(runtime) = runtime {
+            args.extend(["--runtime".into(), runtime.into()]);
+        }
+        args.extend([
+            "--model-address".into(),
+            address.into(),
+            "--db".into(),
+            db.to_str().unwrap().into(),
+            "--repo".into(),
+            repo_arg.into(),
+            "--issue".into(),
+            "217".into(),
+            "--objective".into(),
+            "refuse the address".into(),
+            "--acceptance".into(),
+            "no database".into(),
+        ]);
+        let output = model_endpoint_output(&args.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(output.status.code(), Some(2), "{address} {output:?}");
+        assert!(output.stdout.is_empty(), "{address} {output:?}");
+        let stderr: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(stderr["ok"], false);
+        assert_eq!(
+            stderr["error"]["category"], "model_address_not_allowed",
+            "{address} {stderr}"
+        );
+        let message = stderr["error"]["message"].as_str().unwrap();
+        assert!(message.contains("omit --model-address"), "{message}");
+        if !address.is_empty() {
+            assert!(!message.contains(address), "{address}: {message}");
+        }
+        assert!(!message.contains("127.0.0.1"), "{message}");
+        assert!(!message.contains("localhost"), "{message}");
+        assert!(!message.contains("8.8.8.8"), "{message}");
+        assert!(!db.exists(), "{address}");
+        assert!(!owner_lock(&db).exists(), "{address}");
+    }
+}
+
+#[test]
+fn model_endpoint_https_is_refused_in_the_ungated_cli_suite() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+    let db = tmp.path().join("https.sqlite");
+    let endpoint = "https://127.0.0.1/v1";
+    let output = model_endpoint_output(&[
+        "mission",
+        "create",
+        "--runtime",
+        "confined-pi",
+        "--model-endpoint",
+        endpoint,
+        "--db",
+        db.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "217",
+        "--objective",
+        "https is not the splice",
+        "--acceptance",
+        "no database",
+    ]);
+    let message = assert_model_endpoint_guard(
+        &output,
+        &db,
+        "HTTPS model endpoints require a TLS client; only credential-free HTTP routes are supported",
+    );
+    assert!(!message.contains(endpoint), "{message}");
+    assert!(!message.contains("127.0.0.1"), "{message}");
+}
+
+#[test]
+fn model_endpoint_invalid_port_is_a_parse_refusal_without_a_database() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+    for endpoint in ["http://127.0.0.1:99999/v1", "http://[::1]:0/v1"] {
+        let db = tmp.path().join(format!("{}.sqlite", endpoint.len()));
+        let output = model_endpoint_output(&[
+            "mission",
+            "create",
+            "--runtime",
+            "confined-pi",
+            "--model-endpoint",
+            endpoint,
+            "--db",
+            db.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--issue",
+            "217",
+            "--objective",
+            "bad port",
+            "--acceptance",
+            "no database",
+        ]);
+        let message = assert_model_endpoint_guard(
+            &output,
+            &db,
+            "model endpoint must be one http URL without credentials",
+        );
+        assert!(!message.contains(endpoint), "{endpoint}: {message}");
+        assert!(!message.contains("99999"), "{message}");
     }
 }
 

@@ -27,13 +27,19 @@ pub(crate) struct Cli {
     /// runtime is refused before the host opens. Omitted keeps egress denied.
     ///
     /// The host must be a loopback IP literal (`127.0.0.0/8` or `::1`), with
-    /// or without a port. Hostnames, including `localhost`, are refused with
-    /// no DNS lookup. The same value is required for the mission's lifetime;
-    /// a mismatch is refused, and re-supplying the original value is the way
-    /// out. The URL, including its path, is stored in the mission database
-    /// and the launch record and must not carry a key.
+    /// or without a port, and the scheme must be `http`. Hostnames, including
+    /// `localhost`, and `https` are refused with no DNS lookup. The same value
+    /// is required for the mission's lifetime; a mismatch is refused, and
+    /// re-supplying the original value is the way out. The URL, including its
+    /// path, is stored in the mission database and the launch record and must
+    /// not carry a key. When this flag is set, the confined runtime uses the
+    /// `product` fixture. Omitting it keeps `s3-acceptance`.
     #[arg(long, global = true, value_name = "URL")]
     pub(crate) model_endpoint: Option<String>,
+    /// Refused for every value and every runtime, before the host opens.
+    /// The value is not parsed, resolved, or echoed. Omit the flag.
+    #[arg(long, global = true, value_name = "ADDRESS")]
+    pub(crate) model_address: Option<String>,
     #[command(subcommand)]
     pub(crate) command: Command,
 }
@@ -42,8 +48,8 @@ pub(crate) struct Cli {
 pub(crate) enum RuntimeSelection {
     /// FakeRuntime. Product default when `--runtime` is omitted.
     Fake,
-    /// Credential-free confined Pi runtime. Runs the composed `s3-acceptance`
-    /// scenario. A model endpoint is selected only by `--model-endpoint`.
+    /// Credential-free confined Pi runtime. With no `--model-endpoint`, runs
+    /// the composed `s3-acceptance` scenario. With that flag, runs `product`.
     #[value(name = "confined-pi")]
     ConfinedPi,
 }

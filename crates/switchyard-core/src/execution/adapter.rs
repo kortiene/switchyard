@@ -828,6 +828,7 @@ mod tests {
             request_id: "a:c".into(),
             payload_hash: "not-a-real-hash".into(),
             method: "submit",
+            work_brief: None,
         }
     }
 

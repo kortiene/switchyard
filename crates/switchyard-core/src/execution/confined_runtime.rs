@@ -88,6 +88,7 @@ pub(crate) fn production_host_fixture(fixture: &str) -> bool {
             | "process-cancel"
             | "tools"
             | "s3-acceptance"
+            | "product"
             | "ignore-abort"
     )
 }
@@ -117,6 +118,7 @@ mod tests {
             policy: path(),
             model_endpoint: None,
         };
+        assert!(production_host_fixture("product"));
         assert!(!production_host_fixture("busy-once"));
         assert!(host_fixture_allowed("busy-once", true));
         assert!(!host_fixture_allowed("busy-once", false));

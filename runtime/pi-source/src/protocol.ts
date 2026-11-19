@@ -10,7 +10,7 @@ export const DEADLINE_MS: number = pins.bridge.deadlineMs;
 export const CAPABILITIES: string[] = pins.bridge.capabilities;
 export const SOURCE: string = pins.commit;
 export const ADAPTER = hash(['protocol.ts', 'transport.ts', 'runtime.ts', 'forwarders.ts',
-  '../test/bridge-child.ts', '../pins.json', '../package-lock.json']
+  '../test/bridge-child.ts', '../pins.json', '../package-lock.json', 'product-child.ts']
   .map(path => readFileSync(new URL(path, import.meta.url), 'utf8')));
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export type Binding = { missionId: string; attemptId: string; sessionId: string; generation: number };

@@ -53,6 +53,7 @@ fn redelivery_with_a_different_payload_conflicts_and_keeps_the_command() {
             request_id: admitted.request_id.clone(),
             payload_hash: "sha256:different".into(),
             method: "submit",
+            work_brief: None,
         })
         .unwrap();
     drop(external);

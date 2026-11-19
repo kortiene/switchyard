@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 
 pub(crate) const ATTEMPT_FREEZE_SCHEMA: &str = "switchyard.attempt-freeze.v1";
 pub(crate) const PLAN_DIGEST_SCHEMA: &str = "switchyard.plan-digest.v1";
+pub(crate) const WORK_BRIEF_SCHEMA: &str = "switchyard.work-brief.v1";
 
 /// Canonical frozen-input document for one attempt.
 ///
@@ -137,6 +138,111 @@ fn sandbox_policy(environment_json: &str, policy_json: &str) -> Result<Value> {
         "environment": environment,
         "policy": policy,
     }))
+}
+
+/// Model input for `approve_plan`, `authorize_bounded_repair`, and
+/// `request_changes`. RFC 8785 JSON. Built only from the stored freeze and
+/// the approved plan. `writeScope` is the frozen sandbox policy.
+/// `repairFeedback` is omitted unless the command carries feedback.
+pub(crate) fn work_brief(
+    frozen_inputs_json: &str,
+    plan: &str,
+    repair_feedback: Option<&str>,
+) -> Result<String> {
+    let frozen: Value = serde_json::from_str(frozen_inputs_json)
+        .map_err(|_| Error::guard("frozen inputs are not valid JSON"))?;
+    if frozen.get("schema").and_then(Value::as_str) != Some(ATTEMPT_FREEZE_SCHEMA) {
+        return Err(Error::guard("frozen inputs are not an attempt freeze"));
+    }
+    let objective = text_field(&frozen, "objective")?;
+    let acceptance = text_field(&frozen, "acceptanceCriteria")?;
+    let write_scope = frozen
+        .get("sandboxPolicy")
+        .cloned()
+        .filter(|value| value.is_object())
+        .ok_or_else(|| Error::guard("frozen inputs have no write scope"))?;
+    let verifier = frozen
+        .get("verifier")
+        .cloned()
+        .filter(|value| value.is_object())
+        .ok_or_else(|| Error::guard("frozen inputs have no verifier"))?;
+    require_text(plan, "plan")?;
+    let mut document = json!({
+        "acceptanceCriteria": acceptance,
+        "objective": objective,
+        "plan": plan,
+        "schema": WORK_BRIEF_SCHEMA,
+        "verifier": verifier,
+        "writeScope": write_scope,
+    });
+    if let Some(feedback) = repair_feedback {
+        require_text(feedback, "repair feedback")?;
+        document
+            .as_object_mut()
+            .expect("work brief is an object")
+            .insert("repairFeedback".into(), json!(feedback));
+    }
+    canonicalize(&document)
+}
+
+/// `Some` when this command's model input is the work brief and the freeze
+/// plus the approved plan are both present. `None` leaves admission free to
+/// report a missing freeze or an empty repair note.
+pub(crate) fn optional_work_brief(
+    mission: &MissionRecord,
+    payload: &Value,
+) -> Result<Option<String>> {
+    let kind = payload.get("kind").and_then(Value::as_str);
+    let feedback = match kind {
+        Some("approve_plan") => None,
+        Some("authorize_bounded_repair") => match payload.pointer("/body/rationale") {
+            Some(Value::String(text)) if !text.trim().is_empty() => Some(text.as_str()),
+            _ => return Ok(None),
+        },
+        Some("request_changes") => match payload.pointer("/body/feedback") {
+            Some(Value::String(text)) if !text.trim().is_empty() => Some(text.as_str()),
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let (Some(frozen), Some(plan)) = (
+        mission.attempt.frozen_inputs_json.as_deref(),
+        mission.plan_body.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(work_brief(frozen, plan, feedback)?))
+}
+
+#[cfg(any(test, feature = "pi-contract"))]
+pub(crate) fn command_uses_work_brief(payload: &Value) -> bool {
+    matches!(
+        payload.get("kind").and_then(Value::as_str),
+        Some("approve_plan" | "authorize_bounded_repair" | "request_changes")
+    )
+}
+
+/// Wire params for a work-brief submission. `hostCommand` stays the command
+/// payload and its hash. `content` is the brief bytes.
+#[cfg(any(test, feature = "pi-contract"))]
+pub(crate) fn work_brief_model_params(payload: &Value, payload_hash: &str, brief: &str) -> Value {
+    json!({
+        "type": "input",
+        "content": brief,
+        "hostCommand": {
+            "payload": payload,
+            "payloadHash": payload_hash,
+        },
+    })
+}
+
+fn text_field(document: &Value, key: &str) -> Result<String> {
+    let text = document
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::guard(format!("frozen inputs are missing {key}")))?;
+    require_text(text, key)?;
+    Ok(text.to_string())
 }
 
 pub(crate) fn parse_object(raw: &str, label: &str) -> Result<Value> {
@@ -276,5 +382,51 @@ mod tests {
                 .is_none()
         );
         assert!(document["sandboxPolicy"].get("host").is_none());
+    }
+
+    #[test]
+    fn work_brief_replay_sends_identical_bytes_and_keeps_host_command() {
+        let frozen = frozen_canonical(&mission()).unwrap();
+        let plan = "do the work";
+        let first = work_brief(&frozen, plan, None).unwrap();
+        let second = work_brief(&frozen, plan, None).unwrap();
+        assert_eq!(first.as_bytes(), second.as_bytes());
+        assert_eq!(
+            first,
+            r#"{"acceptanceCriteria":"Inputs stay put","objective":"Ship the freeze","plan":"do the work","schema":"switchyard.work-brief.v1","verifier":{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"},"writeScope":{"environment":{"confinement":"deferred_to_s3","host":"single"},"policy":{"credentials":"none","planningTools":"read-only"}}}"#
+        );
+        assert!(!first.contains("baseSha"), "{first}");
+        assert!(!first.contains("issueSnapshot"), "{first}");
+        assert!(!first.contains("runtimeConfig"), "{first}");
+        assert!(!first.contains("planDigest"), "{first}");
+        assert!(!first.contains("repairFeedback"), "{first}");
+        let repaired = work_brief(&frozen, plan, Some("try again")).unwrap();
+        let repaired_again = work_brief(&frozen, plan, Some("try again")).unwrap();
+        assert_eq!(repaired.as_bytes(), repaired_again.as_bytes());
+        assert!(
+            repaired.contains(r#""repairFeedback":"try again""#),
+            "{repaired}"
+        );
+        assert_ne!(repaired.as_bytes(), first.as_bytes());
+
+        let payload = json!({
+            "kind": "approve_plan",
+            "missionId": "m-test",
+            "attemptId": "a-test",
+            "body": {"planDigest": "sha256:plan"},
+        });
+        let hash = payload_hash(&payload).unwrap();
+        let params = work_brief_model_params(&payload, &hash, &first);
+        let replay = work_brief_model_params(&payload, &hash, &second);
+        assert_eq!(
+            canonicalize(&params).unwrap().as_bytes(),
+            canonicalize(&replay).unwrap().as_bytes()
+        );
+        assert_eq!(params["content"], first);
+        assert_eq!(params["hostCommand"]["payload"], payload);
+        assert_eq!(params["hostCommand"]["payloadHash"], hash);
+        assert_ne!(params["content"], canonicalize(&payload).unwrap());
+        assert!(command_uses_work_brief(&payload));
+        assert!(!command_uses_work_brief(&json!({"kind": "start_planning"})));
     }
 }

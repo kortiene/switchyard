@@ -105,7 +105,8 @@ pub fn adapter_fingerprint() -> String {
         include_str!("../../../../runtime/pi-source/src/forwarders.ts"),
         include_str!("../../../../runtime/pi-source/test/bridge-child.ts"),
         include_str!("../../../../runtime/pi-source/pins.json"),
-        include_str!("../../../../runtime/pi-source/package-lock.json")
+        include_str!("../../../../runtime/pi-source/package-lock.json"),
+        include_str!("../../../../runtime/pi-source/src/product-child.ts")
     ]))
     .expect("fingerprint contains only strings")
 }

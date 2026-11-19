@@ -1860,6 +1860,8 @@ fn simulated_no_row_error_is_transient(error: &Error) -> bool {
         | Error::OperatorWriteUnavailable
         | Error::OperatorWritePhaseClosed { .. }
         | Error::ExportTargetExists
+        | Error::ModelEndpointNotAllowed { .. }
+        | Error::ModelAddressNotAllowed
         | Error::AdmissionRejected { .. }
         | Error::GuardFailed { .. }
         | Error::UnknownNotification { .. }

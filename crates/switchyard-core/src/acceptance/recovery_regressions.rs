@@ -210,6 +210,7 @@ fn explicit_recovery_reuses_pending_request_with_or_without_lost_ack() {
                         request_id: start.request_id.clone(),
                         payload_hash: start.payload_hash.clone(),
                         method: "submit",
+                        work_brief: None,
                     })
                     .unwrap(),
             )
@@ -294,6 +295,7 @@ fn reconciling_lost_start_ack_keeps_its_pending_abort() {
             request_id: start.request_id,
             payload_hash: start.payload_hash,
             method: "submit",
+            work_brief: None,
         })
         .unwrap();
     drop(runtime);

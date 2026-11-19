@@ -233,6 +233,7 @@ impl PiRuntime {
         request: &RuntimeRequest,
         payload: &Value,
     ) -> Result<Option<RuntimeReceipt>> {
+        require_work_brief_for_send(request, payload)?;
         Self::validate_command(request, payload)?;
         let (method, params) = mapped(request, payload)?;
         let snapshot = self.inspect_ids(request, &[request.request_id.as_str()])?;
@@ -265,6 +266,7 @@ impl PiRuntime {
                 return Err(Error::guard("Pi acknowledgement batch repeats a command"));
             }
             seen.push(check.request.request_id.as_str());
+            require_work_brief_for_send(&check.request, &check.payload)?;
             Self::validate_command(&check.request, &check.payload)?;
         }
         let mut rows = BTreeMap::<String, Value>::new();
@@ -323,6 +325,7 @@ impl PiRuntime {
         request: &RuntimeRequest,
         payload: &Value,
     ) -> Result<RuntimeReceipt> {
+        require_work_brief_for_send(request, payload)?;
         Self::validate_command(request, payload)?;
         let (method, params) = mapped(request, payload)?;
         let wire_hash = payload_hash(&json!({"method":method,"params":params}))?;
@@ -431,6 +434,20 @@ fn no_effects(_: &Value) -> Result<Value> {
     ))
 }
 
+/// A model command must not be sent or reconciled as the raw payload.
+/// Admission may still measure that frame when the freeze is not ready.
+pub(crate) fn require_work_brief_for_send(request: &RuntimeRequest, payload: &Value) -> Result<()> {
+    if request.method == "submit"
+        && crate::freeze::command_uses_work_brief(payload)
+        && request.work_brief.is_none()
+    {
+        return Err(Error::guard(
+            "work brief requires frozen inputs and the approved plan",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn mapped(request: &RuntimeRequest, payload: &Value) -> Result<(&'static str, Value)> {
     let kind = payload["kind"]
         .as_str()
@@ -444,13 +461,21 @@ pub(crate) fn mapped(request: &RuntimeRequest, payload: &Value) -> Result<(&'sta
                 .ok_or_else(|| Error::guard("missing steering content"))?;
             json!({"type":"input","content":content})
         }
-        "start_planning"
-        | "request_revised_plan"
-        | "approve_plan"
-        | "authorize_bounded_repair"
-        | "request_changes"
+        "start_planning" | "request_revised_plan" if request.method == "submit" => {
+            json!({"type":"input","content":canonicalize(payload)?})
+        }
+        "approve_plan" | "authorize_bounded_repair" | "request_changes"
             if request.method == "submit" =>
         {
+            if let Some(brief) = request.work_brief.as_deref() {
+                // hostCommand stays the command payload. content is the brief.
+                return Ok((
+                    "runtime.submit",
+                    crate::freeze::work_brief_model_params(payload, &request.payload_hash, brief),
+                ));
+            }
+            // Admission measures the frame before a missing freeze is reported.
+            // A send without the brief is refused before this fallback is used.
             json!({"type":"input","content":canonicalize(payload)?})
         }
         _ => return Err(Error::guard("command has no S2-A runtime mapping")),

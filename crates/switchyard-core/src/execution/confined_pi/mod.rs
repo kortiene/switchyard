@@ -103,6 +103,11 @@ impl ConfinedPiSession {
         test_fixtures: bool,
     ) -> Result<Self> {
         validate_fixture(&binding, fixture, test_fixtures || cfg!(test))?;
+        if fixture == "product" && config.model_endpoint.is_none() {
+            return Err(Error::guard(
+                "product fixture requires one loopback model endpoint",
+            ));
+        }
         let root = Directory::root(&config.root)?;
         let key = payload_hash(&identity(&binding))?;
         let control = root.child(&format!("session-{key}"))?;
@@ -192,6 +197,7 @@ impl ConfinedPiSession {
             &state.path,
             proxy.as_ref().map(|proxy| proxy.directory()),
             &installed,
+            fixture,
         )?;
         let leaf = retention::allocate(&control, &cgroup_root, &binding)?;
         let mut record = json!({"version":1,"identity":identity(&binding),"generation":binding.generation,
@@ -505,6 +511,7 @@ fn production_session_fixture(fixture: &str) -> bool {
             | "process-cancel"
             | "tools"
             | "s3-acceptance"
+            | "product"
     )
 }
 
