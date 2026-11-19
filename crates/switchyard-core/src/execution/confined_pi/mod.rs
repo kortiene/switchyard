@@ -439,17 +439,21 @@ impl ConfinedPiSession {
         Ok(())
     }
 
+    /// The next `stop` re-proof cannot see this leaf, so it stays unproven.
+    #[cfg(feature = "test-fixtures")]
+    pub fn miss_leaf_for_test(&mut self) {
+        self.leaf.path = std::path::PathBuf::from("/tmp/switchyard-missing-bridge-leaf");
+        self.leaf.dev = 0;
+        self.leaf.ino = 0;
+        self.leaf.boot_id = "missing".into();
+    }
+
     /// Reap the direct child and prove the recorded leaf empty.
     ///
-    /// A second call keeps the recorded evidence when that proof is `proven`.
-    /// An unproven stop runs `rekill_and_prove` again. The fresh result
-    /// decides; the earlier flag does not.
+    /// A later call always runs `rekill_and_prove` again. The fresh result
+    /// decides; a stored `proven` flag is not reused.
     pub fn stop(&mut self) -> Result<Value> {
         if self.stopped {
-            let recorded = self.record["termination"].clone();
-            if recorded["proven"] == true {
-                return Ok(recorded);
-            }
             return self.reprove_stopped_leaf();
         }
         if let Some((done, watchdog)) = self.watchdog.take() {

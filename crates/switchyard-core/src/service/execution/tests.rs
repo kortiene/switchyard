@@ -1864,6 +1864,7 @@ fn simulated_no_row_error_is_transient(error: &Error) -> bool {
         | Error::OperatorWritePhaseClosed { .. }
         | Error::ExportTargetExists
         | Error::AdmissionRejected { .. }
+        | Error::BridgeBusy
         | Error::GuardFailed { .. }
         | Error::UnknownNotification { .. }
         | Error::NotFound

@@ -629,7 +629,7 @@ fn open_confined(
             probe_request: None,
             fail_launch: false,
         },
-        confined_fixture().as_str(),
+        confined_fixture()?.as_str(),
     )
 }
 
@@ -641,7 +641,12 @@ fn open_confined(
     feature = "linux-execution",
     target_os = "linux"
 ))]
-fn confined_fixture() -> String {
+fn confined_fixture() -> switchyard_core::Result<String> {
+    if std::env::var("SWITCHYARD_CONFINED_FIXTURE").ok().as_deref() == Some("ignore-abort") {
+        return Err(switchyard_core::Error::guard(
+            "SWITCHYARD_CONFINED_FIXTURE=ignore-abort is not a CLI fixture",
+        ));
+    }
     match std::env::var("SWITCHYARD_CONFINED_FIXTURE") {
         Ok(value)
             if matches!(
@@ -653,12 +658,11 @@ fn confined_fixture() -> String {
                     | "process-cancel"
                     | "tools"
                     | "s3-acceptance"
-                    | "ignore-abort"
             ) =>
         {
-            value
+            Ok(value)
         }
-        _ => "s3-acceptance".into(),
+        _ => Ok("s3-acceptance".into()),
     }
 }
 

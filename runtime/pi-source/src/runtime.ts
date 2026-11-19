@@ -11,6 +11,13 @@ import { ADAPTER, canonical, CAPABILITIES, DEADLINE_MS, hash, MAX_FRAME, MAX_PEN
 const Session = defineDoc({ kind: 'switchyard.bridge.session', scope: 'session', version: 1,
   initial: () => ({ missionId: '', attemptId: '', sessionId: '', generation: 0, source: SOURCE, adapter: ADAPTER, stopCommand: '' }),
   checkpointWhen: () => true });
+// Read-only view of pi-durable's live document (LiveDoc: kind pi.live,
+// version 3, conversation scope, history latest, fork initial). `run` is set
+// by startRun and cleared only by endRun. checkpointWhen stays false so a
+// snapshot never writes or deletes `run`.
+const PiLive = defineDoc({ kind: 'pi.live', scope: 'conversation', version: 3, history: 'latest', fork: 'initial',
+  initial: () => ({}),
+  checkpointWhen: () => false });
 const Command = defineDocFamily({ kind: 'switchyard.bridge.command', scope: 'session', version: 1, family: true,
   initial: (_seed: null) => ({ hash: '', method: '', receipt: '', settled: false as boolean }), checkpointWhen: () => true });
 
@@ -298,13 +305,23 @@ export class Runtime {
     }
     const inspection = await this.harness!.inspect(BACKGROUND_CONTEXT);
     const state = await this.harness!.snapshot(Session, BACKGROUND_CONTEXT);
-    // `scheduling === "busy"` is pi-durable treating the conversation as busy
-    // while `pi.live.run` is set. This read does not delete that field.
+    const live = await this.harness!.snapshot(PiLive, this.root!.id, BACKGROUND_CONTEXT);
     return { source: SOURCE, scheduling: inspection.scheduling, commands, stopping: !!state?.stopCommand,
       runtimeIdle: inspection.tasks.length === 0, liveTaskCount: inspection.tasks.length,
       unsettledSubmissionCount: inspection.submissions.length,
-      liveRun: inspection.scheduling === 'busy' };
+      liveRun: liveRunName((live as { run?: unknown } | undefined)?.run) };
   }
+}
+
+function liveRunName(run: unknown): string | null {
+  if (run == null) return null;
+  if (typeof run === 'string' && run.length > 0) return run;
+  if (typeof run === 'object') {
+    const id = (run as { id?: unknown }).id;
+    if (typeof id === 'string' && id.length > 0) return id;
+    return 'pi.live.run';
+  }
+  return 'pi.live.run';
 }
 
 function observedStorageError(error: unknown, seen = new Set<unknown>()): boolean {

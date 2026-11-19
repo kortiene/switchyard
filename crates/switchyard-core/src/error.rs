@@ -163,6 +163,11 @@ pub enum Error {
     #[error("admission rejected: {category}")]
     AdmissionRejected { category: String },
 
+    /// Pi protocol category `busy`. The conversation still has `pi.live.run`.
+    /// Retryable for a live generation. A dead generation becomes `unsettled_turn`.
+    #[error("bridge: busy")]
+    BridgeBusy,
+
     #[error("guard failed: {detail}")]
     GuardFailed { detail: String },
 
@@ -228,6 +233,7 @@ impl Error {
             Self::OperatorWritePhaseClosed { .. } => "operator_write_phase_closed",
             Self::ExportTargetExists => "export_target_exists",
             Self::AdmissionRejected { .. } => "admission_rejected",
+            Self::BridgeBusy => "busy",
             Self::GuardFailed { .. } => "guard_failed",
             Self::UnknownNotification { .. } => "unknown_notification",
             Self::NotFound => "not_found",

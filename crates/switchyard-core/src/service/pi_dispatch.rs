@@ -274,35 +274,21 @@ impl Host {
             .take(32)
             .collect();
         let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-        // `liveRun` is `pi.live.run` still set (pi-durable submissions.ts:255).
-        // Opening does not delete it. A non-zero unsettled count is the same
-        // dead generation's submission. Neither is a timeout.
-        let snapshot = self.confined_inspect(&binding, &id_refs)?;
-        let live_run = snapshot["liveRun"] == true || snapshot["scheduling"] == "busy";
-        let unsettled = snapshot["unsettledSubmissionCount"].as_u64().unwrap_or(0) > 0;
-        if !live_run && !unsettled {
+        // One signal: `pi.live.run` on the pi.live document. Inspect failure
+        // is fail-closed in this process; a later ensure would not re-check.
+        let snapshot = match self.confined_inspect(&binding, &id_refs) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                let mission = self.store.load_mission(mission_id)?;
+                self.admit_unsettled_turn(&mission, "unreadable")?;
+                return Ok(());
+            }
+        };
+        let Some(turn) = snapshot["liveRun"].as_str().filter(|turn| !turn.is_empty()) else {
             return Ok(());
-        }
-        let mut turns: Vec<String> = snapshot["commands"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|row| {
-                let status = row["status"].as_str()?;
-                if status == "done" {
-                    return None;
-                }
-                row["commandId"].as_str().map(str::to_owned)
-            })
-            .collect();
-        if live_run {
-            turns.insert(0, "pi.live.run".into());
-        }
-        if turns.is_empty() {
-            turns.push("unsettled-submission".into());
-        }
+        };
         let mission = self.store.load_mission(mission_id)?;
-        self.admit_unsettled_turn(&mission, &turns.join(","))?;
+        self.admit_unsettled_turn(&mission, turn)?;
         Ok(())
     }
 
@@ -559,7 +545,12 @@ impl Host {
         let binding = self.binding(&mission);
         self.accept_runtime_binding(&binding, mission_id)?;
         self.store.require_workspace_ready(&binding.attempt_id)?;
-        if mission.phase.is_terminal() || mission.phase == Phase::Paused {
+        if mission.phase.is_terminal()
+            || matches!(
+                mission.phase,
+                Phase::Paused | Phase::Pausing | Phase::Cancelling
+            )
+        {
             for command in self.store.list_commands(mission_id)? {
                 if command.state == CommandState::Pending && is_runtime_work(command.kind) {
                     self.store.supersede_pending(
@@ -630,7 +621,7 @@ impl Host {
                             // clear it and do not retry the submit. Cancel is
                             // the way out.
                             if self.recovered_dead_generation(&request.binding)?
-                                && error.to_string().contains("bridge: busy")
+                                && error.category() == "busy"
                             {
                                 let current = self.store.load_mission(mission_id)?;
                                 self.admit_unsettled_turn(&current, &command.request_id)?;
@@ -727,9 +718,71 @@ impl Host {
             .sessions
             .get(&binding.session_id)
             .is_some_and(|session| session.is_stopped());
-        if !session_stopped {
-            self.confined_history(&mission)?;
+        if session_stopped {
+            // One branch for a bridge that is already stopped. `stop` always
+            // re-proves. Ack the host-settle-proof marker only when that fresh
+            // proof is `proven`. An unproven result leaves the stop pending.
+            // #226 merges into this branch: keep the re-proof, the clock
+            // stamp, and `record_supervisor_receipt`.
+            for command in self.store.list_commands(mission_id)? {
+                if command.state == CommandState::Pending && is_runtime_work(command.kind) {
+                    self.store.supersede_pending(
+                        &command.id,
+                        "admission closed before runtime accepted this command",
+                    )?;
+                }
+            }
+            self.note_bridge_down();
+            let proof = self
+                .confined_mut()?
+                .sessions
+                .get_mut(&binding.session_id)
+                .ok_or(Error::NotFound)?
+                .stop()?;
+            let mut lifecycle = self
+                .confined_mut()?
+                .sessions
+                .get(&binding.session_id)
+                .ok_or(Error::NotFound)?
+                .lifecycle();
+            self.stamp_attempt_clock(&mut lifecycle);
+            self.store.save_pi_host(
+                &binding.attempt_id,
+                binding.generation,
+                &lifecycle,
+                &Value::Null,
+            )?;
+            self.reconcile_execution(mission_id)?;
+            if proof["proven"] != true || self.store.ops_blocked(mission_id)? {
+                self.release_finished_sessions()?;
+                return Ok(0);
+            }
+            let mut count = 0;
+            for command in self.store.list_commands(mission_id)? {
+                if command.state != CommandState::Pending
+                    || !matches!(command.kind, CommandKind::Pause | CommandKind::Cancel)
+                {
+                    continue;
+                }
+                self.store
+                    .acknowledge(&command.id, &host_settle_proof_marker(&command.request_id))?;
+                count += 1;
+            }
+            let current = self.store.load_mission(mission_id)?;
+            let body = match current.phase {
+                Phase::Pausing => Some(CommandBody::ConfirmStopped),
+                Phase::Cancelling => Some(CommandBody::ConfirmCancelled),
+                _ => None,
+            };
+            if let Some(body) = body {
+                let admitted = self.admit_host_fact(&current, body)?;
+                self.store
+                    .record_supervisor_receipt(&admitted.command_id, &proof.to_string())?;
+            }
+            self.release_finished_sessions()?;
+            return Ok(count);
         }
+        self.confined_history(&mission)?;
         let mut count = 0;
         for command in stops {
             let request = RuntimeRequest {
@@ -740,17 +793,9 @@ impl Host {
             };
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
-            let receipt = if session_stopped {
-                RuntimeReceipt {
-                    receipt_id: request.request_id.clone(),
-                    request_id: request.request_id.clone(),
-                    payload_hash: request.payload_hash.clone(),
-                }
-            } else {
-                match self.confined_receipt(&request, &payload)? {
-                    Some(r) => r,
-                    None => self.confined_send(&request, &payload)?,
-                }
+            let receipt = match self.confined_receipt(&request, &payload)? {
+                Some(r) => r,
+                None => self.confined_send(&request, &payload)?,
             };
             self.store
                 .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
@@ -771,13 +816,6 @@ impl Host {
             };
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
-            if session_stopped {
-                self.store.supersede_pending(
-                    &command.id,
-                    "admission closed before runtime accepted this command",
-                )?;
-                continue;
-            }
             if let Some(receipt) = self.confined_receipt(&request, &payload)? {
                 self.store
                     .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
@@ -858,6 +896,18 @@ impl Host {
     }
 
     #[cfg(feature = "test-fixtures")]
+    pub fn miss_bridge_leaf_for_test(&mut self, mission_id: &str) -> Result<()> {
+        let mission = self.store.load_mission(mission_id)?;
+        let session_id = mission.attempt.session_id;
+        self.confined_mut()?
+            .sessions
+            .get_mut(&session_id)
+            .ok_or(Error::NotFound)?
+            .miss_leaf_for_test();
+        Ok(())
+    }
+
+    #[cfg(feature = "test-fixtures")]
     pub fn stop_live_bridge_for_test(&mut self, mission_id: &str) -> Result<Value> {
         self.ensure_confined_session(mission_id)?;
         let mission = self.store.load_mission(mission_id)?;
@@ -915,6 +965,17 @@ impl Host {
         self.reconcile_execution(mission_id)?;
         Ok(vec![unchanged(&self.store.load_mission(mission_id)?)])
     }
+}
+
+/// Stop acknowledgement used when the bridge is already stopped. Not a Pi
+/// receipt. Written only after a fresh proof with `proven: true`.
+fn host_settle_proof_marker(request_id: &str) -> String {
+    json!({
+        "adapter": "host-settle-proof",
+        "delivered": false,
+        "requestId": request_id,
+    })
+    .to_string()
 }
 
 enum ConfinedEffectRoute {

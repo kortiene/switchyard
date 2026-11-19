@@ -203,6 +203,39 @@ fn unproven_settle_then_cancel_reproves_in_the_same_process() {
     assert!(receipt["cgroup"].is_object(), "{receipt}");
 }
 
+/// The fresh re-proof is still unproven. Cancel stays pending and the mission
+/// stays cancelling. No `confirm_cancelled`.
+#[test]
+fn unproven_reproof_leaves_cancel_pending() {
+    let (world, mut host) = World::new("answer");
+    host.dispatch_pending(&world.mission).unwrap();
+    let unproven = host
+        .settle_unproven_bridge_for_test(&world.mission)
+        .unwrap();
+    assert_eq!(unproven["proven"], false, "{unproven}");
+    host.miss_bridge_leaf_for_test(&world.mission).unwrap();
+    admit(&mut host, &world.mission, CommandBody::Cancel);
+    host.dispatch_pending(&world.mission).unwrap();
+    let settled = host.snapshot(&world.mission).unwrap();
+    assert_eq!(settled.phase, Phase::Cancelling);
+    let value = settled.to_json();
+    let cancel = value["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["kind"] == "cancel")
+        .unwrap();
+    assert_eq!(cancel["state"], "pending", "{cancel}");
+    assert!(
+        value["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|command| command["kind"] != "confirm_cancelled"),
+        "{value}"
+    );
+}
+
 #[test]
 fn sigint_worker() {
     let Ok(root) = std::env::var("SW_BUDGET_ROOT") else {
