@@ -42,9 +42,11 @@ CONNECT_TIMEOUT_S = 10
 # Idle time between upstream reads. Each read that returns data starts it again.
 UPSTREAM_TIMEOUT_S = 300
 # Client keepalive. A pi-ai half-close leaves the socket in CLOSE_WAIT, and a
-# later full close sends no packet. Probes are what notice a dead peer.
-# With these values a dead client showed up at about 66 s in review, not 1 s.
-# A close within about 1 s happens only while response bytes are flowing, or on an RST.
+# later full close sends no packet. Linux does probe in CLOSE_WAIT. How soon
+# a dead peer is noticed is bounded by that peer's tcp_fin_timeout, about 64 s
+# (measured 63.9 s). When upstream is silent, the forwarder closes it within
+# about 64 s of the client close. A sub-second close is #229's reset on cancel,
+# which is pending Sekou and is not claimed here.
 KEEPALIVE_IDLE = 5
 KEEPALIVE_INTVL = 5
 KEEPALIVE_CNT = 2
@@ -707,32 +709,15 @@ def _write_side_closed(sock: socket.socket) -> bool:
     return peeked == b""
 
 
-_probe_at: dict[int, float] = {}
+def _client_disconnected(sock: socket.socket, half_closed_at_start: bool) -> bool:
+    """True when the peer is dead, not merely write-half-closed.
 
-
-def _close_wait_write_probe(sock: socket.socket) -> bool:
-    """Notice a dead peer that already half-closed.
-
-    Linux does not send keepalive segments in CLOSE_WAIT, and a later full
-    close sends no packet. A write is what changes the socket. The byte is
-    out-of-band so it is not part of the HTTP stream. The schedule is the
-    keepalive idle/interval configured on the socket.
+    CLOSE_WAIT by itself is not a disconnect. Linux keepalive does probe in
+    CLOSE_WAIT, and a dead peer then shows up as a socket error. With upstream
+    silent, that is about 64 s, bounded by the closed peer's tcp_fin_timeout.
+    An RST shows up as a socket error without that wait.
     """
-    if _tcp_state(sock) != 8:
-        return False
-    due = _probe_at.get(id(sock), 0.0)
-    now = time.monotonic()
-    if now < due:
-        return False
-    try:
-        interval = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL)
-    except OSError:
-        interval = KEEPALIVE_INTVL
-    _probe_at[id(sock)] = now + max(1, interval)
-    try:
-        sock.send(b"\x00", socket.MSG_OOB | socket.MSG_DONTWAIT | socket.MSG_NOSIGNAL)
-    except OSError:
-        return True
+    del half_closed_at_start
     try:
         err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
     except OSError:
@@ -742,28 +727,8 @@ def _close_wait_write_probe(sock: socket.socket) -> bool:
     return _tcp_state(sock) in (7, 9)
 
 
-def _client_disconnected(sock: socket.socket, half_closed_at_start: bool) -> bool:
-    """True when the peer is dead, not merely write-half-closed.
-
-    CLOSE_WAIT by itself is not a disconnect, whether or not the client had
-    already half-closed when the response started. A dead peer shows up as a
-    socket error: an RST, keepalive on an established socket, or the
-    CLOSE_WAIT write probe.
-    """
-    del half_closed_at_start
-    try:
-        err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-    except OSError:
-        return True
-    if err:
-        return True
-    state = _tcp_state(sock)
-    if state in (7, 9):
-        return True
-    return state == 8 and _close_wait_write_probe(sock)
-
-
 def _arm_client_keepalive(sock: socket.socket) -> None:
+    """SO_KEEPALIVE, idle 5, interval 5, count 2. No extra write."""
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, KEEPALIVE_IDLE)
@@ -771,7 +736,6 @@ def _arm_client_keepalive(sock: socket.socket) -> None:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, KEEPALIVE_CNT)
     except OSError:
         return
-    _probe_at[id(sock)] = time.monotonic() + KEEPALIVE_IDLE
 
 
 def _recv_some(
@@ -1196,8 +1160,9 @@ class Handler(BaseHTTPRequestHandler):
     def handle(self) -> None:
         # Exactly one request. Do not treat a client write-side half-close
         # as the end of the exchange: pi-ai shuts down writes after the body
-        # and still reads the response. Keepalive is what later notices a
-        # full close, because that close sends no further packet.
+        # and still reads the response. Keepalive probes in CLOSE_WAIT notice
+        # a later full close. With upstream silent that takes about 64 s,
+        # bounded by the peer's tcp_fin_timeout.
         self.close_connection = True
         _arm_client_keepalive(self.connection)
         self.server.register_socket(self.connection)

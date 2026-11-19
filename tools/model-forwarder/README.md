@@ -80,11 +80,13 @@ the system trust store (`CERT_REQUIRED`, hostname checked). The connect and
 handshake timeout is 10 seconds. Each upstream read has its own 300 second
 idle timeout, started again when a read returns data. A redirect or an
 upstream `1xx` is a local 502. The client socket uses TCP keepalive (idle
-5 s, interval 5 s, 2 probes). A half-close is not a disconnect. A later full
-close sends no packet, so keepalive is what notices a dead client. Closing
-upstream within about a second happens when response bytes are still
-flowing, or when the client sends an RST. Only `Content-Type`, `Accept`,
-and `User-Agent` are copied from the
+5 s, interval 5 s, 2 probes). A half-close is not a disconnect. Linux does
+probe in `CLOSE_WAIT`. A later full close sends no packet, and how soon that
+dead peer is noticed is bounded by the closed peer's `tcp_fin_timeout`,
+about 64 s. When upstream is silent, the forwarder closes it within about
+64 s of the client close. A sub-second close is #229's reset on cancel,
+which is pending Sekou and is not claimed here. Only `Content-Type`,
+`Accept`, and `User-Agent` are copied from the
 client; `Host` and `Authorization` are replaced. Caps are 256 KiB per
 request (413), 1 MiB per response (502 or a cut logged `response_cap`), and
 40 reserve rows per mission log (429, no dial).
@@ -99,7 +101,7 @@ or chunked encoding. Headers are not hashed, and the key is never hashed.
 sha256 of `forwarder.py` at this revision:
 
 ```
-9d58124f635413e51457615a627cfd271052bd13a93d23dd239671ab3f21c4e9
+296061160ef9ef85d359a585383db43c692f4e80a808e785b657d5c25a6afb92
 ```
 
 Confirm it on the host before the run:

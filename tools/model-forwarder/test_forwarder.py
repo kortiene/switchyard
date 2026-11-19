@@ -168,6 +168,13 @@ def chunk(data: bytes) -> bytes:
     return f"{len(data):x}\r\n".encode() + data + b"\r\n"
 
 
+def _same_peer(sock: socket.socket, name: tuple) -> bool:
+    try:
+        return sock.getpeername() == name
+    except OSError:
+        return False
+
+
 def decode_chunked(body: bytes) -> tuple[bytes, bool]:
     out = bytearray()
     index = 0
@@ -1173,40 +1180,68 @@ class TestProxy(unittest.TestCase):
     def test_p5_ragged_fin_after_chunked_reply_is_ok(self) -> None:
         self._chunked_ok(ragged_close)
 
-    def test_keepalive_after_half_close_closes_silent_upstream(self) -> None:
-        # pi-ai half-closes after the body. A later full close sends no packet.
-        # Short keepalive values stand in for idle 5 / interval 5 / count 2.
-        seen = threading.Event()
-        closed = threading.Event()
+    def test_keepalive_sockopts_are_5_5_2(self) -> None:
+        held = threading.Event()
+        release = threading.Event()
 
         def handler(tls):
             read_request(tls)
-            seen.set()
-            try:
-                tls.settimeout(20)
-                tls.recv(1)
-            except OSError:
-                pass
-            closed.set()
+            held.set()
+            release.wait(5)
+            tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            clean_close(tls)
 
         self.h.stub.handler = handler
-        saved = (forwarder.KEEPALIVE_IDLE, forwarder.KEEPALIVE_INTVL, forwarder.KEEPALIVE_CNT)
-        forwarder.KEEPALIVE_IDLE = 1
-        forwarder.KEEPALIVE_INTVL = 1
-        forwarder.KEEPALIVE_CNT = 2
         sock = self.h.connect()
+        sock.sendall(http_request(chat_body()))
+        self.assertTrue(held.wait(3))
         try:
-            sock.sendall(http_request(chat_body()))
-            sock.shutdown(socket.SHUT_WR)
-            self.assertTrue(seen.wait(3))
-            sock.close()
-            self.assertTrue(closed.wait(15))
+            with self.h.httpd.active_lock:
+                peers = [
+                    item
+                    for item in self.h.httpd.active
+                    if _same_peer(item, sock.getsockname())
+                ]
+            self.assertEqual(len(peers), 1)
+            peer = peers[0]
+            self.assertEqual(peer.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE), 1)
+            self.assertEqual(peer.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE), 5)
+            self.assertEqual(peer.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL), 5)
+            self.assertEqual(peer.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT), 2)
         finally:
-            (
-                forwarder.KEEPALIVE_IDLE,
-                forwarder.KEEPALIVE_INTVL,
-                forwarder.KEEPALIVE_CNT,
-            ) = saved
+            release.set()
+        read_all(sock)
+
+    def test_half_closed_oobinline_stream_is_exact(self) -> None:
+        # 13 one-second gaps: a healthy half-closed stream longer than 12 s.
+        chunks = [f"data: {i:02d}\n\n".encode() for i in range(14)]
+        framed = b"".join(chunk(part) for part in chunks) + b"0\r\n\r\n"
+
+        def handler(tls):
+            read_request(tls)
+            tls.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n"
+            )
+            for part in chunks:
+                tls.sendall(chunk(part))
+                time.sleep(1.0)
+            tls.sendall(b"0\r\n\r\n")
+            clean_close(tls)
+
+        self.h.stub.handler = handler
+        sock = self.h.connect()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_OOBINLINE, 1)
+        sock.settimeout(25)
+        sock.sendall(http_request(chat_body()))
+        sock.shutdown(socket.SHUT_WR)
+        data = read_all(sock)
+        _head, body = split_http(data)
+        self.assertEqual(body, framed)
+        decoded, complete = decode_chunked(body)
+        self.assertTrue(complete)
+        self.assertEqual(decoded, b"".join(chunks))
+        self.assertEqual(log_rows(self.h.log_path)[-1]["outcome"], "ok")
 
     def test_idle_timeout_resets_after_each_chunk(self) -> None:
         # One chunk a second for 5 s, with the idle timeout patched to 3 s.
