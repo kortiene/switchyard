@@ -27,7 +27,6 @@ pub(crate) const PLAN_DIGEST_SCHEMA: &str = "switchyard.plan-digest.v1";
 /// `FREEZE_AT_1A12F25` and every other no-endpoint freeze stay byte-identical.
 pub(crate) fn model_harness_off() -> Value {
     json!({
-        "restartLimit": 0,
         "retryEnabled": false,
         "retryMaxRetries": 0,
         "streamMaxRetries": 0,

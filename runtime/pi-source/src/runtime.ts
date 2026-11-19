@@ -322,10 +322,9 @@ export class Runtime {
 export function harnessSettings(modelEndpoint: boolean): { settings: {
   retry: { enabled: false, maxRetries: 0 },
   stream: { maxRetries: 0 },
-  restartLimit: 0,
 } } | Record<string, never> {
   if (!modelEndpoint) return {};
-  return { settings: { retry: { enabled: false, maxRetries: 0 }, stream: { maxRetries: 0 }, restartLimit: 0 } };
+  return { settings: { retry: { enabled: false, maxRetries: 0 }, stream: { maxRetries: 0 } } };
 }
 
 function runFailureName(failure: unknown): string | null {

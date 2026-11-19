@@ -293,16 +293,21 @@ impl Host {
         // `confirm_cancelled`. With no endpoint, keep the stuck-tool rule so
         // a captured receipt can still be replayed.
         // Open already compared `network` via `runtime_config_mismatch`, so this is the frozen endpoint.
+        // A retained tool receipt is the composed recovery path: replay must still finish it.
+        // An endpoint run with no retained receipt is the mid-stream re-send, flagged before replay.
         let has_endpoint = self.confined_mut()?.config.model_endpoint.is_some();
-        if !has_endpoint {
-            let stuck_tool = self.store.linux_views(mission_id)?.iter().any(|view| {
-                !view.superseded
-                    && !view.receipt_retained
-                    && matches!(view.state.as_str(), "entered" | "running" | "uncertain")
-            });
-            if !stuck_tool {
-                return Ok(());
-            }
+        let stuck_tool = self.store.linux_views(mission_id)?.iter().any(|view| {
+            !view.superseded
+                && !view.receipt_retained
+                && matches!(view.state.as_str(), "entered" | "running" | "uncertain")
+        });
+        let captured_receipt = self
+            .store
+            .linux_views(mission_id)?
+            .iter()
+            .any(|view| !view.superseded && view.receipt_retained);
+        if captured_receipt || !(has_endpoint || stuck_tool) {
+            return Ok(());
         }
         let mission = self.store.load_mission(mission_id)?;
         self.admit_unsettled_turn(&mission, turn)?;
