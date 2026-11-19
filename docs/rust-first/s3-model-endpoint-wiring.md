@@ -65,6 +65,11 @@ Design D1–D9 is signed.
   The broker text points there. This flag is not that broker, and it does
   not inject credentials.
 
+The operator-run forwarder for that fallback is `tools/model-forwarder/`.
+Switchyard does not ship it and does not hold its key. Logs from that
+process carry the label "egress pinned by an operator forwarder, not by
+Switchyard".
+
 The bridge policy requires Linux x86_64
 (`crates/switchyard-core/src/execution/confined_pi/policy.rs`). An aarch64
 host can parse and record a loopback literal but cannot launch the confined

@@ -1,0 +1,124 @@
+# Operator model forwarder (D1(b))
+
+This process is not Switchyard. The confined bridge speaks plain HTTP. The
+host splices that socket to `127.0.0.1:<port>`. This forwarder listens
+there, adds the provider credential, and opens TLS to one operator-pinned
+address. Switchyard never holds the key. FakeRuntime stays the Switchyard
+default.
+
+Stopping this process is not part of Switchyard cancel. Cancel drops the
+bridge proxy and does not resolve DNS or read the credential file.
+
+Honesty label for these logs: **egress pinned by an operator forwarder, not
+by Switchyard**. They are not #102 or #166 broker evidence.
+
+## Dedicated uid
+
+Run the forwarder as its own user, not as the Switchyard host user and not
+as root. The key file must be mode `0600` and owned by that uid. The
+forwarder reads it once at start through `O_NOFOLLOW` and refuses any other
+mode, owner, or a symlink. `--host-uid` is the Switchyard host uid and must
+differ from the forwarder's uid.
+
+```sh
+sudo useradd --system --create-home --shell /usr/sbin/nologin model-forwarder
+sudo install -d -o model-forwarder -g model-forwarder -m 0700 /var/lib/model-forwarder
+sudo install -o model-forwarder -g model-forwarder -m 0600 /path/to/key /var/lib/model-forwarder/key
+```
+
+The key file is opened with `O_NOFOLLOW` and `O_NONBLOCK`, then checked
+with `fstat`. It is not a command argument, not an environment variable,
+and it is never logged or written anywhere else.
+
+## Operator steps
+
+1. Resolve `api.x.ai` once, with your own tool. Record the tool, the time,
+   and the full answer. The forwarder does no DNS.
+2. Choose one global address from that answer (`ipaddress` `is_global`).
+   Private, loopback, and other non-global addresses are refused.
+3. Confirm the receipt below, then start the forwarder under the dedicated
+   uid. Pass the mission id. One process holds an exclusive lock on that
+   mission's `--log`. A reserve row is fsynced before each dial, so a
+   restart keeps the 40-request count, including after an upstream IP
+   change. The drill is its own mission id and its own log. Both still
+   count toward the operator's $10 ceiling.
+4. Point the confined host at `http://127.0.0.1:<port>/v1/chat/completions`
+   with no key in the URL.
+
+`--path` is required and has no default. The example path is
+`/v1/chat/completions`, which is what #227's pi-ai openai-completions
+client sends (`stream: true`, response read as SSE).
+
+pi-ai sends `Host: 127.0.0.1` and `Authorization: Bearer unused`, then
+half-closes its write side. `maxRetries` is 0, so one call is one
+connection. This forwarder replaces those headers with `Host: api.x.ai` and
+`Authorization: Bearer <key>`, and it keeps writing the upstream response
+after the half-close.
+
+Upstream bytes are not close-delimited. A `Content-Length` from upstream is
+preserved. A close-delimited upstream body is re-framed as chunked. An
+upstream cut does not get a terminating `0` chunk, so the client can tell a
+truncated stream from a finished one. There is no SSE heartbeat.
+
+```sh
+sudo -u model-forwarder python3 tools/model-forwarder/forwarder.py \
+  --listen 127.0.0.1:8000 \
+  --path /v1/chat/completions \
+  --model grok-4.7 \
+  --key-file /var/lib/model-forwarder/key \
+  --host-uid "$(id -u <switchyard-host-user>)" \
+  --upstream-ip <global-ipv4-from-the-operator-lookup> \
+  --lookup-record "<tool, time, answer>" \
+  --mission-id <mission-id> \
+  --log /var/lib/model-forwarder/mission.log
+```
+
+The forwarder listens only on `127.0.0.1`. `--upstream-ip` is one global
+IPv4 address: not a name, not IPv6, not multicast, and not `192.88.99.0/24`.
+It connects with `socket.create_connection((ip, 443))`, SNI `api.x.ai`, and
+the system trust store (`CERT_REQUIRED`, hostname checked). The connect and
+handshake timeout is 10 seconds. Each upstream read has its own 300 second
+idle timeout, started again when a read returns data. A redirect or an
+upstream `1xx` is a local 502. The client socket uses TCP keepalive (idle
+5 s, interval 5 s, 2 probes). A half-close is not a disconnect. Linux does
+probe in `CLOSE_WAIT`. A later full close sends no packet, and how soon that
+dead peer is noticed is bounded by the closed peer's `tcp_fin_timeout`,
+about 64 s. When upstream is silent, the forwarder closes it within about
+64 s of the client close. A sub-second close is #229's reset on cancel,
+which is pending Sekou and is not claimed here. Only `Content-Type`,
+`Accept`, and `User-Agent` are copied from the
+client; `Host` and `Authorization` are replaced. Caps are 256 KiB per
+request (413), 1 MiB per response (502 or a cut logged `response_cap`), and
+40 reserve rows per mission log (429, no dial).
+
+`request_sha256` and `response_sha256` are the sha256 of the de-framed
+request and response body bytes. Chunk framing is not part of the hash, so
+the same payload has the same hash whether upstream used `Content-Length`
+or chunked encoding. Headers are not hashed, and the key is never hashed.
+
+## Receipt
+
+sha256 of `forwarder.py` at this revision:
+
+```
+296061160ef9ef85d359a585383db43c692f4e80a808e785b657d5c25a6afb92
+```
+
+Confirm it on the host before the run:
+
+```sh
+sha256sum tools/model-forwarder/forwarder.py
+```
+
+The GA host's `python3 --version` is recorded at preflight (#223). The CI
+job `model-forwarder` runs the image `python3` on `ubuntu-24.04`.
+
+## Tests
+
+```sh
+python3 -m unittest discover tools/model-forwarder
+```
+
+Tests use a local TLS stub and a throwaway CA generated by `openssl`. They
+do not contact `api.x.ai`. There is no `--ca-file` and no `--insecure` flag.
+The dogfood run uses the system trust store.

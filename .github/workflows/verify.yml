@@ -141,3 +141,17 @@ jobs:
 
       - name: UI gate
         run: ./scripts/ui-verify.sh
+
+  # Operator-run D1(b) forwarder. Python stdlib tests against a local TLS
+  # stub. This job does not run rust-verify and does not contact api.x.ai.
+  model-forwarder:
+    name: model-forwarder
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Python version
+        run: python3 --version
+
+      - name: Operator model forwarder tests
+        run: python3 -m unittest discover tools/model-forwarder
