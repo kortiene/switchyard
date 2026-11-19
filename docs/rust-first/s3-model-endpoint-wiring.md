@@ -60,6 +60,12 @@ Design D1–D9 is signed.
 - D1(a) is the S2-6 host broker. D1(b) is an operator loopback forwarder.
   Receipts for that forwarder must say "egress pinned by an operator
   forwarder, not by Switchyard".
+
+The operator-run forwarder for that fallback is `tools/model-forwarder/`.
+Switchyard does not ship it and does not hold its key. Logs from that
+process carry the label "egress pinned by an operator forwarder, not by
+Switchyard".
+
 - D4 is recorded on
   [#167](https://github.com/kortiene/switchyard/issues/167#issuecomment-6954814977).
   The broker text points there. This flag is not that broker, and it does
