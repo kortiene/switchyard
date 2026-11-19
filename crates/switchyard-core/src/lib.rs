@@ -68,12 +68,12 @@ pub use freeze::bound_plan_digest;
 #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
 pub(crate) use service::VerifierResultPlant;
 pub use service::read_attempt_freeze;
-pub use service::repair_wait_outcome;
 pub use service::{
     AdmitRequest, AdmitResult, CommandView, CreateMission, DeliveryView, ExportReceipt, Host,
     MissionSnapshot, NotifyOutcome, OperatorWrite, SuccessorChanges, journal_path,
     write_export_exclusive,
 };
+pub use service::{foreground_run_complete, repair_wait_outcome};
 
 #[cfg(test)]
 mod acceptance;

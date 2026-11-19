@@ -48,6 +48,11 @@ static OPERATOR_STOP: AtomicBool = AtomicBool::new(false);
 ))]
 extern "C" fn on_operator_stop(_: libc::c_int) {
     OPERATOR_STOP.store(true, Ordering::SeqCst);
+    // The next Ctrl-C uses the default disposition and ends the process.
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+    }
 }
 
 #[cfg(any(
@@ -617,8 +622,37 @@ fn open_confined(
             probe_request: None,
             fail_launch: false,
         },
-        "s3-acceptance",
+        confined_fixture().as_str(),
     )
+}
+
+/// Default is the composed `s3-acceptance` replay. Tests may set
+/// `SWITCHYARD_CONFINED_FIXTURE` to another allowlisted fixture so the
+/// foreground wait stays open. Unknown values stay on `s3-acceptance`.
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
+fn confined_fixture() -> String {
+    match std::env::var("SWITCHYARD_CONFINED_FIXTURE") {
+        Ok(value)
+            if matches!(
+                value.as_str(),
+                "answer"
+                    | "file-write"
+                    | "process-fast"
+                    | "process-hold"
+                    | "process-cancel"
+                    | "tools"
+                    | "s3-acceptance"
+                    | "ignore-abort"
+            ) =>
+        {
+            value
+        }
+        _ => "s3-acceptance".into(),
+    }
 }
 
 #[cfg(not(all(
@@ -833,6 +867,17 @@ fn bridge_root(db: &Path) -> switchyard_core::Result<PathBuf> {
     feature = "linux-execution",
     target_os = "linux"
 ))]
+fn has_pending_runtime_work(snapshot: &switchyard_core::MissionSnapshot) -> bool {
+    snapshot.commands.iter().any(|command| {
+        command.state == "pending" && command.kind != "pause" && command.kind != "cancel"
+    })
+}
+
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
 fn latest_repair_state(snapshot: &switchyard_core::MissionSnapshot) -> Option<&str> {
     snapshot
         .commands
@@ -853,9 +898,8 @@ fn settle_confined(host: &mut Host, mission: &str, require_composed: bool) -> &'
     {
         OPERATOR_STOP.store(false, Ordering::SeqCst);
         arm_operator_stop();
-        let Ok(Some(budgets)) = host.frozen_budgets(mission) else {
-            return "pending";
-        };
+        let budgets = host.frozen_budgets(mission).ok().flatten();
+        let s3_acceptance = host.s3_acceptance_replay(mission);
         loop {
             if operator_stop_requested() {
                 return match host.interrupt_operator(mission) {
@@ -884,8 +928,14 @@ fn settle_confined(host: &mut Host, mission: &str, require_composed: bool) -> &'
             }
             let value = snapshot.to_json();
             let idle = value["piHost"]["observation"]["runtimeIdle"] == true;
+            let pending = has_pending_runtime_work(&snapshot);
             if require_composed {
-                if idle && composed_scenario_settled(&value) {
+                if switchyard_core::foreground_run_complete(
+                    s3_acceptance,
+                    idle,
+                    pending,
+                    composed_scenario_settled(&value),
+                ) {
                     return "complete";
                 }
             } else if let Some(outcome) =
@@ -893,9 +943,10 @@ fn settle_confined(host: &mut Host, mission: &str, require_composed: bool) -> &'
             {
                 return outcome;
             }
-            if host
-                .generation_over_bridge_wall(mission, budgets.bridge_wall)
-                .unwrap_or(false)
+            if let Some(wall) = budgets.as_ref().and_then(|budgets| budgets.bridge_wall)
+                && host
+                    .generation_over_bridge_wall(mission, wall)
+                    .unwrap_or(false)
             {
                 let _ = host.exhaust_runtime_budget(mission);
                 return "needs_attention";
@@ -1098,6 +1149,15 @@ mod operator_stop_tests {
             libc::raise(libc::SIGINT);
         }
         assert!(operator_stop_requested());
+        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigaction(libc::SIGINT, std::ptr::null(), &mut current);
+        }
+        assert_eq!(
+            current.sa_sigaction,
+            libc::SIG_DFL,
+            "the first Ctrl-C restores the default disposition"
+        );
         OPERATOR_STOP.store(false, Ordering::SeqCst);
         unsafe {
             let mut action: libc::sigaction = std::mem::zeroed();

@@ -9,7 +9,28 @@ use crate::domain::{CommandKind, MissionRecord, Phase};
 use crate::error::{Error, Result};
 
 pub(crate) const ATTEMPT_FREEZE_SCHEMA: &str = "switchyard.attempt-freeze.v1";
+
+/// Canonical freeze `1a12f25` wrote for the unit-test mission. Budget keys are
+/// absent. A newer binary must rebuild these bytes when the attempt policy
+/// has no budget keys.
+#[cfg(test)]
+pub(crate) const FREEZE_AT_1A12F25: &str = concat!(
+    r#"{"acceptanceCriteria":"Inputs stay put","baseSha":"abc","executionLimits":{"maxPlanRevisions":3,"maxRepairs":2},"#,
+    r#""issueSnapshot":{"number":172,"provider":"github","snapshotAt":10,"title":"S4-A"},"objective":"Ship the freeze","#,
+    r#""runtimeConfig":{"adapter":"fake","credentials":"none"},"sandboxPolicy":{"environment":{"confinement":"deferred_to_s3","host":"single"},"#,
+    r#""policy":{"credentials":"none","planningTools":"read-only"}},"schema":"switchyard.attempt-freeze.v1","#,
+    r#""verifier":{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}}"#
+);
 pub(crate) const PLAN_DIGEST_SCHEMA: &str = "switchyard.plan-digest.v1";
+
+const BUDGET_KEYS: [&str; 6] = [
+    "attemptWallSeconds",
+    "bridgeCpuSeconds",
+    "bridgeWallSeconds",
+    "maxModelRequests",
+    "maxRequestBytes",
+    "maxResponseBytes",
+];
 
 /// Canonical frozen-input document for one attempt.
 ///
@@ -26,16 +47,7 @@ pub(crate) fn frozen_document(mission: &MissionRecord) -> Result<Value> {
     Ok(json!({
         "acceptanceCriteria": mission.acceptance_criteria,
         "baseSha": mission.attempt.base_sha,
-        "executionLimits": {
-            "attemptWallSeconds": crate::budget::ATTEMPT_WALL_SECONDS,
-            "bridgeCpuSeconds": crate::budget::BRIDGE_CPU_SECONDS,
-            "bridgeWallSeconds": crate::budget::BRIDGE_WALL_SECONDS,
-            "maxModelRequests": crate::budget::MAX_MODEL_REQUESTS,
-            "maxPlanRevisions": mission.attempt.max_plan_revisions,
-            "maxRepairs": mission.attempt.max_repairs,
-            "maxRequestBytes": crate::budget::MAX_REQUEST_BYTES,
-            "maxResponseBytes": crate::budget::MAX_RESPONSE_BYTES,
-        },
+        "executionLimits": execution_limits(mission)?,
         "issueSnapshot": {
             "number": mission.source_issue.number,
             "provider": mission.source_issue.provider,
@@ -138,6 +150,9 @@ fn sandbox_policy(environment_json: &str, policy_json: &str) -> Result<Value> {
     if let Some(object) = policy.as_object_mut() {
         object.remove("maxRepairs");
         object.remove("maxPlanRevisions");
+        for key in BUDGET_KEYS {
+            object.remove(key);
+        }
     }
     Ok(json!({
         "environment": environment,
@@ -152,6 +167,30 @@ pub(crate) fn parse_object(raw: &str, label: &str) -> Result<Value> {
         return Err(Error::guard(format!("{label} must be a JSON object")));
     }
     Ok(value)
+}
+
+/// `maxPlanRevisions` and `maxRepairs` are always present. Each §3.4 budget
+/// key is copied from the attempt policy only when that key is already
+/// there. Absence is the pre-#218 freeze, not an error.
+fn execution_limits(mission: &MissionRecord) -> Result<Value> {
+    let policy = parse_object(&mission.attempt.policy_json, "sandbox policy")?;
+    let mut limits = serde_json::Map::new();
+    limits.insert(
+        "maxPlanRevisions".into(),
+        json!(mission.attempt.max_plan_revisions),
+    );
+    limits.insert("maxRepairs".into(), json!(mission.attempt.max_repairs));
+    if let Some(object) = policy.as_object() {
+        for key in BUDGET_KEYS {
+            if let Some(value) = object
+                .get(key)
+                .filter(|value| value.is_u64() || value.is_i64())
+            {
+                limits.insert(key.into(), value.clone());
+            }
+        }
+    }
+    Ok(Value::Object(limits))
 }
 
 fn require_text(value: &str, label: &str) -> Result<()> {
@@ -226,6 +265,7 @@ mod tests {
     #[test]
     fn frozen_document_is_sorted_rfc8785_and_drops_the_session_marker() {
         let canonical = frozen_canonical(&mission()).unwrap();
+        assert_eq!(canonical, FREEZE_AT_1A12F25);
         assert!(!canonical.contains("sessionInitialized"), "{canonical}");
         assert!(
             canonical.starts_with(r#"{"acceptanceCriteria":"Inputs stay put","baseSha":"abc","#)

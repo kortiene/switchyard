@@ -101,12 +101,19 @@ pub(crate) struct OpenLimits {
 /// `"scope":"generation"`. The proxy counts a connection once the upstream
 /// dial succeeds, and sets `exhausted()` past the allowance.
 ///
-/// TODO(d1b-splice-timeout-connection-cap): after that lands, replace
-/// `UNWIRED_CONNECTION_ALLOWANCE` with the frozen per-mission cap (40) minus
-/// connections already recorded for the mission. A prior generation that had
-/// egress but no recorded count is 0 remaining (fail closed), and the scope
-/// becomes `"mission"`. Do not add a second connection counter here, and do
-/// not edit `egress.rs` in this slice.
+/// TODO(d1b-splice-timeout-connection-cap): when #229 is on main, this
+/// interim call is `ModelProxy::start(endpoint, egress::UNWIRED_CONNECTION_ALLOWANCE)`.
+/// Scope is a constructor input; pass `"mission"`. Wiring that replaces the
+/// constant, due before GA:
+/// allowance = frozen cap minus every recorded connection across prior
+/// generations, saturating at 0. `u64` to `u32` via `try_from`, and 0 on
+/// overflow. Persist each generation's final `modelEgress` durably before the
+/// next generation opens. `current.json` and the `pi_host_sessions` row are
+/// overwritten, so they are not that record. Fail closed at allowance 0, not
+/// 40, when a prior generation had egress but no recorded count, and when the
+/// mission has no frozen budget. Old ledgers keep cancel and get no new model
+/// egress. After wiring, `UNWIRED_CONNECTION_ALLOWANCE` has zero uses. Freeze
+/// `maxRetries` 0. Do not edit `egress.rs` in this slice.
 fn start_model_proxy(
     endpoint: &egress::ModelEndpoint,
     model_request_cap: u64,
@@ -415,14 +422,15 @@ impl ConfinedPiSession {
                 .map_err(|_| Error::guard("bridge watchdog failed"))?;
         }
         self.bridge.terminate();
-        // TODO(d1b-splice-timeout-connection-cap): before dropping the proxy,
-        // that PR writes `record["modelEgress"]` (allowance, accepted, refused,
-        // scope, and reason `runtime_budget_exhausted` when `exhausted()`).
-        // It adds no Error variant. After it lands, if the proxy reports
-        // exhausted, the host admits `detect_uncertainty` with reason
-        // `runtime_budget_exhausted` and does not admit `request_verification`
-        // (that would bypass settle_not_proven). This slice does not count
-        // connections and does not edit `egress.rs`.
+        // TODO(d1b-splice-timeout-connection-cap): #229 writes `modelEgress`
+        // after the accept thread joins and before this drop. Keep that copy.
+        // Delete this TODO in the merge. Pass scope `"mission"`. Counts are
+        // allowance, accepted, refused, scope, and reason
+        // `runtime_budget_exhausted` when `exhausted()`. No new Error variant.
+        // Exhaustion admits `detect_uncertainty` and does not admit
+        // `request_verification`. The `modelEgress` object has to be stored
+        // somewhere `current.json` and `pi_host_sessions` cannot overwrite
+        // before the next generation opens.
         // Drop the proxy only after the bridge is dead so an in-flight splice
         // is not the thing that decides termination.
         self.proxy.take();

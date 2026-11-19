@@ -89,11 +89,12 @@ pub enum Error {
     #[error("runtime budget exhausted; cancel, then confirm_cancelled, then a successor")]
     RuntimeBudgetExhausted,
 
-    /// A repair was dispatched after this bridge generation had already
+    /// A stored repair was dispatched after this bridge generation had already
     /// settled. The command stays pending. It is not superseded.
-    /// Way out: keep the pending repair and run it on a generation whose
-    /// bridge has not settled, or `cancel`, then `confirm_cancelled`.
-    #[error("repair after settle was not sent; the command stays pending and was not superseded")]
+    /// Way out: run mission recover, or cancel then confirm_cancelled.
+    #[error(
+        "repair after settle was not sent; the command stays pending; run mission recover, or cancel then confirm_cancelled"
+    )]
     RepairAfterSettle,
 
     /// `mission successor` on a source that is not published, rejected, or cancelled.

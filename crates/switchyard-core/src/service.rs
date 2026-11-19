@@ -3081,6 +3081,17 @@ pub(crate) fn is_post_settle_repair(kind: CommandKind) -> bool {
     )
 }
 
+/// Product mode completes when the runtime is idle and nothing is pending.
+/// The composed `s3-acceptance` replay still waits for its three effects.
+pub fn foreground_run_complete(
+    s3_acceptance: bool,
+    idle: bool,
+    pending_work: bool,
+    composed: bool,
+) -> bool {
+    idle && !pending_work && (!s3_acceptance || composed)
+}
+
 /// Foreground repair wait. `None` means keep waiting.
 ///
 /// A pending repair is not treated as settled. A superseded repair is not

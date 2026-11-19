@@ -17,8 +17,10 @@ impl Host {
         match mission.attempt.frozen_inputs_json.as_deref() {
             None => Ok(None),
             Some(document) => {
-                let value: Value = serde_json::from_str(document).map_err(Error::storage)?;
-                Ok(Some(FrozenBudgets::parse(&value)?))
+                let Ok(value) = serde_json::from_str::<Value>(document) else {
+                    return Ok(None);
+                };
+                Ok(Some(FrozenBudgets::parse(&value)))
             }
         }
     }
@@ -55,21 +57,20 @@ impl Host {
         self.snapshot(mission_id)
     }
 
-    /// Request-size cap. One byte over the frozen limit exhausts the budget
-    /// and does not apply the measured request.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn enforce_request_budget(
-        &mut self,
-        mission_id: &str,
-        request_bytes: u64,
-    ) -> Result<()> {
-        self.enforce_usage(
-            mission_id,
-            &BudgetUsage {
-                request_bytes,
-                ..BudgetUsage::default()
-            },
-        )
+    /// `true` when this mission's runtime config is the composed
+    /// `s3-acceptance` replay. A missing fixture keeps that replay. Any other
+    /// fixture, including a later product fixture, completes on idle.
+    pub fn s3_acceptance_replay(&self, mission_id: &str) -> bool {
+        let Ok(mission) = self.store.load_mission(mission_id) else {
+            return true;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&mission.attempt.runtime_config_json) else {
+            return true;
+        };
+        match value.get("fixture").and_then(Value::as_str) {
+            Some("s3-acceptance") | None => true,
+            Some(_) => false,
+        }
     }
 
     pub fn enforce_attempt_wall(&mut self, mission_id: &str) -> Result<()> {
@@ -168,29 +169,6 @@ impl Host {
         self.attempt_clock.restore(&lifecycle);
         self.attempt_clock.bridge_up();
         Ok(())
-    }
-
-    #[cfg(all(
-        feature = "pi-contract",
-        feature = "linux-execution",
-        target_os = "linux"
-    ))]
-    pub(crate) fn model_requests_sent(&self, mission_id: &str) -> Result<u64> {
-        let commands = self.store.list_commands(mission_id)?;
-        Ok(commands
-            .iter()
-            .filter(|command| {
-                command.kind.is_runtime_bound()
-                    && matches!(
-                        RuntimeAdapter::runtime_method(command.kind),
-                        "submit" | "steer"
-                    )
-                    && matches!(
-                        command.state,
-                        CommandState::Acknowledged | CommandState::Reconciled
-                    )
-            })
-            .count() as u64)
     }
 
     #[cfg(all(

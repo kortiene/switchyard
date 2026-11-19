@@ -8,8 +8,6 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::error::{Error, Result};
-
 /// CLI default. Frozen from the attempt; a later change is a successor.
 pub const DEFAULT_MAX_PLAN_REVISIONS: u32 = 2;
 /// CLI default. Frozen from the attempt; a later change is a successor.
@@ -188,70 +186,61 @@ impl AttemptClock {
     }
 }
 
-/// Budgets read back from a frozen document. Missing keys fail closed.
+/// Budgets read back from a frozen document.
+///
+/// A missing key is absent, not an error. Absence is the pre-#218 ledger:
+/// that cap is not enforced. The 40 model-request cap is frozen here and
+/// enforced only by the splice allowance after #226 and #229 land.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrozenBudgets {
-    pub bridge_wall: Duration,
-    pub attempt_wall: Duration,
-    pub max_model_requests: u64,
-    pub max_request_bytes: u64,
-    pub max_response_bytes: u64,
-    pub bridge_cpu: Duration,
-    pub max_plan_revisions: u64,
-    pub max_repairs: u64,
+    pub bridge_wall: Option<Duration>,
+    pub attempt_wall: Option<Duration>,
+    pub max_model_requests: Option<u64>,
+    pub bridge_cpu: Option<Duration>,
 }
 
 impl FrozenBudgets {
-    pub(crate) fn parse(document: &Value) -> Result<Self> {
-        let limits = document
-            .get("executionLimits")
-            .filter(|value| value.is_object())
-            .ok_or_else(|| Error::guard("frozen execution limits are missing"))?;
-        Ok(Self {
-            bridge_wall: Duration::from_secs(field(limits, "bridgeWallSeconds")?),
-            attempt_wall: Duration::from_secs(field(limits, "attemptWallSeconds")?),
-            max_model_requests: field(limits, "maxModelRequests")?,
-            max_request_bytes: field(limits, "maxRequestBytes")?,
-            max_response_bytes: field(limits, "maxResponseBytes")?,
-            bridge_cpu: Duration::from_secs(field(limits, "bridgeCpuSeconds")?),
-            max_plan_revisions: field(limits, "maxPlanRevisions")?,
-            max_repairs: field(limits, "maxRepairs")?,
-        })
+    /// Never fails because a budget key is missing.
+    pub(crate) fn parse(document: &Value) -> Self {
+        let limits = document.get("executionLimits");
+        Self {
+            bridge_wall: seconds(limits, "bridgeWallSeconds"),
+            attempt_wall: seconds(limits, "attemptWallSeconds"),
+            max_model_requests: number(limits, "maxModelRequests"),
+            bridge_cpu: seconds(limits, "bridgeCpuSeconds"),
+        }
     }
 
-    /// `true` when this measurement is past a frozen cap.
+    /// `true` when a present cap is past the measurement.
     ///
-    /// The attempt wall uses [`attempt_wall_charge`]. A zero measurement is
-    /// not a cap (the caller did not observe that counter).
+    /// The attempt wall uses [`attempt_wall_charge`]. Model-request count and
+    /// host RPC sizes are not enforced here.
     pub(crate) fn exceeded(&self, usage: &BudgetUsage) -> bool {
         let attempt = attempt_wall_charge(usage.bridge_outside_verify, usage.verifier);
-        (usage.bridge_generation > self.bridge_wall)
-            || (attempt > self.attempt_wall)
-            || (usage.model_requests >= self.max_model_requests && self.max_model_requests > 0)
-            || (usage.request_bytes > self.max_request_bytes)
-            || (usage.response_bytes > self.max_response_bytes)
-            || (usage.bridge_cpu > self.bridge_cpu)
+        self.bridge_wall
+            .is_some_and(|wall| usage.bridge_generation > wall)
+            || self.attempt_wall.is_some_and(|wall| attempt > wall)
+            || self.bridge_cpu.is_some_and(|cap| usage.bridge_cpu > cap)
     }
 }
 
-/// One observation of the counters. Zero means "not measured", except
-/// `model_requests`, which is the count of model turns already sent.
+/// One observation of the counters. Zero means "not measured".
 #[derive(Clone, Debug, Default)]
 pub struct BudgetUsage {
     pub bridge_generation: Duration,
     pub bridge_outside_verify: Duration,
     pub verifier: Duration,
-    pub model_requests: u64,
-    pub request_bytes: u64,
-    pub response_bytes: u64,
     pub bridge_cpu: Duration,
 }
 
-fn field(limits: &Value, key: &str) -> Result<u64> {
+fn seconds(limits: Option<&Value>, key: &str) -> Option<Duration> {
+    number(limits, key).map(Duration::from_secs)
+}
+
+fn number(limits: Option<&Value>, key: &str) -> Option<u64> {
     limits
-        .get(key)
+        .and_then(|value| value.get(key))
         .and_then(Value::as_u64)
-        .ok_or_else(|| Error::guard(format!("frozen budget {key} is missing")))
 }
 
 #[cfg(test)]

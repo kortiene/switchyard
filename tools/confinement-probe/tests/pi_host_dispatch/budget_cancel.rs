@@ -74,6 +74,53 @@ fn confirm_receipt(db: &std::path::Path, mission: &str) -> Value {
 }
 
 #[test]
+fn pre_budget_ledger_cancels_with_a_cgroup_proof() {
+    let (world, mut host) = World::new("answer");
+    let conn = rusqlite::Connection::open(world.db()).unwrap();
+    let policy: String = conn
+        .query_row(
+            "SELECT policy_json FROM attempts WHERE active = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut policy: Value = serde_json::from_str(&policy).unwrap();
+    for key in [
+        "attemptWallSeconds",
+        "bridgeCpuSeconds",
+        "bridgeWallSeconds",
+        "maxModelRequests",
+        "maxRequestBytes",
+        "maxResponseBytes",
+    ] {
+        policy.as_object_mut().unwrap().remove(key);
+    }
+    conn.execute(
+        "UPDATE attempts SET policy_json = ?1 WHERE active = 1",
+        [policy.to_string()],
+    )
+    .unwrap();
+    drop(conn);
+    let frozen = host.canonical_attempt_freeze(&world.mission).unwrap();
+    assert!(
+        !frozen.contains("maxModelRequests"),
+        "an old ledger freeze has no budget keys: {frozen}"
+    );
+    rusqlite::Connection::open(world.db())
+        .unwrap()
+        .execute(
+            "UPDATE attempts SET frozen_inputs_json = ?1 WHERE active = 1",
+            [frozen],
+        )
+        .unwrap();
+    let settled = host.interrupt_operator(&world.mission).unwrap();
+    assert_eq!(settled.phase, Phase::Cancelled);
+    let receipt = confirm_receipt(&world.db(), &world.mission);
+    assert_eq!(receipt["proven"], true, "{receipt}");
+    assert!(receipt["cgroup"].is_object(), "{receipt}");
+}
+
+#[test]
 fn sigint_worker() {
     let Ok(root) = std::env::var("SW_BUDGET_ROOT") else {
         return;

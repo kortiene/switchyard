@@ -191,10 +191,18 @@ impl Host {
         // opens keep the 60s conformance watchdog. No product-mode flag.
         // TODO(#217): the product fixture should keep this wall. Do not add a
         // product-mode flag here; the freeze is the gate.
-        let (wall, model_request_cap) = match self.frozen_budgets(mission_id)? {
-            Some(budgets) => (budgets.bridge_wall, budgets.max_model_requests),
-            None => (BRIDGE_WALL, crate::budget::MAX_MODEL_REQUESTS),
+        // Cancel and pause do not parse budgets. A pre-#218 freeze has no
+        // budget keys; absence is the old wall, not an error.
+        let wall = if matches!(mission.phase, Phase::Cancelling | Phase::Pausing) {
+            BRIDGE_WALL
+        } else {
+            self.frozen_budgets(mission_id)
+                .ok()
+                .flatten()
+                .and_then(|budgets| budgets.bridge_wall)
+                .unwrap_or(BRIDGE_WALL)
         };
+        let model_request_cap = crate::budget::MAX_MODEL_REQUESTS;
         let digest = self.confined_mut()?.runtime_digest.clone();
         let runtime = self.confined_mut()?;
         let test_fixtures = runtime.allow_test_fixtures();
@@ -338,23 +346,11 @@ impl Host {
         receipt_from_row(request, method, &params, &rows[0])
     }
 
-    /// Walls, CPU, and size caps from the freeze. `count_requests` is set only
-    /// when a model turn is about to be sent, so a poll does not treat a full
-    /// budget of 40 as already exhausted.
-    fn enforce_observed(
-        &mut self,
-        binding: &RuntimeBinding,
-        request_bytes: u64,
-        response_bytes: u64,
-        count_requests: bool,
-    ) -> Result<()> {
+    /// Bridge wall, attempt wall, and bridge CPU from the freeze. The frozen
+    /// 40 is not counted here; the splice allowance enforces that cap.
+    fn enforce_observed(&mut self, binding: &RuntimeBinding) -> Result<()> {
         let (bridge, verifier) = self.attempt_clock.components();
         let (generation, cpu, wall_hit) = self.confined_generation_usage(&binding.session_id);
-        let model_requests = if count_requests {
-            self.model_requests_sent(&binding.mission_id)?
-        } else {
-            0
-        };
         let usage = crate::budget::BudgetUsage {
             bridge_generation: if wall_hit {
                 Duration::from_secs(crate::BRIDGE_WALL_SECONDS.saturating_add(1))
@@ -363,9 +359,6 @@ impl Host {
             },
             bridge_outside_verify: bridge,
             verifier,
-            model_requests,
-            request_bytes,
-            response_bytes,
             bridge_cpu: cpu,
         };
         self.enforce_usage(&binding.mission_id, &usage)
@@ -395,21 +388,7 @@ impl Host {
     ) -> Result<RuntimeReceipt> {
         crate::execution::PiRuntime::validate_command(request, payload)?;
         let (method, params) = mapped(request, payload)?;
-        let model_turn = matches!(method, "runtime.submit" | "runtime.steer");
-        if model_turn {
-            let request_bytes = serde_json::to_vec(&params)
-                .map(|bytes| bytes.len() as u64)
-                .unwrap_or(u64::MAX);
-            self.enforce_observed(&request.binding, request_bytes, 0, true)?;
-        }
-        let result =
-            self.confined_call(&request.binding, method, Some(&request.request_id), params)?;
-        if model_turn {
-            let response_bytes = serde_json::to_vec(&result)
-                .map(|bytes| bytes.len() as u64)
-                .unwrap_or(u64::MAX);
-            self.enforce_observed(&request.binding, 0, response_bytes, false)?;
-        }
+        self.confined_call(&request.binding, method, Some(&request.request_id), params)?;
         self.barrier("pi-before-ack");
         // Read the public durable receipt, including hash/binding checks, rather
         // than trusting a successful transport return as an admission fact.
@@ -539,11 +518,6 @@ impl Host {
                 None => {
                     let current = self.store.load_mission(mission_id)?;
                     if !matches!(current.phase, Phase::Planning | Phase::Implementing) {
-                        // A repair after settle stays pending. Superseding it
-                        // would drop the command with no named reason (#226).
-                        if is_post_settle_repair(command.kind) {
-                            return Err(Error::RepairAfterSettle);
-                        }
                         self.store.supersede_pending(
                             &command.id,
                             "admission closed before runtime accepted this command",
@@ -693,17 +667,14 @@ impl Host {
             .get_mut(&binding.session_id)
             .ok_or(Error::NotFound)?
             .stop()?;
-        // TODO(d1b-splice-timeout-connection-cap): that PR merges first and
-        // writes `modelEgress` from the proxy inside `stop` (scope
-        // "generation", allowance `UNWIRED_CONNECTION_ALLOWANCE` = 40). After
-        // it lands, if the proxy reported `exhausted()`, call
-        // `exhaust_runtime_budget` (`detect_uncertainty` /
-        // `runtime_budget_exhausted`). Do not admit `request_verification`.
-        // Replace the unwired allowance with the frozen per-mission cap (40)
-        // minus connections already recorded for the mission. A prior
-        // generation that had egress but no recorded count is 0 remaining
-        // (fail closed), and the scope becomes "mission". No second
-        // connection counter in this slice.
+        // TODO(d1b-splice-timeout-connection-cap): after #229 is on main, if
+        // `modelEgress` says the proxy was exhausted, call
+        // `exhaust_runtime_budget`. Do not admit `request_verification`.
+        // The allowance is the frozen cap minus recorded connections across
+        // prior generations, saturating at 0 (`try_from`, 0 on overflow).
+        // No frozen budget, or a prior generation with egress and no recorded
+        // count, is allowance 0. Persist that generation's `modelEgress`
+        // before the next open. Freeze `maxRetries` 0. No second counter.
         let mut lifecycle = self
             .confined_mut()?
             .sessions
@@ -737,6 +708,23 @@ impl Host {
         Ok(count)
     }
 
+    /// Stop the live bridge and leave the proven session in memory.
+    ///
+    /// The confinement probe uses this to dispatch a repair after settle
+    /// without admitting cancel. `cfg(test)` is not set when that probe
+    /// builds this crate.
+    #[cfg(feature = "test-fixtures")]
+    pub fn stop_live_bridge_for_test(&mut self, mission_id: &str) -> Result<Value> {
+        self.ensure_confined_session(mission_id)?;
+        let mission = self.store.load_mission(mission_id)?;
+        let session_id = mission.attempt.session_id;
+        self.confined_mut()?
+            .sessions
+            .get_mut(&session_id)
+            .ok_or(Error::NotFound)?
+            .stop()
+    }
+
     pub(super) fn poll_confined(&mut self, mission_id: &str) -> Result<Vec<NotifyOutcome>> {
         let mission = self.store.load_mission(mission_id)?;
         let binding = self.binding(&mission);
@@ -745,7 +733,9 @@ impl Host {
             return Ok(Vec::new());
         }
         self.ensure_confined_session(mission_id)?;
-        if let Err(error) = self.enforce_observed(&binding, 0, 0, false) {
+        if !matches!(mission.phase, Phase::Cancelling | Phase::Pausing)
+            && let Err(error) = self.enforce_observed(&binding)
+        {
             if error.category() == "runtime_budget_exhausted" {
                 return Ok(vec![unchanged(&self.store.load_mission(mission_id)?)]);
             }

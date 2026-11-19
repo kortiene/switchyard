@@ -586,10 +586,16 @@ impl Store {
         }
         let now = now_ms();
         let policy_value = json!({
-            "maxRepairs": created.max_repairs,
+            "attemptWallSeconds": crate::budget::ATTEMPT_WALL_SECONDS,
+            "bridgeCpuSeconds": crate::budget::BRIDGE_CPU_SECONDS,
+            "bridgeWallSeconds": crate::budget::BRIDGE_WALL_SECONDS,
+            "credentials": "none",
+            "maxModelRequests": crate::budget::MAX_MODEL_REQUESTS,
             "maxPlanRevisions": created.max_plan_revisions,
-            "planningTools": "read-only",
-            "credentials": "none"
+            "maxRepairs": created.max_repairs,
+            "maxRequestBytes": crate::budget::MAX_REQUEST_BYTES,
+            "maxResponseBytes": crate::budget::MAX_RESPONSE_BYTES,
+            "planningTools": "read-only"
         });
         let policy_json = canonicalize(&policy_value)?;
         let policy_hash = payload_hash(&policy_value)?;

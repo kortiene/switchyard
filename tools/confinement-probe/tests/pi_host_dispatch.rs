@@ -17,6 +17,8 @@ use switchyard_core::{
 mod budget_cancel;
 #[path = "pi_host_dispatch/composed.rs"]
 mod composed;
+#[path = "pi_host_dispatch/repair_after_settle.rs"]
+mod repair_after_settle;
 #[path = "pi_host_dispatch/stop_admission.rs"]
 mod stop_admission;
 

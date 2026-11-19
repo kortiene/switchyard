@@ -7,10 +7,10 @@ use crate::budget::{
     ATTEMPT_WALL_COUNTS_VERIFIER, ATTEMPT_WALL_SECONDS, DEFAULT_MAX_PLAN_REVISIONS,
     DEFAULT_MAX_REPAIRS,
 };
-use crate::{CommandBody, CommandKind, CreateMission, Phase, SuccessorChanges};
+use crate::{CommandBody, CreateMission, Phase, SuccessorChanges};
 
 #[test]
-fn request_cap_exhausts_without_a_provider_and_does_not_verify() {
+fn attempt_wall_exhausts_without_a_provider_and_does_not_verify() {
     let world = open_world();
     let mut host = crate::Host::open(&world.db).unwrap();
     let created = host
@@ -44,9 +44,9 @@ fn request_cap_exhausts_without_a_provider_and_does_not_verify() {
     let digest = frozen.content_digest.clone();
     let revision = frozen.revision;
 
-    let error = host
-        .enforce_request_budget(&created.mission_id, 256 * 1024 + 1)
-        .unwrap_err();
+    host.begin_bridge_for_test();
+    host.advance_attempt_clock_for_test(Duration::from_secs(ATTEMPT_WALL_SECONDS + 1));
+    let error = host.enforce_attempt_wall(&created.mission_id).unwrap_err();
     assert_eq!(error.category(), "runtime_budget_exhausted");
     let attention = host.snapshot(&created.mission_id).unwrap();
     assert_eq!(attention.phase, Phase::NeedsAttention);
@@ -78,9 +78,7 @@ fn request_cap_exhausts_without_a_provider_and_does_not_verify() {
             .any(|command| command.kind == "detect_uncertainty")
     );
 
-    let again = host
-        .enforce_request_budget(&created.mission_id, 256 * 1024 + 1)
-        .unwrap_err();
+    let again = host.enforce_attempt_wall(&created.mission_id).unwrap_err();
     assert_eq!(again.category(), "runtime_budget_exhausted");
     let still = host.snapshot(&created.mission_id).unwrap();
     assert_eq!(still.revision, attention.revision);
@@ -164,24 +162,20 @@ fn attempt_wall_does_not_count_two_verifier_deadlines() {
 }
 
 #[test]
-fn repair_after_settle_stays_pending_and_is_not_superseded() {
-    assert!(crate::service::is_post_settle_repair(
-        CommandKind::AuthorizeBoundedRepair
-    ));
-    assert!(crate::service::is_post_settle_repair(
-        CommandKind::RequestChanges
-    ));
-    assert!(!crate::service::is_post_settle_repair(
-        CommandKind::ApprovePlan
-    ));
-    assert!(!crate::service::is_post_settle_repair(
-        CommandKind::StartPlanning
-    ));
-    assert_eq!(
-        crate::repair_wait_outcome(true, Some("pending")),
-        None,
-        "a pending repair keeps the foreground wait running"
+fn product_mode_completes_when_idle_with_no_pending_work() {
+    assert!(crate::foreground_run_complete(false, true, false, false));
+    assert!(!crate::foreground_run_complete(false, true, true, true));
+    assert!(!crate::foreground_run_complete(false, false, false, true));
+    assert!(crate::foreground_run_complete(true, true, false, true));
+    assert!(
+        !crate::foreground_run_complete(true, true, false, false),
+        "the s3-acceptance replay still waits for its composed effects"
     );
+}
+
+#[test]
+fn repair_wait_does_not_treat_a_pending_or_superseded_repair_as_complete() {
+    assert_eq!(crate::repair_wait_outcome(true, Some("pending")), None);
     assert_eq!(
         crate::repair_wait_outcome(true, Some("superseded")),
         Some("repair_after_settle")
@@ -190,11 +184,107 @@ fn repair_after_settle_stays_pending_and_is_not_superseded() {
         crate::repair_wait_outcome(true, Some("acknowledged")),
         Some("complete")
     );
-    assert_eq!(
-        crate::repair_wait_outcome(false, Some("acknowledged")),
-        None
-    );
     let error = crate::Error::RepairAfterSettle;
     assert_eq!(error.category(), "repair_after_settle");
-    assert!(error.to_string().contains("not superseded"), "{error}");
+    assert!(error.to_string().contains("mission recover"), "{error}");
+}
+
+#[test]
+fn ledger_frozen_at_1a12f25_reopens_without_drift_and_admits_pause_and_verification() {
+    let world = open_world();
+    let mut host = crate::Host::open(&world.db).unwrap();
+    let written = plant_pre_budget_freeze(&mut host, &world);
+    let conn = rusqlite::Connection::open(&world.db).unwrap();
+    conn.execute(
+        "UPDATE attempts SET frozen_inputs_json = ?1 WHERE id = ?2",
+        rusqlite::params![crate::freeze::FREEZE_AT_1A12F25, written.attempt_id],
+    )
+    .unwrap();
+    drop(conn);
+    drop(host);
+
+    let mut host = crate::Host::open(&world.db).unwrap();
+    assert_eq!(
+        host.canonical_attempt_freeze(&written.mission_id).unwrap(),
+        crate::freeze::FREEZE_AT_1A12F25
+    );
+    admit(&mut host, &written.mission_id, CommandBody::Pause);
+    let paused = host.snapshot(&written.mission_id).unwrap();
+    assert_eq!(paused.phase, Phase::Pausing);
+    assert!(paused.attention_reason.is_none());
+    assert_eq!(
+        paused.frozen_inputs_json.as_deref(),
+        Some(crate::freeze::FREEZE_AT_1A12F25)
+    );
+
+    let world = open_world();
+    let mut host = crate::Host::open(&world.db).unwrap();
+    let created = plant_pre_budget_freeze(&mut host, &world);
+    let digest = {
+        use super::fixtures::{notify, plan_note, stored_plan_digest};
+        assert_eq!(
+            notify(&mut host, &created.mission_id, plan_note("do the work")),
+            Phase::AwaitingPlanApproval
+        );
+        let digest = stored_plan_digest(&host, &created.mission_id);
+        admit(
+            &mut host,
+            &created.mission_id,
+            CommandBody::ApprovePlan {
+                plan_digest: digest.clone(),
+            },
+        );
+        digest
+    };
+    let _ = digest;
+    admit(
+        &mut host,
+        &created.mission_id,
+        CommandBody::RequestVerification { quiescent: true },
+    );
+    let verifying = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(verifying.phase, Phase::Verifying);
+    assert!(verifying.attention_reason.is_none());
+    assert_eq!(
+        verifying.frozen_inputs_json.as_deref(),
+        Some(crate::freeze::FREEZE_AT_1A12F25)
+    );
+}
+
+fn plant_pre_budget_freeze(
+    host: &mut crate::Host,
+    world: &super::fixtures::World,
+) -> crate::MissionSnapshot {
+    let created = super::fixtures::create(host, &world.repo, 2);
+    let conn = rusqlite::Connection::open(&world.db).unwrap();
+    conn.execute(
+        "UPDATE missions SET objective = ?1, source_issue_json = ?2 WHERE id = ?3",
+        rusqlite::params![
+            "Ship the freeze",
+            r#"{"number":172,"provider":"github","snapshotAt":10,"title":"S4-A"}"#,
+            created.mission_id,
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE tasks SET acceptance_criteria = ?1 WHERE mission_id = ?2 AND root = 1",
+        rusqlite::params!["Inputs stay put", created.mission_id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE attempts SET base_sha = 'abc', max_repairs = 2, max_plan_revisions = 3, policy_json = ?1 WHERE mission_id = ?2 AND active = 1",
+        rusqlite::params![
+            r#"{"credentials":"none","maxPlanRevisions":3,"maxRepairs":2,"planningTools":"read-only"}"#,
+            created.mission_id,
+        ],
+    )
+    .unwrap();
+    drop(conn);
+    admit(host, &created.mission_id, CommandBody::StartPlanning);
+    let written = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(
+        written.frozen_inputs_json.as_deref(),
+        Some(crate::freeze::FREEZE_AT_1A12F25)
+    );
+    written
 }
