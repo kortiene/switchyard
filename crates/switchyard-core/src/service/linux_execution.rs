@@ -513,6 +513,11 @@ mod os {
                 let Some(effect) = self.store.linux_effect(&view.operation_id)? else {
                     continue;
                 };
+                // `poll_active` may have completed this row from the snapshot
+                // taken above. Completing it again is not a new effect.
+                if matches!(effect.state.as_str(), "completed" | "not_applied") {
+                    continue;
+                }
                 match crate::persistence::linux_execution::execution_kind(&effect.request_json) {
                     crate::persistence::linux_execution::ExecutionKind::Unknown => {
                         if effect.state != "uncertain" {
