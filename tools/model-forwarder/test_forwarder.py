@@ -662,6 +662,58 @@ class TestChecks(unittest.TestCase):
             with self.assertRaises(forwarder.StartupError) as symlink:
                 forwarder.open_mission_log(str(link), settings)
             self.assertIn("symlink", str(symlink.exception))
+            wrong = forwarder.Settings(
+                listen_host="127.0.0.1",
+                listen_port=9,
+                path=PATH,
+                model="grok-4.7",
+                key=KEY,
+                host_uid=0,
+                upstream_ip="8.8.8.8",
+                lookup_record=LOOKUP,
+                mission_id="other-mission",
+            )
+            fresh = tmp / "fresh"
+            first = forwarder.open_mission_log(str(fresh), settings)
+            first.close()
+            with self.assertRaises(forwarder.StartupError) as mismatch:
+                forwarder.open_mission_log(str(fresh), wrong)
+            self.assertIn("mission id does not match the log", str(mismatch.exception))
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_restart_row_on_every_reopen_round_trips_the_ip(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        log = tmp / "mission.log"
+
+        def settings(ip: str, lookup: str) -> forwarder.Settings:
+            return forwarder.Settings(
+                listen_host="127.0.0.1",
+                listen_port=9,
+                path=PATH,
+                model="grok-4.7",
+                key=KEY,
+                host_uid=0,
+                upstream_ip=ip,
+                lookup_record=lookup,
+                mission_id="mission-1",
+            )
+
+        try:
+            first = forwarder.open_mission_log(str(log), settings("127.0.0.1", "lookup-A"))
+            first.close()
+            second = forwarder.open_mission_log(str(log), settings("1.1.1.1", "lookup-B"))
+            second.close()
+            third = forwarder.open_mission_log(str(log), settings("127.0.0.1", "lookup-A"))
+            try:
+                self.assertEqual(third.reserved, 0)
+                restarts = [row for row in log_rows(log) if row["kind"] == "restart"]
+                self.assertEqual([row["upstream_ip"] for row in restarts], ["1.1.1.1", "127.0.0.1"])
+                self.assertEqual(restarts[-1]["lookup_record"], "lookup-A")
+                self.assertEqual(restarts[0]["lookup_record"], "lookup-B")
+                self.assertEqual(restarts[-1]["forwarder_sha256"], forwarder.forwarder_sha256())
+            finally:
+                third.close()
         finally:
             shutil.rmtree(tmp)
 
@@ -1121,35 +1173,112 @@ class TestProxy(unittest.TestCase):
     def test_p5_ragged_fin_after_chunked_reply_is_ok(self) -> None:
         self._chunked_ok(ragged_close)
 
-    def test_p6b_client_close_stops_silent_upstream(self) -> None:
-        payload = b"data: first\n\n"
+    def test_keepalive_after_half_close_closes_silent_upstream(self) -> None:
+        # pi-ai half-closes after the body. A later full close sends no packet.
+        # Short keepalive values stand in for idle 5 / interval 5 / count 2.
+        seen = threading.Event()
         closed = threading.Event()
 
         def handler(tls):
             read_request(tls)
-            tls.sendall(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
-                b"Transfer-Encoding: chunked\r\n\r\n" + chunk(payload)
-            )
+            seen.set()
             try:
-                tls.settimeout(5)
+                tls.settimeout(20)
                 tls.recv(1)
             except OSError:
                 pass
             closed.set()
 
         self.h.stub.handler = handler
+        saved = (forwarder.KEEPALIVE_IDLE, forwarder.KEEPALIVE_INTVL, forwarder.KEEPALIVE_CNT)
+        forwarder.KEEPALIVE_IDLE = 1
+        forwarder.KEEPALIVE_INTVL = 1
+        forwarder.KEEPALIVE_CNT = 2
         sock = self.h.connect()
-        sock.settimeout(2)
+        try:
+            sock.sendall(http_request(chat_body()))
+            sock.shutdown(socket.SHUT_WR)
+            self.assertTrue(seen.wait(3))
+            sock.close()
+            self.assertTrue(closed.wait(15))
+        finally:
+            (
+                forwarder.KEEPALIVE_IDLE,
+                forwarder.KEEPALIVE_INTVL,
+                forwarder.KEEPALIVE_CNT,
+            ) = saved
+
+    def test_idle_timeout_resets_after_each_chunk(self) -> None:
+        # One chunk a second for 5 s, with the idle timeout patched to 3 s.
+        # A single deadline would cut the stream; a per-read timeout does not.
+        chunks = [f"data: {i}\n\n".encode() for i in range(5)]
+
+        def handler(tls):
+            read_request(tls)
+            tls.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n"
+            )
+            for part in chunks:
+                tls.sendall(chunk(part))
+                time.sleep(1.0)
+            tls.sendall(b"0\r\n\r\n")
+            clean_close(tls)
+
+        self.h.stub.handler = handler
+        saved = forwarder.UPSTREAM_TIMEOUT_S
+        forwarder.UPSTREAM_TIMEOUT_S = 3
+        sock = self.h.connect()
+        sock.settimeout(12)
+        try:
+            sock.sendall(http_request(chat_body()))
+            data = read_all(sock)
+        finally:
+            forwarder.UPSTREAM_TIMEOUT_S = saved
+        _head, body = split_http(data)
+        decoded, complete = decode_chunked(body)
+        self.assertTrue(complete)
+        self.assertEqual(decoded, b"".join(chunks))
+        self.assertEqual(log_rows(self.h.log_path)[-1]["outcome"], "ok")
+
+    def test_chunked_and_content_length_hash_the_same_payload(self) -> None:
+        payload = b"same-payload"
+        mode = {"chunked": False}
+
+        def handler(tls):
+            read_request(tls)
+            if mode["chunked"]:
+                tls.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                    b"Transfer-Encoding: chunked\r\n\r\n"
+                    + chunk(payload[:4])
+                    + chunk(payload[4:])
+                    + b"0\r\n\r\n"
+                )
+            else:
+                tls.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: "
+                    + str(len(payload)).encode()
+                    + b"\r\n\r\n"
+                    + payload
+                )
+            clean_close(tls)
+
+        self.h.stub.handler = handler
+        sock = self.h.connect()
         sock.sendall(http_request(chat_body()))
-        data = b""
-        while payload not in data:
-            piece = sock.recv(4096)
-            if not piece:
-                self.fail("eof before first chunk")
-            data += piece
-        sock.close()
-        self.assertTrue(closed.wait(1.0))
+        read_all(sock)
+        mode["chunked"] = True
+        sock = self.h.connect()
+        sock.sendall(http_request(chat_body()))
+        read_all(sock)
+        exchanges = [row for row in log_rows(self.h.log_path) if row["kind"] == "exchange"]
+        self.assertEqual(len(exchanges), 2)
+        expect = hashlib.sha256(payload).hexdigest()
+        self.assertEqual(exchanges[0]["response_sha256"], expect)
+        self.assertEqual(exchanges[1]["response_sha256"], expect)
+        self.assertEqual(exchanges[0]["response_bytes"], len(payload))
+        self.assertEqual(exchanges[1]["response_bytes"], len(payload))
 
     def test_allowlist_drops_proxy_and_api_key_headers(self) -> None:
         captured = []
@@ -1226,6 +1355,8 @@ class TestProxy(unittest.TestCase):
         for body in (
             b'{"model":"other","model":"grok-4.7","stream":true}',
             b'{"model":"grok-4.7","stream":false}',
+            b'{"model":"grok-4.7","stream":true,"n":1,"n":2}',
+            b'{"model":"grok-4.7"}',
         ):
             sock = self.h.connect()
             sock.sendall(http_request(body))

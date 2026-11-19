@@ -38,8 +38,16 @@ LABEL = "egress pinned by an operator forwarder, not by Switchyard"
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_REQUESTS = 40
-UPSTREAM_TIMEOUT_S = 300
 CONNECT_TIMEOUT_S = 10
+# Idle time between upstream reads. Each read that returns data starts it again.
+UPSTREAM_TIMEOUT_S = 300
+# Client keepalive. A pi-ai half-close leaves the socket in CLOSE_WAIT, and a
+# later full close sends no packet. Probes are what notice a dead peer.
+# With these values a dead client showed up at about 66 s in review, not 1 s.
+# A close within about 1 s happens only while response bytes are flowing, or on an RST.
+KEEPALIVE_IDLE = 5
+KEEPALIVE_INTVL = 5
+KEEPALIVE_CNT = 2
 UPSTREAM_SNI = "api.x.ai"
 MAX_KEY_BYTES = 4096
 MAX_LOG_BYTES = 8 * 1024 * 1024
@@ -259,7 +267,7 @@ def _validate_loaded_log(records: list[dict], settings: Settings) -> tuple[int, 
     if header.get("path") != settings.path or header.get("model") != settings.model:
         raise StartupError("refusing to start: log does not match this mission")
     if header.get("mission_id") != settings.mission_id:
-        raise StartupError("refusing to start: log does not match this mission")
+        raise StartupError("refusing to start: mission id does not match the log")
     if not isinstance(header.get("upstream_ip"), str) or not _hex64(header.get("forwarder_sha256")):
         raise StartupError("refusing to start: log is malformed")
     reserved = 0
@@ -278,8 +286,10 @@ def _validate_loaded_log(records: list[dict], settings: Settings) -> tuple[int, 
             continue
         if kind == "restart":
             if row.get("mission_id") != settings.mission_id:
-                raise StartupError("refusing to start: log is malformed")
+                raise StartupError("refusing to start: mission id does not match the log")
             if not isinstance(row.get("upstream_ip"), str) or not isinstance(row.get("start"), str):
+                raise StartupError("refusing to start: log is malformed")
+            if not isinstance(row.get("lookup_record"), str) or not _hex64(row.get("forwarder_sha256")):
                 raise StartupError("refusing to start: log is malformed")
             continue
         if kind != "exchange":
@@ -364,7 +374,7 @@ def _header_record(settings: Settings) -> dict:
         "lookup_record": settings.lookup_record,
         "mission_id": settings.mission_id,
         "sni": settings.sni,
-        "hash_scope": "request-and-response-bodies",
+        "hash_scope": "de-framed-request-and-response-bodies",
         "caps_request_bytes": MAX_REQUEST_BYTES,
         "caps_response_bytes": MAX_RESPONSE_BYTES,
         "caps_requests": MAX_REQUESTS,
@@ -433,18 +443,19 @@ def open_mission_log(path: str, settings: Settings) -> MissionLog:
             if not isinstance(obj, dict):
                 raise StartupError("refusing to start: log is malformed")
             records.append(obj)
-        reserved, next_seq, ip_changed = _validate_loaded_log(records, settings)
+        reserved, next_seq, _ip_changed = _validate_loaded_log(records, settings)
         log = MissionLog(fd, reserved, next_seq)
         fd = -1
-        if ip_changed:
-            log.append(
-                {
-                    "kind": "restart",
-                    "start": utc_millis(),
-                    "mission_id": settings.mission_id,
-                    "upstream_ip": settings.upstream_ip,
-                }
-            )
+        log.append(
+            {
+                "kind": "restart",
+                "start": utc_millis(),
+                "mission_id": settings.mission_id,
+                "upstream_ip": settings.upstream_ip,
+                "lookup_record": settings.lookup_record,
+                "forwarder_sha256": forwarder_sha256(),
+            }
+        )
         return log
     except Exception:
         if fd >= 0:
@@ -529,13 +540,15 @@ def build_upstream_request(path: str, headers, body: bytes, key: bytes) -> bytes
     return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body
 
 
-def _read_head(sock: ssl.SSLSocket) -> tuple[bytes, bytes]:
+def _read_head(
+    sock: ssl.SSLSocket,
+    client: socket.socket | None,
+    half_closed: bool,
+    clock: _IdleClock,
+) -> tuple[bytes, bytes]:
     buf = b""
     while b"\r\n\r\n" not in buf:
-        try:
-            piece = sock.recv(4096)
-        except (TimeoutError, socket.timeout, OSError, ssl.SSLError) as exc:
-            raise _UpstreamCut(type(exc).__name__) from None
+        piece = _recv_some(sock, client, half_closed, clock)
         if not piece:
             raise _UpstreamCut("eof")
         buf += piece
@@ -649,14 +662,41 @@ def _tcp_state(sock: socket.socket) -> int:
     return info[0] if info else 0
 
 
+class _IdleClock:
+    """Per-read idle timeout. A read that returns data starts the window again."""
+
+    def reset(self) -> None:
+        self.deadline = time.monotonic() + UPSTREAM_TIMEOUT_S
+
+    def expired(self) -> bool:
+        return time.monotonic() >= self.deadline
+
+    def slice(self) -> float:
+        return max(0.0, min(0.2, self.deadline - time.monotonic()))
+
+
+def _poll_mask(sock: socket.socket, timeout: float) -> int:
+    """Poll one socket. poll, not select: fds can be 1024 or higher."""
+    try:
+        poller = select.poll()
+        poller.register(sock.fileno(), select.POLLIN | select.POLLERR | select.POLLHUP)
+        events = poller.poll(max(0, int(timeout * 1000)))
+    except (OSError, ValueError):
+        return 0
+    if not events:
+        return 0
+    return events[0][1]
+
+
 def _write_side_closed(sock: socket.socket) -> bool:
     if _tcp_state(sock) == 8:
         return True
-    try:
-        readable, _, _ = select.select([sock], [], [], 0)
-    except (OSError, ValueError):
+    mask = _poll_mask(sock, 0)
+    if not mask:
+        return False
+    if mask & (select.POLLERR | select.POLLNVAL):
         return True
-    if not readable:
+    if not mask & select.POLLIN:
         return False
     try:
         peeked = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
@@ -667,13 +707,50 @@ def _write_side_closed(sock: socket.socket) -> bool:
     return peeked == b""
 
 
-def _client_disconnected(sock: socket.socket, half_closed_at_start: bool) -> bool:
-    """True when the client has gone away after the response started.
+_probe_at: dict[int, float] = {}
 
-    A write-side half-close is already true before the response for pi-ai.
-    That is not a disconnect. A later full close, or a close with no prior
-    half-close, is.
+
+def _close_wait_write_probe(sock: socket.socket) -> bool:
+    """Notice a dead peer that already half-closed.
+
+    Linux does not send keepalive segments in CLOSE_WAIT, and a later full
+    close sends no packet. A write is what changes the socket. The byte is
+    out-of-band so it is not part of the HTTP stream. The schedule is the
+    keepalive idle/interval configured on the socket.
     """
+    if _tcp_state(sock) != 8:
+        return False
+    due = _probe_at.get(id(sock), 0.0)
+    now = time.monotonic()
+    if now < due:
+        return False
+    try:
+        interval = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL)
+    except OSError:
+        interval = KEEPALIVE_INTVL
+    _probe_at[id(sock)] = now + max(1, interval)
+    try:
+        sock.send(b"\x00", socket.MSG_OOB | socket.MSG_DONTWAIT | socket.MSG_NOSIGNAL)
+    except OSError:
+        return True
+    try:
+        err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+    except OSError:
+        return True
+    if err:
+        return True
+    return _tcp_state(sock) in (7, 9)
+
+
+def _client_disconnected(sock: socket.socket, half_closed_at_start: bool) -> bool:
+    """True when the peer is dead, not merely write-half-closed.
+
+    CLOSE_WAIT by itself is not a disconnect, whether or not the client had
+    already half-closed when the response started. A dead peer shows up as a
+    socket error: an RST, keepalive on an established socket, or the
+    CLOSE_WAIT write probe.
+    """
+    del half_closed_at_start
     try:
         err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
     except OSError:
@@ -683,29 +760,30 @@ def _client_disconnected(sock: socket.socket, half_closed_at_start: bool) -> boo
     state = _tcp_state(sock)
     if state in (7, 9):
         return True
-    if half_closed_at_start:
-        return False
-    if state == 8:
-        return True
+    return state == 8 and _close_wait_write_probe(sock)
+
+
+def _arm_client_keepalive(sock: socket.socket) -> None:
     try:
-        readable, _, _ = select.select([sock], [], [], 0)
-    except (OSError, ValueError):
-        return True
-    if not readable:
-        return False
-    try:
-        peeked = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
-    except BlockingIOError:
-        return False
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, KEEPALIVE_IDLE)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, KEEPALIVE_INTVL)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, KEEPALIVE_CNT)
     except OSError:
-        return True
-    return peeked == b""
+        return
+    _probe_at[id(sock)] = time.monotonic() + KEEPALIVE_IDLE
 
 
-def _recv_some(sock: ssl.SSLSocket, client: socket.socket | None, half_closed: bool, deadline: float) -> bytes | None:
+def _recv_some(
+    sock: ssl.SSLSocket,
+    client: socket.socket | None,
+    half_closed: bool,
+    clock: _IdleClock,
+) -> bytes | None:
     """Return bytes, b'' on a clean TLS close, or None on a cut.
 
-    Raises _ClientGone after closing upstream when the client disconnects.
+    A non-empty read resets the idle clock. Raises _ClientGone after closing
+    upstream when keepalive or an RST shows the client is dead.
     """
     while True:
         if client is not None and _client_disconnected(client, half_closed):
@@ -714,36 +792,44 @@ def _recv_some(sock: ssl.SSLSocket, client: socket.socket | None, half_closed: b
             except OSError:
                 pass
             raise _ClientGone()
+        # A readable SSL socket can still block in recv. Keep that wait
+        # inside the idle slice so a silent upstream cannot hide a dead client.
+        sock.settimeout(max(clock.slice(), 0.05))
         if sock.pending():
             try:
-                return sock.recv(8192)
-            except (TimeoutError, socket.timeout, OSError, ssl.SSLError):
+                data = sock.recv(8192)
+            except (TimeoutError, socket.timeout):
+                continue
+            except (OSError, ssl.SSLError):
                 return None
-        if time.monotonic() >= deadline:
+            if data:
+                clock.reset()
+            return data
+        if clock.expired():
             return None
-        wait = min(0.2, deadline - time.monotonic())
-        try:
-            readable, _, _ = select.select([sock], [], [], max(wait, 0))
-        except (OSError, ValueError):
-            return None
-        if not readable:
+        mask = _poll_mask(sock, clock.slice())
+        if not mask:
             continue
         try:
             data = sock.recv(8192)
-        except (TimeoutError, socket.timeout, OSError, ssl.SSLError):
+        except (TimeoutError, socket.timeout):
+            continue
+        except (OSError, ssl.SSLError):
             return None
+        if data:
+            clock.reset()
         return data
 
 
-def _take_chunk_frames(buf: bytes) -> tuple[bytes, bytes, bool, bool, int]:
+def _take_chunk_frames(buf: bytes) -> tuple[bytes, bytes, bool, bool, bytes]:
     """Split complete chunk frames out of buf.
 
     Returns forwardable bytes, the unparsed tail, whether the 0-chunk
-    finished the message, whether the framing is invalid, and the payload
-    bytes inside the frames.
+    finished the message, whether the framing is invalid, and the de-framed
+    payload inside those frames.
     """
     frames: list[bytes] = []
-    payload = 0
+    payload = bytearray()
     index = 0
     while True:
         newline = buf.find(b"\r\n", index)
@@ -753,7 +839,7 @@ def _take_chunk_frames(buf: bytes) -> tuple[bytes, bytes, bool, bool, int]:
         try:
             size = int(size_token, 16)
         except ValueError:
-            return b"".join(frames), buf[index:], False, True, payload
+            return b"".join(frames), buf[index:], False, True, bytes(payload)
         data_at = newline + 2
         if size == 0:
             if buf[data_at : data_at + 2] == b"\r\n":
@@ -764,16 +850,16 @@ def _take_chunk_frames(buf: bytes) -> tuple[bytes, bytes, bool, bool, int]:
                     break
                 end = end_rel + 4
             frames.append(buf[index:end])
-            return b"".join(frames), buf[end:], True, False, payload
+            return b"".join(frames), buf[end:], True, False, bytes(payload)
         end = data_at + size + 2
         if len(buf) < end:
             break
         if buf[end - 2 : end] != b"\r\n":
-            return b"".join(frames), buf[index:], False, True, payload
+            return b"".join(frames), buf[index:], False, True, bytes(payload)
         frames.append(buf[index:end])
-        payload += size
+        payload += buf[data_at : data_at + size]
         index = end
-    return b"".join(frames), buf[index:], False, False, payload
+    return b"".join(frames), buf[index:], False, False, bytes(payload)
 
 
 def _wire_reframe(
@@ -783,44 +869,45 @@ def _wire_reframe(
     code: int,
     client: socket.socket | None,
     half_closed: bool,
-    deadline: float,
+    clock: _IdleClock,
 ) -> tuple[int, str, int, str]:
-    """Re-frame a close-delimited upstream body as chunked, unbuffered."""
+    """Re-frame a close-delimited upstream body as chunked, unbuffered.
+
+    The hash and byte count are the de-framed payload, not the chunk framing.
+    """
     digest = hashlib.sha256()
-    wire = 0
     payload = 0
     pending = rest
 
-    def account(frame: bytes) -> None:
-        nonlocal wire
+    def write_out(frame: bytes, piece: bytes) -> None:
+        nonlocal payload
         wfile.write(frame)
         wfile.flush()
-        digest.update(frame)
-        wire += len(frame)
+        if piece:
+            digest.update(piece)
+            payload += len(piece)
 
     try:
         while True:
             if not pending:
-                nxt = _recv_some(tls, client, half_closed, deadline)
+                nxt = _recv_some(tls, client, half_closed, clock)
                 if nxt is None:
-                    return code, "upstream_error", wire, digest.hexdigest()
+                    return code, "upstream_error", payload, digest.hexdigest()
                 if nxt == b"":
-                    end = b"0\r\n\r\n"
-                    account(end)
-                    return code, "ok", wire, digest.hexdigest()
+                    write_out(b"0\r\n\r\n", b"")
+                    return code, "ok", payload, digest.hexdigest()
                 pending = nxt
             room = MAX_RESPONSE_BYTES - payload
             if room <= 0:
-                return code, "response_cap", wire, digest.hexdigest()
+                return code, "response_cap", payload, digest.hexdigest()
             piece = pending[:room]
             frame = f"{len(piece):x}\r\n".encode("ascii") + piece + b"\r\n"
-            account(frame)
-            payload += len(piece)
+            write_out(frame, piece)
             pending = pending[len(piece) :]
             if payload >= MAX_RESPONSE_BYTES and pending:
-                return code, "response_cap", wire, digest.hexdigest()
+                return code, "response_cap", payload, digest.hexdigest()
     except _ClientGone:
-        return code, "upstream_error", wire, digest.hexdigest()
+        return code, "upstream_error", payload, digest.hexdigest()
 
 
 def relay_response(
@@ -831,10 +918,14 @@ def relay_response(
     Content-Length from upstream is preserved. A close-delimited body is
     re-framed as chunked. A chunked body is parsed, and the terminating
     0-chunk ends the reply even if upstream stays open. A cut does not
-    get a terminating 0-chunk. request_sha256 and response_sha256 cover
-    body bytes only.
+    get a terminating 0-chunk. request_sha256 and response_sha256 are the
+    de-framed body bytes only, so a chunked body and a Content-Length body
+    of the same payload hash the same.
     """
-    head, rest = _read_head(tls)
+    half_closed = bool(client is not None and _write_side_closed(client))
+    clock = _IdleClock()
+    clock.reset()
+    head, rest = _read_head(tls, client, half_closed, clock)
     status_line, pairs = _split_head(head)
     code = _status_code(status_line)
     if 100 <= code <= 199:
@@ -857,13 +948,11 @@ def relay_response(
         mode = "content-length"
     else:
         mode = "close"
-    half_closed = bool(client is not None and _write_side_closed(client))
-    deadline = time.monotonic() + UPSTREAM_TIMEOUT_S
     framed = "content-length" if mode == "content-length" else "chunked"
     wfile.write(_response_head(status_line, pairs, framed, length if isinstance(length, int) else 0))
     wfile.flush()
     if mode == "close":
-        return _wire_reframe(tls, wfile, rest, code, client, half_closed, deadline)
+        return _wire_reframe(tls, wfile, rest, code, client, half_closed, clock)
     digest = hashlib.sha256()
     sent = 0
     try:
@@ -872,7 +961,7 @@ def relay_response(
             pending = rest
             while sent < length:
                 if not pending:
-                    pending = _recv_some(tls, client, half_closed, deadline)
+                    pending = _recv_some(tls, client, half_closed, clock)
                     if pending is None or pending == b"":
                         return code, "upstream_error", sent, digest.hexdigest()
                 take = pending[: length - sent]
@@ -889,29 +978,30 @@ def relay_response(
         pending = rest
         payload = 0
         while True:
-            frames, pending, finished, invalid, chunk_payload = _take_chunk_frames(pending)
+            frames, pending, finished, invalid, payload_bytes = _take_chunk_frames(pending)
             if invalid:
-                return code, "upstream_error", sent, digest.hexdigest()
-            if frames:
-                if payload + chunk_payload > MAX_RESPONSE_BYTES:
-                    return code, "response_cap", sent, digest.hexdigest()
+                return code, "upstream_error", payload, digest.hexdigest()
+            if payload_bytes or frames:
+                if payload + len(payload_bytes) > MAX_RESPONSE_BYTES:
+                    return code, "response_cap", payload, digest.hexdigest()
                 wfile.write(frames)
                 wfile.flush()
-                digest.update(frames)
-                sent += len(frames)
-                payload += chunk_payload
+                if payload_bytes:
+                    digest.update(payload_bytes)
+                    payload += len(payload_bytes)
             if finished:
                 try:
                     tls.close()
                 except OSError:
                     pass
-                return code, "ok", sent, digest.hexdigest()
-            nxt = _recv_some(tls, client, half_closed, deadline)
+                return code, "ok", payload, digest.hexdigest()
+            nxt = _recv_some(tls, client, half_closed, clock)
             if nxt is None or nxt == b"":
-                return code, "upstream_error", sent, digest.hexdigest()
+                return code, "upstream_error", payload, digest.hexdigest()
             pending += nxt
     except _ClientGone:
-        return code, "upstream_error", sent, digest.hexdigest()
+        counted = payload if mode == "chunked" else sent
+        return code, "upstream_error", counted, digest.hexdigest()
 
 
 def _target_path(handler: BaseHTTPRequestHandler) -> str:
@@ -1023,7 +1113,7 @@ def handle_exchange(handler: BaseHTTPRequestHandler) -> None:
     if not isinstance(obj, dict) or not isinstance(obj.get("model"), str) or obj.get("model") != settings.model:
         _refuse(handler, 400, "400", body, started_m, started, method, path)
         return
-    if "stream" in obj and obj["stream"] is not True:
+    if obj.get("stream") is not True:
         _refuse(handler, 400, "400", body, started_m, started, method, path)
         return
     try:
@@ -1106,8 +1196,10 @@ class Handler(BaseHTTPRequestHandler):
     def handle(self) -> None:
         # Exactly one request. Do not treat a client write-side half-close
         # as the end of the exchange: pi-ai shuts down writes after the body
-        # and still reads the response.
+        # and still reads the response. Keepalive is what later notices a
+        # full close, because that close sends no further packet.
         self.close_connection = True
+        _arm_client_keepalive(self.connection)
         self.server.register_socket(self.connection)
         try:
             self.raw_requestline = self.rfile.readline(65537)
@@ -1192,8 +1284,9 @@ class ForwarderServer(ThreadingHTTPServer):
 
 
 def _json_object(pairs: list[tuple[str, object]]) -> dict:
-    if sum(1 for key, _value in pairs if key == "model") > 1:
-        raise ValueError("duplicate model")
+    keys = [key for key, _value in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key")
     return dict(pairs)
 
 

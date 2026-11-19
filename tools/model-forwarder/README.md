@@ -77,22 +77,29 @@ The forwarder listens only on `127.0.0.1`. `--upstream-ip` is one global
 IPv4 address: not a name, not IPv6, not multicast, and not `192.88.99.0/24`.
 It connects with `socket.create_connection((ip, 443))`, SNI `api.x.ai`, and
 the system trust store (`CERT_REQUIRED`, hostname checked). The connect and
-handshake timeout is 10 seconds. A redirect or an upstream `1xx` is a local
-502. Only `Content-Type`, `Accept`, and `User-Agent` are copied from the
+handshake timeout is 10 seconds. Each upstream read has its own 300 second
+idle timeout, started again when a read returns data. A redirect or an
+upstream `1xx` is a local 502. The client socket uses TCP keepalive (idle
+5 s, interval 5 s, 2 probes). A half-close is not a disconnect. A later full
+close sends no packet, so keepalive is what notices a dead client. Closing
+upstream within about a second happens when response bytes are still
+flowing, or when the client sends an RST. Only `Content-Type`, `Accept`,
+and `User-Agent` are copied from the
 client; `Host` and `Authorization` are replaced. Caps are 256 KiB per
 request (413), 1 MiB per response (502 or a cut logged `response_cap`), and
 40 reserve rows per mission log (429, no dial).
 
-`request_sha256` and `response_sha256` are the sha256 of the request and
-response body bytes only. They do not cover headers, and they never cover
-the key.
+`request_sha256` and `response_sha256` are the sha256 of the de-framed
+request and response body bytes. Chunk framing is not part of the hash, so
+the same payload has the same hash whether upstream used `Content-Length`
+or chunked encoding. Headers are not hashed, and the key is never hashed.
 
 ## Receipt
 
 sha256 of `forwarder.py` at this revision:
 
 ```
-1d811d9a03d360400b5c23f1b9ce2b7f16252836387ef20091cddbff469c598f
+9d58124f635413e51457615a627cfd271052bd13a93d23dd239671ab3f21c4e9
 ```
 
 Confirm it on the host before the run:
