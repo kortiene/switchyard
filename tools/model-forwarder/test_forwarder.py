@@ -137,6 +137,18 @@ def clean_close(tls: ssl.SSLSocket) -> None:
         pass
 
 
+def ragged_close(tls: ssl.SSLSocket) -> None:
+    """TCP close without a TLS close_notify. Do not RST; the bytes must arrive."""
+    try:
+        os.close(tls.fileno())
+    except OSError:
+        pass
+    try:
+        tls.close()
+    except OSError:
+        pass
+
+
 def cut_tls(tls: ssl.SSLSocket) -> None:
     try:
         tls.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
@@ -189,6 +201,15 @@ def read_all(sock: socket.socket, limit: int = 8 * 1024 * 1024) -> bytes:
             break
         data += piece
     return data
+
+
+def reserve_row(seq: int, upstream_ip: str = "127.0.0.1") -> dict:
+    return {
+        "kind": "reserve",
+        "seq": seq,
+        "start": "2026-11-19T00:00:00.000Z",
+        "upstream_ip": upstream_ip,
+    }
 
 
 def exchange_row(seq: int, outcome: str = "ok") -> dict:
@@ -323,6 +344,7 @@ class Harness:
             host_uid=0,
             upstream_ip="127.0.0.1",
             lookup_record=LOOKUP,
+            mission_id="mission-1",
         )
         if exchanges is not None:
             header = forwarder._header_record(self.settings)
@@ -399,7 +421,18 @@ class TestChecks(unittest.TestCase):
         socket.getaddrinfo = wrapped
         try:
             self.assertEqual(forwarder.require_global_ip("8.8.8.8"), "8.8.8.8")
-            for bad in ("127.0.0.1", "10.1.2.3", "192.168.0.1", "169.254.1.1", "api.x.ai", "localhost"):
+            for bad in (
+                "127.0.0.1",
+                "10.1.2.3",
+                "192.168.0.1",
+                "169.254.1.1",
+                "224.0.0.1",
+                "192.88.99.1",
+                "2001:4860:4860::8888",
+                "64:ff9b::8.8.8.8",
+                "api.x.ai",
+                "localhost",
+            ):
                 with self.assertRaises(forwarder.StartupError):
                     forwarder.require_global_ip(bad)
         finally:
@@ -479,6 +512,7 @@ class TestChecks(unittest.TestCase):
             "--host-uid", "1",
             "--upstream-ip", "8.8.8.8",
             "--lookup-record", "x",
+            "--mission-id", "mission-1",
             "--log", "l",
         ]
         with contextlib.redirect_stderr(io.StringIO()):
@@ -526,6 +560,7 @@ class TestChecks(unittest.TestCase):
             "--host-uid", "0",
             "--upstream-ip", "8.8.8.8",
             "--lookup-record", LOOKUP,
+            "--mission-id", "mission-1",
             "--log", str(tmp / "mission.log"),
         ]
         try:
@@ -541,6 +576,7 @@ class TestChecks(unittest.TestCase):
                 "--host-uid", "0",
                 "--upstream-ip", "api.x.ai",
                 "--lookup-record", LOOKUP,
+                "--mission-id", "mission-1",
                 "--log", str(tmp / "mission.log"),
             ])
             self.assertEqual(code, 1, err)
@@ -553,6 +589,7 @@ class TestChecks(unittest.TestCase):
                 "--host-uid", "0",
                 "--upstream-ip", "10.1.2.3",
                 "--lookup-record", LOOKUP,
+                "--mission-id", "mission-1",
                 "--log", str(tmp / "mission.log"),
             ])
             self.assertEqual(code, 1)
@@ -565,6 +602,7 @@ class TestChecks(unittest.TestCase):
                 "--host-uid", "0",
                 "--upstream-ip", "8.8.8.8",
                 "--lookup-record", LOOKUP,
+                "--mission-id", "mission-1",
                 "--log", str(tmp / "mission.log"),
             ])
             self.assertEqual(code, 1)
@@ -578,6 +616,7 @@ class TestChecks(unittest.TestCase):
                 "--host-uid", str(os.geteuid()),
                 "--upstream-ip", "8.8.8.8",
                 "--lookup-record", LOOKUP,
+                "--mission-id", "mission-1",
                 "--log", str(tmp / "mission.log"),
             ])
             self.assertEqual(code, 1)
@@ -597,6 +636,7 @@ class TestChecks(unittest.TestCase):
             host_uid=0,
             upstream_ip="8.8.8.8",
             lookup_record=LOOKUP,
+            mission_id="mission-1",
         )
         try:
             bad = tmp / "bad"
@@ -625,13 +665,53 @@ class TestChecks(unittest.TestCase):
         finally:
             shutil.rmtree(tmp)
 
+    def test_fifo_key_is_refused_without_blocking(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        fifo = tmp / "key"
+        os.mkfifo(fifo)
+        try:
+            started = time.monotonic()
+            with self.assertRaises(forwarder.StartupError) as exc:
+                forwarder.read_key_file(str(fifo))
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertIn("regular file", str(exc.exception))
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_listen_port_in_use_is_named(self) -> None:
+        held = socket.socket()
+        held.bind(("127.0.0.1", 0))
+        port = held.getsockname()[1]
+        tmp = Path(tempfile.mkdtemp())
+        key_path = tmp / "key"
+        key_path.write_bytes(KEY)
+        os.chmod(key_path, 0o600)
+        try:
+            code, _out, err = run_cli([
+                "--listen", f"127.0.0.1:{port}",
+                "--path", PATH,
+                "--key-file", str(key_path),
+                "--host-uid", "0",
+                "--upstream-ip", "8.8.8.8",
+                "--lookup-record", LOOKUP,
+                "--mission-id", "mission-1",
+                "--log", str(tmp / "mission.log"),
+            ])
+            self.assertEqual(code, 1)
+            self.assertIn("listen port is in use", err)
+        finally:
+            held.close()
+            shutil.rmtree(tmp)
+
 
 class TestProxy(unittest.TestCase):
     def setUp(self) -> None:
         self.h = Harness()
 
     def tearDown(self) -> None:
-        self.h.stop()
+        harness = getattr(self, "h", None)
+        if harness is not None:
+            harness.stop()
 
     def test_strips_client_auth_and_records_exchange(self) -> None:
         body = chat_body()
@@ -688,7 +768,7 @@ class TestProxy(unittest.TestCase):
         self.assertEqual(rows[0]["model"], "grok-4.7")
         self.assertEqual(rows[0]["forwarder_sha256"], forwarder.forwarder_sha256())
         self.assertEqual(rows[0]["caps_requests"], 40)
-        exchange = rows[1]
+        exchange = next(row for row in rows if row["kind"] == "exchange")
         self.assertEqual(exchange["outcome"], "ok")
         self.assertEqual(exchange["request_sha256"], hashlib.sha256(body).hexdigest())
         self.assertEqual(exchange["response_sha256"], hashlib.sha256(resp).hexdigest())
@@ -955,7 +1035,7 @@ class TestProxy(unittest.TestCase):
 
     def test_restart_at_40_is_429_without_upstream(self) -> None:
         self.h.stop()
-        rows = [exchange_row(i) for i in range(1, 41)]
+        rows = [reserve_row(i) for i in range(1, 41)]
         self.h = Harness(exchanges=rows)
         sock = self.h.connect()
         sock.sendall(http_request(chat_body()))
@@ -967,7 +1047,7 @@ class TestProxy(unittest.TestCase):
 
     def test_refusal_does_not_consume_a_logged_slot(self) -> None:
         self.h.stop()
-        self.h = Harness(exchanges=[exchange_row(i) for i in range(1, 40)])
+        self.h = Harness(exchanges=[reserve_row(i) for i in range(1, 40)])
         sock = self.h.connect()
         sock.sendall(http_request(b'{"model":"nope"}'))
         data = read_all(sock)
@@ -1012,8 +1092,237 @@ class TestProxy(unittest.TestCase):
             self.assertNotIn(b"Bearer unused", raw)
             self.assertIn(KEY, raw)
 
+    def _chunked_ok(self, after) -> None:
+        payload = b"data: finished\n\n"
+        framed = chunk(payload) + b"0\r\n\r\n"
+
+        def handler(tls):
+            read_request(tls)
+            tls.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n" + framed
+            )
+            after(tls)
+
+        self.h.stub.handler = handler
+        sock = self.h.connect()
+        sock.settimeout(2)
+        sock.sendall(http_request(chat_body()))
+        data = read_all(sock)
+        _head, body = split_http(data)
+        decoded, complete = decode_chunked(body)
+        self.assertTrue(complete)
+        self.assertEqual(decoded, payload)
+        self.assertEqual(log_rows(self.h.log_path)[-1]["outcome"], "ok")
+
+    def test_p4_chunked_reply_ends_without_upstream_close(self) -> None:
+        self._chunked_ok(lambda tls: time.sleep(30))
+
+    def test_p5_ragged_fin_after_chunked_reply_is_ok(self) -> None:
+        self._chunked_ok(ragged_close)
+
+    def test_p6b_client_close_stops_silent_upstream(self) -> None:
+        payload = b"data: first\n\n"
+        closed = threading.Event()
+
+        def handler(tls):
+            read_request(tls)
+            tls.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n" + chunk(payload)
+            )
+            try:
+                tls.settimeout(5)
+                tls.recv(1)
+            except OSError:
+                pass
+            closed.set()
+
+        self.h.stub.handler = handler
+        sock = self.h.connect()
+        sock.settimeout(2)
+        sock.sendall(http_request(chat_body()))
+        data = b""
+        while payload not in data:
+            piece = sock.recv(4096)
+            if not piece:
+                self.fail("eof before first chunk")
+            data += piece
+        sock.close()
+        self.assertTrue(closed.wait(1.0))
+
+    def test_allowlist_drops_proxy_and_api_key_headers(self) -> None:
+        captured = []
+
+        def handler(tls):
+            captured.append(read_request(tls))
+            tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            clean_close(tls)
+
+        self.h.stub.handler = handler
+        extra = (
+            "Proxy-Authorization: Basic client-proxy",
+            "X-Api-Key: client-x-api-key",
+            "Api-Key: client-api-key",
+            "Cookie: session=client-cookie",
+            "X-Goog-Api-Key: goog-secret",
+            "Proxy-Connection: keep-alive",
+            "Expect: 100-continue",
+            "Connection: close, X-Hop",
+            "X-Hop: hop-secret",
+            "Forwarded: for=evil",
+            "Host: evil.example",
+            "Accept: text/event-stream",
+            "User-Agent: pi-ai",
+        )
+        sock = self.h.connect()
+        sock.sendall(http_request(chat_body(), extra=extra))
+        read_all(sock)
+        raw = captured[0]
+        self.assertIn(b"Host: api.x.ai\r\n", raw)
+        self.assertIn(b"Authorization: Bearer " + KEY + b"\r\n", raw)
+        self.assertIn(b"Accept: text/event-stream\r\n", raw)
+        self.assertIn(b"User-Agent: pi-ai\r\n", raw)
+        self.assertIn(b"Content-Type: application/json\r\n", raw)
+        for secret in (
+            b"Bearer unused",
+            b"client-proxy",
+            b"client-x-api-key",
+            b"client-api-key",
+            b"client-cookie",
+            b"goog-secret",
+            b"Proxy-Connection",
+            b"100-continue",
+            b"hop-secret",
+            b"X-Hop",
+            b"for=evil",
+            b"evil.example",
+        ):
+            self.assertNotIn(secret, raw)
+
+    def test_upstream_100_then_200_is_local_502(self) -> None:
+        marker = b"UPSTREAM200BODY"
+
+        def handler(tls):
+            read_request(tls)
+            tls.sendall(
+                b"HTTP/1.1 100 Continue\r\n\r\n"
+                b"HTTP/1.1 200 OK\r\nContent-Length: "
+                + str(len(marker)).encode()
+                + b"\r\n\r\n"
+                + marker
+            )
+            clean_close(tls)
+
+        self.h.stub.handler = handler
+        sock = self.h.connect()
+        sock.sendall(http_request(chat_body()))
+        data = read_all(sock)
+        self.assertIn(b"HTTP/1.1 502", data)
+        self.assertNotIn(marker, data)
+        self.assertEqual(log_rows(self.h.log_path)[-1]["outcome"], "502")
+
+    def test_duplicate_model_and_stream_false_are_400(self) -> None:
+        for body in (
+            b'{"model":"other","model":"grok-4.7","stream":true}',
+            b'{"model":"grok-4.7","stream":false}',
+        ):
+            sock = self.h.connect()
+            sock.sendall(http_request(body))
+            data = read_all(sock)
+            self.assertIn(b"HTTP/1.1 400", data)
+        self.assertEqual(self.h.stub.accepts, 0)
+
+    def test_p9_new_ip_keeps_the_count(self) -> None:
+        def handler(tls):
+            read_request(tls)
+            tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            clean_close(tls)
+
+        self.h.stub.handler = handler
+        sock = self.h.connect()
+        sock.sendall(http_request(chat_body()))
+        read_all(sock)
+        snapshot = self.h.log_path.read_bytes()
+        self.h.stop()
+        self.h = None
+        root = Path(tempfile.mkdtemp())
+        log = root / "mission.log"
+        log.write_bytes(snapshot)
+        os.chmod(log, 0o600)
+        settings = forwarder.Settings(
+            listen_host="127.0.0.1",
+            listen_port=9,
+            path=PATH,
+            model="grok-4.7",
+            key=KEY,
+            host_uid=0,
+            upstream_ip="1.1.1.1",
+            lookup_record=LOOKUP,
+            mission_id="mission-1",
+        )
+        mission = forwarder.open_mission_log(str(log), settings)
+        try:
+            self.assertEqual(mission.reserved, 1)
+            rows = log_rows(log)
+            self.assertTrue(any(row.get("kind") == "restart" and row.get("upstream_ip") == "1.1.1.1" for row in rows))
+        finally:
+            mission.close()
+            shutil.rmtree(root)
+        self.h = None
+
 
 class TestSubprocess(unittest.TestCase):
+    def test_p8_sigkill_leaves_the_reserve(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="fwd-kill-"))
+        key_path = root / "key"
+        key_path.write_bytes(KEY)
+        os.chmod(key_path, 0o600)
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", ""),
+            "LANG": os.environ.get("LANG", "C.UTF-8"),
+            "FORWARDER_TEST_CHILD": "killreserve",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        proc = subprocess.Popen(
+            [sys.executable, str(HERE / "test_forwarder.py"), str(root), str(CERTS["dir"])],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        try:
+            assert proc.stdout is not None
+            line = proc.stdout.readline().decode()
+            self.assertTrue(line.startswith("GOT"), line)
+            os.kill(proc.pid, signal_kill())
+            proc.wait(timeout=3)
+            settings = forwarder.Settings(
+                listen_host="127.0.0.1",
+                listen_port=9,
+                path=PATH,
+                model="grok-4.7",
+                key=KEY,
+                host_uid=0,
+                upstream_ip="127.0.0.1",
+                lookup_record=LOOKUP,
+                mission_id="mission-1",
+            )
+            mission = forwarder.open_mission_log(str(root / "mission.log"), settings)
+            try:
+                self.assertEqual(mission.reserved, 1)
+            finally:
+                mission.close()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=3)
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_streams_and_log_do_not_contain_the_key(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="fwd-child-"))
         key_path = root / "key"
@@ -1145,6 +1454,7 @@ def _child_boot(root: Path, cert_dir: Path, handler):
         host_uid=0,
         upstream_ip="127.0.0.1",
         lookup_record=LOOKUP,
+        mission_id="mission-1",
     )
     patch = DnsPatch(stub.port)
     patch.__enter__()
@@ -1183,6 +1493,26 @@ def child_proxy() -> None:
     print("DONE", flush=True)
 
 
+def child_killreserve() -> None:
+    root = Path(sys.argv[1])
+    cert_dir = Path(sys.argv[2])
+
+    def handler(tls):
+        read_request(tls)
+        print("GOT", flush=True)
+        time.sleep(60)
+
+    _stub, _patch, _mission, httpd = _child_boot(root, cert_dir, handler)
+    thread = threading.Thread(
+        target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+    )
+    thread.start()
+    port = httpd.server_address[1]
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    sock.sendall(http_request(chat_body()))
+    time.sleep(60)
+
+
 def child_hold() -> None:
     root = Path(sys.argv[1])
     cert_dir = Path(sys.argv[2])
@@ -1207,5 +1537,7 @@ if __name__ == "__main__":
         child_proxy()
     elif kind == "hold":
         child_hold()
+    elif kind == "killreserve":
+        child_killreserve()
     else:
         unittest.main(verbosity=2)

@@ -26,8 +26,9 @@ sudo install -d -o model-forwarder -g model-forwarder -m 0700 /var/lib/model-for
 sudo install -o model-forwarder -g model-forwarder -m 0600 /path/to/key /var/lib/model-forwarder/key
 ```
 
-The key is not a command argument, not an environment variable, and it is
-never logged or written anywhere else.
+The key file is opened with `O_NOFOLLOW` and `O_NONBLOCK`, then checked
+with `fstat`. It is not a command argument, not an environment variable,
+and it is never logged or written anywhere else.
 
 ## Operator steps
 
@@ -36,16 +37,17 @@ never logged or written anywhere else.
 2. Choose one global address from that answer (`ipaddress` `is_global`).
    Private, loopback, and other non-global addresses are refused.
 3. Confirm the receipt below, then start the forwarder under the dedicated
-   uid. One process and one `--log` per mission. A restart continues the
-   40-request count from that log. The drill is its own mission and its own
-   log. Both still count toward the operator's $10 ceiling.
+   uid. Pass the mission id. One process holds an exclusive lock on that
+   mission's `--log`. A reserve row is fsynced before each dial, so a
+   restart keeps the 40-request count, including after an upstream IP
+   change. The drill is its own mission id and its own log. Both still
+   count toward the operator's $10 ceiling.
 4. Point the confined host at `http://127.0.0.1:<port>/v1/chat/completions`
    with no key in the URL.
 
-`--path` is required and has no default. The example uses
-`/v1/chat/completions` from the head of #227 (pi-ai openai-completions,
-`stream: true`, response read as SSE). That value is pending Jeli's #227
-sign-off.
+`--path` is required and has no default. The example path is
+`/v1/chat/completions`, which is what #227's pi-ai openai-completions
+client sends (`stream: true`, response read as SSE).
 
 pi-ai sends `Host: 127.0.0.1` and `Authorization: Bearer unused`, then
 half-closes its write side. `maxRetries` is 0, so one call is one
@@ -65,23 +67,32 @@ sudo -u model-forwarder python3 tools/model-forwarder/forwarder.py \
   --model grok-4.7 \
   --key-file /var/lib/model-forwarder/key \
   --host-uid "$(id -u <switchyard-host-user>)" \
-  --upstream-ip <global-ip-from-the-operator-lookup> \
+  --upstream-ip <global-ipv4-from-the-operator-lookup> \
   --lookup-record "<tool, time, answer>" \
+  --mission-id <mission-id> \
   --log /var/lib/model-forwarder/mission.log
 ```
 
-The forwarder listens only on `127.0.0.1`. It connects with
-`socket.create_connection((ip, 443))`, SNI `api.x.ai`, and the system trust
-store (`CERT_REQUIRED`, hostname checked). A redirect is a local 502. Caps
-are 256 KiB per request (413), 1 MiB per response (502 or a cut logged
-`response_cap`), and 40 reserved upstream attempts per log (429, no dial).
+The forwarder listens only on `127.0.0.1`. `--upstream-ip` is one global
+IPv4 address: not a name, not IPv6, not multicast, and not `192.88.99.0/24`.
+It connects with `socket.create_connection((ip, 443))`, SNI `api.x.ai`, and
+the system trust store (`CERT_REQUIRED`, hostname checked). The connect and
+handshake timeout is 10 seconds. A redirect or an upstream `1xx` is a local
+502. Only `Content-Type`, `Accept`, and `User-Agent` are copied from the
+client; `Host` and `Authorization` are replaced. Caps are 256 KiB per
+request (413), 1 MiB per response (502 or a cut logged `response_cap`), and
+40 reserve rows per mission log (429, no dial).
+
+`request_sha256` and `response_sha256` are the sha256 of the request and
+response body bytes only. They do not cover headers, and they never cover
+the key.
 
 ## Receipt
 
 sha256 of `forwarder.py` at this revision:
 
 ```
-e5b3305b445fb365f605bf4f6213833bffa8e15d96107e56359a5e629790e3d2
+1d811d9a03d360400b5c23f1b9ce2b7f16252836387ef20091cddbff469c598f
 ```
 
 Confirm it on the host before the run:

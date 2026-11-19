@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import argparse
 import errno
+import fcntl
 import hashlib
 import ipaddress
 import json
 import os
+import select
 import signal
 import socket
 import ssl
@@ -37,6 +39,7 @@ MAX_REQUEST_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_REQUESTS = 40
 UPSTREAM_TIMEOUT_S = 300
+CONNECT_TIMEOUT_S = 10
 UPSTREAM_SNI = "api.x.ai"
 MAX_KEY_BYTES = 4096
 MAX_LOG_BYTES = 8 * 1024 * 1024
@@ -47,24 +50,10 @@ RESERVED_OUTCOMES = frozenset(
 LOCAL_OUTCOMES = frozenset({"429", "413", "411", "400", "404", "405"})
 OUTCOMES = RESERVED_OUTCOMES | LOCAL_OUTCOMES
 
-REQUEST_DROP = frozenset(
-    {
-        "authorization",
-        "proxy-authorization",
-        "cookie",
-        "x-api-key",
-        "api-key",
-        "host",
-        "content-length",
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "te",
-        "trailer",
-        "transfer-encoding",
-        "upgrade",
-    }
-)
+# Client headers that may be copied upstream. Host and Authorization are
+# replaced, not copied. Anything else, including proxy and API-key headers,
+# is dropped.
+ALLOWED_REQUEST_HEADERS = frozenset({"content-type", "accept", "user-agent"})
 
 EXCHANGE_REQUIRED = (
     "kind",
@@ -96,6 +85,10 @@ class _UpstreamCut(Exception):
     """Upstream ended without a clean close_notify, or the read failed."""
 
 
+class _ClientGone(Exception):
+    """The client disconnected while upstream was still open."""
+
+
 @dataclass
 class Settings:
     listen_host: str
@@ -106,6 +99,7 @@ class Settings:
     host_uid: int
     upstream_ip: str
     lookup_record: str
+    mission_id: str
     sni: str = UPSTREAM_SNI
 
     def __repr__(self) -> str:
@@ -130,13 +124,19 @@ def forwarder_sha256() -> str:
 
 
 def require_global_ip(ip: str) -> str:
-    """Accept only a global IP literal. Never resolves a name."""
+    """Accept one global IPv4 literal. Never resolves a name."""
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         raise StartupError("refusing to start: upstream-ip must be an IP address") from None
-    if not addr.is_global:
-        raise StartupError("refusing to start: upstream-ip is not a global address") from None
+    if not isinstance(addr, ipaddress.IPv4Address):
+        raise StartupError("refusing to start: upstream-ip must be an IPv4 address")
+    if (
+        addr.is_multicast
+        or not addr.is_global
+        or addr in ipaddress.ip_network("192.88.99.0/24")
+    ):
+        raise StartupError("refusing to start: upstream-ip is not a global address")
     return str(addr)
 
 
@@ -176,6 +176,14 @@ def validate_model(model: str) -> str:
     return model
 
 
+def validate_mission_id(mission_id: str) -> str:
+    if not isinstance(mission_id, str) or not mission_id or len(mission_id) > 200:
+        raise StartupError("refusing to start: mission id is empty")
+    if any(ch in mission_id for ch in " \r\n\t"):
+        raise StartupError("refusing to start: mission id is empty")
+    return mission_id
+
+
 def _open_nofollow(path: str, flags: int, mode: int | None = None) -> int:
     if not hasattr(os, "O_NOFOLLOW"):
         raise StartupError("refusing to start: O_NOFOLLOW is not available")
@@ -197,7 +205,7 @@ def read_key_file(path: str, euid: int | None = None) -> bytes:
     if euid is None:
         euid = os.geteuid()
     try:
-        fd = _open_nofollow(path, os.O_RDONLY)
+        fd = _open_nofollow(path, os.O_RDONLY | os.O_NONBLOCK)
     except StartupError as exc:
         if str(exc) == "symlink":
             raise StartupError("refusing to start: key file is a symlink") from None
@@ -236,32 +244,49 @@ def _hex64(value: object) -> bool:
     )
 
 
-def _validate_loaded_log(records: list[dict], settings: Settings) -> tuple[int, int]:
+def _seq_ok(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def _validate_loaded_log(records: list[dict], settings: Settings) -> tuple[int, int, bool]:
+    """Return reserved count, next seq, and whether the pinned IP changed."""
     headers = [row for row in records if row.get("kind") == "header"]
-    exchanges = [row for row in records if row.get("kind") == "exchange"]
     if len(headers) != 1 or records[0] is not headers[0]:
         raise StartupError("refusing to start: log is malformed")
-    if len(headers) + len(exchanges) != len(records):
-        raise StartupError("refusing to start: log is malformed")
     header = headers[0]
-    if header.get("label") != LABEL:
+    if header.get("label") != LABEL or header.get("sni") != settings.sni:
         raise StartupError("refusing to start: log does not match this mission")
     if header.get("path") != settings.path or header.get("model") != settings.model:
         raise StartupError("refusing to start: log does not match this mission")
-    if header.get("upstream_ip") != settings.upstream_ip or header.get("sni") != settings.sni:
+    if header.get("mission_id") != settings.mission_id:
         raise StartupError("refusing to start: log does not match this mission")
-    if not _hex64(header.get("forwarder_sha256")):
+    if not isinstance(header.get("upstream_ip"), str) or not _hex64(header.get("forwarder_sha256")):
         raise StartupError("refusing to start: log is malformed")
-    seqs: list[int] = []
     reserved = 0
-    for row in exchanges:
+    seqs: list[int] = []
+    reserve_seqs: list[int] = []
+    for row in records[1:]:
+        kind = row.get("kind")
+        if kind == "reserve":
+            if not _seq_ok(row.get("seq")) or not isinstance(row.get("start"), str):
+                raise StartupError("refusing to start: log is malformed")
+            if not isinstance(row.get("upstream_ip"), str):
+                raise StartupError("refusing to start: log is malformed")
+            reserve_seqs.append(row["seq"])
+            seqs.append(row["seq"])
+            reserved += 1
+            continue
+        if kind == "restart":
+            if row.get("mission_id") != settings.mission_id:
+                raise StartupError("refusing to start: log is malformed")
+            if not isinstance(row.get("upstream_ip"), str) or not isinstance(row.get("start"), str):
+                raise StartupError("refusing to start: log is malformed")
+            continue
+        if kind != "exchange":
+            raise StartupError("refusing to start: log is malformed")
         if any(key not in row for key in EXCHANGE_REQUIRED):
             raise StartupError("refusing to start: log is malformed")
-        seq = row["seq"]
-        outcome = row["outcome"]
-        if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
-            raise StartupError("refusing to start: log is malformed")
-        if outcome not in OUTCOMES:
+        if not _seq_ok(row["seq"]) or row["outcome"] not in OUTCOMES:
             raise StartupError("refusing to start: log is malformed")
         if not _hex64(row["request_sha256"]) or not _hex64(row["response_sha256"]):
             raise StartupError("refusing to start: log is malformed")
@@ -274,13 +299,12 @@ def _validate_loaded_log(records: list[dict], settings: Settings) -> tuple[int, 
                 raise StartupError("refusing to start: log is malformed")
         if not isinstance(row["start"], str) or not isinstance(row["method"], str):
             raise StartupError("refusing to start: log is malformed")
-        if outcome in RESERVED_OUTCOMES:
-            reserved += 1
-        seqs.append(seq)
-    if sorted(seqs) != list(range(1, len(seqs) + 1)):
+        seqs.append(row["seq"])
+    if len(reserve_seqs) != len(set(reserve_seqs)):
         raise StartupError("refusing to start: log is malformed")
     next_seq = (max(seqs) + 1) if seqs else 1
-    return reserved, next_seq
+    ip_changed = header.get("upstream_ip") != settings.upstream_ip
+    return reserved, next_seq, ip_changed
 
 
 class MissionLog:
@@ -296,24 +320,36 @@ class MissionLog:
         if fd >= 0:
             os.close(fd)
 
-    def claim(self, upstream: bool) -> tuple[int, bool]:
-        """Reserve a sequence. Upstream claims also take one of the 40 slots."""
-        with self._lock:
-            allowed = True
-            if upstream and self.reserved >= MAX_REQUESTS:
-                allowed = False
-            elif upstream:
-                self.reserved += 1
-            seq = self.next_seq
-            self.next_seq += 1
-            return seq, allowed
-
-    def append(self, record: dict) -> None:
+    def _write_unlocked(self, record: dict) -> None:
         line = json.dumps(record, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         line += b"\n"
+        os.write(self._fd, line)
+        os.fsync(self._fd)
+
+    def claim(self, upstream: bool, upstream_ip: str = "") -> tuple[int, bool]:
+        """Allocate a seq. An upstream claim fsyncs a reserve row before return."""
         with self._lock:
-            os.write(self._fd, line)
-            os.fsync(self._fd)
+            if upstream and self.reserved >= MAX_REQUESTS:
+                seq = self.next_seq
+                self.next_seq += 1
+                return seq, False
+            seq = self.next_seq
+            self.next_seq += 1
+            if upstream:
+                self.reserved += 1
+                self._write_unlocked(
+                    {
+                        "kind": "reserve",
+                        "seq": seq,
+                        "start": utc_millis(),
+                        "upstream_ip": upstream_ip,
+                    }
+                )
+            return seq, True
+
+    def append(self, record: dict) -> None:
+        with self._lock:
+            self._write_unlocked(record)
 
 
 def _header_record(settings: Settings) -> dict:
@@ -326,7 +362,9 @@ def _header_record(settings: Settings) -> dict:
         "model": settings.model,
         "upstream_ip": settings.upstream_ip,
         "lookup_record": settings.lookup_record,
+        "mission_id": settings.mission_id,
         "sni": settings.sni,
+        "hash_scope": "request-and-response-bodies",
         "caps_request_bytes": MAX_REQUEST_BYTES,
         "caps_response_bytes": MAX_RESPONSE_BYTES,
         "caps_requests": MAX_REQUESTS,
@@ -360,6 +398,10 @@ def open_mission_log(path: str, settings: Settings) -> MissionLog:
             raise StartupError("refusing to start: log mode is not 0600")
         if info.st_uid != os.geteuid():
             raise StartupError("refusing to start: log owner is not the forwarder uid")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise StartupError("refusing to start: log is locked") from None
         os.lseek(fd, 0, os.SEEK_SET)
         raw = b""
         while True:
@@ -391,10 +433,22 @@ def open_mission_log(path: str, settings: Settings) -> MissionLog:
             if not isinstance(obj, dict):
                 raise StartupError("refusing to start: log is malformed")
             records.append(obj)
-        reserved, next_seq = _validate_loaded_log(records, settings)
-        return MissionLog(fd, reserved, next_seq)
+        reserved, next_seq, ip_changed = _validate_loaded_log(records, settings)
+        log = MissionLog(fd, reserved, next_seq)
+        fd = -1
+        if ip_changed:
+            log.append(
+                {
+                    "kind": "restart",
+                    "start": utc_millis(),
+                    "mission_id": settings.mission_id,
+                    "upstream_ip": settings.upstream_ip,
+                }
+            )
+        return log
     except Exception:
-        os.close(fd)
+        if fd >= 0:
+            os.close(fd)
         raise
 
 
@@ -411,9 +465,9 @@ def production_context() -> ssl.SSLContext:
 
 def connect_upstream(ip: str, context: ssl.SSLContext) -> ssl.SSLSocket:
     """Dial the operator IP only. Port 443. No name is resolved here."""
-    sock = socket.create_connection((ip, 443), UPSTREAM_TIMEOUT_S)
+    sock = socket.create_connection((ip, 443), CONNECT_TIMEOUT_S)
     try:
-        sock.settimeout(UPSTREAM_TIMEOUT_S)
+        sock.settimeout(CONNECT_TIMEOUT_S)
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except OSError:
@@ -454,18 +508,7 @@ def _request_length(headers) -> int | str:
     return int(text)
 
 
-def _connection_hops(headers) -> set[str]:
-    names: set[str] = set()
-    for value in headers.get_all("Connection") or []:
-        for part in value.split(","):
-            token = part.strip().lower()
-            if token and token not in ("close", "keep-alive"):
-                names.add(token)
-    return names
-
-
 def build_upstream_request(path: str, headers, body: bytes, key: bytes) -> bytes:
-    hops = _connection_hops(headers)
     lines = [
         f"POST {path} HTTP/1.1",
         "Host: api.x.ai",
@@ -474,8 +517,7 @@ def build_upstream_request(path: str, headers, body: bytes, key: bytes) -> bytes
         "Connection: close",
     ]
     for name, value in headers.items():
-        lowered = name.lower()
-        if lowered in REQUEST_DROP or lowered in hops:
+        if name.lower() not in ALLOWED_REQUEST_HEADERS:
             continue
         if "\r" in name or "\n" in name or "\r" in value or "\n" in value:
             raise _BadHeader()
@@ -599,15 +641,150 @@ def _write_local(wfile, status: int, outcome: str) -> bytes:
     return body
 
 
-def _recv_some(sock: ssl.SSLSocket) -> bytes | None:
-    """Return bytes, b'' on a clean TLS close, or None on a cut."""
+def _tcp_state(sock: socket.socket) -> int:
     try:
-        return sock.recv(8192)
-    except (TimeoutError, socket.timeout, OSError, ssl.SSLError):
-        return None
+        info = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 1)
+    except OSError:
+        return 0
+    return info[0] if info else 0
 
 
-def _wire_reframe(tls: ssl.SSLSocket, wfile, rest: bytes, code: int) -> tuple[int, str, int, str]:
+def _write_side_closed(sock: socket.socket) -> bool:
+    if _tcp_state(sock) == 8:
+        return True
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+    except (OSError, ValueError):
+        return True
+    if not readable:
+        return False
+    try:
+        peeked = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+    except BlockingIOError:
+        return False
+    except OSError:
+        return True
+    return peeked == b""
+
+
+def _client_disconnected(sock: socket.socket, half_closed_at_start: bool) -> bool:
+    """True when the client has gone away after the response started.
+
+    A write-side half-close is already true before the response for pi-ai.
+    That is not a disconnect. A later full close, or a close with no prior
+    half-close, is.
+    """
+    try:
+        err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+    except OSError:
+        return True
+    if err:
+        return True
+    state = _tcp_state(sock)
+    if state in (7, 9):
+        return True
+    if half_closed_at_start:
+        return False
+    if state == 8:
+        return True
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+    except (OSError, ValueError):
+        return True
+    if not readable:
+        return False
+    try:
+        peeked = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+    except BlockingIOError:
+        return False
+    except OSError:
+        return True
+    return peeked == b""
+
+
+def _recv_some(sock: ssl.SSLSocket, client: socket.socket | None, half_closed: bool, deadline: float) -> bytes | None:
+    """Return bytes, b'' on a clean TLS close, or None on a cut.
+
+    Raises _ClientGone after closing upstream when the client disconnects.
+    """
+    while True:
+        if client is not None and _client_disconnected(client, half_closed):
+            try:
+                sock.close()
+            except OSError:
+                pass
+            raise _ClientGone()
+        if sock.pending():
+            try:
+                return sock.recv(8192)
+            except (TimeoutError, socket.timeout, OSError, ssl.SSLError):
+                return None
+        if time.monotonic() >= deadline:
+            return None
+        wait = min(0.2, deadline - time.monotonic())
+        try:
+            readable, _, _ = select.select([sock], [], [], max(wait, 0))
+        except (OSError, ValueError):
+            return None
+        if not readable:
+            continue
+        try:
+            data = sock.recv(8192)
+        except (TimeoutError, socket.timeout, OSError, ssl.SSLError):
+            return None
+        return data
+
+
+def _take_chunk_frames(buf: bytes) -> tuple[bytes, bytes, bool, bool, int]:
+    """Split complete chunk frames out of buf.
+
+    Returns forwardable bytes, the unparsed tail, whether the 0-chunk
+    finished the message, whether the framing is invalid, and the payload
+    bytes inside the frames.
+    """
+    frames: list[bytes] = []
+    payload = 0
+    index = 0
+    while True:
+        newline = buf.find(b"\r\n", index)
+        if newline < 0:
+            break
+        size_token = buf[index:newline].split(b";", 1)[0].strip()
+        try:
+            size = int(size_token, 16)
+        except ValueError:
+            return b"".join(frames), buf[index:], False, True, payload
+        data_at = newline + 2
+        if size == 0:
+            if buf[data_at : data_at + 2] == b"\r\n":
+                end = data_at + 2
+            else:
+                end_rel = buf.find(b"\r\n\r\n", newline)
+                if end_rel < 0:
+                    break
+                end = end_rel + 4
+            frames.append(buf[index:end])
+            return b"".join(frames), buf[end:], True, False, payload
+        end = data_at + size + 2
+        if len(buf) < end:
+            break
+        if buf[end - 2 : end] != b"\r\n":
+            return b"".join(frames), buf[index:], False, True, payload
+        frames.append(buf[index:end])
+        payload += size
+        index = end
+    return b"".join(frames), buf[index:], False, False, payload
+
+
+def _wire_reframe(
+    tls: ssl.SSLSocket,
+    wfile,
+    rest: bytes,
+    code: int,
+    client: socket.socket | None,
+    half_closed: bool,
+    deadline: float,
+) -> tuple[int, str, int, str]:
     """Re-frame a close-delimited upstream body as chunked, unbuffered."""
     digest = hashlib.sha256()
     wire = 0
@@ -621,38 +798,48 @@ def _wire_reframe(tls: ssl.SSLSocket, wfile, rest: bytes, code: int) -> tuple[in
         digest.update(frame)
         wire += len(frame)
 
-    while True:
-        if not pending:
-            nxt = _recv_some(tls)
-            if nxt is None:
-                return code, "upstream_error", wire, digest.hexdigest()
-            if nxt == b"":
-                end = b"0\r\n\r\n"
-                account(end)
-                return code, "ok", wire, digest.hexdigest()
-            pending = nxt
-        room = MAX_RESPONSE_BYTES - payload
-        if room <= 0:
-            return code, "response_cap", wire, digest.hexdigest()
-        piece = pending[:room]
-        frame = f"{len(piece):x}\r\n".encode("ascii") + piece + b"\r\n"
-        account(frame)
-        payload += len(piece)
-        pending = pending[len(piece) :]
-        if payload >= MAX_RESPONSE_BYTES and pending:
-            return code, "response_cap", wire, digest.hexdigest()
+    try:
+        while True:
+            if not pending:
+                nxt = _recv_some(tls, client, half_closed, deadline)
+                if nxt is None:
+                    return code, "upstream_error", wire, digest.hexdigest()
+                if nxt == b"":
+                    end = b"0\r\n\r\n"
+                    account(end)
+                    return code, "ok", wire, digest.hexdigest()
+                pending = nxt
+            room = MAX_RESPONSE_BYTES - payload
+            if room <= 0:
+                return code, "response_cap", wire, digest.hexdigest()
+            piece = pending[:room]
+            frame = f"{len(piece):x}\r\n".encode("ascii") + piece + b"\r\n"
+            account(frame)
+            payload += len(piece)
+            pending = pending[len(piece) :]
+            if payload >= MAX_RESPONSE_BYTES and pending:
+                return code, "response_cap", wire, digest.hexdigest()
+    except _ClientGone:
+        return code, "upstream_error", wire, digest.hexdigest()
 
 
-def relay_response(tls: ssl.SSLSocket, wfile) -> tuple[int, str, int, str]:
+def relay_response(
+    tls: ssl.SSLSocket, wfile, client: socket.socket | None = None
+) -> tuple[int, str, int, str]:
     """Forward one upstream response. Never close-delimit the body.
 
     Content-Length from upstream is preserved. A close-delimited body is
-    re-framed as chunked. Chunked upstream bytes are copied through.
-    A cut or the 1 MiB cap does not write a terminating 0-chunk.
+    re-framed as chunked. A chunked body is parsed, and the terminating
+    0-chunk ends the reply even if upstream stays open. A cut does not
+    get a terminating 0-chunk. request_sha256 and response_sha256 cover
+    body bytes only.
     """
     head, rest = _read_head(tls)
     status_line, pairs = _split_head(head)
     code = _status_code(status_line)
+    if 100 <= code <= 199:
+        body = _write_local(wfile, 502, "502")
+        return 502, "502", len(body), sha256_bytes(body)
     if 300 <= code <= 399:
         body = _write_local(wfile, 502, "redirect_refused")
         return 502, "redirect_refused", len(body), sha256_bytes(body)
@@ -670,49 +857,61 @@ def relay_response(tls: ssl.SSLSocket, wfile) -> tuple[int, str, int, str]:
         mode = "content-length"
     else:
         mode = "close"
+    half_closed = bool(client is not None and _write_side_closed(client))
+    deadline = time.monotonic() + UPSTREAM_TIMEOUT_S
     framed = "content-length" if mode == "content-length" else "chunked"
     wfile.write(_response_head(status_line, pairs, framed, length if isinstance(length, int) else 0))
     wfile.flush()
     if mode == "close":
-        return _wire_reframe(tls, wfile, rest, code)
+        return _wire_reframe(tls, wfile, rest, code, client, half_closed, deadline)
     digest = hashlib.sha256()
     sent = 0
-    if mode == "content-length":
-        assert isinstance(length, int)
-        pending = rest
-        while sent < length:
-            if not pending:
-                pending = _recv_some(tls)
-                if pending is None or pending == b"":
-                    return code, "upstream_error", sent, digest.hexdigest()
-            take = pending[: length - sent]
-            wfile.write(take)
-            wfile.flush()
-            digest.update(take)
-            sent += len(take)
-            pending = pending[len(take) :]
-        return code, "ok", sent, digest.hexdigest()
-    pending = rest
-    while True:
-        if not pending:
-            pending = _recv_some(tls)
-            if pending is None:
-                return code, "upstream_error", sent, digest.hexdigest()
-            if pending == b"":
-                return code, "ok", sent, digest.hexdigest()
-        if sent + len(pending) > MAX_RESPONSE_BYTES:
-            room = MAX_RESPONSE_BYTES - sent
-            if room:
-                wfile.write(pending[:room])
+    try:
+        if mode == "content-length":
+            assert isinstance(length, int)
+            pending = rest
+            while sent < length:
+                if not pending:
+                    pending = _recv_some(tls, client, half_closed, deadline)
+                    if pending is None or pending == b"":
+                        return code, "upstream_error", sent, digest.hexdigest()
+                take = pending[: length - sent]
+                wfile.write(take)
                 wfile.flush()
-                digest.update(pending[:room])
-                sent += room
-            return code, "response_cap", sent, digest.hexdigest()
-        wfile.write(pending)
-        wfile.flush()
-        digest.update(pending)
-        sent += len(pending)
-        pending = b""
+                digest.update(take)
+                sent += len(take)
+                pending = pending[len(take) :]
+            try:
+                tls.close()
+            except OSError:
+                pass
+            return code, "ok", sent, digest.hexdigest()
+        pending = rest
+        payload = 0
+        while True:
+            frames, pending, finished, invalid, chunk_payload = _take_chunk_frames(pending)
+            if invalid:
+                return code, "upstream_error", sent, digest.hexdigest()
+            if frames:
+                if payload + chunk_payload > MAX_RESPONSE_BYTES:
+                    return code, "response_cap", sent, digest.hexdigest()
+                wfile.write(frames)
+                wfile.flush()
+                digest.update(frames)
+                sent += len(frames)
+                payload += chunk_payload
+            if finished:
+                try:
+                    tls.close()
+                except OSError:
+                    pass
+                return code, "ok", sent, digest.hexdigest()
+            nxt = _recv_some(tls, client, half_closed, deadline)
+            if nxt is None or nxt == b"":
+                return code, "upstream_error", sent, digest.hexdigest()
+            pending += nxt
+    except _ClientGone:
+        return code, "upstream_error", sent, digest.hexdigest()
 
 
 def _target_path(handler: BaseHTTPRequestHandler) -> str:
@@ -817,11 +1016,14 @@ def handle_exchange(handler: BaseHTTPRequestHandler) -> None:
         _refuse(handler, 400, "400", b"", started_m, started, method, path)
         return
     try:
-        obj = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        obj = json.loads(body.decode("utf-8"), object_pairs_hook=_json_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         _refuse(handler, 400, "400", body, started_m, started, method, path)
         return
     if not isinstance(obj, dict) or not isinstance(obj.get("model"), str) or obj.get("model") != settings.model:
+        _refuse(handler, 400, "400", body, started_m, started, method, path)
+        return
+    if "stream" in obj and obj["stream"] is not True:
         _refuse(handler, 400, "400", body, started_m, started, method, path)
         return
     try:
@@ -829,7 +1031,7 @@ def handle_exchange(handler: BaseHTTPRequestHandler) -> None:
     except _BadHeader:
         _refuse(handler, 400, "400", body, started_m, started, method, path)
         return
-    seq, allowed = handler.server.mission.claim(True)
+    seq, allowed = handler.server.mission.claim(True, handler.server.upstream_ip)
     if not allowed:
         response = _write_local(handler.wfile, 429, "429")
         _log_exchange(
@@ -859,7 +1061,9 @@ def handle_exchange(handler: BaseHTTPRequestHandler) -> None:
         handler.server.register_socket(tls)
         cert = cert_fingerprint(tls)
         tls.sendall(upstream)
-        status, outcome, response_len, response_hash = relay_response(tls, handler.wfile)
+        status, outcome, response_len, response_hash = relay_response(
+            tls, handler.wfile, handler.connection
+        )
     except Exception:
         if response_len == 0 and outcome == "upstream_error":
             try:
@@ -933,8 +1137,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class ForwarderServer(ThreadingHTTPServer):
-    daemon_threads = True
-    block_on_close = False
+    daemon_threads = False
+    block_on_close = True
     allow_reuse_address = False
     address_family = socket.AF_INET
 
@@ -987,13 +1191,24 @@ class ForwarderServer(ThreadingHTTPServer):
             pass
 
 
+def _json_object(pairs: list[tuple[str, object]]) -> dict:
+    if sum(1 for key, _value in pairs if key == "model") > 1:
+        raise ValueError("duplicate model")
+    return dict(pairs)
+
+
 def build_server(settings: Settings, mission: MissionLog, context: ssl.SSLContext | None = None, ip_check=None):
     if settings.listen_host != "127.0.0.1":
         raise StartupError("refusing to start: listen address must be 127.0.0.1:<port>")
     check = ip_check if ip_check is not None else require_global_ip
     upstream_ip = check(settings.upstream_ip)
     ctx = context if context is not None else production_context()
-    httpd = ForwarderServer((settings.listen_host, settings.listen_port), Handler)
+    try:
+        httpd = ForwarderServer((settings.listen_host, settings.listen_port), Handler)
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            raise StartupError("refusing to start: listen port is in use") from None
+        raise
     bound = httpd.socket.getsockname()
     if bound[0] != "127.0.0.1":
         httpd.server_close()
@@ -1022,6 +1237,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--host-uid", required=True, type=int)
     parser.add_argument("--upstream-ip", required=True)
     parser.add_argument("--lookup-record", required=True)
+    parser.add_argument("--mission-id", required=True)
     parser.add_argument("--log", required=True)
     return parser.parse_args(argv)
 
@@ -1038,6 +1254,7 @@ def main(argv: list[str] | None = None) -> int:
             raise StartupError("refusing to start: lookup record is empty")
         if len(args.lookup_record) > 8192:
             raise StartupError("refusing to start: lookup record is too long")
+        mission_id = validate_mission_id(args.mission_id)
         assert_process_identity(args.host_uid, os.geteuid())
         upstream_ip = require_global_ip(args.upstream_ip)
         key = read_key_file(args.key_file)
@@ -1050,6 +1267,7 @@ def main(argv: list[str] | None = None) -> int:
             host_uid=args.host_uid,
             upstream_ip=upstream_ip,
             lookup_record=args.lookup_record,
+            mission_id=mission_id,
         )
         mission = open_mission_log(args.log, settings)
         httpd = build_server(settings, mission, production_context(), require_global_ip)
@@ -1063,6 +1281,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     finally:
         if httpd is not None:
+            httpd.close_active()
             try:
                 httpd.server_close()
             except Exception:
