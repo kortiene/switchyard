@@ -61,6 +61,7 @@ fn restart_after_admission_keeps_mission_attempt_and_pending_command() {
             request_id: snap.pending_commands[0].request_id.clone(),
             payload_hash: snap.pending_commands[0].payload_hash.clone(),
             method: "submit",
+            work_brief: None,
         })
         .unwrap();
     drop(external);

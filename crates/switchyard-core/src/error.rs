@@ -141,6 +141,17 @@ pub enum Error {
     #[error("export target already exists; pick a new path, or remove the file")]
     ExportTargetExists,
 
+    /// `--model-endpoint` was refused. The detail names the case.
+    /// Way out: fix the flag, or omit it.
+    #[error("{detail}")]
+    ModelEndpointNotAllowed { detail: String },
+
+    /// `--model-address` is refused for every value and every runtime.
+    /// The value is not parsed, resolved, or echoed.
+    /// Way out: omit the flag. Broker mode arrives in S2-6.
+    #[error("model address is not allowed; omit --model-address")]
+    ModelAddressNotAllowed,
+
     /// Pi refused to admit the command and the protocol marks that refusal as
     /// definite. Transport loss and `admission: uncertain` stay [`Self::GuardFailed`]
     /// or [`Self::Storage`]. Effect outcomes use `PiEffectOutcome` separately
@@ -210,6 +221,8 @@ impl Error {
             Self::OperatorWriteUnavailable => "operator_write_unavailable",
             Self::OperatorWritePhaseClosed { .. } => "operator_write_phase_closed",
             Self::ExportTargetExists => "export_target_exists",
+            Self::ModelEndpointNotAllowed { .. } => "model_endpoint_not_allowed",
+            Self::ModelAddressNotAllowed => "model_address_not_allowed",
             Self::AdmissionRejected { .. } => "admission_rejected",
             Self::GuardFailed { .. } => "guard_failed",
             Self::UnknownNotification { .. } => "unknown_notification",
@@ -233,6 +246,23 @@ impl Error {
     pub fn guard(detail: impl Into<String>) -> Self {
         Self::GuardFailed {
             detail: detail.into(),
+        }
+    }
+
+    pub fn model_endpoint_not_allowed(detail: impl Into<String>) -> Self {
+        Self::ModelEndpointNotAllowed {
+            detail: detail.into(),
+        }
+    }
+
+    /// Detail of a guard or endpoint refusal, without the `guard failed` prefix.
+    pub fn refusal_detail(&self) -> Option<&str> {
+        match self {
+            Self::GuardFailed { detail } | Self::ModelEndpointNotAllowed { detail } => {
+                Some(detail.as_str())
+            }
+            Self::WithContext { source, .. } => source.refusal_detail(),
+            _ => None,
         }
     }
 

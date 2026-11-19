@@ -591,6 +591,37 @@ pub fn read_attempt_freeze(db_path: &Path, mission_id: &str) -> Result<String> {
     crate::freeze::frozen_canonical(&store.load_mission(mission_id)?)
 }
 
+fn runtime_sends_model_brief(runtime: &RuntimeAdapter) -> bool {
+    match runtime {
+        #[cfg(feature = "pi-contract")]
+        RuntimeAdapter::Pi(_) => true,
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        RuntimeAdapter::Confined(_) => true,
+        _ => false,
+    }
+}
+
+/// The brief is only the Pi model input for approve_plan,
+/// authorize_bounded_repair, and request_changes. Abort and cancel skip it,
+/// so a damaged plan cannot block a stop.
+fn attach_work_brief(
+    pi: bool,
+    mission: &MissionRecord,
+    payload: &Value,
+    mut request: RuntimeRequest,
+) -> Result<RuntimeRequest> {
+    if !pi || request.method != "submit" {
+        request.work_brief = None;
+        return Ok(request);
+    }
+    request.work_brief = crate::freeze::optional_work_brief(mission, payload)?;
+    Ok(request)
+}
+
 impl Host {
     pub fn open(db_path: &Path) -> Result<Self> {
         let db_path = canonical_db_path(db_path)?;
@@ -957,6 +988,11 @@ impl Host {
                 request_id: format!("{attempt_id}:{command_id}"),
                 payload_hash: hash.clone(),
                 method: RuntimeAdapter::runtime_method(request.body.kind()),
+                work_brief: if runtime_sends_model_brief(&self.runtime) {
+                    crate::freeze::optional_work_brief(&mission, &payload)?
+                } else {
+                    None
+                },
             };
             self.runtime.validate_command(&runtime_request, &payload)?;
         }
@@ -1199,15 +1235,22 @@ impl Host {
                     .iter()
                     .filter(|c| c.state == CommandState::Acknowledged && c.kind.is_runtime_bound())
                     .map(|c| {
+                        let payload =
+                            serde_json::from_str(&c.payload_canonical).map_err(Error::storage)?;
                         Ok(crate::execution::AcknowledgedCheck {
-                            request: RuntimeRequest {
-                                binding: binding.clone(),
-                                request_id: c.request_id.clone(),
-                                payload_hash: c.payload_hash.clone(),
-                                method: RuntimeAdapter::runtime_method(c.kind),
-                            },
-                            payload: serde_json::from_str(&c.payload_canonical)
-                                .map_err(Error::storage)?,
+                            request: attach_work_brief(
+                                true,
+                                &mission,
+                                &payload,
+                                RuntimeRequest {
+                                    binding: binding.clone(),
+                                    request_id: c.request_id.clone(),
+                                    payload_hash: c.payload_hash.clone(),
+                                    method: RuntimeAdapter::runtime_method(c.kind),
+                                    work_brief: None,
+                                },
+                            )?,
+                            payload,
                             recorded: c.runtime_receipt_json.clone(),
                         })
                     })
@@ -1230,14 +1273,20 @@ impl Host {
                     detail: "stop command does not belong to the active attempt".into(),
                 });
             }
-            let request = RuntimeRequest {
-                binding: binding.clone(),
-                request_id: command.request_id.clone(),
-                payload_hash: command.payload_hash.clone(),
-                method: "abort",
-            };
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+            let request = attach_work_brief(
+                runtime_sends_model_brief(&self.runtime),
+                &mission,
+                &payload,
+                RuntimeRequest {
+                    binding: binding.clone(),
+                    request_id: command.request_id.clone(),
+                    payload_hash: command.payload_hash.clone(),
+                    method: "abort",
+                    work_brief: None,
+                },
+            )?;
             // FakeRuntime's idempotent abort validates stored identity, method
             // and payload on replay, returning the original durable receipt.
             self.runtime.validate_command(&request, &payload)?;
@@ -1335,15 +1384,22 @@ impl Host {
                     .iter()
                     .filter(|c| c.state == CommandState::Acknowledged && c.kind.is_runtime_bound())
                 {
+                    let payload =
+                        serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
                     acknowledged.push(crate::execution::AcknowledgedCheck {
-                        request: RuntimeRequest {
-                            binding: binding.clone(),
-                            request_id: command.request_id.clone(),
-                            payload_hash: command.payload_hash.clone(),
-                            method: RuntimeAdapter::runtime_method(command.kind),
-                        },
-                        payload: serde_json::from_str(&command.payload_canonical)
-                            .map_err(Error::storage)?,
+                        request: attach_work_brief(
+                            true,
+                            &mission,
+                            &payload,
+                            RuntimeRequest {
+                                binding: binding.clone(),
+                                request_id: command.request_id.clone(),
+                                payload_hash: command.payload_hash.clone(),
+                                method: RuntimeAdapter::runtime_method(command.kind),
+                                work_brief: None,
+                            },
+                        )?,
+                        payload,
                         recorded: command.runtime_receipt_json.clone(),
                     });
                 }
@@ -1352,14 +1408,20 @@ impl Host {
         }
         let mut dispatched = stops_dispatched;
         for command in pending {
-            let request = RuntimeRequest {
-                binding: binding.clone(),
-                request_id: command.request_id.clone(),
-                payload_hash: command.payload_hash.clone(),
-                method: RuntimeAdapter::runtime_method(command.kind),
-            };
             let payload: Value =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+            let request = attach_work_brief(
+                runtime_sends_model_brief(&self.runtime),
+                &mission,
+                &payload,
+                RuntimeRequest {
+                    binding: binding.clone(),
+                    request_id: command.request_id.clone(),
+                    payload_hash: command.payload_hash.clone(),
+                    method: RuntimeAdapter::runtime_method(command.kind),
+                    work_brief: None,
+                },
+            )?;
             self.runtime.validate_command(&request, &payload)?;
             if let Some(receipt) = self.runtime.reconcile(&request, &payload)? {
                 if receipt.payload_hash != command.payload_hash {
@@ -1450,14 +1512,20 @@ impl Host {
         let Some(command) = candidate else {
             return Ok(());
         };
-        let request = RuntimeRequest {
-            binding,
-            request_id: command.request_id.clone(),
-            payload_hash: command.payload_hash.clone(),
-            method: RuntimeAdapter::runtime_method(command.kind),
-        };
         let payload: Value =
             serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+        let request = attach_work_brief(
+            true,
+            mission,
+            &payload,
+            RuntimeRequest {
+                binding,
+                request_id: command.request_id.clone(),
+                payload_hash: command.payload_hash.clone(),
+                method: RuntimeAdapter::runtime_method(command.kind),
+                work_brief: None,
+            },
+        )?;
         let original = runtime.require_acknowledged(
             &request,
             &payload,

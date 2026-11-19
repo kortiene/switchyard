@@ -49,6 +49,11 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
     let runtime = cli.runtime.unwrap_or(RuntimeSelection::Fake);
     // Flags only. Opening the host first would take the owner lock and
     // create the database. Same shape as the empty-acceptance refusal.
+    // `--model-address` is not parsed and not resolved. Cancel and teardown
+    // use this same entry, so they do not look up a name or read a credential.
+    if cli.model_address.is_some() {
+        return Err(Error::ModelAddressNotAllowed);
+    }
     let model_endpoint = model_endpoint_from_flag(runtime, cli.model_endpoint.as_deref())?;
     match cli.command {
         Command::Mission { action } => match action {
@@ -523,8 +528,8 @@ fn open_confined(
     use switchyard_core::{ConfinedPiConfig, LinuxExecutionConfig};
 
     // The endpoint was parsed from `--model-endpoint` before this open.
-    // Unset keeps default-deny egress. This fixture is the faux provider;
-    // it records the pin and does not send model traffic.
+    // Unset keeps default-deny egress and the `s3-acceptance` faux provider.
+    // Set selects `product`: one provider over the model socket, no faux.
     let pi_runtime = env_path("SWITCHYARD_PI_RUNTIME")?;
     let bubblewrap = env_path("SWITCHYARD_BWRAP")?;
     let cgroup_root = env_path("SWITCHYARD_CGROUP_ROOT")?;
@@ -533,9 +538,13 @@ fn open_confined(
     let policy = env_path("SWITCHYARD_BRIDGE_POLICY")?;
     let helper = env_path("SWITCHYARD_EXECUTION_HELPER")?;
     let root = bridge_root(db)?;
-    // The composed scenario's trusted fixture (`s3-acceptance`, the faux
-    // provider). Nothing on this path is model egress. Egress stays denied
-    // when the flag is omitted. No credential or TLS route is configured.
+    // No endpoint: `s3-acceptance` (the faux provider). An endpoint: `product`.
+    // Egress stays denied when the flag is omitted. No credential file is read.
+    let fixture = if model_endpoint.is_some() {
+        "product"
+    } else {
+        "s3-acceptance"
+    };
     Host::open_confined_pi(
         db,
         ConfinedPiConfig {
@@ -556,7 +565,7 @@ fn open_confined(
             probe_request: None,
             fail_launch: false,
         },
-        "s3-acceptance",
+        fixture,
     )
 }
 
@@ -603,29 +612,91 @@ fn model_endpoint_from_flag(
         return Ok(None);
     };
     if runtime != RuntimeSelection::ConfinedPi {
-        return Err(Error::guard(
+        return Err(Error::model_endpoint_not_allowed(
             "--model-endpoint is valid only with --runtime confined-pi",
         ));
     }
+    // Scheme only. The rest of an https URL is not read into the error.
+    if matches!(value.split_once("://"), Some(("https", _))) {
+        return Err(Error::model_endpoint_not_allowed(
+            "HTTPS model endpoints require a TLS client; only credential-free HTTP routes are supported",
+        ));
+    }
+    if !endpoint_authority_is_loopback(value) {
+        return Err(Error::model_endpoint_not_allowed(
+            "--model-endpoint accepts only a loopback IP literal in 127.0.0.0/8 or ::1, with or without a port; hostnames and other addresses are refused without a DNS lookup",
+        ));
+    }
+    // Path is not normalised. Empty, `/`, `/v1/`, any other path, and any
+    // query or fragment are refused here, before open_host. Way out: use
+    // `http://<ip>:<port>/v1`.
+    if !endpoint_path_is_exactly_v1(value) {
+        return Err(Error::model_endpoint_not_allowed(
+            "--model-endpoint path must be /v1 with no query or fragment; use http://<ip>:<port>/v1",
+        ));
+    }
+    if !endpoint_port_is_valid(value) {
+        return Err(Error::model_endpoint_not_allowed(
+            "model endpoint must be one http URL without credentials",
+        ));
+    }
     if !endpoint_host_is_loopback_literal(value) {
-        return Err(Error::guard(
+        return Err(Error::model_endpoint_not_allowed(
             "--model-endpoint accepts only a loopback IP literal in 127.0.0.0/8 or ::1, with or without a port; hostnames and other addresses are refused without a DNS lookup",
         ));
     }
     Ok(Some(parse_pinned_loopback(value)?))
 }
 
-/// True only for an `http` or `https` URL whose host is an IPv4 address in
-/// `127.0.0.0/8` or the IPv6 address `::1`.
+/// True only for the exact path `/v1`, with no query and no fragment.
+/// `/`, `/v1/`, an empty path, and every other path are false. Nothing is rewritten.
+fn endpoint_path_is_exactly_v1(input: &str) -> bool {
+    let Some((_, rest)) = input.split_once("://") else {
+        return false;
+    };
+    if rest.contains(['?', '#']) {
+        return false;
+    }
+    match rest.split_once('/') {
+        Some((_, path)) => path == "v1",
+        None => false,
+    }
+}
+
+/// Loopback check of the authority only, so a bad path can be refused without
+/// calling it a hostname. The path, query, and fragment are not rewritten.
+fn endpoint_authority_is_loopback(input: &str) -> bool {
+    let Some((scheme, rest)) = input.split_once("://") else {
+        return false;
+    };
+    if scheme != "http" {
+        return false;
+    }
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty()
+        || authority.contains(['@', '\\', '%'])
+        || authority
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return false;
+    }
+    endpoint_host_is_loopback_literal(&format!("http://{authority}/v1"))
+}
+
+/// True only for an `http` URL whose host is an IPv4 address in
+/// `127.0.0.0/8` or the IPv6 address `::1`. `https` is not a loopback literal.
 ///
 /// This never resolves a name. [`parse_pinned_loopback`] calls
-/// `ModelEndpoint::parse` only after this returns true, and only an IP
-/// literal reaches that parser, so `to_socket_addrs` does not query DNS.
+/// `ModelEndpoint::parse` only after this returns true. That parser does call
+/// `to_socket_addrs`, and only on the IP literal this function already
+/// accepted, so the call does not look up a name.
 fn endpoint_host_is_loopback_literal(input: &str) -> bool {
     let Some((scheme, rest)) = input.split_once("://") else {
         return false;
     };
-    if scheme != "http" && scheme != "https" {
+    if scheme != "http" {
         return false;
     }
     // Userinfo, query, fragment, and escapes are not a loopback literal.
@@ -670,6 +741,46 @@ fn endpoint_host_is_loopback_literal(input: &str) -> bool {
         .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// Port rules shared with `parse_port` in
+/// `switchyard-core`'s `execution/confined_pi/egress.rs`.
+/// A missing port is the scheme default and is valid. This copy exists so the
+/// ungated CLI can refuse a bad port before `ModelEndpoint::parse`. Keep the
+/// two checks in step: empty, a leading zero, `0`, and anything outside `u16`
+/// are rejected. No name is resolved here.
+fn endpoint_port_is_valid(input: &str) -> bool {
+    let Some((_, rest)) = input.split_once("://") else {
+        return false;
+    };
+    let authority = rest
+        .split_once('/')
+        .map(|(authority, _)| authority)
+        .unwrap_or(rest);
+    let port = if let Some(body) = authority.strip_prefix('[') {
+        let Some((_, after)) = body.split_once(']') else {
+            return false;
+        };
+        if after.is_empty() {
+            return true;
+        }
+        let Some(port) = after.strip_prefix(':') else {
+            return false;
+        };
+        port
+    } else {
+        match authority.rsplit_once(':') {
+            Some((_, port)) => port,
+            None => return true,
+        }
+    };
+    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    if port.len() > 1 && port.starts_with('0') {
+        return false;
+    }
+    matches!(port.parse::<u16>(), Ok(value) if value != 0)
+}
+
 /// Pins a loopback literal. Callers have already rejected every hostname.
 #[cfg(all(
     feature = "pi-contract",
@@ -677,9 +788,16 @@ fn endpoint_host_is_loopback_literal(input: &str) -> bool {
     target_os = "linux"
 ))]
 fn parse_pinned_loopback(value: &str) -> switchyard_core::Result<switchyard_core::ModelEndpoint> {
-    // Return the parser's guard unchanged. Wrapping `error.to_string()`
-    // prints "guard failed" twice, because that display already includes it.
-    switchyard_core::ModelEndpoint::parse(value)
+    // Keep the parser's detail. Do not wrap `error.to_string()`: a guard's
+    // display already includes "guard failed", and the category is the
+    // endpoint refusal either way.
+    switchyard_core::ModelEndpoint::parse(value).map_err(|error| {
+        Error::model_endpoint_not_allowed(
+            error
+                .refusal_detail()
+                .unwrap_or("model endpoint must be one http URL without credentials"),
+        )
+    })
 }
 
 #[cfg(not(all(

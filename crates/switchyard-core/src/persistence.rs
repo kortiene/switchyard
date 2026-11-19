@@ -2181,23 +2181,25 @@ fn json_str(value: &Value, key: &str) -> Result<String> {
 
 /// Fail closed, and name every key whose stored value differs from the host.
 /// `sessionInitialized` is removed by the caller before this runs.
-fn runtime_config_mismatch(found: &Value, expected: &Value) -> String {
-    let (Some(found_map), Some(expected_map)) = (found.as_object(), expected.as_object()) else {
+/// `frozen` is the ledger value. `supplied` is the configuration this open
+/// would record.
+fn runtime_config_mismatch(frozen: &Value, supplied: &Value) -> String {
+    let (Some(frozen_map), Some(supplied_map)) = (frozen.as_object(), supplied.as_object()) else {
         return format!(
-            "ledger runtime configuration mismatch; no adapter replacement (config: expected {expected}, found {found})"
+            "ledger runtime configuration mismatch; no adapter replacement (config: frozen {frozen}, supplied {supplied})"
         );
     };
-    let mut keys: Vec<&String> = found_map.keys().chain(expected_map.keys()).collect();
+    let mut keys: Vec<&String> = frozen_map.keys().chain(supplied_map.keys()).collect();
     keys.sort();
     keys.dedup();
     let parts: Vec<String> = keys
         .into_iter()
-        .filter(|key| found_map.get(*key) != expected_map.get(*key))
+        .filter(|key| frozen_map.get(*key) != supplied_map.get(*key))
         .map(|key| {
             format!(
-                "{key}: expected {}, found {}",
-                render_config_value(expected_map.get(key)),
-                render_config_value(found_map.get(key))
+                "{key}: frozen {}, supplied {}",
+                render_config_value(frozen_map.get(key)),
+                render_config_value(supplied_map.get(key))
             )
         })
         .collect();
@@ -2581,19 +2583,19 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            message.contains("fingerprint: expected \"sha256:new\", found \"sha256:old\""),
+            message.contains("fingerprint: frozen \"sha256:old\", supplied \"sha256:new\""),
             "{message}"
         );
         assert!(
-            message.contains("node: expected \"22.23.5\", found \"22.23.4\""),
+            message.contains("node: frozen \"22.23.4\", supplied \"22.23.5\""),
             "{message}"
         );
         assert!(
-            message.contains("source: expected \"def\", found \"abc\""),
+            message.contains("source: frozen \"abc\", supplied \"def\""),
             "{message}"
         );
         assert!(
-            message.contains("extra: expected true, found absent"),
+            message.contains("extra: frozen absent, supplied true"),
             "{message}"
         );
         assert!(
@@ -2601,6 +2603,8 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("no adapter replacement"), "{message}");
+        assert!(!message.contains("expected"), "{message}");
+        assert!(!message.contains("found"), "{message}");
         store
             .conn
             .execute(

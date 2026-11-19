@@ -233,6 +233,7 @@ impl PiRuntime {
         request: &RuntimeRequest,
         payload: &Value,
     ) -> Result<Option<RuntimeReceipt>> {
+        require_work_brief_for_send(request, payload)?;
         Self::validate_command(request, payload)?;
         let (method, params) = mapped(request, payload)?;
         let snapshot = self.inspect_ids(request, &[request.request_id.as_str()])?;
@@ -265,6 +266,7 @@ impl PiRuntime {
                 return Err(Error::guard("Pi acknowledgement batch repeats a command"));
             }
             seen.push(check.request.request_id.as_str());
+            require_work_brief_for_send(&check.request, &check.payload)?;
             Self::validate_command(&check.request, &check.payload)?;
         }
         let mut rows = BTreeMap::<String, Value>::new();
@@ -323,6 +325,7 @@ impl PiRuntime {
         request: &RuntimeRequest,
         payload: &Value,
     ) -> Result<RuntimeReceipt> {
+        require_work_brief_for_send(request, payload)?;
         Self::validate_command(request, payload)?;
         let (method, params) = mapped(request, payload)?;
         let wire_hash = payload_hash(&json!({"method":method,"params":params}))?;
@@ -431,6 +434,20 @@ fn no_effects(_: &Value) -> Result<Value> {
     ))
 }
 
+/// A model command must not be sent or reconciled as the raw payload.
+/// Admission may still measure that frame when the freeze is not ready.
+pub(crate) fn require_work_brief_for_send(request: &RuntimeRequest, payload: &Value) -> Result<()> {
+    if request.method == "submit"
+        && crate::freeze::command_uses_work_brief(payload)
+        && request.work_brief.is_none()
+    {
+        return Err(Error::guard(
+            "work brief requires frozen inputs and the approved plan",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn mapped(request: &RuntimeRequest, payload: &Value) -> Result<(&'static str, Value)> {
     let kind = payload["kind"]
         .as_str()
@@ -444,13 +461,21 @@ pub(crate) fn mapped(request: &RuntimeRequest, payload: &Value) -> Result<(&'sta
                 .ok_or_else(|| Error::guard("missing steering content"))?;
             json!({"type":"input","content":content})
         }
-        "start_planning"
-        | "request_revised_plan"
-        | "approve_plan"
-        | "authorize_bounded_repair"
-        | "request_changes"
+        "start_planning" | "request_revised_plan" if request.method == "submit" => {
+            json!({"type":"input","content":canonicalize(payload)?})
+        }
+        "approve_plan" | "authorize_bounded_repair" | "request_changes"
             if request.method == "submit" =>
         {
+            if let Some(brief) = request.work_brief.as_deref() {
+                // hostCommand stays the command payload. content is the brief.
+                return Ok((
+                    "runtime.submit",
+                    crate::freeze::work_brief_model_params(payload, &request.payload_hash, brief),
+                ));
+            }
+            // Admission measures the frame before a missing freeze is reported.
+            // A send without the brief is refused before this fallback is used.
             json!({"type":"input","content":canonicalize(payload)?})
         }
         _ => return Err(Error::guard("command has no S2-A runtime mapping")),
@@ -462,4 +487,78 @@ pub(crate) fn mapped(request: &RuntimeRequest, payload: &Value) -> Result<(&'sta
         _ => "runtime.submit",
     };
     Ok((method, params))
+}
+
+#[cfg(test)]
+mod mapped_tests {
+    use super::{mapped, require_work_brief_for_send};
+    use crate::canonical::payload_hash;
+    use crate::execution::{RuntimeBinding, RuntimeRequest};
+    use serde_json::json;
+
+    fn request(method: &'static str, brief: Option<&str>, payload_hash: String) -> RuntimeRequest {
+        RuntimeRequest {
+            binding: RuntimeBinding {
+                mission_id: "m".into(),
+                attempt_id: "a".into(),
+                session_id: "s".into(),
+                generation: 1,
+            },
+            request_id: "a:c".into(),
+            payload_hash,
+            method,
+            work_brief: brief.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn require_work_brief_for_send_allows_abort_and_refuses_an_unbriefed_plan() {
+        let cancel = json!({"kind":"cancel","missionId":"m","attemptId":"a","body":{}});
+        require_work_brief_for_send(
+            &request("abort", None, payload_hash(&cancel).unwrap()),
+            &cancel,
+        )
+        .unwrap();
+        let approve = json!({
+            "kind": "approve_plan",
+            "missionId": "m",
+            "attemptId": "a",
+            "body": {"planDigest": "sha256:plan"},
+        });
+        assert!(
+            require_work_brief_for_send(
+                &request("submit", None, payload_hash(&approve).unwrap()),
+                &approve,
+            )
+            .is_err()
+        );
+        require_work_brief_for_send(
+            &request("submit", Some("brief"), payload_hash(&approve).unwrap()),
+            &approve,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn mapped_keeps_host_command_and_uses_the_brief_for_approve_plan() {
+        let payload = json!({
+            "kind": "approve_plan",
+            "missionId": "m",
+            "attemptId": "a",
+            "body": {"planDigest": "sha256:plan"},
+        });
+        let hash = payload_hash(&payload).unwrap();
+        let (method, params) =
+            mapped(&request("submit", Some("BRIEF"), hash.clone()), &payload).unwrap();
+        assert_eq!(method, "runtime.submit");
+        assert_eq!(params["content"], "BRIEF");
+        assert_eq!(params["hostCommand"]["payload"], payload);
+        assert_eq!(params["hostCommand"]["payloadHash"], hash);
+        let cancel = json!({"kind":"cancel","missionId":"m","attemptId":"a","body":{}});
+        let cancel_hash = payload_hash(&cancel).unwrap();
+        let (method, params) = mapped(&request("abort", None, cancel_hash), &cancel).unwrap();
+        assert_eq!(method, "runtime.abort");
+        assert!(params.get("content").is_none());
+        assert_eq!(params["hostCommand"]["payload"], cancel);
+    }
 }

@@ -93,6 +93,7 @@ fn request(
         request_id: command.request_id.clone(),
         payload_hash: command.payload_hash.clone(),
         method,
+        work_brief: None,
     }
 }
 fn first_receipt(host: &mut Host, req: &RuntimeRequest) -> Value {
@@ -320,7 +321,7 @@ fn incompatible_configuration_and_default_fake_reopen_are_rejected() {
         .expect("drifted fingerprint")
         .to_string();
     assert!(drifted.contains("fingerprint:"), "{drifted}");
-    assert!(drifted.contains("found \"wrong\""), "{drifted}");
+    assert!(drifted.contains("frozen \"wrong\""), "{drifted}");
     assert!(drifted.contains("no adapter replacement"), "{drifted}");
 }
 
@@ -818,6 +819,7 @@ fn acknowledged_batch_checks_more_than_32_commands() {
             request_id: format!("pause-{index}"),
             payload_hash: payload_hash(&payload).unwrap(),
             method: "abort",
+            work_brief: None,
         };
         let receipt = pi(&mut h).dispatch(&request, &payload).unwrap();
         checks.push(crate::execution::AcknowledgedCheck {

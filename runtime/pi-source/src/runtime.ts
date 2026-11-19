@@ -44,9 +44,12 @@ export class Runtime {
   // Storage can fail in the scheduler without an outstanding host request.
   readonly failed = new Promise<unknown>(resolve => { this.failSession = resolve; });
   private barriers: RuntimeBarriers;
+  private model: { provider: string; modelId: string };
   private aborts = new Map<string, { hash: string; promise: Promise<Json> }>();
-  constructor(database: string, binding: Binding, models: Models, tools: ToolRegistration[], barriers: RuntimeBarriers = {}) {
+  constructor(database: string, binding: Binding, models: Models, tools: ToolRegistration[], barriers: RuntimeBarriers = {},
+    model: { provider: string; modelId: string } = { provider: 'faux', modelId: 'faux-1' }) {
     this.database = database; this.binding = binding; this.models = models; this.tools = tools; this.barriers = barriers;
+    this.model = model;
   }
 
   async dispatch(frame: Frame): Promise<Json> {
@@ -185,8 +188,7 @@ export class Runtime {
       if (state.sessionId && this.binding.generation <= state.generation) throw new ProtocolError('stale_generation');
       Object.assign(state, this.binding);
     }, BACKGROUND_CONTEXT);
-    this.root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: 'faux', modelId: 'faux-1' },
-      tools: this.tools } });
+    this.root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: this.model, tools: this.tools } });
     // Opening and inspection never resume interrupted tools. Replaying an authorized
     // submission or abort is the explicit scheduling step after outbox reconciliation.
     return { opened: true, conversationId: String(this.root.id), source: SOURCE, scheduling: 'paused' };

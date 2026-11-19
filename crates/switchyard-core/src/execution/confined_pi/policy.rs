@@ -79,6 +79,10 @@ const REVIEWED_FILES: &[(&str, &[u8])] = &[
         include_bytes!("../../../../../runtime/pi-source/src/transport.ts"),
     ),
     (
+        "src/product-child.ts",
+        include_bytes!("../../../../../runtime/pi-source/src/product-child.ts"),
+    ),
+    (
         "test/bridge-child.ts",
         include_bytes!("../../../../../runtime/pi-source/test/bridge-child.ts"),
     ),
@@ -435,6 +439,7 @@ pub(super) fn argv(
     state: &Path,
     proxy_dir: Option<&Path>,
     installed: &Value,
+    fixture: &str,
 ) -> Result<Vec<String>> {
     // Re-hash at launch and bind the canonical paths from this second look.
     let install = inspect_runtime(&config.runtime)?;
@@ -543,7 +548,11 @@ pub(super) fn argv(
             "--require",
             "/guard.cjs",
             "--experimental-strip-types",
-            "/runtime/test/bridge-child.ts",
+            if fixture == "product" {
+                "/runtime/src/product-child.ts"
+            } else {
+                "/runtime/test/bridge-child.ts"
+            },
             "/state/session.sqlite",
         ]
         .into_iter()

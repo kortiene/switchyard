@@ -83,6 +83,7 @@ fn blocked_workspace_delivers_stops_and_replays_the_original_abort() {
                                 request_id: stop.request_id.clone(),
                                 payload_hash: stop.payload_hash.clone(),
                                 method: "abort",
+                                work_brief: None,
                             })
                             .unwrap(),
                     )
@@ -302,6 +303,7 @@ fn stop_replay_rejects_wrong_runtime_binding() {
             request_id: stop.request_id,
             payload_hash: stop.payload_hash,
             method: "abort",
+            work_brief: None,
         })
         .unwrap();
     assert_eq!(

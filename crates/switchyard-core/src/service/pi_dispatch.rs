@@ -298,6 +298,7 @@ impl Host {
         request: &RuntimeRequest,
         payload: &Value,
     ) -> Result<Option<RuntimeReceipt>> {
+        crate::execution::pi_runtime::require_work_brief_for_send(request, payload)?;
         crate::execution::PiRuntime::validate_command(request, payload)?;
         let (method, params) = mapped(request, payload)?;
         let snapshot = self.confined_inspect(&request.binding, &[&request.request_id])?;
@@ -313,6 +314,7 @@ impl Host {
         request: &RuntimeRequest,
         payload: &Value,
     ) -> Result<RuntimeReceipt> {
+        crate::execution::pi_runtime::require_work_brief_for_send(request, payload)?;
         crate::execution::PiRuntime::validate_command(request, payload)?;
         let (method, params) = mapped(request, payload)?;
         self.confined_call(&request.binding, method, Some(&request.request_id), params)?;
@@ -342,14 +344,20 @@ impl Host {
             .iter()
             .filter(|c| c.state == CommandState::Acknowledged && c.kind.is_runtime_bound())
         {
-            let request = RuntimeRequest {
-                binding: binding.clone(),
-                request_id: command.request_id.clone(),
-                payload_hash: command.payload_hash.clone(),
-                method: RuntimeAdapter::runtime_method(command.kind),
-            };
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+            let request = super::attach_work_brief(
+                true,
+                mission,
+                &payload,
+                RuntimeRequest {
+                    binding: binding.clone(),
+                    request_id: command.request_id.clone(),
+                    payload_hash: command.payload_hash.clone(),
+                    method: RuntimeAdapter::runtime_method(command.kind),
+                    work_brief: None,
+                },
+            )?;
             let receipt = self
                 .confined_receipt(&request, &payload)?
                 .ok_or_else(|| Error::guard("acknowledged confined command is missing"))?;
@@ -406,14 +414,20 @@ impl Host {
             if command.attempt_id != binding.attempt_id {
                 return Err(Error::guard("foreign confined outbox command"));
             }
-            let request = RuntimeRequest {
-                binding: binding.clone(),
-                request_id: command.request_id.clone(),
-                payload_hash: command.payload_hash.clone(),
-                method: RuntimeAdapter::runtime_method(command.kind),
-            };
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+            let request = super::attach_work_brief(
+                true,
+                &mission,
+                &payload,
+                RuntimeRequest {
+                    binding: binding.clone(),
+                    request_id: command.request_id.clone(),
+                    payload_hash: command.payload_hash.clone(),
+                    method: RuntimeAdapter::runtime_method(command.kind),
+                    work_brief: None,
+                },
+            )?;
             let receipt = match self.confined_receipt(&request, &payload)? {
                 Some(receipt) => receipt,
                 None => {
@@ -475,14 +489,21 @@ impl Host {
                     })
                     .find(|c| c.state == CommandState::Acknowledged && is_runtime_work(c.kind))
             {
-                let request = RuntimeRequest {
-                    binding,
-                    request_id: command.request_id.clone(),
-                    payload_hash: command.payload_hash.clone(),
-                    method: RuntimeAdapter::runtime_method(command.kind),
-                };
                 let payload =
                     serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+                let current = self.store.load_mission(mission_id)?;
+                let request = super::attach_work_brief(
+                    true,
+                    &current,
+                    &payload,
+                    RuntimeRequest {
+                        binding,
+                        request_id: command.request_id.clone(),
+                        payload_hash: command.payload_hash.clone(),
+                        method: RuntimeAdapter::runtime_method(command.kind),
+                        work_brief: None,
+                    },
+                )?;
                 let original = self.confined_receipt(&request, &payload)?;
                 if Some(self.confined_send(&request, &payload)?) != original {
                     return Err(Error::guard("confined replay changed receipt"));
@@ -518,14 +539,20 @@ impl Host {
         self.confined_history(&mission)?;
         let mut count = 0;
         for command in stops {
-            let request = RuntimeRequest {
-                binding: binding.clone(),
-                request_id: command.request_id,
-                payload_hash: command.payload_hash,
-                method: "abort",
-            };
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+            let request = super::attach_work_brief(
+                true,
+                &mission,
+                &payload,
+                RuntimeRequest {
+                    binding: binding.clone(),
+                    request_id: command.request_id,
+                    payload_hash: command.payload_hash,
+                    method: "abort",
+                    work_brief: None,
+                },
+            )?;
             let receipt = match self.confined_receipt(&request, &payload)? {
                 Some(r) => r,
                 None => self.confined_send(&request, &payload)?,
@@ -541,14 +568,20 @@ impl Host {
             if command.state != CommandState::Pending || !is_runtime_work(command.kind) {
                 continue;
             }
-            let request = RuntimeRequest {
-                binding: binding.clone(),
-                request_id: command.request_id.clone(),
-                payload_hash: command.payload_hash.clone(),
-                method: RuntimeAdapter::runtime_method(command.kind),
-            };
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+            let request = super::attach_work_brief(
+                true,
+                &mission,
+                &payload,
+                RuntimeRequest {
+                    binding: binding.clone(),
+                    request_id: command.request_id.clone(),
+                    payload_hash: command.payload_hash.clone(),
+                    method: RuntimeAdapter::runtime_method(command.kind),
+                    work_brief: None,
+                },
+            )?;
             if let Some(receipt) = self.confined_receipt(&request, &payload)? {
                 self.store
                     .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
