@@ -202,7 +202,7 @@ exec '{launcher}' "${{args[@]}}"
         policy: env_path("SWITCHYARD_BRIDGE_POLICY"),
         model_endpoint: Some(endpoint.clone()),
     };
-    let session = ConfinedPiSession::open(
+    let mut session = ConfinedPiSession::open(
         &config,
         RuntimeBinding {
             mission_id: "egress-m".into(),
@@ -284,6 +284,20 @@ exec '{launcher}' "${{args[@]}}"
         fs::read_to_string(&protected).unwrap(),
         "host authority sentinel"
     );
+    session
+        .stop()
+        .unwrap_or_else(|error| panic!("endpoint session stop failed: {error}"));
+    let recorded = session.lifecycle()["modelEgress"].clone();
+    assert_eq!(
+        recorded,
+        json!({
+            "allowance": 40,
+            "accepted": 1,
+            "refused": 0,
+            "scope": "generation",
+        })
+    );
+    assert!(recorded.get("reason").is_none());
     if let Some(directory) = std::env::var_os("SWITCHYARD_CONFINEMENT_EVIDENCE") {
         fs::write(
             Path::new(&directory).join("bridge-egress.json"),

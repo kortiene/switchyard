@@ -184,7 +184,11 @@ impl ConfinedPiSession {
         retention::recover(&control, &cgroup_root, &binding, previous.as_ref())?;
         state.inspect_state(require_existing)?;
         let proxy = match &config.model_endpoint {
-            Some(endpoint) => Some(egress::ModelProxy::start(endpoint)?),
+            Some(endpoint) => Some(egress::ModelProxy::start(
+                endpoint,
+                egress::UNWIRED_CONNECTION_ALLOWANCE,
+                "generation",
+            )?),
             None => None,
         };
         let argv = policy::argv(
@@ -339,8 +343,13 @@ impl ConfinedPiSession {
         }
         self.bridge.terminate();
         // Drop the proxy only after the bridge is dead so an in-flight splice
-        // is not the thing that decides termination.
-        self.proxy.take();
+        // is not the thing that decides termination. `finish` joins the
+        // accept thread before reading the counts, so a connection still in
+        // the poll cannot be missed. #218 raises `detect_uncertainty` from
+        // `reason`.
+        if let Some(proxy) = self.proxy.take() {
+            self.record["modelEgress"] = proxy.finish();
+        }
         let proof = cgroup::rekill_and_prove(&self.leaf, Duration::from_secs(5))?;
         self.record["phase"] = json!(if proof.proven { "stopped" } else { "uncertain" });
         let evidence = json!({"proven":proof.proven,"reason":proof.reason,"events":proof.events,

@@ -171,6 +171,10 @@ fn confined_lifecycle_kills_hung_bridge_before_inert_reopen() {
             .contains("cancellation_timeout")
     );
     assert_eq!(first.lifecycle()["termination"]["proven"], true);
+    assert!(
+        first.lifecycle().get("modelEgress").is_none(),
+        "an endpoint-less session must not record modelEgress"
+    );
     drop(first);
     let mut recovered = ConfinedPiSession::open(&config, binding(2), "ignore-abort").unwrap();
     let before = call(
