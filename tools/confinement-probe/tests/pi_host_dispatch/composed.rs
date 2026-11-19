@@ -244,16 +244,6 @@ fn retirement(world: &World, lifecycle: &Value) -> Value {
     audit
 }
 
-fn saved_receipt(receipts: &[(String, Option<String>)], effect: &Value) -> Option<Value> {
-    receipts
-        .iter()
-        .find(|(id, _)| id == effect["operationId"].as_str().unwrap())
-        .expect("effect has a durable ledger row")
-        .1
-        .as_deref()
-        .map(|text| serde_json::from_str(text).unwrap())
-}
-
 struct Worker(Child);
 impl Drop for Worker {
     fn drop(&mut self) {
