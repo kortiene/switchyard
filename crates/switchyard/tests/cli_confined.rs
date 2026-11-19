@@ -42,7 +42,14 @@ fn init_repo(repo: &Path) {
 }
 
 fn run(args: &[&str]) -> (i32, Value, Value) {
-    let output = Command::new(bin())
+    run_fixture(args, None)
+}
+
+/// `fixture` is frozen into the attempt's runtime config on create, and every
+/// later open has to present the same value.
+fn run_fixture(args: &[&str], fixture: Option<&str>) -> (i32, Value, Value) {
+    let mut command = Command::new(bin());
+    command
         .args(args)
         .env("GH_TOKEN", "SENTINEL_GH_TOKEN_SHOULD_NOT_PERSIST")
         .env(
@@ -51,9 +58,11 @@ fn run(args: &[&str]) -> (i32, Value, Value) {
         )
         // The endpoint is the flag alone. A leftover environment value must
         // not change the composed fixture's `network: denied` record.
-        .env_remove("SWITCHYARD_MODEL_ENDPOINT")
-        .output()
-        .unwrap();
+        .env_remove("SWITCHYARD_MODEL_ENDPOINT");
+    if let Some(fixture) = fixture {
+        command.env("SWITCHYARD_CONFINED_FIXTURE", fixture);
+    }
+    let output = command.output().unwrap();
     let stdout = serde_json::from_slice::<Value>(&output.stdout).unwrap_or(Value::Null);
     let stderr = serde_json::from_slice::<Value>(&output.stderr).unwrap_or(Value::Null);
     (output.status.code().unwrap_or(1), stdout, stderr)
@@ -447,39 +456,45 @@ fn cli_sigint_during_foreground_wait_cancels_with_cgroup_proof() {
     std::fs::create_dir(&root).unwrap();
     init_repo(&repo);
     let db_arg = db.to_str().unwrap();
-    let (code, created, error) = run(&[
-        "mission",
-        "create",
-        "--runtime",
-        "confined-pi",
-        "--db",
-        db_arg,
-        "--repo",
-        repo.to_str().unwrap(),
-        "--issue",
-        "218",
-        "--objective",
-        "hold the bridge open",
-        "--acceptance",
-        "Ctrl-C cancels with a cgroup proof",
-    ]);
+    let (code, created, error) = run_fixture(
+        &[
+            "mission",
+            "create",
+            "--runtime",
+            "confined-pi",
+            "--db",
+            db_arg,
+            "--repo",
+            repo.to_str().unwrap(),
+            "--issue",
+            "218",
+            "--objective",
+            "hold the bridge open",
+            "--acceptance",
+            "Ctrl-C cancels with a cgroup proof",
+        ],
+        Some("process-hold"),
+    );
     assert_eq!(code, 0, "{error}");
     let mission = created["mission"]["missionId"].as_str().unwrap();
     let attempt = created["mission"]["attemptId"].as_str().unwrap();
-    let (code, prepared, error) = run(&[
-        "mission",
-        "workspace",
-        "--runtime",
-        "confined-pi",
-        "--db",
-        db_arg,
-        "--mission",
-        mission,
-        "--attempt",
-        attempt,
-        "--root",
-        root.to_str().unwrap(),
-    ]);
+    let (code, prepared, error) = run_fixture(
+        &[
+            "mission",
+            "workspace",
+            "--runtime",
+            "confined-pi",
+            "--db",
+            db_arg,
+            "--mission",
+            mission,
+            "--attempt",
+            attempt,
+            "--root",
+            root.to_str().unwrap(),
+        ],
+        Some("process-hold"),
+    );
     assert_eq!(code, 0, "{error}");
     assert_eq!(prepared["workspace"]["state"], "ready");
     let frozen = switchyard_core::read_attempt_freeze(Path::new(db_arg), mission).unwrap();
@@ -496,16 +511,19 @@ fn cli_sigint_during_foreground_wait_cancels_with_cgroup_proof() {
     )
     .unwrap();
     drop(conn);
-    let (code, status, error) = run(&[
-        "mission",
-        "status",
-        "--runtime",
-        "confined-pi",
-        "--db",
-        db_arg,
-        "--mission",
-        mission,
-    ]);
+    let (code, status, error) = run_fixture(
+        &[
+            "mission",
+            "status",
+            "--runtime",
+            "confined-pi",
+            "--db",
+            db_arg,
+            "--mission",
+            mission,
+        ],
+        Some("process-hold"),
+    );
     assert_eq!(code, 0, "{error}");
     let revision = status["missions"][0]["revision"]
         .as_u64()
@@ -558,7 +576,13 @@ fn cli_sigint_during_foreground_wait_cancels_with_cgroup_proof() {
             break;
         }
         match child.try_wait().unwrap() {
-            Some(status) => panic!("foreground wait ended before SIGINT: {status} phase={phase}"),
+            Some(status) => {
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "foreground wait ended before SIGINT: {status} phase={phase} stderr={}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
             None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
             None => panic!("process-hold did not enter the foreground wait"),
         }
@@ -618,39 +642,45 @@ fn cli_sigkill_mid_turn_reopens_uncertain_and_cancel_needs_proof() {
     std::fs::create_dir(&root).unwrap();
     init_repo(&repo);
     let db_arg = db.to_str().unwrap();
-    let (code, created, error) = run(&[
-        "mission",
-        "create",
-        "--runtime",
-        "confined-pi",
-        "--db",
-        db_arg,
-        "--repo",
-        repo.to_str().unwrap(),
-        "--issue",
-        "227",
-        "--objective",
-        "die mid turn",
-        "--acceptance",
-        "reopen names the unsettled turn",
-    ]);
+    let (code, created, error) = run_fixture(
+        &[
+            "mission",
+            "create",
+            "--runtime",
+            "confined-pi",
+            "--db",
+            db_arg,
+            "--repo",
+            repo.to_str().unwrap(),
+            "--issue",
+            "227",
+            "--objective",
+            "die mid turn",
+            "--acceptance",
+            "reopen names the unsettled turn",
+        ],
+        Some("process-hold"),
+    );
     assert_eq!(code, 0, "{error}");
     let mission = created["mission"]["missionId"].as_str().unwrap();
     let attempt = created["mission"]["attemptId"].as_str().unwrap();
-    let (code, prepared, error) = run(&[
-        "mission",
-        "workspace",
-        "--runtime",
-        "confined-pi",
-        "--db",
-        db_arg,
-        "--mission",
-        mission,
-        "--attempt",
-        attempt,
-        "--root",
-        root.to_str().unwrap(),
-    ]);
+    let (code, prepared, error) = run_fixture(
+        &[
+            "mission",
+            "workspace",
+            "--runtime",
+            "confined-pi",
+            "--db",
+            db_arg,
+            "--mission",
+            mission,
+            "--attempt",
+            attempt,
+            "--root",
+            root.to_str().unwrap(),
+        ],
+        Some("process-hold"),
+    );
     assert_eq!(code, 0, "{error}");
     assert_eq!(prepared["workspace"]["state"], "ready");
     let frozen = switchyard_core::read_attempt_freeze(Path::new(db_arg), mission).unwrap();
@@ -667,16 +697,19 @@ fn cli_sigkill_mid_turn_reopens_uncertain_and_cancel_needs_proof() {
     )
     .unwrap();
     drop(conn);
-    let (code, status, error) = run(&[
-        "mission",
-        "status",
-        "--runtime",
-        "confined-pi",
-        "--db",
-        db_arg,
-        "--mission",
-        mission,
-    ]);
+    let (code, status, error) = run_fixture(
+        &[
+            "mission",
+            "status",
+            "--runtime",
+            "confined-pi",
+            "--db",
+            db_arg,
+            "--mission",
+            mission,
+        ],
+        Some("process-hold"),
+    );
     assert_eq!(code, 0, "{error}");
     let revision = status["missions"][0]["revision"]
         .as_u64()
@@ -724,7 +757,13 @@ fn cli_sigkill_mid_turn_reopens_uncertain_and_cancel_needs_proof() {
             break;
         }
         match child.try_wait().unwrap() {
-            Some(status) => panic!("turn ended before SIGKILL: {status} phase={phase}"),
+            Some(status) => {
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "turn ended before SIGKILL: {status} phase={phase} stderr={}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
             None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
             None => panic!("process-hold did not enter the turn"),
         }
@@ -736,31 +775,37 @@ fn cli_sigkill_mid_turn_reopens_uncertain_and_cancel_needs_proof() {
     assert!(status.success());
     let killed = child.wait_with_output().unwrap();
     assert!(!killed.status.success());
-    let (code, recovered, error) = run(&[
-        "mission",
-        "recover",
-        "--runtime",
-        "confined-pi",
-        "--db",
-        db_arg,
-        "--mission",
-        mission,
-    ]);
+    let (code, recovered, error) = run_fixture(
+        &[
+            "mission",
+            "recover",
+            "--runtime",
+            "confined-pi",
+            "--db",
+            db_arg,
+            "--mission",
+            mission,
+        ],
+        Some("process-hold"),
+    );
     let recovered_text = format!("{recovered} {error}");
     assert!(
         !recovered_text.contains("bridge: busy"),
         "reopen must not surface bridge: busy ({code}): {recovered_text}"
     );
-    let (code, status, error) = run(&[
-        "mission",
-        "status",
-        "--runtime",
-        "confined-pi",
-        "--db",
-        db_arg,
-        "--mission",
-        mission,
-    ]);
+    let (code, status, error) = run_fixture(
+        &[
+            "mission",
+            "status",
+            "--runtime",
+            "confined-pi",
+            "--db",
+            db_arg,
+            "--mission",
+            mission,
+        ],
+        Some("process-hold"),
+    );
     assert_eq!(code, 0, "{error}");
     assert_eq!(
         status["missions"][0]["phase"], "needs_attention",
@@ -784,20 +829,23 @@ fn cli_sigkill_mid_turn_reopens_uncertain_and_cancel_needs_proof() {
         .as_u64()
         .unwrap()
         .to_string();
-    let (code, cancelled, error) = run(&[
-        "mission",
-        "command",
-        "--runtime",
-        "confined-pi",
-        "--db",
-        db_arg,
-        "--mission",
-        mission,
-        "--kind",
-        "cancel",
-        "--expected-revision",
-        &revision,
-    ]);
+    let (code, cancelled, error) = run_fixture(
+        &[
+            "mission",
+            "command",
+            "--runtime",
+            "confined-pi",
+            "--db",
+            db_arg,
+            "--mission",
+            mission,
+            "--kind",
+            "cancel",
+            "--expected-revision",
+            &revision,
+        ],
+        Some("process-hold"),
+    );
     assert_eq!(code, 0, "{error}");
     assert_eq!(cancelled["mission"]["phase"], "cancelled", "{cancelled}");
     let export =
