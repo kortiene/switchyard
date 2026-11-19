@@ -262,9 +262,9 @@ impl Host {
             return Ok(());
         }
         let binding = self.binding(&mission);
-        if !self.recovered_dead_generation(&binding)? {
+        let Some(dead_generation) = self.recovered_dead_generation(&binding)? else {
             return Ok(());
-        }
+        };
         let ids: Vec<String> = self
             .store
             .list_commands(mission_id)?
@@ -287,26 +287,24 @@ impl Host {
         let Some(turn) = snapshot["liveRun"].as_str().filter(|turn| !turn.is_empty()) else {
             return Ok(());
         };
-        // `pi.live.run` survives SIGKILL because endRun never ran. With a
-        // model endpoint, replay would re-send that request before any tool
-        // exists. Flag here, before replay. The way out is cancel, then
-        // `confirm_cancelled`. With no endpoint, keep the stuck-tool rule so
-        // a captured receipt can still be replayed.
-        // Open already compared `network` via `runtime_config_mismatch`, so this is the frozen endpoint.
-        // A retained tool receipt is the composed recovery path: replay must still finish it.
-        // An endpoint run with no retained receipt is the mid-stream re-send, flagged before replay.
-        let has_endpoint = self.confined_mut()?.config.model_endpoint.is_some();
-        let stuck_tool = self.store.linux_views(mission_id)?.iter().any(|view| {
+        // `pi.live.run` survives SIGKILL because endRun never ran. Flag here,
+        // before replay. The way out is cancel, then `confirm_cancelled`.
+        // Open already compared `network` via `runtime_config_mismatch`.
+        // A stuck tool is unsettled on every mission, including one whose
+        // other tool already kept a receipt. An endpoint mission otherwise
+        // skips this only when the dead generation itself kept a receipt.
+        // A receipt from an older generation does not hide a mid-stream death.
+        let views = self.store.linux_views(mission_id)?;
+        let stuck_tool = views.iter().any(|view| {
             !view.superseded
                 && !view.receipt_retained
                 && matches!(view.state.as_str(), "entered" | "running" | "uncertain")
         });
-        let captured_receipt = self
-            .store
-            .linux_views(mission_id)?
-            .iter()
-            .any(|view| !view.superseded && view.receipt_retained);
-        if captured_receipt || !(has_endpoint || stuck_tool) {
+        let has_endpoint = self.confined_mut()?.config.model_endpoint.is_some();
+        let dead_generation_receipt = views.iter().any(|view| {
+            !view.superseded && view.receipt_retained && view.started_generation == dead_generation
+        });
+        if !stuck_tool && (!has_endpoint || dead_generation_receipt) {
             return Ok(());
         }
         let mission = self.store.load_mission(mission_id)?;
@@ -315,15 +313,19 @@ impl Host {
     }
 
     /// The open proved a previous generation's cgroup empty. That generation
-    /// is dead. `pi.live.run` from it is not cleared here.
-    fn recovered_dead_generation(&mut self, binding: &RuntimeBinding) -> Result<bool> {
+    /// is dead. `pi.live.run` from it is not cleared here. The number is the
+    /// generation that died, used to tell its own tool receipt from an older one.
+    fn recovered_dead_generation(&mut self, binding: &RuntimeBinding) -> Result<Option<u64>> {
         let recovered = self
             .confined_mut()?
             .sessions
             .get(&binding.session_id)
             .map(|session| session.lifecycle()["recovered"].clone())
             .unwrap_or(Value::Null);
-        Ok(recovered["proven"] == true && recovered["generation"].as_u64().is_some())
+        if recovered["proven"] != true {
+            return Ok(None);
+        }
+        Ok(recovered["generation"].as_u64())
     }
 
     fn admit_unsettled_turn(
@@ -684,7 +686,7 @@ impl Host {
                             // A dead generation left `pi.live.run` set. Do not
                             // clear it and do not retry the submit. Cancel is
                             // the way out.
-                            if self.recovered_dead_generation(&request.binding)?
+                            if self.recovered_dead_generation(&request.binding)?.is_some()
                                 && error.category() == "busy"
                             {
                                 let current = self.store.load_mission(mission_id)?;
@@ -889,7 +891,7 @@ impl Host {
         // No frozen budget, or a prior generation with egress and no recorded
         // count, is allowance 0. Persist that generation's `modelEgress`
         // before the next open. Endpoint missions already freeze `modelHarness`
-        // and open with retries and restarts off. No second counter.
+        // and open with retries off. `restartLimit` is not set. No second counter.
         let mut lifecycle = self
             .confined_mut()?
             .sessions
@@ -917,7 +919,7 @@ impl Host {
                     if command.state == CommandState::Pending && is_runtime_work(command.kind) {
                         self.store.supersede_pending(
                             &command.id,
-                            "admission closed before runtime accepted this command",
+                            "operator stop ended the turn before runtime accepted this command",
                         )?;
                     }
                 }

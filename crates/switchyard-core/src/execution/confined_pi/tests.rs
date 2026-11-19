@@ -85,6 +85,9 @@ fn confined_pi_recovery_rejects_foreign_leaf_and_invalid_identity() {
     assert!(!production_session_fixture("slow-stream"));
     assert!(validate(&binding, "slow-stream").is_ok());
     assert!(validate_fixture(&binding, "slow-stream", false).is_err());
+    assert!(!production_session_fixture("write-then-hold"));
+    assert!(validate(&binding, "write-then-hold").is_ok());
+    assert!(validate_fixture(&binding, "write-then-hold", false).is_err());
     assert!(validate(&binding, "http://169.254.169.254/latest").is_err());
     assert!(validate(&binding, "http://127.0.0.1:9/v1").is_err());
 }

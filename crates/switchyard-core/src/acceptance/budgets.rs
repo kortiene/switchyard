@@ -187,14 +187,26 @@ fn product_mode_completes_when_idle_with_no_pending_work() {
 
 #[test]
 fn repair_wait_does_not_treat_a_pending_or_superseded_repair_as_complete() {
-    assert_eq!(crate::repair_wait_outcome(true, Some("pending")), None);
     assert_eq!(
-        crate::repair_wait_outcome(true, Some("superseded")),
+        crate::repair_wait_outcome(true, Some("pending"), false),
+        None
+    );
+    assert_eq!(
+        crate::repair_wait_outcome(true, Some("superseded"), false),
         Some("repair_after_settle")
     );
     assert_eq!(
-        crate::repair_wait_outcome(true, Some("acknowledged")),
+        crate::repair_wait_outcome(true, Some("acknowledged"), false),
         Some("complete")
+    );
+    assert_eq!(
+        crate::repair_wait_outcome(true, Some("acknowledged"), true),
+        None,
+        "a failed or unanswered repair run is not complete"
+    );
+    assert_eq!(
+        crate::repair_wait_outcome(true, Some("reconciled"), true),
+        None
     );
     let error = crate::Error::RepairAfterSettle;
     assert_eq!(error.category(), "repair_after_settle");

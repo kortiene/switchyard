@@ -318,7 +318,7 @@ export class Runtime {
   }
 }
 
-/** Endpoint missions disable pi-durable retries and restarts. No endpoint keeps the defaults. */
+/** Endpoint missions disable pi-durable retries. `restartLimit` stays at the default. No endpoint keeps every default. */
 export function harnessSettings(modelEndpoint: boolean): { settings: {
   retry: { enabled: false, maxRetries: 0 },
   stream: { maxRetries: 0 },

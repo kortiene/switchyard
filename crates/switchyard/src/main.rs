@@ -913,7 +913,11 @@ fn settle_confined(host: &mut Host, mission: &str, require_composed: bool) -> &'
         target_os = "linux"
     ))]
     {
-        arm_operator_stop();
+        // A stop already requested restored the default disposition. Arming
+        // again would catch the next Ctrl-C instead of ending the process.
+        if !operator_stop_requested() {
+            arm_operator_stop();
+        }
         let budgets = host.frozen_budgets(mission).ok().flatten();
         let s3_acceptance = host.s3_acceptance_replay(mission);
         loop {
@@ -956,9 +960,11 @@ fn settle_confined(host: &mut Host, mission: &str, require_composed: bool) -> &'
                 ) {
                     return "complete";
                 }
-            } else if let Some(outcome) =
-                switchyard_core::repair_wait_outcome(idle, latest_repair_state(&snapshot))
-            {
+            } else if let Some(outcome) = switchyard_core::repair_wait_outcome(
+                idle,
+                latest_repair_state(&snapshot),
+                failed_or_unanswered,
+            ) {
                 return outcome;
             }
             if let Some(wall) = budgets.as_ref().and_then(|budgets| budgets.bridge_wall)

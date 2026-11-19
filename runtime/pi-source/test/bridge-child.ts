@@ -17,7 +17,7 @@ if (!database || !bindingJson || !['answer', 'file-write', 'process-fast', 'proc
   'crash-after-abort-recorded', 'crash-after-abort-settled', 'hold-abort', 'ignore-abort', 'cooperative-wait',
   'storage-submit', 'storage-abort-intent', 'storage-abort-cancel', 'storage-abort-settlement', 'storage-background', 'storage-close',
   'storage-background-hang', 'gated-tools',
-  'busy-once', 'stopping-once', 'mismatch', 'slow-stream'].includes(mode)) throw new Error('Invalid launcher arguments');
+  'busy-once', 'stopping-once', 'mismatch', 'slow-stream', 'write-then-hold'].includes(mode)) throw new Error('Invalid launcher arguments');
 const binding = JSON.parse(bindingJson) as Binding;
 const faux = fauxProvider();
 const waitingTool = () => fauxAssistantMessage([fauxToolCall('uncooperative', {})], { stopReason: 'toolUse' });
@@ -60,7 +60,10 @@ const responses: FauxResponseStep[] = mode === 'cooperative-wait' ? Array.from({
     }] : []),
     fauxAssistantMessage('done'),
   ]
-  : mode === 'file-write' ? [
+  : mode === 'write-then-hold' ? [
+    fauxAssistantMessage([fauxToolCall('write_file', { path: 'output.txt', content: 'once' })], { stopReason: 'toolUse' }),
+    fauxAssistantMessage([fauxToolCall('process_start', { argv: ['/bin/sh', '-c', heldProcess] })], { stopReason: 'toolUse' }),
+  ] : mode === 'file-write' ? [
     fauxAssistantMessage([fauxToolCall('write_file', { path: 'output.txt', content: 'once' })], { stopReason: 'toolUse' }),
     fauxAssistantMessage('done'),
   ] : mode === 'tools' || mode === 'gated-tools' ? [
@@ -102,7 +105,7 @@ const models = createModels();
 models.setProvider(faux.provider);
 const transport = new Transport(binding);
 const tools: ToolRegistration[] = forwarders(binding, transport);
-if (mode === 'process-hold') {
+if (mode === 'process-hold' || mode === 'write-then-hold') {
   const index = tools.findIndex(tool => tool.name === 'process_start');
   const tool = tools[index];
   tools[index] = { ...tool, execute: async (args, api, context) => {

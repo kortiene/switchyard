@@ -3264,11 +3264,15 @@ pub fn foreground_run_complete(
 ///
 /// A pending repair is not treated as settled. A superseded repair is not
 /// reported as complete.
-pub fn repair_wait_outcome(idle: bool, repair_state: Option<&str>) -> Option<&'static str> {
+pub fn repair_wait_outcome(
+    idle: bool,
+    repair_state: Option<&str>,
+    failed_or_unanswered: bool,
+) -> Option<&'static str> {
     match repair_state {
         Some("pending") => None,
         Some("superseded") => Some("repair_after_settle"),
-        Some("acknowledged" | "reconciled") if idle => Some("complete"),
+        Some("acknowledged" | "reconciled") if idle && !failed_or_unanswered => Some("complete"),
         _ => None,
     }
 }

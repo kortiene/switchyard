@@ -121,8 +121,8 @@ pub struct CreatedMission {
     pub expected_source: Option<ExpectedSource>,
     /// `operator` is stored on the policy in this insert. `runtime` omits the key.
     pub plan_source: PlanSource,
-    /// Endpoint missions freeze `modelHarness` with retries and restarts off.
-    /// No-endpoint missions omit the object.
+    /// Endpoint missions freeze `modelHarness` with retries off.
+    /// `restartLimit` is not set. No-endpoint missions omit the object.
     pub model_endpoint: bool,
 }
 
