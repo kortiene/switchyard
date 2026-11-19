@@ -425,11 +425,16 @@ impl Host {
         }))
     }
 
-    fn bridge_termination_proven(&mut self, binding: &RuntimeBinding) -> Result<bool> {
+    /// The bridge process is already stopped. `uncertain` is the unproven
+    /// stop: the child is dead, so a later stop must `reprove` instead of
+    /// sending another abort.
+    fn bridge_already_stopped(&mut self, binding: &RuntimeBinding) -> Result<bool> {
         let Some(session) = self.confined_mut()?.sessions.get(&binding.session_id) else {
             return Ok(false);
         };
-        Ok(session.lifecycle()["termination"]["proven"] == true)
+        let lifecycle = session.lifecycle();
+        let phase = lifecycle["phase"].as_str().unwrap_or("");
+        Ok(phase == "stopped" || phase == "uncertain")
     }
 
     /// Re-run the cgroup proof on a bridge settle already stopped, and store it.
@@ -550,7 +555,7 @@ impl Host {
             return Ok(count);
         }
         self.ensure_confined_session(mission_id)?;
-        if self.bridge_termination_proven(&binding)? {
+        if self.bridge_already_stopped(&binding)? {
             // The settle proof already stopped this bridge. Do not call it again
             // and do not record uncertainty from a dead transport.
             for command in self.store.list_commands(mission_id)? {
@@ -688,7 +693,7 @@ impl Host {
         // receipt: the runtime never received this abort. No DNS and no
         // credential read. An unproven leaf leaves the stop pending so a
         // retry runs `reprove` again.
-        if self.bridge_termination_proven(&binding)? {
+        if self.bridge_already_stopped(&binding)? {
             let proof = self.reprove_and_store(&binding)?;
             self.reconcile_execution(mission_id)?;
             if proof.get("proven").and_then(Value::as_bool) == Some(true)
