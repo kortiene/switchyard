@@ -331,14 +331,22 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 // and both dispatches, so it cannot create a worktree.
                 // Isolated workspace failures still allow admission and stop
                 // delivery. Never drain earlier work before admitting a stop.
-                // A stop does not verify the workspace. An unresolved process
-                // from a killed host would otherwise refuse cancel.
-                let workspace_error = if persist_only || is_stop {
+                // An unresolved Linux effect makes recover return
+                // `execution_blocked` before a stop can be admitted. That block
+                // is what pause and cancel clear, so only that error continues.
+                // A ready workspace is still reconciled. An uncertain one is
+                // still reported.
+                let workspace_error = if persist_only {
                     None
                 } else {
                     match host.recover_workspace(&mission) {
                         Ok(_) => None,
                         Err(error) if error.is_isolated_workspace_failure() => Some(error),
+                        Err(error)
+                            if is_stop && matches!(error, Error::ExecutionBlocked { .. }) =>
+                        {
+                            None
+                        }
                         Err(error) => return Err(error),
                     }
                 };
