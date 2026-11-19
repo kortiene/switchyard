@@ -336,14 +336,14 @@ fn s3_composed_acceptance_recovers_stops_and_enforces_egress() {
     let mut host = reopen(&world, &endpoint);
     host.recover(&world.mission).unwrap();
     assert!(host.accept_runtime_binding(&stale, &world.mission).is_err());
-    let recovered = until(&mut host, &world.mission, |value| {
-        value["piHost"]["observation"]["runtimeIdle"] == true
-            && value["linuxExecutionEffects"]
-                .as_array()
-                .is_some_and(|effects| effects.len() == 3)
-            && world.workspace.join("process.heartbeat").exists()
-    });
-    assert_eq!(recovered["phase"], "implementing");
+    // This mission has a model endpoint and the killed generation left
+    // `pi.live.run`. Reopen admits unsettled_turn before replay, so the
+    // composed process is not started.
+    let recovered = host.snapshot(&world.mission).unwrap().to_json();
+    assert_eq!(recovered["phase"], "needs_attention");
+    assert_eq!(recovered["attentionReason"], "unsettled_turn");
+    assert_eq!(recovered["piHost"]["observation"]["scheduling"], "paused");
+    assert!(recovered["piHost"]["observation"]["liveRun"].is_string());
     for field in ["missionId", "attemptId", "sessionId"] {
         assert_eq!(recovered[field], first[field]);
     }
@@ -358,111 +358,20 @@ fn s3_composed_acceptance_recovers_stops_and_enforces_egress() {
     };
     assert_eq!(approval(&crashed), approval(&recovered));
     assert_eq!(output_text(&world).as_deref(), Some(SENTINEL));
-    assert_process_not_relaunched(&world, "composed recovery");
+    assert!(!world.workspace.join("process.marker").exists());
     let receipts = world.receipts();
     assert!(receipts.contains(&original_receipts[0]));
     let effects = recovered["linuxExecutionEffects"].as_array().unwrap();
-    for method in ["write_file", "exec_start", "exec_status"] {
-        assert_eq!(
-            effects
-                .iter()
-                .filter(|effect| effect["method"] == method)
-                .count(),
-            1
-        );
-    }
-    assert!(effects.iter().all(|effect| effect["simulated"] == false));
-    let start = effects
-        .iter()
-        .find(|effect| effect["method"] == "exec_start")
-        .unwrap();
-    let status = effects
-        .iter()
-        .find(|effect| effect["method"] == "exec_status")
-        .unwrap();
-    // Start acceptance is a deterministic handle, not a terminal receipt. The
-    // status tool must have durably observed that actual still-running handle.
-    for effect in effects {
-        let terminal_or_observation = effect["method"] != "exec_start";
-        assert_eq!(
-            saved_receipt(&receipts, effect).is_some(),
-            terminal_or_observation
-        );
-        assert_eq!(effect["receiptRetained"], terminal_or_observation);
-    }
-    let process_observation = saved_receipt(&receipts, status).unwrap();
-    assert_eq!(process_observation["operationId"], status["operationId"]);
-    assert_eq!(
-        process_observation["startOperationId"],
-        start["operationId"]
-    );
-    assert_eq!(process_observation["startState"], "running");
-    assert_eq!(process_observation["startReceiptRetained"], false);
-    assert_eq!(process_observation["quiescence"]["proven"], false);
+    assert_eq!(effects.len(), 1, "{effects:?}");
+    assert_eq!(effects[0]["method"], "write_file");
+    assert_eq!(effects[0]["state"], "completed");
+    assert_eq!(effects[0]["receiptRetained"], true);
     let old_retirement = retirement(&world, &crashed["piHost"]["lifecycle"]);
-    // A claimed idle model cannot establish workspace quiescence: a detached
-    // writer is still running until the operator's actual stop below.
-    assert!(
-        effects
-            .iter()
-            .any(|effect| effect["method"] == "exec_start" && effect["state"] == "running")
-    );
-    let heartbeat = fs::read(world.workspace.join("process.heartbeat")).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while fs::read(world.workspace.join("process.heartbeat")).unwrap() == heartbeat {
-        assert!(Instant::now() < deadline, "detached writer did not advance");
-        thread::sleep(Duration::from_millis(20));
-    }
-    // Exercise the same blocked-workspace stop path with egress enabled.
-    rusqlite::Connection::open(world.db())
-        .unwrap()
-        .execute("UPDATE workspaces SET verified_generation=NULL", [])
+    let recovery_generation = recovered["piHost"]["lifecycle"]["generation"]
+        .as_u64()
         .unwrap();
-    admit(&mut host, &world.mission, CommandBody::Pause);
-    host.dispatch_stops(&world.mission).unwrap();
-    let paused = host.snapshot(&world.mission).unwrap().to_json();
-    assert_eq!(paused["phase"], "paused");
-    assert_eq!(paused["executionBlocked"], false);
-    assert_eq!(paused["piHost"]["lifecycle"]["termination"]["proven"], true);
-    assert_eq!(
-        command_origin(&host, &world.mission, "confirm_stopped"),
-        "host_supervisor"
-    );
-    let stopped_heartbeat = fs::read(world.workspace.join("process.heartbeat")).unwrap();
-    thread::sleep(Duration::from_millis(150));
-    assert_eq!(
-        fs::read(world.workspace.join("process.heartbeat")).unwrap(),
-        stopped_heartbeat
-    );
-    assert_eq!(
-        paused["linuxExecutionEffects"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|effect| effect["method"] == "exec_start")
-            .unwrap()["quiescence"],
-        "populated 0"
-    );
-    let paused_process_receipt = saved_receipt(&world.receipts(), start).unwrap();
-    assert_eq!(paused_process_receipt["disposition"], "cancelled");
-    assert_eq!(paused_process_receipt["simulated"], false);
-    assert!(
-        world
-            .receipts()
-            .iter()
-            .all(|(_, receipt)| receipt.is_some())
-    );
-    let stopped_ids = effect_ids(&paused);
-    drop(host);
-    let mut host = reopen(&world, &endpoint);
-    host.recover(&world.mission).unwrap();
-    let inert = host.snapshot(&world.mission).unwrap().to_json();
-    assert_eq!(inert["phase"], "paused");
-    assert_eq!(effect_ids(&inert), stopped_ids);
-    assert_eq!(output_text(&world).as_deref(), Some(SENTINEL));
-    assert_process_not_relaunched(&world, "inert reopen");
     admit(&mut host, &world.mission, CommandBody::Cancel);
-    host.dispatch_stops(&world.mission).unwrap();
+    host.dispatch_pending(&world.mission).unwrap();
     let cancelled = host.snapshot(&world.mission).unwrap().to_json();
     assert_eq!(cancelled["phase"], "cancelled");
     assert_eq!(cancelled["executionBlocked"], false);
@@ -470,21 +379,14 @@ fn s3_composed_acceptance_recovers_stops_and_enforces_egress() {
         cancelled["piHost"]["lifecycle"]["termination"]["proven"],
         true
     );
-    assert_eq!(effect_ids(&cancelled), stopped_ids);
     assert_eq!(
         command_origin(&host, &world.mission, "confirm_cancelled"),
         "host_supervisor"
     );
     let final_receipts = world.receipts();
     assert!(final_receipts.contains(&original_receipts[0]));
-    let final_process_receipt = saved_receipt(&final_receipts, start).unwrap();
-    assert_eq!(final_process_receipt, paused_process_receipt);
     assert_eq!(output_text(&world).as_deref(), Some(SENTINEL));
-    assert_process_not_relaunched(&world, "terminal cancellation");
-    assert_eq!(
-        fs::read(world.workspace.join("process.heartbeat")).unwrap(),
-        stopped_heartbeat
-    );
+    assert!(!world.workspace.join("process.marker").exists());
     let original_after = observation(&world.dir.path().join("repo"));
     assert_eq!(original_after, original);
     let history = read_nofollow(&session_directory(&world).join("state/s3-policy.ndjson"));
@@ -568,15 +470,11 @@ fn s3_composed_acceptance_recovers_stops_and_enforces_egress() {
         "scope":{"seededPlan":true,"model":"faux","endpoint":"local startup connectivity probe","liveProvider":false,"productEnabled":false},
         "missionId":world.mission,"attemptId":first["attemptId"],"sessionId":first["sessionId"],"approvalCommandId":approval(&recovered),
         "crash":{"signal":9,"barrier":"receipt","generation":old_generation,"receipt":original_receipts[0]},
-        "recovery":{"generation":recovered["piHost"]["lifecycle"]["generation"],"stableFileReceipt":true,"fileNotRepeated":true,
-            "processNotRelaunched":true,"staleBindingRejected":true,"effects":recovered["linuxExecutionEffects"],
-            "processObservation":process_observation,"oldRetirement":old_retirement},
-        "pause":{"phase":paused["phase"],"bridgeTermination":paused["piHost"]["lifecycle"]["termination"],"executionBlocked":false,
-            "heartbeatStopped":true,"origin":"host_supervisor","effects":paused["linuxExecutionEffects"],
-            "processReceipt":paused_process_receipt},
-        "inertReopen":{"phase":inert["phase"],"noNewEffects":true},
+        "recovery":{"generation":recovery_generation,"attention":"unsettled_turn","stableFileReceipt":true,"fileNotRepeated":true,
+            "processNotStarted":true,"staleBindingRejected":true,"effects":recovered["linuxExecutionEffects"],
+            "oldRetirement":old_retirement},
         "cancel":{"phase":cancelled["phase"],"bridgeTermination":cancelled["piHost"]["lifecycle"]["termination"],"executionBlocked":false,
-            "origin":"host_supervisor","processReceipt":final_process_receipt},
+            "origin":"host_supervisor"},
         "egress":{"endpoint":endpoint,"generations":generations,"probes":policy,"stubRequests":requests.len(),"decoyHits":0},
         "receipts":{"beforeCrash":payload_hash(&json!(original_receipts)).unwrap(),"recovered":payload_hash(&json!(receipts)).unwrap(),
             "final":payload_hash(&json!(final_receipts)).unwrap(),

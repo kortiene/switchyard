@@ -103,7 +103,10 @@ fn slow_stream_worker() {
     )
     .unwrap();
     host.dispatch_pending(&mission).unwrap();
-    panic!("slow-stream dispatch returned");
+    // The model call continues after the host ack. Stay up until SIGKILL.
+    loop {
+        std::thread::sleep(Duration::from_secs(30));
+    }
 }
 
 /// A model stream with no tool entered is `unsettled_turn` on reopen. Replay
