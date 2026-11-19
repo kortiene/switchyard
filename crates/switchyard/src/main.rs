@@ -185,7 +185,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     return Err(Error::guard("acceptance criteria is required"));
                 }
                 let mut host = open_host(&db, runtime, model_endpoint.as_ref())?;
-                let snapshot = host.create_mission_with_verifier(
+                let snapshot = host.create_mission_with_plan_source(
                     CreateMission {
                         repo,
                         issue_number: issue,
@@ -197,10 +197,8 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                         max_plan_revisions,
                     },
                     verifier,
+                    PlanSource::parse(&plan_source)?,
                 )?;
-                if plan_source == "operator" {
-                    host.set_plan_source(&snapshot.mission_id, PlanSource::Operator)?;
-                }
                 let schedule_scenario = runtime == RuntimeSelection::ConfinedPi
                     && !persist_only
                     && admit.as_deref() == Some("approve_plan");

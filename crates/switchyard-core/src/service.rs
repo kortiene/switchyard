@@ -753,6 +753,21 @@ impl Host {
         request: CreateMission,
         verifier_json: Option<String>,
     ) -> Result<MissionSnapshot> {
+        self.create_mission_with_plan_source(
+            request,
+            verifier_json,
+            crate::freeze::PlanSource::Runtime,
+        )
+    }
+
+    /// Same as [`Self::create_mission_with_verifier`]. `plan_source` is written
+    /// in that insert. `runtime` omits the policy key.
+    pub fn create_mission_with_plan_source(
+        &mut self,
+        request: CreateMission,
+        verifier_json: Option<String>,
+        plan_source: crate::freeze::PlanSource,
+    ) -> Result<MissionSnapshot> {
         // Defense in depth for callers outside the CLI. The CLI refuses the
         // same empty or whitespace-only value before it opens the host.
         require_override(&request.acceptance, "acceptance criteria")?;
@@ -785,6 +800,7 @@ impl Host {
             verifier_json,
             decision_rationale: None,
             expected_source: None,
+            plan_source,
         };
         let id = created.id.clone();
         self.store.create_mission(created)?;
@@ -823,6 +839,10 @@ impl Host {
             return Err(Error::SuccessorExists { mission_id });
         }
         let resolved = resolve_successor(&source, actor, changes)?;
+        let plan_source = match changes.plan_source {
+            Some(chosen) => chosen,
+            None => crate::freeze::planning_plan_source(&source)?,
+        };
         let repo = inspect_repo(Path::new(&source.repo.toplevel))?;
         let created = CreatedMission {
             runtime_config: canonicalize(&self.runtime.configuration())?,
@@ -847,6 +867,7 @@ impl Host {
                 revision: source.revision,
                 phase: source.phase.as_str().to_string(),
             }),
+            plan_source,
         };
         // Test seam only: change the source after the expected revision is
         // captured and before the insert transaction reads it.
@@ -856,13 +877,6 @@ impl Host {
         }
         let id = created.id.clone();
         self.store.create_mission(created)?;
-        let plan_source = match changes.plan_source {
-            Some(chosen) => chosen,
-            None => crate::freeze::planning_plan_source(&source)?,
-        };
-        if plan_source == crate::freeze::PlanSource::Operator {
-            self.set_plan_source(&id, plan_source)?;
-        }
         #[cfg(feature = "pi-contract")]
         self.release_finished_sessions()?;
         self.snapshot(&id)

@@ -46,7 +46,7 @@ fn default_freeze_records_plan_source_runtime_and_still_enqueues() {
     let frozen = host.snapshot(&created.mission_id).unwrap();
     let document: serde_json::Value =
         serde_json::from_str(frozen.frozen_inputs_json.as_deref().unwrap()).unwrap();
-    assert_eq!(document["planSource"], "runtime");
+    assert!(document.get("planSource").is_none());
     assert!(
         document["sandboxPolicy"]["policy"]
             .get("planSource")
@@ -59,6 +59,95 @@ fn default_freeze_records_plan_source_runtime_and_still_enqueues() {
         .unwrap();
     assert_eq!(command.state, "pending");
     assert_eq!(frozen.phase, Phase::Planning);
+}
+
+#[test]
+fn ledger_frozen_at_1a12f25_reopens_without_drift_and_admits_pause() {
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = create(&mut host, &world.repo, 2);
+    let conn = rusqlite::Connection::open(&world.db).unwrap();
+    conn.execute(
+        "UPDATE missions SET objective = ?1, source_issue_json = ?2 WHERE id = ?3",
+        rusqlite::params![
+            "Ship the freeze",
+            r#"{"number":172,"provider":"github","snapshotAt":10,"title":"S4-A"}"#,
+            created.mission_id,
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE tasks SET acceptance_criteria = ?1 WHERE mission_id = ?2 AND root = 1",
+        rusqlite::params!["Inputs stay put", created.mission_id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE attempts SET base_sha = 'abc' WHERE mission_id = ?1 AND active = 1",
+        [&created.mission_id],
+    )
+    .unwrap();
+    drop(conn);
+    admit(&mut host, &created.mission_id, CommandBody::StartPlanning);
+    let conn = rusqlite::Connection::open(&world.db).unwrap();
+    conn.execute(
+        "UPDATE attempts SET frozen_inputs_json = ?1 WHERE id = ?2",
+        rusqlite::params![crate::freeze::FREEZE_AT_1A12F25, created.attempt_id],
+    )
+    .unwrap();
+    drop(conn);
+    drop(host);
+
+    let mut host = Host::open(&world.db).unwrap();
+    let reopened = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(reopened.phase, Phase::Planning);
+    assert!(reopened.attention_reason.is_none());
+    assert_eq!(
+        reopened.frozen_inputs_json.as_deref(),
+        Some(crate::freeze::FREEZE_AT_1A12F25)
+    );
+    assert_eq!(
+        host.canonical_attempt_freeze(&created.mission_id).unwrap(),
+        crate::freeze::FREEZE_AT_1A12F25
+    );
+    admit(&mut host, &created.mission_id, CommandBody::Pause);
+    let paused = host.snapshot(&created.mission_id).unwrap();
+    assert_eq!(paused.phase, Phase::Pausing);
+    assert!(paused.attention_reason.is_none());
+    assert_eq!(
+        paused.frozen_inputs_json.as_deref(),
+        Some(crate::freeze::FREEZE_AT_1A12F25)
+    );
+}
+
+#[test]
+fn operator_plan_source_is_written_in_the_create_insert() {
+    let world = open_world();
+    let mut host = Host::open(&world.db).unwrap();
+    let created = host
+        .create_mission_with_plan_source(
+            crate::CreateMission {
+                repo: world.repo.clone(),
+                issue_number: 219,
+                issue_title: "plan source".into(),
+                objective: "Write the plan".into(),
+                acceptance: "The policy insert carries it".into(),
+                actor: "operator".into(),
+                max_repairs: 2,
+                max_plan_revisions: 3,
+            },
+            None,
+            PlanSource::Operator,
+        )
+        .unwrap();
+    let policy: String = rusqlite::Connection::open(&world.db)
+        .unwrap()
+        .query_row(
+            "SELECT policy_json FROM attempts WHERE id = ?1",
+            [&created.attempt_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(policy.contains(r#""planSource":"operator""#), "{policy}");
 }
 
 #[test]
@@ -184,7 +273,7 @@ fn successor_can_freeze_plan_source_operator() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(forced_doc["planSource"], "runtime");
+    assert!(forced_doc.get("planSource").is_none());
     let rationale = host
         .decisions(&forced.mission_id)
         .unwrap()
@@ -312,8 +401,10 @@ fn confined_runtime_or_unset_plan_file_is_refused_and_state_is_unchanged() {
         .unwrap_err();
     assert_eq!(error.category(), "plan_source_not_operator");
     let message = error.to_string();
-    assert!(message.contains("use the runtime path"), "{message}");
-    assert!(message.contains("planSource operator"), "{message}");
+    assert!(
+        message.contains("start a successor with --plan-source operator"),
+        "{message}"
+    );
     assert_eq!(fingerprint(&host, &created.mission_id), before);
     assert!(!missing.exists());
 

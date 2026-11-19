@@ -9,6 +9,17 @@ use crate::domain::{CommandKind, MissionRecord, Phase};
 use crate::error::{Error, Result};
 
 pub(crate) const ATTEMPT_FREEZE_SCHEMA: &str = "switchyard.attempt-freeze.v1";
+
+/// Canonical freeze `1a12f25` wrote for the unit-test mission. `planSource` is
+/// absent, which is `runtime`. A newer binary must rebuild these bytes.
+#[cfg(test)]
+pub(crate) const FREEZE_AT_1A12F25: &str = concat!(
+    r#"{"acceptanceCriteria":"Inputs stay put","baseSha":"abc","executionLimits":{"maxPlanRevisions":3,"maxRepairs":2},"#,
+    r#""issueSnapshot":{"number":172,"provider":"github","snapshotAt":10,"title":"S4-A"},"objective":"Ship the freeze","#,
+    r#""runtimeConfig":{"adapter":"fake","credentials":"none"},"sandboxPolicy":{"environment":{"confinement":"deferred_to_s3","host":"single"},"#,
+    r#""policy":{"credentials":"none","planningTools":"read-only"}},"schema":"switchyard.attempt-freeze.v1","#,
+    r#""verifier":{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}}"#
+);
 pub(crate) const PLAN_DIGEST_SCHEMA: &str = "switchyard.plan-digest.v1";
 
 /// Who writes the plan. Frozen on the attempt at `start_planning`.
@@ -74,7 +85,7 @@ pub(crate) fn frozen_document(mission: &MissionRecord) -> Result<Value> {
     require_text(&mission.attempt.base_sha, "base SHA")?;
     require_text(&mission.source_issue.provider, "issue snapshot")?;
     let plan_source = plan_source_value(&mission.attempt.policy_json, "sandbox policy")?;
-    Ok(json!({
+    let mut document = json!({
         "acceptanceCriteria": mission.acceptance_criteria,
         "baseSha": mission.attempt.base_sha,
         "executionLimits": {
@@ -88,7 +99,6 @@ pub(crate) fn frozen_document(mission: &MissionRecord) -> Result<Value> {
             "title": mission.source_issue.title,
         },
         "objective": mission.objective,
-        "planSource": plan_source.as_str(),
         "runtimeConfig": runtime_configuration(&mission.attempt.runtime_config_json)?,
         "sandboxPolicy": sandbox_policy(
             &mission.attempt.environment_json,
@@ -96,7 +106,13 @@ pub(crate) fn frozen_document(mission: &MissionRecord) -> Result<Value> {
         )?,
         "schema": ATTEMPT_FREEZE_SCHEMA,
         "verifier": parse_object(&mission.attempt.verifier_json, "verifier definition")?,
-    }))
+    });
+    // `runtime` stays absent so a freeze written before this field still
+    // matches byte for byte. Absence reads as `runtime`.
+    if plan_source == PlanSource::Operator {
+        document["planSource"] = json!("operator");
+    }
+    Ok(document)
 }
 
 /// Commands that may still be admitted after the frozen inputs drift.
@@ -329,11 +345,15 @@ mod tests {
                 .is_none()
         );
         assert!(document["sandboxPolicy"].get("host").is_none());
-        assert_eq!(document["planSource"], "runtime");
+        assert!(document.get("planSource").is_none());
         assert!(
             document["sandboxPolicy"]["policy"]
                 .get("planSource")
                 .is_none()
+        );
+        assert_eq!(
+            frozen_canonical(&mission()).unwrap(),
+            super::FREEZE_AT_1A12F25
         );
     }
 

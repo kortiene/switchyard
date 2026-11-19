@@ -74,11 +74,9 @@ pub enum Error {
     FrozenInputDrift,
 
     /// Confined `mission plan --file` when the freeze does not say the operator
-    /// writes the plan. Nothing is written. Way out: use the runtime path, or
-    /// start a successor with `planSource` `operator`.
-    #[error(
-        "plan source is not operator; use the runtime path, or start a successor with planSource operator"
-    )]
+    /// writes the plan. Nothing is written. Way out: start a successor with
+    /// `--plan-source operator`.
+    #[error("plan source is not operator; start a successor with --plan-source operator")]
     PlanSourceNotOperator,
 
     /// The approval named a digest other than the current plan digest.

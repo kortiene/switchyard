@@ -119,6 +119,8 @@ pub struct CreatedMission {
     pub decision_rationale: Option<String>,
     /// Set for a successor. Compared inside the insert transaction before any write.
     pub expected_source: Option<ExpectedSource>,
+    /// `operator` is stored on the policy in this insert. `runtime` omits the key.
+    pub plan_source: PlanSource,
 }
 
 /// Source row a successor must still match when its insert transaction starts.
@@ -585,12 +587,15 @@ impl Store {
             }
         }
         let now = now_ms();
-        let policy_value = json!({
+        let mut policy_value = json!({
             "maxRepairs": created.max_repairs,
             "maxPlanRevisions": created.max_plan_revisions,
             "planningTools": "read-only",
             "credentials": "none"
         });
+        if created.plan_source == PlanSource::Operator {
+            policy_value["planSource"] = json!("operator");
+        }
         let policy_json = canonicalize(&policy_value)?;
         let policy_hash = payload_hash(&policy_value)?;
         let verifier_json = created.verifier_json.as_deref().unwrap_or(VERIFIER_JSON);
@@ -2728,6 +2733,7 @@ mod tests {
             verifier_json: None,
             decision_rationale: None,
             expected_source: None,
+            plan_source: PlanSource::Runtime,
         }
     }
 }
