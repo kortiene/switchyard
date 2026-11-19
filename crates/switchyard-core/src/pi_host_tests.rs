@@ -321,7 +321,7 @@ fn incompatible_configuration_and_default_fake_reopen_are_rejected() {
         .expect("drifted fingerprint")
         .to_string();
     assert!(drifted.contains("fingerprint:"), "{drifted}");
-    assert!(drifted.contains("found \"wrong\""), "{drifted}");
+    assert!(drifted.contains("frozen \"wrong\""), "{drifted}");
     assert!(drifted.contains("no adapter replacement"), "{drifted}");
 }
 
