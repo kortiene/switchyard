@@ -283,6 +283,9 @@ pub struct SuccessorChanges {
     pub max_plan_revisions: Option<u32>,
     /// JSON object. Stored in canonical form when supplied.
     pub verifier_json: Option<String>,
+    /// `None` copies the source. `runtime` is the default when the source
+    /// has no `planSource`.
+    pub plan_source: Option<crate::freeze::PlanSource>,
 }
 
 pub struct AdmitRequest {
@@ -598,6 +601,37 @@ impl Host {
         })
     }
 
+    /// Confined host for plan-source admission. No Linux session is enabled and
+    /// no bridge is launched. Planning with `planSource: operator` enqueues no
+    /// runtime work, so these tests never dispatch.
+    #[cfg(all(
+        test,
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    ))]
+    pub(crate) fn open_confined_admission(db_path: &Path) -> Result<Self> {
+        let db_path = canonical_db_path(db_path)?;
+        let parent = db_path.parent().unwrap_or_else(|| Path::new("."));
+        let runtime = crate::execution::confined_pi::fixture_runtime(parent, "plan-source");
+        let missing = parent.join("uninstalled-plan-source");
+        let config = crate::execution::confined_pi::ConfinedPiConfig {
+            root: missing.clone(),
+            cgroup_root: missing.clone(),
+            runtime,
+            node: missing.clone(),
+            bubblewrap: missing.clone(),
+            launcher: missing.clone(),
+            policy: missing,
+            model_endpoint: None,
+        };
+        Self::open_with_runtime(&db_path, move |_| {
+            Ok(RuntimeAdapter::Confined(Box::new(
+                crate::execution::confined_runtime::ConfinedRuntime::new(config, "answer")?,
+            )))
+        })
+    }
+
     /// Explicit, credential-free S2-A probe. Uses the committed faux launcher;
     /// it enables neither model calls nor workspace effects. FakeRuntime remains
     /// the CLI/default adapter. A ledger cannot be switched between adapters.
@@ -703,11 +737,36 @@ impl Host {
         self.create_mission_with_verifier(request, None)
     }
 
+    /// Who writes the plan. `runtime` is the default and stores no policy key.
+    /// Refused after `start_planning` has frozen the attempt.
+    pub fn set_plan_source(
+        &mut self,
+        mission_id: &str,
+        source: crate::freeze::PlanSource,
+    ) -> Result<()> {
+        self.store.set_plan_source(mission_id, source)
+    }
+
     /// `None` stores `switchyard.verifier.v1`. Any other value must be allowlisted.
     pub fn create_mission_with_verifier(
         &mut self,
         request: CreateMission,
         verifier_json: Option<String>,
+    ) -> Result<MissionSnapshot> {
+        self.create_mission_with_plan_source(
+            request,
+            verifier_json,
+            crate::freeze::PlanSource::Runtime,
+        )
+    }
+
+    /// Same as [`Self::create_mission_with_verifier`]. `plan_source` is written
+    /// in that insert. `runtime` omits the policy key.
+    pub fn create_mission_with_plan_source(
+        &mut self,
+        request: CreateMission,
+        verifier_json: Option<String>,
+        plan_source: crate::freeze::PlanSource,
     ) -> Result<MissionSnapshot> {
         // Defense in depth for callers outside the CLI. The CLI refuses the
         // same empty or whitespace-only value before it opens the host.
@@ -741,6 +800,7 @@ impl Host {
             verifier_json,
             decision_rationale: None,
             expected_source: None,
+            plan_source,
         };
         let id = created.id.clone();
         self.store.create_mission(created)?;
@@ -779,6 +839,10 @@ impl Host {
             return Err(Error::SuccessorExists { mission_id });
         }
         let resolved = resolve_successor(&source, actor, changes)?;
+        let plan_source = match changes.plan_source {
+            Some(chosen) => chosen,
+            None => crate::freeze::planning_plan_source(&source)?,
+        };
         let repo = inspect_repo(Path::new(&source.repo.toplevel))?;
         let created = CreatedMission {
             runtime_config: canonicalize(&self.runtime.configuration())?,
@@ -803,6 +867,7 @@ impl Host {
                 revision: source.revision,
                 phase: source.phase.as_str().to_string(),
             }),
+            plan_source,
         };
         // Test seam only: change the source after the expected revision is
         // captured and before the insert transaction reads it.
@@ -914,6 +979,16 @@ impl Host {
         verification: Option<&NewVerification>,
         host_fact: bool,
     ) -> Result<AdmitResult> {
+        self.admit_plan(request, verification, host_fact, false)
+    }
+
+    fn admit_plan(
+        &mut self,
+        request: AdmitRequest,
+        verification: Option<&NewVerification>,
+        host_fact: bool,
+        operator_plan_file: bool,
+    ) -> Result<AdmitResult> {
         let mission = self.store.load_mission(&request.mission_id)?;
         let attempt_id = require_active_attempt(&mission, &request)?;
         let payload = request.body.payload(&mission.id, &attempt_id);
@@ -1007,9 +1082,15 @@ impl Host {
             return Err(Error::FrozenInputsMissing);
         }
         self.refuse_drift_or_plan_mismatch(&mission, request.body.kind())?;
+        let operator_authored_plan = operator_plan_file
+            && request.origin == CommandOrigin::Operator
+            && matches!(request.body, CommandBody::PlanCompleted { .. })
+            && crate::freeze::planning_plan_source(&mission)?
+                == crate::freeze::PlanSource::Operator;
         if is_runtime_observation(request.body.kind())
             && request.origin != CommandOrigin::RuntimeObservation
             && !(host_pass && request.origin == CommandOrigin::HostSupervisor)
+            && !operator_authored_plan
         {
             return Err(Error::guard(
                 "plan, verification, and publication observations must come from the runtime",
@@ -1059,6 +1140,13 @@ impl Host {
             return Err(Error::VerificationNotHostRun);
         }
         let plan = policy::project(&mission, spec, &request.body, &facts)?;
+        let mut state = initial_state(&request);
+        if matches!(request.body, CommandBody::StartPlanning)
+            && crate::freeze::planning_plan_source(&mission)? == crate::freeze::PlanSource::Operator
+        {
+            // The operator writes the plan. Freeze, and enqueue no runtime work.
+            state = CommandState::Reconciled;
+        }
         let mut command = new_command(
             &request,
             &mission,
@@ -1068,7 +1156,7 @@ impl Host {
                 canonical,
                 hash,
                 resulting_revision: mission.revision.saturating_add(1),
-                state: initial_state(&request),
+                state,
             },
         );
         command.decision_digest = plan.decision_digest.clone();
@@ -1739,12 +1827,25 @@ impl Host {
     /// `runtime_observation`. The actor is `operator-plan-file`, which is not
     /// part of the payload, so `planDigest` and the payload hash match
     /// [`Self::apply_notification`] for the same text.
+    ///
+    /// A confined host is different. Frozen `planSource: operator` admits the
+    /// same bytes with origin `operator` and the host digest from
+    /// [`crate::freeze::plan_digest_document`]. `runtime` or an unset freeze
+    /// refuses `plan_source_not_operator` before the file is opened.
     pub fn apply_plan_file(
         &mut self,
         mission_id: &str,
         path: &Path,
         quiescent: bool,
     ) -> Result<NotifyOutcome> {
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        if matches!(self.runtime, RuntimeAdapter::Confined(_)) {
+            return self.apply_confined_plan_file(mission_id, path, quiescent);
+        }
         if self.runtime.fake_mut().is_none() {
             return Err(Error::guard(
                 "fake observations cannot certify Pi mission facts",
@@ -1756,6 +1857,47 @@ impl Host {
             RuntimeNotification::PlanCompleted { plan, quiescent },
             "operator-plan-file",
         )
+    }
+
+    /// Confined `mission plan --file` when the freeze names the operator.
+    ///
+    /// The plan-source check runs before the file is opened, so a refusal
+    /// leaves the ledger unchanged. The digest is
+    /// [`crate::bound_plan_digest`], the same function the Fake path uses.
+    #[cfg(all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    ))]
+    fn apply_confined_plan_file(
+        &mut self,
+        mission_id: &str,
+        path: &Path,
+        quiescent: bool,
+    ) -> Result<NotifyOutcome> {
+        let mission = self.store.load_mission(mission_id)?;
+        if crate::freeze::planning_plan_source(&mission)? != crate::freeze::PlanSource::Operator {
+            return Err(Error::PlanSourceNotOperator);
+        }
+        let plan = read_plan_file(path)?;
+        if mission.phase != Phase::Planning && mission.plan_body.as_deref() == Some(plan.as_str()) {
+            return Ok(unchanged(&mission));
+        }
+        self.admit_plan(
+            AdmitRequest {
+                command_id: None,
+                mission_id: mission.id.clone(),
+                attempt_id: Some(mission.attempt.id.clone()),
+                expected_revision: mission.revision,
+                actor: "operator-plan-file".into(),
+                origin: CommandOrigin::Operator,
+                body: CommandBody::PlanCompleted { plan, quiescent },
+            },
+            None,
+            false,
+            true,
+        )
+        .map(NotifyOutcome::Transition)
     }
 
     /// Same admission path as [`Self::apply_notification`]. `plan_actor` is
@@ -2523,6 +2665,12 @@ impl Host {
         if !resumes || !matches!(next, Phase::Planning | Phase::Implementing) {
             return Ok(None);
         }
+        if next == Phase::Planning
+            && crate::freeze::planning_plan_source(mission)? == crate::freeze::PlanSource::Operator
+        {
+            // Planning has no runtime submission to resume. Do not enqueue one.
+            return Ok(None);
+        }
         let commands = self.store.list_commands(&mission.id)?;
         if resumable_work_for(&commands, next) {
             return Ok(None);
@@ -2857,6 +3005,9 @@ fn resolve_successor(
     }
     if changes.objective.is_some() {
         overridden.push("objective");
+    }
+    if changes.plan_source.is_some() {
+        overridden.push("planSource");
     }
     if changes.verifier_json.is_some() {
         overridden.push("verifier");

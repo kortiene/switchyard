@@ -435,6 +435,43 @@ fn confined_request_verification_reaches_verifying_under_proof() {
 }
 
 #[test]
+fn unproven_cancel_after_settle_stays_cancelling() {
+    let (world, mut host) = World::new("answer");
+    host.dispatch_pending(&world.mission).unwrap();
+    until(&mut host, &world.mission, |value| {
+        value["piHost"]["observation"]["runtimeIdle"] == true
+    });
+    request_verification(&mut host, &world.mission, true).unwrap();
+    let settled = host.snapshot(&world.mission).unwrap().to_json();
+    assert_eq!(settled["phase"], "verifying");
+    let leaf = settled["piHost"]["lifecycle"]["cgroup"]["path"]
+        .as_str()
+        .unwrap();
+    fs::remove_dir(leaf).unwrap();
+    admit(&mut host, &world.mission, CommandBody::Cancel);
+    host.dispatch_stops(&world.mission).unwrap();
+    let snap = host.snapshot(&world.mission).unwrap();
+    assert_eq!(snap.phase, Phase::Cancelling);
+    let cancel = snap
+        .commands
+        .iter()
+        .find(|command| command.kind == "cancel")
+        .unwrap();
+    assert_eq!(cancel.state, "pending");
+    assert!(
+        !snap
+            .commands
+            .iter()
+            .any(|command| command.kind == "confirm_cancelled")
+    );
+    host.dispatch_stops(&world.mission).unwrap();
+    assert_eq!(
+        host.snapshot(&world.mission).unwrap().phase,
+        Phase::Cancelling
+    );
+}
+
+#[test]
 fn live_writer_is_settle_not_proven_until_cancel_or_retry() {
     let (world, mut host) = World::new("process-hold");
     host.dispatch_pending(&world.mission).unwrap();
