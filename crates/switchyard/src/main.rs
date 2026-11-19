@@ -23,7 +23,7 @@ use cli::{Cli, Command, MissionCommand, RuntimeSelection};
 use serde_json::{Value, json};
 use switchyard_core::{
     AdmitRequest, CommandBody, CommandKind, CommandOrigin, CreateMission, EffectProof, Error, Host,
-    Phase, SuccessorChanges, write_export_exclusive,
+    Phase, PlanSource, SuccessorChanges, write_export_exclusive,
 };
 
 /// Set by SIGINT and SIGTERM in this process. The waiting command admits
@@ -246,6 +246,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 persist_only,
                 payload,
                 verifier,
+                plan_source,
             } => {
                 // This refusal uses only the flag. Opening the host first would
                 // take the owner lock and bump host_owner.generation.
@@ -253,7 +254,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     return Err(Error::guard("acceptance criteria is required"));
                 }
                 let mut host = open_host(&db, runtime, model_endpoint.as_ref())?;
-                let snapshot = host.create_mission_with_verifier(
+                let snapshot = host.create_mission_with_plan_source(
                     CreateMission {
                         repo,
                         issue_number: issue,
@@ -265,6 +266,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                         max_plan_revisions,
                     },
                     verifier,
+                    PlanSource::parse(&plan_source)?,
                 )?;
                 let schedule_scenario = runtime == RuntimeSelection::ConfinedPi
                     && !persist_only
@@ -497,6 +499,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 max_repairs,
                 max_plan_revisions,
                 verifier,
+                plan_source,
             } => {
                 // An acceptance override is CLI input. Refuse it before the
                 // host open bumps host_owner.generation. Omitting the flag
@@ -512,6 +515,10 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                         max_repairs,
                         max_plan_revisions,
                         verifier_json: verifier,
+                        plan_source: match plan_source {
+                            Some(value) => Some(PlanSource::parse(&value)?),
+                            None => None,
+                        },
                     },
                 )?;
                 Ok(json!({"ok": true, "mission": snapshot.to_json()}))

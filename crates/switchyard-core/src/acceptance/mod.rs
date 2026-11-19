@@ -10,6 +10,7 @@ mod host_verifier_confined;
 mod ownership;
 mod pause_cancel;
 mod plan_file;
+mod plan_source;
 mod planning_approval;
 mod planning_freeze;
 mod publication;

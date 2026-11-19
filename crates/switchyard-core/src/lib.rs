@@ -64,7 +64,7 @@ pub use execution::{
 };
 #[cfg(feature = "pi-contract")]
 pub use execution::{PiBridge, PiEffectOutcome};
-pub use freeze::bound_plan_digest;
+pub use freeze::{PlanSource, bound_plan_digest};
 #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
 pub(crate) use service::VerifierResultPlant;
 pub use service::read_attempt_freeze;

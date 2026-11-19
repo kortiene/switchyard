@@ -73,6 +73,12 @@ pub enum Error {
     #[error("frozen attempt inputs drifted; the command was not applied")]
     FrozenInputDrift,
 
+    /// Confined `mission plan --file` when the freeze does not say the operator
+    /// writes the plan. Nothing is written. Way out: start a successor with
+    /// `--plan-source operator`.
+    #[error("plan source is not operator; start a successor with --plan-source operator")]
+    PlanSourceNotOperator,
+
     /// The approval named a digest other than the current plan digest.
     #[error("plan digest does not match the current plan")]
     StalePlanDigest,
@@ -205,6 +211,7 @@ impl Error {
             Self::RepairLimitExhausted { .. } => "repair_limit_exhausted",
             Self::FrozenInputsMissing => "frozen_inputs_missing",
             Self::FrozenInputDrift => "frozen_input_drift",
+            Self::PlanSourceNotOperator => "plan_source_not_operator",
             Self::StalePlanDigest => "stale_plan_digest",
             Self::PlanRevisionLimitReached { .. } => "plan_revision_limit_reached",
             Self::RuntimeBudgetExhausted => "runtime_budget_exhausted",
