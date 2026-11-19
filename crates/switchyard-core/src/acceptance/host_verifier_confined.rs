@@ -1007,8 +1007,34 @@ fn host_verifier_confined_measure_full_rust_verify() {
     let db = tmp.path().join("mission.sqlite");
     let (mut host, id, _) = mission(&repo, &db);
     host.enable_linux_execution(linux_config(None)).unwrap();
+    // Sample the verifier leaf while it exists. `verify_mission` can remove
+    // that directory before it returns, so a read afterwards may miss it.
+    let cgroup_root = PathBuf::from(require_env("SWITCHYARD_CGROUP_ROOT"));
+    let baseline = fs::read_dir(&cgroup_root)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_else(|_| std::collections::HashSet::new());
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sampled = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let sampler = {
+        let root = cgroup_root.clone();
+        let baseline = baseline.clone();
+        let stop = std::sync::Arc::clone(&stop);
+        let sampled = std::sync::Arc::clone(&sampled);
+        thread::spawn(move || {
+            let mut fresh = std::collections::HashSet::new();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                sweep_leaves(&root, &baseline, &mut fresh, &sampled);
+                thread::sleep(Duration::from_millis(20));
+            }
+            sweep_leaves(&root, &baseline, &mut fresh, &sampled);
+        })
+    };
     let started = Instant::now();
     let verified = host.verify_mission(&id);
+    let mut fresh = std::collections::HashSet::new();
+    sweep_leaves(&cgroup_root, &baseline, &mut fresh, &sampled);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    sampler.join().unwrap();
     let elapsed_s = (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0;
     let (outcome, decision) = match &verified {
         Ok((snap, outcome)) => (
@@ -1035,6 +1061,15 @@ fn host_verifier_confined_measure_full_rust_verify() {
         .and_then(|document| document.get("stdoutSha256"))
         .and_then(|value| value.as_str())
         .map(str::to_string);
+    // The helper hashes the full stream, then `push_tail` drops every byte
+    // before the last 64 KiB. Evidence `stdoutTail` is that retained tail.
+    let stdout_tail = document
+        .as_ref()
+        .and_then(|document| document.get("stdoutTail"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
+    let (tests_passed, tests_failed) = tally_results(&stdout_tail);
     let effect = conn.as_ref().and_then(|conn| {
         conn.query_row(
             "SELECT quiescence_json FROM linux_execution_effects
@@ -1054,24 +1089,72 @@ fn host_verifier_confined_measure_full_rust_verify() {
                 .and_then(|path| path.as_str())
                 .map(PathBuf::from)
         });
-    let oom_killed = cgroup_path
-        .as_ref()
-        .and_then(|path| fs::read_to_string(path.join("memory.events")).ok())
-        .is_some_and(|text| {
-            text.lines().any(|line| {
-                let Some((name, value)) = line.split_once(' ') else {
-                    return false;
-                };
-                matches!(name, "oom" | "oom_kill" | "oom_group_kill") && value.trim() != "0"
+    let live = sampled.lock().unwrap().clone();
+    let (cpu_stat, memory_peak, oom_killed, oom_killed_source) = if let Some(sample) = live {
+        (
+            Some(serde_json::json!({
+                "usage_usec": sample.usage_usec,
+                "nr_periods": sample.nr_periods,
+                "nr_throttled": sample.nr_throttled,
+            })),
+            Some(sample.memory_peak),
+            sample.oom_killed,
+            "sampled from the verifier leaf while its cgroup files existed",
+        )
+    } else if let Some(path) = cgroup_path.as_ref() {
+        // The directory was already gone before any sample. This read is the
+        // fallback and can miss an OOM that was only visible on the leaf.
+        let cpu_text = fs::read_to_string(path.join("cpu.stat")).unwrap_or_default();
+        let memory_events = fs::read_to_string(path.join("memory.events")).unwrap_or_default();
+        let stat = |key: &str| -> Option<u64> {
+            cpu_text.lines().find_map(|line| {
+                let (name, value) = line.split_once(' ')?;
+                if name == key {
+                    value.trim().parse::<u64>().ok()
+                } else {
+                    None
+                }
             })
+        };
+        let cpu_stat = match (stat("usage_usec"), stat("nr_periods"), stat("nr_throttled")) {
+            (Some(usage_usec), Some(nr_periods), Some(nr_throttled)) => Some(serde_json::json!({
+                "usage_usec": usage_usec,
+                "nr_periods": nr_periods,
+                "nr_throttled": nr_throttled,
+            })),
+            _ => None,
+        };
+        let memory_peak = fs::read_to_string(path.join("memory.peak"))
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok());
+        let oom_killed = memory_events.lines().any(|line| {
+            let Some((name, value)) = line.split_once(' ') else {
+                return false;
+            };
+            matches!(name, "oom" | "oom_kill" | "oom_group_kill") && value.trim() != "0"
         });
+        (
+            cpu_stat,
+            memory_peak,
+            oom_killed,
+            "post-teardown, may be stale",
+        )
+    } else {
+        (None, None, false, "post-teardown, may be stale")
+    };
     let line = serde_json::json!({
         "sha": sha,
         "elapsedS": elapsed_s,
         "outcome": outcome,
         "decision": decision,
         "oomKilled": oom_killed,
+        "oomKilledSource": oom_killed_source,
         "stdoutTailSha": stdout_tail_sha,
+        "stdoutTail": stdout_tail,
+        "testsPassed": tests_passed,
+        "testsFailed": tests_failed,
+        "cpuStat": cpu_stat,
+        "memoryPeak": memory_peak,
         "nproc": nproc,
         "memTotal": mem_total,
         "cpuModel": cpu_model,
@@ -1079,4 +1162,113 @@ fn host_verifier_confined_measure_full_rust_verify() {
         "kernel": kernel,
     });
     println!("{}", serde_json::to_string(&line).unwrap());
+    assert_eq!(outcome, "pass", "verifier outcome");
+    assert_eq!(tests_failed, 0, "testsFailed");
+    assert!(tests_passed > 0, "testsPassed");
+
+    #[derive(Clone)]
+    struct LeafSample {
+        usage_usec: u64,
+        nr_periods: u64,
+        nr_throttled: u64,
+        memory_peak: u64,
+        oom_killed: bool,
+    }
+
+    fn sweep_leaves(
+        root: &Path,
+        baseline: &std::collections::HashSet<PathBuf>,
+        fresh: &mut std::collections::HashSet<PathBuf>,
+        slot: &std::sync::Mutex<Option<LeafSample>>,
+    ) {
+        let Ok(entries) = fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !baseline.contains(&path) {
+                fresh.insert(path);
+            }
+        }
+        for path in fresh.iter() {
+            if let Some(sample) = read_leaf(path) {
+                let mut guard = slot.lock().unwrap();
+                match guard.as_mut() {
+                    None => *guard = Some(sample),
+                    Some(prev) => {
+                        prev.oom_killed |= sample.oom_killed;
+                        if sample.memory_peak > prev.memory_peak {
+                            prev.memory_peak = sample.memory_peak;
+                        }
+                        if sample.usage_usec >= prev.usage_usec {
+                            prev.usage_usec = sample.usage_usec;
+                            prev.nr_periods = sample.nr_periods;
+                            prev.nr_throttled = sample.nr_throttled;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn read_leaf(path: &Path) -> Option<LeafSample> {
+        let cpu_text = fs::read_to_string(path.join("cpu.stat")).ok()?;
+        let memory_events = fs::read_to_string(path.join("memory.events")).ok()?;
+        let memory_peak = fs::read_to_string(path.join("memory.peak"))
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())?;
+        let stat = |key: &str| -> Option<u64> {
+            cpu_text.lines().find_map(|line| {
+                let (name, value) = line.split_once(' ')?;
+                if name == key {
+                    value.trim().parse::<u64>().ok()
+                } else {
+                    None
+                }
+            })
+        };
+        let oom_killed = memory_events.lines().any(|line| {
+            let Some((name, value)) = line.split_once(' ') else {
+                return false;
+            };
+            matches!(name, "oom" | "oom_kill" | "oom_group_kill") && value.trim() != "0"
+        });
+        Some(LeafSample {
+            usage_usec: stat("usage_usec")?,
+            nr_periods: stat("nr_periods")?,
+            nr_throttled: stat("nr_throttled")?,
+            memory_peak,
+            oom_killed,
+        })
+    }
+
+    fn tally_results(tail: &str) -> (u64, u64) {
+        let mut passed = 0u64;
+        let mut failed = 0u64;
+        for line in tail.lines() {
+            let Some(rest) = line.trim().strip_prefix("test result:") else {
+                continue;
+            };
+            passed += labeled_count(rest, "passed");
+            failed += labeled_count(rest, "failed");
+        }
+        (passed, failed)
+    }
+
+    fn labeled_count(text: &str, label: &str) -> u64 {
+        let words: Vec<_> = text
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect();
+        words
+            .windows(2)
+            .find_map(|pair| {
+                if pair[1] == label {
+                    pair[0].parse::<u64>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0)
+    }
 }
