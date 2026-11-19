@@ -957,3 +957,126 @@ fn profile_command_with_cargo(repo: &Path, cargo_home: Option<&Path>, argv: &[&s
         decode("stderrB64")
     )
 }
+
+/// Resource measurement for the frozen `switchyard.verifier.rust-verify.v1`
+/// profile. Ignored by the default suite. `mission` already passes
+/// `RUST_VERIFY_JSON` and `verify_mission` gives the run a fresh target dir.
+#[test]
+#[ignore]
+fn host_verifier_confined_measure_full_rust_verify() {
+    let repo = PathBuf::from(require_env("SWITCHYARD_MEASURE_REPO"));
+    let sha = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(sha.status.success(), "clone sha");
+    let sha = String::from_utf8(sha.stdout).unwrap().trim().to_string();
+    let mem_total = fs::read_to_string("/proc/meminfo").unwrap();
+    let mem_total = mem_total
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap();
+    let cpu_model = cpuinfo
+        .lines()
+        .find_map(|line| line.strip_prefix("model name"))
+        .unwrap()
+        .split_once(':')
+        .unwrap()
+        .1
+        .trim()
+        .to_string();
+    let kernel = fs::read_to_string("/proc/sys/kernel/osrelease")
+        .unwrap()
+        .trim()
+        .to_string();
+    let nproc = std::thread::available_parallelism().unwrap().get();
+    let bwrap = Command::new(require_env("SWITCHYARD_BWRAP"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    let bwrap = String::from_utf8(bwrap.stdout).unwrap().trim().to_string();
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("mission.sqlite");
+    let (mut host, id, _) = mission(&repo, &db);
+    host.enable_linux_execution(linux_config(None)).unwrap();
+    let started = Instant::now();
+    let verified = host.verify_mission(&id);
+    let elapsed_s = (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0;
+    let (outcome, decision) = match &verified {
+        Ok((snap, outcome)) => (
+            outcome.clone(),
+            snap.attention_reason
+                .clone()
+                .unwrap_or_else(|| snap.phase.as_str().to_string()),
+        ),
+        Err(error) => (error.category().to_string(), error.to_string()),
+    };
+    let conn = rusqlite::Connection::open(&db).ok();
+    let document = conn.as_ref().and_then(|conn| {
+        conn.query_row(
+            "SELECT e.body_json FROM verifications v JOIN evidence e ON e.id = v.evidence_id
+             WHERE v.mission_id = ?1 AND v.invalidated = 0 ORDER BY v.seq DESC LIMIT 1",
+            [&id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    });
+    let document = document.and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok());
+    let stdout_tail_sha = document
+        .as_ref()
+        .and_then(|document| document.get("stdoutSha256"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let effect = conn.as_ref().and_then(|conn| {
+        conn.query_row(
+            "SELECT quiescence_json FROM linux_execution_effects
+             WHERE mission_id = ?1 ORDER BY rowid DESC LIMIT 1",
+            [&id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    });
+    let cgroup_path = effect
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .and_then(|value| {
+            value
+                .get("path")
+                .and_then(|path| path.as_str())
+                .map(PathBuf::from)
+        });
+    let oom_killed = cgroup_path
+        .as_ref()
+        .and_then(|path| fs::read_to_string(path.join("memory.events")).ok())
+        .is_some_and(|text| {
+            text.lines().any(|line| {
+                let Some((name, value)) = line.split_once(' ') else {
+                    return false;
+                };
+                matches!(name, "oom" | "oom_kill" | "oom_group_kill") && value.trim() != "0"
+            })
+        });
+    let line = serde_json::json!({
+        "sha": sha,
+        "elapsedS": elapsed_s,
+        "outcome": outcome,
+        "decision": decision,
+        "oomKilled": oom_killed,
+        "stdoutTailSha": stdout_tail_sha,
+        "nproc": nproc,
+        "memTotal": mem_total,
+        "cpuModel": cpu_model,
+        "bwrap": bwrap,
+        "kernel": kernel,
+    });
+    println!("{}", serde_json::to_string(&line).unwrap());
+}
