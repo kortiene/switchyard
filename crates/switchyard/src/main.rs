@@ -17,6 +17,57 @@ use switchyard_core::{
     Phase, PlanSource, SuccessorChanges, write_export_exclusive,
 };
 
+/// SIGINT and SIGTERM in this process. The handler records the stop on the
+/// shared flag the bridge read polls, then the waiting command admits
+/// `cancel` and uses the existing confined stop proof.
+#[cfg(any(
+    test,
+    all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    )
+))]
+extern "C" fn on_operator_stop(_: libc::c_int) {
+    switchyard_core::request_operator_stop();
+    // The next Ctrl-C uses the default disposition and ends the process.
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+    }
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    )
+))]
+fn arm_operator_stop() {
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_operator_stop as *const () as usize;
+        action.sa_flags = 0;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+    }
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    )
+))]
+fn operator_stop_requested() -> bool {
+    switchyard_core::operator_stop_requested()
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli) {
@@ -226,7 +277,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     json!({"ok": true, "mission": host.snapshot(&snapshot.mission_id)?.to_json()});
                 if schedule_scenario {
                     created["composedScenario"] =
-                        json!(settle_approve_plan(&mut host, &snapshot.mission_id));
+                        json!(settle_confined(&mut host, &snapshot.mission_id, true));
                     created["mission"] = host.snapshot(&snapshot.mission_id)?.to_json();
                 }
                 Ok(created)
@@ -272,16 +323,30 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 )?;
                 let is_stop = matches!(body, CommandBody::Pause | CommandBody::Cancel);
                 let approve_plan = matches!(body, CommandBody::ApprovePlan { .. });
+                let repair = matches!(
+                    body,
+                    CommandBody::AuthorizeBoundedRepair { .. } | CommandBody::RequestChanges { .. }
+                );
                 // Reconcile once per invocation. `--persist-only` skips that
                 // and both dispatches, so it cannot create a worktree.
                 // Isolated workspace failures still allow admission and stop
                 // delivery. Never drain earlier work before admitting a stop.
+                // An unresolved Linux effect makes recover return
+                // `execution_blocked` before a stop can be admitted. That block
+                // is what pause and cancel clear, so only that error continues.
+                // A ready workspace is still reconciled. An uncertain one is
+                // still reported.
                 let workspace_error = if persist_only {
                     None
                 } else {
                     match host.recover_workspace(&mission) {
                         Ok(_) => None,
                         Err(error) if error.is_isolated_workspace_failure() => Some(error),
+                        Err(error)
+                            if is_stop && matches!(error, Error::ExecutionBlocked { .. }) =>
+                        {
+                            None
+                        }
                         Err(error) => return Err(error),
                     }
                 };
@@ -310,15 +375,43 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                             }
                         })?;
                     } else {
-                        host.dispatch_reconciled(&mission)?;
+                        // Arm before the bridge read. `process-hold` does not
+                        // return from dispatch, so the wait loop is not running
+                        // yet when Ctrl-C arrives.
+                        #[cfg(all(
+                            feature = "pi-contract",
+                            feature = "linux-execution",
+                            target_os = "linux"
+                        ))]
+                        if runtime == RuntimeSelection::ConfinedPi {
+                            arm_operator_stop();
+                        }
+                        if let Err(error) = host.dispatch_reconciled(&mission)
+                            && !switchyard_core::operator_stop_requested()
+                        {
+                            return Err(error);
+                        }
                     }
                 }
-                let scenario = if runtime == RuntimeSelection::ConfinedPi
-                    && approve_plan
+                let enters_wait = runtime == RuntimeSelection::ConfinedPi
+                    && (approve_plan || repair)
                     && !persist_only
-                    && workspace_error.is_none()
-                {
-                    Some(settle_approve_plan(&mut host, &mission))
+                    && workspace_error.is_none();
+                // A command that does not enter the foreground wait would
+                // otherwise print ok and exit 0 with no cancel admitted.
+                if ctrl_c_during_dispatch_admits_cancel(
+                    switchyard_core::operator_stop_requested(),
+                    enters_wait,
+                ) {
+                    let stopped = host.interrupt_operator(&mission)?;
+                    if stopped.phase != Phase::Cancelled {
+                        return Err(Error::guard(
+                            "operator stop was requested during dispatch and cancel was not confirmed",
+                        ));
+                    }
+                }
+                let scenario = if enters_wait {
+                    Some(settle_confined(&mut host, &mission, approve_plan))
                 } else {
                     None
                 };
@@ -556,8 +649,40 @@ fn open_confined(
             probe_request: None,
             fail_launch: false,
         },
-        "s3-acceptance",
+        confined_fixture()?.as_str(),
     )
+}
+
+/// Default is the composed `s3-acceptance` replay. Tests may set
+/// `SWITCHYARD_CONFINED_FIXTURE` to another allowlisted fixture so the
+/// foreground wait stays open. An unset variable stays on `s3-acceptance`.
+/// Any other value is refused.
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
+fn confined_fixture() -> switchyard_core::Result<String> {
+    match std::env::var("SWITCHYARD_CONFINED_FIXTURE") {
+        Err(_) => Ok("s3-acceptance".into()),
+        Ok(value)
+            if matches!(
+                value.as_str(),
+                "answer"
+                    | "file-write"
+                    | "process-fast"
+                    | "process-hold"
+                    | "process-cancel"
+                    | "tools"
+                    | "s3-acceptance"
+            ) =>
+        {
+            Ok(value)
+        }
+        Ok(value) => Err(switchyard_core::Error::guard(format!(
+            "SWITCHYARD_CONFINED_FIXTURE={value} is not a CLI fixture"
+        ))),
+    }
 }
 
 #[cfg(not(all(
@@ -757,32 +882,120 @@ fn bridge_root(db: &Path) -> switchyard_core::Result<PathBuf> {
     std::fs::canonicalize(&root).map_err(Error::storage)
 }
 
-/// Wait for the composed scenario after `approve_plan` has already been
-/// admitted. A missing effect or a poll failure stays `"pending"`; this never
-/// turns a committed command into `guard_failed`.
-fn settle_approve_plan(host: &mut Host, mission: &str) -> &'static str {
+/// Foreground wait after `approve_plan` or a repair has been admitted.
+///
+/// The old fixed 60s cap is the frozen bridge wall (20 minutes per
+/// generation) and the attempt wall. SIGINT/SIGTERM admits `cancel` as the
+/// operator and delivers it through [`Host::interrupt_operator`]. A missing
+/// effect or a poll failure stays `"pending"`; this never turns a committed
+/// command into `guard_failed`.
+///
+/// TODO(#217): the product fixture uses this same wait. There is no
+/// product-mode flag; the frozen budgets are the gate.
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
+fn has_pending_runtime_work(snapshot: &switchyard_core::MissionSnapshot) -> bool {
+    snapshot.commands.iter().any(|command| {
+        command.state == "pending" && command.kind != "pause" && command.kind != "cancel"
+    })
+}
+
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
+fn latest_repair_state(snapshot: &switchyard_core::MissionSnapshot) -> Option<&str> {
+    snapshot
+        .commands
+        .iter()
+        .rev()
+        .find(|command| {
+            command.kind == "authorize_bounded_repair" || command.kind == "request_changes"
+        })
+        .map(|command| command.state.as_str())
+}
+
+/// Ctrl-C during a dispatch that will not enter the foreground wait must
+/// admit cancel. The wait path admits it itself.
+fn ctrl_c_during_dispatch_admits_cancel(
+    stop_requested: bool,
+    enters_foreground_wait: bool,
+) -> bool {
+    stop_requested && !enters_foreground_wait
+}
+
+fn settle_confined(host: &mut Host, mission: &str, require_composed: bool) -> &'static str {
     #[cfg(all(
         feature = "pi-contract",
         feature = "linux-execution",
         target_os = "linux"
     ))]
     {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        // A stop already requested restored the default disposition. Arming
+        // again would catch the next Ctrl-C instead of ending the process.
+        if !operator_stop_requested() {
+            arm_operator_stop();
+        }
+        let budgets = host.frozen_budgets(mission).ok().flatten();
+        let s3_acceptance = host.s3_acceptance_replay(mission);
         loop {
+            if operator_stop_requested() {
+                return match host.interrupt_operator(mission) {
+                    Ok(snapshot) if snapshot.phase == Phase::Cancelled => "cancelled",
+                    _ => "pending",
+                };
+            }
             if host.poll_runtime(mission).is_err() {
-                return "pending";
+                let exhausted = host.snapshot(mission).is_ok_and(|snapshot| {
+                    snapshot.attention_reason.as_deref() == Some("runtime_budget_exhausted")
+                });
+                return if exhausted {
+                    "needs_attention"
+                } else {
+                    "pending"
+                };
+            }
+            if host.enforce_attempt_wall(mission).is_err() {
+                return "needs_attention";
             }
             let Ok(snapshot) = host.snapshot(mission) else {
                 return "pending";
             };
-            let value = snapshot.to_json();
-            if value["piHost"]["observation"]["runtimeIdle"] == true
-                && composed_scenario_settled(&value)
-            {
-                return "complete";
+            if snapshot.attention_reason.as_deref() == Some("runtime_budget_exhausted") {
+                return "needs_attention";
             }
-            if std::time::Instant::now() >= deadline {
-                return "pending";
+            let value = snapshot.to_json();
+            let idle = value["piHost"]["observation"]["runtimeIdle"] == true;
+            let pending = has_pending_runtime_work(&snapshot);
+            let failed_or_unanswered = value["piHost"]["observation"]["runFailure"].is_string();
+            if require_composed {
+                if let Some(outcome) = switchyard_core::plan_wait_outcome(
+                    s3_acceptance,
+                    idle,
+                    pending,
+                    composed_scenario_settled(&value),
+                    failed_or_unanswered,
+                ) {
+                    return outcome;
+                }
+            } else if let Some(outcome) = switchyard_core::repair_wait_outcome(
+                idle,
+                latest_repair_state(&snapshot),
+                failed_or_unanswered,
+            ) {
+                return outcome;
+            }
+            if let Some(wall) = budgets.as_ref().and_then(|budgets| budgets.bridge_wall)
+                && host
+                    .generation_over_bridge_wall(mission, wall)
+                    .unwrap_or(false)
+            {
+                let _ = host.exhaust_runtime_budget(mission);
+                return "needs_attention";
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
@@ -793,7 +1006,7 @@ fn settle_approve_plan(host: &mut Host, mission: &str) -> &'static str {
         target_os = "linux"
     )))]
     {
-        let _ = (host, mission);
+        let _ = (host, mission, require_composed);
         "pending"
     }
 }
@@ -934,4 +1147,95 @@ fn command_body(kind: &str, payload: &Value) -> switchyard_core::Result<CommandB
             activity: text("activity")?,
         },
     })
+}
+
+#[cfg(test)]
+mod operator_stop_tests {
+    use super::{arm_operator_stop, operator_stop_requested};
+    use clap::Parser;
+
+    #[test]
+    fn create_defaults_are_the_section_3_4_limits() {
+        let cli = crate::cli::Cli::try_parse_from([
+            "switchyard",
+            "mission",
+            "create",
+            "--db",
+            "mission.sqlite",
+            "--repo",
+            "repo",
+            "--issue",
+            "218",
+            "--objective",
+            "defaults",
+            "--acceptance",
+            "caps",
+        ])
+        .unwrap();
+        let crate::cli::Command::Mission { action } = cli.command;
+        let crate::cli::MissionCommand::Create {
+            max_repairs,
+            max_plan_revisions,
+            ..
+        } = action
+        else {
+            panic!("expected create");
+        };
+        assert_eq!(max_repairs, 1);
+        assert_eq!(max_plan_revisions, 2);
+        assert!(cli.runtime.is_none(), "FakeRuntime stays the default");
+    }
+
+    #[test]
+    fn ctrl_c_outside_the_foreground_wait_admits_cancel() {
+        assert!(super::ctrl_c_during_dispatch_admits_cancel(true, false));
+        assert!(!super::ctrl_c_during_dispatch_admits_cancel(true, true));
+        assert!(!super::ctrl_c_during_dispatch_admits_cancel(false, false));
+    }
+
+    #[cfg(all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn unknown_confined_fixture_is_refused() {
+        let previous = std::env::var("SWITCHYARD_CONFINED_FIXTURE").ok();
+        unsafe {
+            std::env::set_var("SWITCHYARD_CONFINED_FIXTURE", "not-a-fixture");
+        }
+        let error = super::confined_fixture().unwrap_err();
+        match previous {
+            Some(value) => unsafe { std::env::set_var("SWITCHYARD_CONFINED_FIXTURE", value) },
+            None => unsafe { std::env::remove_var("SWITCHYARD_CONFINED_FIXTURE") },
+        }
+        assert!(error.to_string().contains("not a CLI fixture"), "{error}");
+    }
+
+    #[test]
+    fn sigint_sets_the_operator_stop_flag() {
+        switchyard_core::clear_operator_stop();
+        arm_operator_stop();
+        unsafe {
+            libc::raise(libc::SIGINT);
+        }
+        assert!(operator_stop_requested());
+        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigaction(libc::SIGINT, std::ptr::null(), &mut current);
+        }
+        assert_eq!(
+            current.sa_sigaction,
+            libc::SIG_DFL,
+            "the first Ctrl-C restores the default disposition"
+        );
+        switchyard_core::clear_operator_stop();
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = libc::SIG_DFL;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+            libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+        }
+    }
 }

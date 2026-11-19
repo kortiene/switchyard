@@ -84,6 +84,8 @@ fn sustained_real_busy_continuation_cannot_starve_an_admitted_stop() {
         .unwrap();
         for _ in 0..8 {
             let error = h.dispatch_pending(&mission.mission_id).unwrap_err();
+            assert_eq!(error.category(), "busy", "{error}");
+            assert!(error.rejected_admission().is_none(), "{error}");
             assert!(error.to_string().contains("bridge: busy"), "{error}");
             assert!(command_receipt(&w.db, &continued.request_id).is_none());
         }

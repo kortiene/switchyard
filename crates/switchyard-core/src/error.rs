@@ -88,6 +88,21 @@ pub enum Error {
     #[error("plan revision limit reached ({count}/{max}); a higher cap needs a successor attempt")]
     PlanRevisionLimitReached { count: u32, max: u32 },
 
+    /// A frozen runtime budget is exhausted. The mission is in `needs_attention`
+    /// after the first observation. The freeze is not rewritten, and this is
+    /// not a verification edge. Way out: `cancel`, then `confirm_cancelled`,
+    /// then a successor with new limits.
+    #[error("runtime budget exhausted; cancel, then confirm_cancelled, then a successor")]
+    RuntimeBudgetExhausted,
+
+    /// A stored repair was dispatched after this bridge generation had already
+    /// settled. The command stays pending. It is not superseded.
+    /// Way out: run mission recover, or cancel then confirm_cancelled.
+    #[error(
+        "repair after settle was not sent; the command stays pending; run mission recover, or cancel then confirm_cancelled"
+    )]
+    RepairAfterSettle,
+
     /// `mission successor` on a source that is not published, rejected, or cancelled.
     #[error("successor requires a terminal source; cancel, then confirm_cancelled")]
     SuccessorSourceNotTerminal,
@@ -136,6 +151,13 @@ pub enum Error {
     #[error("operator write is closed in phase {phase}; approve_plan first")]
     OperatorWritePhaseClosed { phase: String },
 
+    /// The bridge cgroup is unproven, a writer is still blocked, or an effect
+    /// is unreconciled. The phase does not change and no `needs_attention` row
+    /// is written. The bridge stays stopped.
+    /// Way out: retry request_verification, or cancel.
+    #[error("settle was not proven; retry request_verification, or cancel")]
+    SettleNotProven,
+
     /// `mission export --out` already exists, including when the path is a symlink.
     /// Way out: pick a new path, or remove the file.
     #[error("export target already exists; pick a new path, or remove the file")]
@@ -147,6 +169,11 @@ pub enum Error {
     /// under the `pi-contract` feature; they do not settle command admission.
     #[error("admission rejected: {category}")]
     AdmissionRejected { category: String },
+
+    /// Pi protocol category `busy`. The conversation still has `pi.live.run`.
+    /// Retryable for a live generation. A dead generation becomes `unsettled_turn`.
+    #[error("bridge: busy")]
+    BridgeBusy,
 
     #[error("guard failed: {detail}")]
     GuardFailed { detail: String },
@@ -199,6 +226,9 @@ impl Error {
             Self::PlanSourceNotOperator => "plan_source_not_operator",
             Self::StalePlanDigest => "stale_plan_digest",
             Self::PlanRevisionLimitReached { .. } => "plan_revision_limit_reached",
+            Self::RuntimeBudgetExhausted => "runtime_budget_exhausted",
+            Self::RepairAfterSettle => "repair_after_settle",
+            Self::SettleNotProven => "settle_not_proven",
             Self::SuccessorSourceNotTerminal => "successor_source_not_terminal",
             Self::SuccessorExists { .. } => "successor_exists",
             Self::SourceChangedDuringCreate => "source_changed_during_create",
@@ -211,6 +241,7 @@ impl Error {
             Self::OperatorWritePhaseClosed { .. } => "operator_write_phase_closed",
             Self::ExportTargetExists => "export_target_exists",
             Self::AdmissionRejected { .. } => "admission_rejected",
+            Self::BridgeBusy => "busy",
             Self::GuardFailed { .. } => "guard_failed",
             Self::UnknownNotification { .. } => "unknown_notification",
             Self::NotFound => "not_found",

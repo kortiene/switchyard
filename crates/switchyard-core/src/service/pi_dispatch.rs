@@ -1,6 +1,9 @@
 //! B5 composes the outbox, confined session and Linux effect ledger. Public
 //! runtime observations never acquire mission/verification/quiescence authority.
 //! Rust cgroup proofs are recorded as `CommandOrigin::HostSupervisor`.
+use std::path::Path;
+use std::time::Duration;
+
 use super::*;
 use crate::execution::confined_pi::BRIDGE_WALL;
 use crate::execution::confined_runtime::ConfinedRuntime;
@@ -163,7 +166,7 @@ impl Host {
         Ok(true)
     }
 
-    fn confined_mut(&mut self) -> Result<&mut ConfinedRuntime> {
+    pub(super) fn confined_mut(&mut self) -> Result<&mut ConfinedRuntime> {
         match &mut self.runtime {
             RuntimeAdapter::Confined(runtime) => Ok(runtime),
             _ => Err(Error::guard("Host was not opened with confined Pi")),
@@ -184,6 +187,22 @@ impl Host {
             return Ok(());
         }
         let initialized = self.store.runtime_initialized(&binding.attempt_id)?;
+        // Frozen generation wall when the attempt has one. Direct session
+        // opens keep the 60s conformance watchdog. No product-mode flag.
+        // TODO(#217): the product fixture should keep this wall. Do not add a
+        // product-mode flag here; the freeze is the gate.
+        // Cancel and pause do not parse budgets. A pre-#218 freeze has no
+        // budget keys; absence is the old wall, not an error.
+        let wall = if matches!(mission.phase, Phase::Cancelling | Phase::Pausing) {
+            BRIDGE_WALL
+        } else {
+            self.frozen_budgets(mission_id)
+                .ok()
+                .flatten()
+                .and_then(|budgets| budgets.bridge_wall)
+                .unwrap_or(BRIDGE_WALL)
+        };
+        let model_request_cap = crate::budget::MAX_MODEL_REQUESTS;
         let digest = self.confined_mut()?.runtime_digest.clone();
         let runtime = self.confined_mut()?;
         let test_fixtures = runtime.allow_test_fixtures();
@@ -194,6 +213,10 @@ impl Host {
             initialized,
             Some(&digest),
             test_fixtures,
+            crate::execution::confined_pi::OpenLimits {
+                wall,
+                model_request_cap,
+            },
         );
         let session = match opened {
             Ok(session) => session,
@@ -204,16 +227,122 @@ impl Host {
                 return Err(error);
             }
         };
+        self.note_bridge_up(&binding.attempt_id)?;
+        let mut lifecycle = session.lifecycle();
+        self.stamp_attempt_clock(&mut lifecycle);
         self.store.save_pi_host(
             &binding.attempt_id,
             binding.generation,
-            &session.lifecycle(),
+            &lifecycle,
             &Value::Null,
         )?;
         self.store.mark_runtime_initialized(&binding.attempt_id)?;
         self.confined_mut()?
             .sessions
-            .insert(binding.session_id, session);
+            .insert(binding.session_id.clone(), session);
+        // The previous generation was just proved dead by `rekill_and_prove`
+        // inside `open`. An unsettled submission still in its sqlite belongs
+        // to that generation. This process has not submitted yet, so the
+        // count is not this generation's own turn and it is not a timeout.
+        self.note_unsettled_dead_generation(mission_id)?;
+        Ok(())
+    }
+
+    /// `recovered.proven` is the fresh cgroup proof of the generation that
+    /// just died. A submission still open there is `unsettled_turn`. The way
+    /// out is cancel, then `confirm_cancelled`, on that same stop path.
+    fn note_unsettled_dead_generation(&mut self, mission_id: &str) -> Result<()> {
+        let mission = self.store.load_mission(mission_id)?;
+        if mission.phase.is_terminal()
+            || matches!(
+                mission.phase,
+                Phase::Cancelling | Phase::Pausing | Phase::NeedsAttention
+            )
+        {
+            return Ok(());
+        }
+        let binding = self.binding(&mission);
+        let Some(dead_generation) = self.recovered_dead_generation(&binding)? else {
+            return Ok(());
+        };
+        let ids: Vec<String> = self
+            .store
+            .list_commands(mission_id)?
+            .into_iter()
+            .filter(|command| command.kind.is_runtime_bound())
+            .map(|command| command.request_id)
+            .take(32)
+            .collect();
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        // One signal: `pi.live.run` on the pi.live document. Inspect failure
+        // is fail-closed in this process; a later ensure would not re-check.
+        let snapshot = match self.confined_inspect(&binding, &id_refs) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                let mission = self.store.load_mission(mission_id)?;
+                self.admit_unsettled_turn(&mission, "unreadable")?;
+                return Ok(());
+            }
+        };
+        let Some(turn) = snapshot["liveRun"].as_str().filter(|turn| !turn.is_empty()) else {
+            return Ok(());
+        };
+        // `pi.live.run` survives SIGKILL because endRun never ran. Flag here,
+        // before replay. The way out is cancel, then `confirm_cancelled`.
+        // Open already compared `network` via `runtime_config_mismatch`.
+        // A stuck tool is unsettled on every mission, including one whose
+        // other tool already kept a receipt. An endpoint mission otherwise
+        // skips this only when the dead generation itself kept a receipt.
+        // A receipt from an older generation does not hide a mid-stream death.
+        let views = self.store.linux_views(mission_id)?;
+        let stuck_tool = views.iter().any(|view| {
+            !view.superseded
+                && !view.receipt_retained
+                && matches!(view.state.as_str(), "entered" | "running" | "uncertain")
+        });
+        let has_endpoint = self.confined_mut()?.config.model_endpoint.is_some();
+        let dead_generation_receipt = views.iter().any(|view| {
+            !view.superseded && view.receipt_retained && view.started_generation == dead_generation
+        });
+        if !stuck_tool && (!has_endpoint || dead_generation_receipt) {
+            return Ok(());
+        }
+        let mission = self.store.load_mission(mission_id)?;
+        self.admit_unsettled_turn(&mission, turn)?;
+        Ok(())
+    }
+
+    /// The open proved a previous generation's cgroup empty. That generation
+    /// is dead. `pi.live.run` from it is not cleared here. The number is the
+    /// generation that died, used to tell its own tool receipt from an older one.
+    fn recovered_dead_generation(&mut self, binding: &RuntimeBinding) -> Result<Option<u64>> {
+        let recovered = self
+            .confined_mut()?
+            .sessions
+            .get(&binding.session_id)
+            .map(|session| session.lifecycle()["recovered"].clone())
+            .unwrap_or(Value::Null);
+        if recovered["proven"] != true {
+            return Ok(None);
+        }
+        Ok(recovered["generation"].as_u64())
+    }
+
+    fn admit_unsettled_turn(
+        &mut self,
+        mission: &crate::domain::MissionRecord,
+        turn: &str,
+    ) -> Result<()> {
+        if mission.phase == Phase::NeedsAttention || mission.phase.is_terminal() {
+            return Ok(());
+        }
+        self.admit_host_fact(
+            mission,
+            CommandBody::DetectUncertainty {
+                reason: AttentionReason::UnsettledTurn,
+                content_digest: Some(turn.to_string()),
+            },
+        )?;
         Ok(())
     }
 
@@ -253,7 +382,9 @@ impl Host {
                 ConfinedEffectRoute::Rejected => PiEffectOutcome::Rejected,
             }
         });
-        let lifecycle = session.lifecycle();
+        let wall_hit = session.wall_exhausted();
+        let mut lifecycle = session.lifecycle();
+        self.stamp_attempt_clock(&mut lifecycle);
         self.confined_mut()?
             .sessions
             .insert(binding.session_id.clone(), session);
@@ -274,7 +405,17 @@ impl Host {
             &lifecycle,
             &observation,
         )?;
-        if let Err(error) = &result
+        if wall_hit {
+            let mission = self.store.load_mission(&binding.mission_id)?;
+            if !mission.phase.is_terminal()
+                && !matches!(
+                    mission.phase,
+                    Phase::NeedsAttention | Phase::Pausing | Phase::Cancelling
+                )
+            {
+                self.exhaust_runtime_budget(&binding.mission_id)?;
+            }
+        } else if let Err(error) = &result
             && lifecycle["phase"] == "stopped"
         {
             self.terminate_linux_writers(&binding.mission_id)?;
@@ -308,6 +449,41 @@ impl Host {
         receipt_from_row(request, method, &params, &rows[0])
     }
 
+    /// Bridge wall, attempt wall, and bridge CPU from the freeze. The frozen
+    /// 40 is not counted here; the splice allowance enforces that cap.
+    fn enforce_observed(&mut self, binding: &RuntimeBinding) -> Result<()> {
+        let (bridge, verifier) = self.attempt_clock.components();
+        let (generation, cpu, wall_hit) = self.confined_generation_usage(&binding.session_id);
+        let usage = crate::budget::BudgetUsage {
+            bridge_generation: if wall_hit {
+                Duration::from_secs(crate::BRIDGE_WALL_SECONDS.saturating_add(1))
+            } else {
+                generation
+            },
+            bridge_outside_verify: bridge,
+            verifier,
+            bridge_cpu: cpu,
+        };
+        self.enforce_usage(&binding.mission_id, &usage)
+    }
+
+    fn confined_generation_usage(&mut self, session_id: &str) -> (Duration, Duration, bool) {
+        let Ok(runtime) = self.confined_mut() else {
+            return (Duration::ZERO, Duration::ZERO, false);
+        };
+        let Some(session) = runtime.sessions.get(session_id) else {
+            return (Duration::ZERO, Duration::ZERO, false);
+        };
+        let cpu = session
+            .lifecycle()
+            .get("cgroup")
+            .and_then(|cgroup| cgroup.get("path"))
+            .and_then(Value::as_str)
+            .and_then(|path| crate::linux_execution::cgroup::cpu_usage(Path::new(path)))
+            .unwrap_or(Duration::ZERO);
+        (session.generation_elapsed(), cpu, session.wall_exhausted())
+    }
+
     fn confined_send(
         &mut self,
         request: &RuntimeRequest,
@@ -332,6 +508,53 @@ impl Host {
             self.uncertainty(mission, AttentionReason::ExecutionUncertain)?;
         }
         result
+    }
+
+    fn session_is_stopped(&mut self, binding: &RuntimeBinding) -> Result<bool> {
+        Ok(self
+            .confined_mut()?
+            .sessions
+            .get(&binding.session_id)
+            .is_some_and(|session| session.is_stopped()))
+    }
+
+    /// Fresh `reprove` for a bridge settle already stopped, then store it.
+    /// The session goes back in the map before any error returns. The attempt
+    /// clock is stamped on the stored lifecycle.
+    fn reprove_and_store(&mut self, binding: &RuntimeBinding) -> Result<Value> {
+        let session_id = binding.session_id.clone();
+        let mut session = self
+            .confined_mut()?
+            .sessions
+            .remove(&session_id)
+            .ok_or_else(|| Error::guard("confined session is unavailable"))?;
+        self.note_bridge_down();
+        let proof = match session.reprove() {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                self.confined_mut()?.sessions.insert(session_id, session);
+                return Err(error);
+            }
+        };
+        let mut lifecycle = session.lifecycle();
+        self.stamp_attempt_clock(&mut lifecycle);
+        let observation = match self.store.pi_host_view(&binding.attempt_id) {
+            Ok(view) => view
+                .map(|view| view["observation"].clone())
+                .unwrap_or(Value::Null),
+            Err(error) => {
+                self.confined_mut()?.sessions.insert(session_id, session);
+                return Err(error);
+            }
+        };
+        self.confined_mut()?.sessions.insert(session_id, session);
+        self.store.save_pi_host(
+            &binding.attempt_id,
+            binding.generation,
+            &lifecycle,
+            &observation,
+        )?;
+        Ok(proof)
     }
 
     fn check_confined_history(&mut self, mission: &MissionRecord) -> Result<()> {
@@ -395,7 +618,36 @@ impl Host {
             }
             return Ok(count);
         }
+        if matches!(mission.phase, Phase::Pausing | Phase::Cancelling) {
+            // The stop is already in progress. Leave runtime work pending.
+            // `mission recover` re-proves. This is not `settle_not_proven`.
+            return Ok(count);
+        }
         self.ensure_confined_session(mission_id)?;
+        if self.store.load_mission(mission_id)?.phase == Phase::NeedsAttention {
+            return Ok(count);
+        }
+        if self.session_is_stopped(&binding)? {
+            // Do not send on a stopped bridge. A fresh proof that is still
+            // unproven leaves the work pending. A proven stop keeps a repair
+            // pending and supersedes other runtime work.
+            let proof = self.reprove_and_store(&binding)?;
+            if proof.get("proven").and_then(Value::as_bool) != Some(true) {
+                return Err(Error::SettleNotProven);
+            }
+            for command in self.store.list_commands(mission_id)? {
+                if command.state == CommandState::Pending && is_runtime_work(command.kind) {
+                    if is_post_settle_repair(command.kind) {
+                        return Err(Error::RepairAfterSettle);
+                    }
+                    self.store.supersede_pending(
+                        &command.id,
+                        "admission closed before runtime accepted this command",
+                    )?;
+                }
+            }
+            return Ok(count);
+        }
         self.confined_history(&mission)?;
         for command in self
             .store
@@ -431,6 +683,16 @@ impl Host {
                     match self.confined_send(&request, &payload) {
                         Ok(receipt) => receipt,
                         Err(error) => {
+                            // A dead generation left `pi.live.run` set. Do not
+                            // clear it and do not retry the submit. Cancel is
+                            // the way out.
+                            if self.recovered_dead_generation(&request.binding)?.is_some()
+                                && error.category() == "busy"
+                            {
+                                let current = self.store.load_mission(mission_id)?;
+                                self.admit_unsettled_turn(&current, &command.request_id)?;
+                                return Ok(count);
+                            }
                             let Some(category) = error.rejected_admission().map(str::to_owned)
                             else {
                                 return Err(error);
@@ -515,62 +777,157 @@ impl Host {
         }
         self.stop_confined_linux_writers(mission_id)?;
         self.reconcile_execution(mission_id)?;
-        self.confined_history(&mission)?;
+        // One branch for a bridge that is already stopped. `reprove` always
+        // runs `rekill_and_prove`. Ack the host marker only when that fresh
+        // proof is `proven`. An unproven result leaves the stop pending.
+        if self.session_is_stopped(&binding)? {
+            let proof = self.reprove_and_store(&binding)?;
+            self.reconcile_execution(mission_id)?;
+            if proof.get("proven").and_then(Value::as_bool) == Some(true)
+                && !self.store.ops_blocked(mission_id)?
+            {
+                let mut count = 0;
+                for command in &stops {
+                    self.store.acknowledge(
+                        &command.id,
+                        &host_settle_acknowledgement(&command.request_id),
+                    )?;
+                    count += 1;
+                }
+                for command in self.store.list_commands(mission_id)? {
+                    if command.state == CommandState::Pending && is_runtime_work(command.kind) {
+                        self.store.supersede_pending(
+                            &command.id,
+                            "admission closed before runtime accepted this command",
+                        )?;
+                    }
+                }
+                let current = self.store.load_mission(mission_id)?;
+                let body = match current.phase {
+                    Phase::Pausing => Some(CommandBody::ConfirmStopped),
+                    Phase::Cancelling => Some(CommandBody::ConfirmCancelled),
+                    _ => None,
+                };
+                if let Some(body) = body {
+                    let admitted = self.admit_host_fact(&current, body)?;
+                    self.store
+                        .record_supervisor_receipt(&admitted.command_id, &proof.to_string())?;
+                }
+                self.release_finished_sessions()?;
+                return Ok(count);
+            }
+            return Ok(0);
+        }
+        // Ctrl-C abandoned the in-flight tool call. Another bridge request
+        // returns immediately while that flag is set, so it cannot deliver
+        // abort. `stop` terminates and runs `rekill_and_prove`.
+        // `confirm_cancelled` is still admitted only when that proof is
+        // `proven`.
+        let interrupted = crate::operator_stop_requested();
         let mut count = 0;
-        for command in stops {
-            let request = RuntimeRequest {
-                binding: binding.clone(),
-                request_id: command.request_id,
-                payload_hash: command.payload_hash,
-                method: "abort",
-            };
-            let payload =
-                serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
-            let receipt = match self.confined_receipt(&request, &payload)? {
-                Some(r) => r,
-                None => self.confined_send(&request, &payload)?,
-            };
-            self.store
-                .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
-            count += 1;
+        if !interrupted {
+            self.confined_history(&mission)?;
+            for command in &stops {
+                let request = RuntimeRequest {
+                    binding: binding.clone(),
+                    request_id: command.request_id.clone(),
+                    payload_hash: command.payload_hash.clone(),
+                    method: "abort",
+                };
+                let payload =
+                    serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+                let receipt = match self.confined_receipt(&request, &payload)? {
+                    Some(r) => r,
+                    None => self.confined_send(&request, &payload)?,
+                };
+                self.store
+                    .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
+                count += 1;
+            }
         }
         // An abort may follow work whose Pi acknowledgement was lost. Preserve
         // that original receipt before closing the transport; only absent work
         // may be superseded. Never resubmit it merely to discover its receipt.
-        for command in self.store.list_commands(mission_id)? {
-            if command.state != CommandState::Pending || !is_runtime_work(command.kind) {
-                continue;
-            }
-            let request = RuntimeRequest {
-                binding: binding.clone(),
-                request_id: command.request_id.clone(),
-                payload_hash: command.payload_hash.clone(),
-                method: RuntimeAdapter::runtime_method(command.kind),
-            };
-            let payload =
-                serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
-            if let Some(receipt) = self.confined_receipt(&request, &payload)? {
-                self.store
-                    .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
-            } else {
-                self.store.supersede_pending(
-                    &command.id,
-                    "admission closed before runtime accepted this command",
-                )?;
+        if !interrupted {
+            for command in self.store.list_commands(mission_id)? {
+                if command.state != CommandState::Pending || !is_runtime_work(command.kind) {
+                    continue;
+                }
+                let request = RuntimeRequest {
+                    binding: binding.clone(),
+                    request_id: command.request_id.clone(),
+                    payload_hash: command.payload_hash.clone(),
+                    method: RuntimeAdapter::runtime_method(command.kind),
+                };
+                let payload =
+                    serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+                if let Some(receipt) = self.confined_receipt(&request, &payload)? {
+                    self.store
+                        .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
+                } else {
+                    self.store.supersede_pending(
+                        &command.id,
+                        "admission closed before runtime accepted this command",
+                    )?;
+                }
             }
         }
+        if interrupted {
+            // The flag would make this inspect return immediately. The handler
+            // already restored the default Ctrl-C disposition. A receipt is
+            // acknowledged. Absence of a receipt is the only case superseded.
+            // An inspect error is not proof, so that command stays pending.
+            crate::clear_operator_stop();
+            for command in self.store.list_commands(mission_id)? {
+                if command.state != CommandState::Pending || !is_runtime_work(command.kind) {
+                    continue;
+                }
+                let request = RuntimeRequest {
+                    binding: binding.clone(),
+                    request_id: command.request_id.clone(),
+                    payload_hash: command.payload_hash.clone(),
+                    method: RuntimeAdapter::runtime_method(command.kind),
+                };
+                let payload =
+                    serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
+                match self.confined_receipt(&request, &payload) {
+                    Ok(Some(receipt)) => {
+                        self.store
+                            .acknowledge(&command.id, &receipt_json(&receipt, "pi-confined-v1"))?;
+                    }
+                    Ok(None) => {
+                        self.store
+                            .supersede_pending(&command.id, super::OPERATOR_STOP_NO_RECEIPT)?;
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        // Fold bridge-alive time before `stop`. Proof stays `stop` then
+        // `rekill_and_prove`, then reconcile and the ops_blocked check.
+        self.note_bridge_down();
         let proof = self
             .confined_mut()?
             .sessions
             .get_mut(&binding.session_id)
             .ok_or(Error::NotFound)?
             .stop()?;
-        let lifecycle = self
+        // TODO(d1b-splice-timeout-connection-cap): after #229 is on main, if
+        // `modelEgress` says the proxy was exhausted, call
+        // `exhaust_runtime_budget`. Do not admit `request_verification`.
+        // The allowance is the frozen cap minus recorded connections across
+        // prior generations, saturating at 0 (`try_from`, 0 on overflow).
+        // No frozen budget, or a prior generation with egress and no recorded
+        // count, is allowance 0. Persist that generation's `modelEgress`
+        // before the next open. Endpoint missions already freeze `modelHarness`
+        // and open with retries off. `restartLimit` is not set. No second counter.
+        let mut lifecycle = self
             .confined_mut()?
             .sessions
             .get(&binding.session_id)
             .ok_or(Error::NotFound)?
             .lifecycle();
+        self.stamp_attempt_clock(&mut lifecycle);
         self.store.save_pi_host(
             &binding.attempt_id,
             binding.generation,
@@ -579,6 +936,15 @@ impl Host {
         )?;
         self.reconcile_execution(mission_id)?;
         if proof["proven"] == true && !self.store.ops_blocked(mission_id)? {
+            if interrupted {
+                for command in &stops {
+                    self.store.acknowledge(
+                        &command.id,
+                        &host_settle_acknowledgement(&command.request_id),
+                    )?;
+                    count += 1;
+                }
+            }
             let current = self.store.load_mission(mission_id)?;
             let body = match current.phase {
                 Phase::Pausing => Some(CommandBody::ConfirmStopped),
@@ -586,13 +952,58 @@ impl Host {
                 _ => None,
             };
             if let Some(body) = body {
-                self.admit_host_fact(&current, body)?;
+                let admitted = self.admit_host_fact(&current, body)?;
+                self.store
+                    .record_supervisor_receipt(&admitted.command_id, &proof.to_string())?;
             }
         }
         // Cancel is terminal, so this drops the proven-stopped bridge. Pause is
         // not, and its stopped session stays in this generation.
         self.release_finished_sessions()?;
         Ok(count)
+    }
+
+    /// Stop the live bridge and leave the proven session in memory.
+    ///
+    /// The confinement probe uses this to dispatch a repair after settle
+    /// without admitting cancel. `cfg(test)` is not set when that probe
+    /// builds this crate.
+    #[cfg(feature = "test-fixtures")]
+    pub fn settle_unproven_bridge_for_test(&mut self, mission_id: &str) -> Result<Value> {
+        self.ensure_confined_session(mission_id)?;
+        let mission = self.store.load_mission(mission_id)?;
+        let session_id = mission.attempt.session_id;
+        let session = self
+            .confined_mut()?
+            .sessions
+            .get_mut(&session_id)
+            .ok_or(Error::NotFound)?;
+        session.settle_unproven_for_test()?;
+        Ok(session.lifecycle()["termination"].clone())
+    }
+
+    #[cfg(feature = "test-fixtures")]
+    pub fn miss_bridge_leaf_for_test(&mut self, mission_id: &str) -> Result<()> {
+        let mission = self.store.load_mission(mission_id)?;
+        let session_id = mission.attempt.session_id;
+        self.confined_mut()?
+            .sessions
+            .get_mut(&session_id)
+            .ok_or(Error::NotFound)?
+            .miss_leaf_for_test();
+        Ok(())
+    }
+
+    #[cfg(feature = "test-fixtures")]
+    pub fn stop_live_bridge_for_test(&mut self, mission_id: &str) -> Result<Value> {
+        self.ensure_confined_session(mission_id)?;
+        let mission = self.store.load_mission(mission_id)?;
+        let session_id = mission.attempt.session_id;
+        self.confined_mut()?
+            .sessions
+            .get_mut(&session_id)
+            .ok_or(Error::NotFound)?
+            .stop()
     }
 
     pub(super) fn poll_confined(&mut self, mission_id: &str) -> Result<Vec<NotifyOutcome>> {
@@ -603,6 +1014,14 @@ impl Host {
             return Ok(Vec::new());
         }
         self.ensure_confined_session(mission_id)?;
+        if !matches!(mission.phase, Phase::Cancelling | Phase::Pausing)
+            && let Err(error) = self.enforce_observed(&binding)
+        {
+            if error.category() == "runtime_budget_exhausted" {
+                return Ok(vec![unchanged(&self.store.load_mission(mission_id)?)]);
+            }
+            return Err(error);
+        }
         if self.confined_mut()?.is_released(&binding.session_id)
             || self
                 .confined_mut()?
@@ -633,6 +1052,17 @@ impl Host {
         self.reconcile_execution(mission_id)?;
         Ok(vec![unchanged(&self.store.load_mission(mission_id)?)])
     }
+}
+
+/// Stop acknowledgement used when the bridge is already stopped. Not a Pi
+/// receipt. Written only after a fresh proof with `proven: true`.
+fn host_settle_acknowledgement(request_id: &str) -> String {
+    json!({
+        "adapter": "host-settle-proof",
+        "delivered": false,
+        "requestId": request_id,
+    })
+    .to_string()
 }
 
 enum ConfinedEffectRoute {

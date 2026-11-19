@@ -616,14 +616,14 @@ mod os {
         fn settle_unsupervised_writer(&mut self, mission_id: &str) -> Result<()> {
             let views = self.store.linux_views(mission_id)?;
             for view in views {
-                // Uncertain rows were already quarantined. Killing them again
-                // during stop delivery would treat a previous owner's orphan as
-                // a fresh cancellation. Only entered or running rows are settled.
+                // A quarantined writer stays uncertain unless `rekill_and_prove`
+                // of its own leaf returns proven. The mission bridge leaf is a
+                // different cgroup and is not this proof.
                 if view.method != "exec_start"
                     || view.receipt_retained
                     || view.superseded
                     || !view.entered
-                    || !matches!(view.state.as_str(), "entered" | "running")
+                    || !matches!(view.state.as_str(), "entered" | "running" | "uncertain")
                 {
                     continue;
                 }
@@ -644,8 +644,11 @@ mod os {
                 {
                     continue;
                 }
-                let proof = self.prove_effect(&effect)?;
+                let proof = self.rekill_writer_leaf(&effect)?;
                 if proof["proven"] != true {
+                    if view.state == "uncertain" {
+                        continue;
+                    }
                     // Missing or mismatched identity never reaches cgroup.kill.
                     // Quarantine instead of failing Pause/Cancel permanently.
                     self.store.quarantine_linux(&view.operation_id)?;
@@ -1255,6 +1258,59 @@ mod os {
             effect: &crate::persistence::linux_execution::LinuxEffectRecord,
         ) -> Result<serde_json::Value> {
             self.inspect_effect(effect, true)
+        }
+
+        /// Fresh proof of this writer's own leaf. The same `rekill_and_prove`
+        /// the mission bridge uses. A missing or mismatched leaf is unproven;
+        /// the bridge stop is not evidence that this cgroup is empty.
+        ///
+        /// Only the confined stop path calls this, and that path is
+        /// `pi-contract`.
+        #[cfg(feature = "pi-contract")]
+        fn rekill_writer_leaf(
+            &self,
+            effect: &crate::persistence::linux_execution::LinuxEffectRecord,
+        ) -> Result<serde_json::Value> {
+            let unproven = |reason: &str| {
+                Ok(crate::persistence::linux_execution::quiescence_document(
+                    false, reason, None, "", None,
+                ))
+            };
+            let Some(path) = effect.cgroup_path.as_deref() else {
+                return unproven("missing");
+            };
+            let (Some(dev), Some(ino), Some(boot)) = (
+                effect.cgroup_dev,
+                effect.cgroup_ino,
+                effect.boot_id.as_deref(),
+            ) else {
+                return unproven("missing");
+            };
+            let Ok(dev) = u64::try_from(dev) else {
+                return unproven("missing");
+            };
+            let Ok(ino) = u64::try_from(ino) else {
+                return unproven("missing");
+            };
+            let root = self
+                .linux
+                .as_ref()
+                .ok_or_else(|| Error::guard("linux backend is not enabled"))?
+                .config
+                .cgroup_root
+                .clone();
+            let leaf = PathBuf::from(path);
+            if !cgroup::within_root(&root, &leaf) {
+                return unproven("mismatched");
+            }
+            let identity = CgroupIdentity {
+                path: leaf,
+                dev,
+                ino,
+                boot_id: boot.to_string(),
+            };
+            let proved = cgroup::rekill_and_prove(&identity, Duration::from_secs(5))?;
+            Ok(quiescence_value(&proved, &identity))
         }
 
         fn inspect_effect(

@@ -10,9 +10,11 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -38,9 +40,10 @@ pub(crate) fn egress_network(config: &ConfinedPiConfig) -> Value {
     }
 }
 
-/// Conformance wall for one bridge generation. Forwarded effects use half of
-/// this budget so a tool can settle before the watchdog fires. Production
-/// budgets belong to S4.
+/// Conformance wall for a direct session open, and the ceiling for one
+/// forwarded effect (half of this, matching the 60s Linux ledger). Host
+/// sessions that have a freeze use the frozen generation wall instead.
+/// The effect deadline and policy `wallSeconds` stay on this constant.
 pub(crate) const BRIDGE_WALL: Duration = Duration::from_secs(60);
 
 /// Trusted installation paths. `root` must already be a private (0700) directory
@@ -77,6 +80,53 @@ pub struct ConfinedPiSession {
     /// Host-side splice to the pinned model address. Absent when egress is denied.
     proxy: Option<egress::ModelProxy>,
     stopped: bool,
+    opened_at: Instant,
+    wall_exhausted: Arc<AtomicBool>,
+    /// Frozen per-mission model-request cap. Held for `ModelProxy::start`.
+    model_request_cap: u64,
+}
+
+/// Wall and the frozen per-mission model-request cap for one bridge open.
+pub(crate) struct OpenLimits {
+    pub wall: Duration,
+    /// Owner: "40 requests is the frozen per-mission cap".
+    pub model_request_cap: u64,
+}
+
+/// Construction site for the host splice. Does not count connections.
+///
+/// `d1b-splice-timeout-connection-cap` merges first and changes
+/// `ModelProxy::start` to `start(endpoint, allowance: u32)`. That PR passes
+/// `egress::UNWIRED_CONNECTION_ALLOWANCE` (40) and labels the record
+/// `"scope":"generation"`. The proxy counts a connection once the upstream
+/// dial succeeds, and sets `exhausted()` past the allowance.
+///
+/// TODO(d1b-splice-timeout-connection-cap): when #229 is on main, this
+/// interim call is `ModelProxy::start(endpoint, egress::UNWIRED_CONNECTION_ALLOWANCE)`.
+/// Scope is a constructor input; pass `"mission"`. Wiring that replaces the
+/// constant, due before GA:
+/// allowance = frozen cap minus every recorded connection across prior
+/// generations, saturating at 0. `u64` to `u32` via `try_from`, and 0 on
+/// overflow. Persist each generation's final `modelEgress` durably before the
+/// next generation opens. `current.json` and the `pi_host_sessions` row are
+/// overwritten, so they are not that record. Fail closed at allowance 0, not
+/// 40, when a prior generation had egress but no recorded count, and when the
+/// mission has no frozen budget. Old ledgers keep cancel and get no new model
+/// egress. After wiring, `UNWIRED_CONNECTION_ALLOWANCE` has zero uses. Freeze
+/// `maxRetries` 0. Endpoint missions already open the harness with
+/// `retry: { enabled: false, maxRetries: 0 }` and `stream.maxRetries: 0`, and
+/// freeze `modelHarness`. pi-durable 1.4.0 treats `restartLimit` below 1 as
+/// the default 5 (`agent.ts` `restartLimit`), so it is not set. Retries off
+/// is what stops a cut-off model request from being sent again.
+/// No-endpoint missions keep every default. The product wait does not treat
+/// an unanswered or failed run as complete. Do not edit `egress.rs`.
+fn start_model_proxy(
+    endpoint: &egress::ModelEndpoint,
+    model_request_cap: u64,
+) -> Result<egress::ModelProxy> {
+    // Held for the post-merge call `ModelProxy::start(endpoint, allowance)`.
+    let _frozen_per_mission_cap = model_request_cap;
+    egress::ModelProxy::start(endpoint)
 }
 
 impl ConfinedPiSession {
@@ -89,7 +139,18 @@ impl ConfinedPiSession {
     /// thread that created the child. The supervisor stays parked until
     /// [`Self::stop`], so `open` may run on a thread that ends first.
     pub fn open(config: &ConfinedPiConfig, binding: RuntimeBinding, fixture: &str) -> Result<Self> {
-        Self::open_required(config, binding, fixture, false, None, cfg!(test))
+        Self::open_required(
+            config,
+            binding,
+            fixture,
+            false,
+            None,
+            cfg!(test),
+            OpenLimits {
+                wall: BRIDGE_WALL,
+                model_request_cap: crate::budget::MAX_MODEL_REQUESTS,
+            },
+        )
     }
 
     pub(crate) fn open_required(
@@ -101,6 +162,7 @@ impl ConfinedPiSession {
         // session open that has no attempt ledger yet.
         expected_digest: Option<&str>,
         test_fixtures: bool,
+        limits: OpenLimits,
     ) -> Result<Self> {
         validate_fixture(&binding, fixture, test_fixtures || cfg!(test))?;
         let root = Directory::root(&config.root)?;
@@ -184,7 +246,7 @@ impl ConfinedPiSession {
         retention::recover(&control, &cgroup_root, &binding, previous.as_ref())?;
         state.inspect_state(require_existing)?;
         let proxy = match &config.model_endpoint {
-            Some(endpoint) => Some(egress::ModelProxy::start(endpoint)?),
+            Some(endpoint) => Some(start_model_proxy(endpoint, limits.model_request_cap)?),
             None => None,
         };
         let argv = policy::argv(
@@ -238,11 +300,17 @@ impl ConfinedPiSession {
         let launch_supervisor = pending.supervisor.take().expect("launch supervisor");
         let (done, wait) = channel();
         let watched = leaf.clone();
+        let wall_exhausted = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&wall_exhausted);
+        let wall = limits.wall;
         let watchdog = std::thread::spawn(move || {
             if matches!(
-                wait.recv_timeout(BRIDGE_WALL),
+                wait.recv_timeout(wall),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout)
             ) {
+                flag.store(true, Ordering::SeqCst);
+                // Same cgroup proof the stop path uses. Not a second teardown:
+                // the generation wall already killed here, and `stop` proves again.
                 let _ = cgroup::rekill_and_prove(&watched, Duration::from_secs(5));
             }
         });
@@ -255,6 +323,9 @@ impl ConfinedPiSession {
             launch_supervisor: Some(launch_supervisor),
             proxy,
             stopped: false,
+            opened_at: Instant::now(),
+            wall_exhausted,
+            model_request_cap: limits.model_request_cap,
         };
         session.bridge.hello()?;
         let opened = session.bridge.call(
@@ -274,6 +345,25 @@ impl ConfinedPiSession {
 
     pub fn binding(&self) -> &RuntimeBinding {
         self.bridge.binding()
+    }
+
+    /// Time since this generation was released. The frozen bridge wall is
+    /// measured from here, not from `mission verify`.
+    pub fn generation_elapsed(&self) -> Duration {
+        self.opened_at.elapsed()
+    }
+
+    pub fn wall_exhausted(&self) -> bool {
+        self.wall_exhausted.load(Ordering::SeqCst)
+    }
+
+    /// Frozen per-mission model-request cap for this generation.
+    ///
+    /// Owner: "40 requests is the frozen per-mission cap".
+    /// [`start_model_proxy`] holds it until `d1b-splice-timeout-connection-cap`
+    /// passes the remaining mission allowance into `ModelProxy::start`.
+    pub fn model_request_cap(&self) -> u64 {
+        self.model_request_cap
     }
 
     /// A protocol abort receipt is not a bridge termination proof. `stop` owns
@@ -321,15 +411,72 @@ impl ConfinedPiSession {
         result
     }
 
-    /// Reap the direct child and prove the recorded leaf empty. A second call
-    /// returns the recorded termination evidence and does not kill or rewrite it.
+    /// The session has already run `stop`. This is the in-process fact.
+    /// `termination.proven` is not: a later cancel re-proves when that flag
+    /// is false.
+    pub fn is_stopped(&self) -> bool {
+        self.stopped
+    }
+
+    /// Record an unproven stop without `rekill_and_prove`. The confinement
+    /// probe uses this so a later cancel in the same process has to re-prove.
+    /// `cfg(test)` is not set when that probe builds this crate.
+    #[cfg(feature = "test-fixtures")]
+    pub fn settle_unproven_for_test(&mut self) -> Result<()> {
+        if let Some((done, watchdog)) = self.watchdog.take() {
+            let _ = done.send(());
+            let _ = watchdog.join();
+        }
+        self.bridge.terminate();
+        self.proxy.take();
+        self.record["phase"] = json!("uncertain");
+        self.record["termination"] = json!({
+            "proven": false,
+            "reason": "nonempty",
+            "events": "",
+            "generation": self.binding().generation,
+            "cgroup": self.record["cgroup"]
+        });
+        self.control.write("current.json", &self.record)?;
+        self.stopped = true;
+        if let Some(mut supervisor) = self.launch_supervisor.take() {
+            let _ = supervisor.shutdown();
+        }
+        Ok(())
+    }
+
+    /// The next `stop` re-proof cannot see this leaf, so it stays unproven.
+    #[cfg(feature = "test-fixtures")]
+    pub fn miss_leaf_for_test(&mut self) {
+        self.leaf.path = std::path::PathBuf::from("/tmp/switchyard-missing-bridge-leaf");
+        self.leaf.dev = 0;
+        self.leaf.ino = 0;
+        self.leaf.boot_id = "missing".into();
+    }
+
+    /// Run the cgroup proof again after [`Self::stop`]. The bridge stays stopped.
+    /// A later settle uses this instead of the recorded `proven` flag.
+    /// Returns the new evidence even when it is still unproven.
+    pub fn reprove(&mut self) -> Result<Value> {
+        if !self.stopped {
+            return self.stop();
+        }
+        let proof = cgroup::rekill_and_prove(&self.leaf, Duration::from_secs(5))?;
+        self.record["phase"] = json!(if proof.proven { "stopped" } else { "uncertain" });
+        let evidence = json!({"proven":proof.proven,"reason":proof.reason,"events":proof.events,
+            "generation":self.binding().generation,"cgroup":self.record["cgroup"]});
+        self.record["termination"] = evidence.clone();
+        self.control.write("current.json", &self.record)?;
+        Ok(evidence)
+    }
+
+    /// Reap the direct child and prove the recorded leaf empty.
+    ///
+    /// A later call runs [`Self::reprove`]. The fresh result decides; a stored
+    /// `proven` flag is not reused.
     pub fn stop(&mut self) -> Result<Value> {
         if self.stopped {
-            let evidence = self.record["termination"].clone();
-            if evidence["proven"] != true {
-                return Err(Error::guard("confined bridge termination remains unproven"));
-            }
-            return Ok(evidence);
+            return self.reprove();
         }
         if let Some((done, watchdog)) = self.watchdog.take() {
             let _ = done.send(());
@@ -338,6 +485,15 @@ impl ConfinedPiSession {
                 .map_err(|_| Error::guard("bridge watchdog failed"))?;
         }
         self.bridge.terminate();
+        // TODO(d1b-splice-timeout-connection-cap): #229 writes `modelEgress`
+        // after the accept thread joins and before this drop. Keep that copy.
+        // Delete this TODO in the merge. Pass scope `"mission"`. Counts are
+        // allowance, accepted, refused, scope, and reason
+        // `runtime_budget_exhausted` when `exhausted()`. No new Error variant.
+        // Exhaustion admits `detect_uncertainty` and does not admit
+        // `request_verification`. The `modelEgress` object has to be stored
+        // somewhere `current.json` and `pi_host_sessions` cannot overwrite
+        // before the next generation opens.
         // Drop the proxy only after the bridge is dead so an in-flight splice
         // is not the thing that decides termination.
         self.proxy.take();

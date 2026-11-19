@@ -11,6 +11,13 @@ import { ADAPTER, canonical, CAPABILITIES, DEADLINE_MS, hash, MAX_FRAME, MAX_PEN
 const Session = defineDoc({ kind: 'switchyard.bridge.session', scope: 'session', version: 1,
   initial: () => ({ missionId: '', attemptId: '', sessionId: '', generation: 0, source: SOURCE, adapter: ADAPTER, stopCommand: '' }),
   checkpointWhen: () => true });
+// Read-only view of pi-durable's live document (LiveDoc: kind pi.live,
+// version 3, conversation scope, history latest, fork initial). `run` is set
+// by startRun and cleared only by endRun. checkpointWhen stays false so a
+// snapshot never writes or deletes `run`.
+const PiLive = defineDoc({ kind: 'pi.live', scope: 'conversation', version: 3, history: 'latest', fork: 'initial',
+  initial: () => ({}),
+  checkpointWhen: () => false });
 const Command = defineDocFamily({ kind: 'switchyard.bridge.command', scope: 'session', version: 1, family: true,
   initial: (_seed: null) => ({ hash: '', method: '', receipt: '', settled: false as boolean }), checkpointWhen: () => true });
 
@@ -172,6 +179,7 @@ export class Runtime {
       // `closed` waits for task invocations to join. An uncooperative tool can
       // prevent that forever, so surface the fatal report as soon as it occurs.
       onReport: report => { if (report.kind === 'storage_failed') fail(report.error); },
+      ...harnessSettings(process.env.SWITCHYARD_BRIDGE_EGRESS === 'model-socket'),
     }, BACKGROUND_CONTEXT);
     this.harness = harness;
     void harness.closed.then(end => {
@@ -183,6 +191,14 @@ export class Runtime {
       if (state.sessionId && (state.sessionId !== this.binding.sessionId || state.missionId !== this.binding.missionId
         || state.attemptId !== this.binding.attemptId || state.source !== SOURCE || state.adapter !== ADAPTER)) throw new ProtocolError('binding_mismatch');
       if (state.sessionId && this.binding.generation <= state.generation) throw new ProtocolError('stale_generation');
+      // Host generation only. Do not clear `pi.live.run`. startRun writes it
+      // (generation.ts:1149 onto live.ts:194). Only endRun deletes live.run
+      // and live.generation (live.ts:290, :312, :314). A killed bridge never
+      // calls endRun. With a model endpoint the host admits unsettled_turn
+      // before replay, so a mid-stream kill is not re-sent (generation.ts:265,
+      // :494-534). With no endpoint, only a tool that is still open and has
+      // no receipt is unsettled_turn. A present run with no taskId is still
+      // reported as `pi.live.run`.
       Object.assign(state, this.binding);
     }, BACKGROUND_CONTEXT);
     this.root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: 'faux', modelId: 'faux-1' },
@@ -293,10 +309,36 @@ export class Runtime {
     }
     const inspection = await this.harness!.inspect(BACKGROUND_CONTEXT);
     const state = await this.harness!.snapshot(Session, BACKGROUND_CONTEXT);
+    const live = await this.harness!.snapshot(PiLive, this.root!.id, BACKGROUND_CONTEXT);
     return { source: SOURCE, scheduling: inspection.scheduling, commands, stopping: !!state?.stopCommand,
       runtimeIdle: inspection.tasks.length === 0, liveTaskCount: inspection.tasks.length,
-      unsettledSubmissionCount: inspection.submissions.length };
+      unsettledSubmissionCount: inspection.submissions.length,
+      liveRun: liveRunName((live as { run?: unknown } | undefined)?.run),
+      runFailure: runFailureName((live as { runFailure?: unknown } | undefined)?.runFailure) };
   }
+}
+
+/** Endpoint missions disable pi-durable retries. `restartLimit` stays at the default. No endpoint keeps every default. */
+export function harnessSettings(modelEndpoint: boolean): { settings: {
+  retry: { enabled: false, maxRetries: 0 },
+  stream: { maxRetries: 0 },
+} } | Record<string, never> {
+  if (!modelEndpoint) return {};
+  return { settings: { retry: { enabled: false, maxRetries: 0 }, stream: { maxRetries: 0 } } };
+}
+
+function runFailureName(failure: unknown): string | null {
+  if (failure == null || typeof failure !== 'object') return null;
+  const reason = (failure as { reason?: unknown }).reason;
+  if (typeof reason === 'string' && reason.length > 0) return reason;
+  return 'unanswered';
+}
+
+function liveRunName(run: unknown): string | null {
+  if (run == null || typeof run !== 'object') return null;
+  const taskId = (run as { taskId?: unknown }).taskId;
+  if (typeof taskId === 'string' && taskId.length > 0) return taskId;
+  return 'pi.live.run';
 }
 
 function observedStorageError(error: unknown, seen = new Set<unknown>()): boolean {

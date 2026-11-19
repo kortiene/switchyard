@@ -121,6 +121,9 @@ pub struct CreatedMission {
     pub expected_source: Option<ExpectedSource>,
     /// `operator` is stored on the policy in this insert. `runtime` omits the key.
     pub plan_source: PlanSource,
+    /// Endpoint missions freeze `modelHarness` with retries off.
+    /// `restartLimit` is not set. No-endpoint missions omit the object.
+    pub model_endpoint: bool,
 }
 
 /// Source row a successor must still match when its insert transaction starts.
@@ -588,13 +591,22 @@ impl Store {
         }
         let now = now_ms();
         let mut policy_value = json!({
-            "maxRepairs": created.max_repairs,
+            "attemptWallSeconds": crate::budget::ATTEMPT_WALL_SECONDS,
+            "bridgeCpuSeconds": crate::budget::BRIDGE_CPU_SECONDS,
+            "bridgeWallSeconds": crate::budget::BRIDGE_WALL_SECONDS,
+            "credentials": "none",
+            "maxModelRequests": crate::budget::MAX_MODEL_REQUESTS,
             "maxPlanRevisions": created.max_plan_revisions,
-            "planningTools": "read-only",
-            "credentials": "none"
+            "maxRepairs": created.max_repairs,
+            "maxRequestBytes": crate::budget::MAX_REQUEST_BYTES,
+            "maxResponseBytes": crate::budget::MAX_RESPONSE_BYTES,
+            "planningTools": "read-only"
         });
         if created.plan_source == PlanSource::Operator {
             policy_value["planSource"] = json!("operator");
+        }
+        if created.model_endpoint {
+            policy_value["modelHarness"] = crate::freeze::model_harness_off();
         }
         let policy_json = canonicalize(&policy_value)?;
         let policy_hash = payload_hash(&policy_value)?;
@@ -1178,6 +1190,46 @@ impl Store {
                 command_id: Some(&command.id),
             },
         )?;
+        tx.commit().map_err(Error::storage)?;
+        Ok(())
+    }
+
+    /// Attach a supervisor proof to a command that is already reconciled.
+    /// Cancel's cgroup proof is this receipt. A second call leaves the first
+    /// proof in place.
+    #[cfg(all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    ))]
+    pub(crate) fn record_supervisor_receipt(
+        &mut self,
+        command_id: &str,
+        receipt_json: &str,
+    ) -> Result<()> {
+        let tx = self.immediate()?;
+        let existing: Option<Option<String>> = tx
+            .query_row(
+                "SELECT runtime_receipt_json FROM commands WHERE id = ?1 AND state = 'reconciled'",
+                params![command_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Error::storage)?;
+        let Some(existing) = existing else {
+            return Err(Error::storage(format!(
+                "supervisor receipt was not recorded for {command_id}"
+            )));
+        };
+        if existing.is_some() {
+            tx.commit().map_err(Error::storage)?;
+            return Ok(());
+        }
+        tx.execute(
+            "UPDATE commands SET runtime_receipt_json = ?1, updated_at = ?2 WHERE id = ?3",
+            params![receipt_json, now_ms(), command_id],
+        )
+        .map_err(Error::storage)?;
         tx.commit().map_err(Error::storage)?;
         Ok(())
     }
@@ -2702,6 +2754,26 @@ mod tests {
         assert!(store.list_commands("m-1").unwrap().is_empty());
     }
 
+    #[test]
+    fn create_with_a_model_endpoint_stores_model_harness() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mission.sqlite");
+        let mut store = Store::open_writer(&db).unwrap();
+        store.migrate().unwrap();
+        let mut created = sample_mission();
+        created.model_endpoint = true;
+        store.create_mission(created).unwrap();
+        let policy: String = store
+            .conn
+            .query_row("SELECT policy_json FROM attempts", [], |row| row.get(0))
+            .unwrap();
+        let policy: serde_json::Value = serde_json::from_str(&policy).unwrap();
+        assert_eq!(policy["modelHarness"]["retryEnabled"], false);
+        assert_eq!(policy["modelHarness"]["retryMaxRetries"], 0);
+        assert_eq!(policy["modelHarness"]["streamMaxRetries"], 0);
+        assert!(policy["modelHarness"].get("restartLimit").is_none());
+    }
+
     fn sample_mission() -> CreatedMission {
         CreatedMission {
             runtime_config: r#"{"adapter":"fake","credentials":"none"}"#.into(),
@@ -2734,6 +2806,7 @@ mod tests {
             decision_rationale: None,
             expected_source: None,
             plan_source: PlanSource::Runtime,
+            model_endpoint: false,
         }
     }
 }

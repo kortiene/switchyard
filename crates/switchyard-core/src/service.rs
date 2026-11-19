@@ -19,6 +19,7 @@ use crate::policy::{self, Facts};
 use crate::transitions::target_spec;
 use crate::verification::{NewVerification, VerificationCollector};
 
+mod budget;
 mod execution;
 mod export;
 mod linux_execution;
@@ -220,6 +221,9 @@ pub struct Host {
     ledger_path: PathBuf,
     // Process-local, Host-observed proof; never reconstructed from operator claims.
     execution_evidence: execution::ExecutionEvidence,
+    /// Bridge-alive time versus host `mission verify` time. The attempt wall
+    /// reads this through [`crate::budget::attempt_wall_charge`].
+    attempt_clock: crate::budget::AttemptClock,
     /// Test seam: after a successor insert, bump the source revision so the
     /// post-write check returns `source_changed_during_create`.
     #[cfg(test)]
@@ -666,6 +670,7 @@ impl Host {
             lock,
             ledger_path: db_path.to_path_buf(),
             execution_evidence: Default::default(),
+            attempt_clock: crate::budget::AttemptClock::default(),
             #[cfg(test)]
             successor_source_tamper: false,
             #[cfg(test)]
@@ -801,10 +806,25 @@ impl Host {
             decision_rationale: None,
             expected_source: None,
             plan_source,
+            model_endpoint: self.host_has_model_endpoint(),
         };
         let id = created.id.clone();
         self.store.create_mission(created)?;
         self.snapshot(&id)
+    }
+
+    fn host_has_model_endpoint(&self) -> bool {
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        {
+            if let RuntimeAdapter::Confined(runtime) = &self.runtime {
+                return runtime.config.model_endpoint.is_some();
+            }
+        }
+        false
     }
 
     pub fn create_successor(
@@ -868,6 +888,7 @@ impl Host {
                 phase: source.phase.as_str().to_string(),
             }),
             plan_source,
+            model_endpoint: self.host_has_model_endpoint(),
         };
         // Test seam only: change the source after the expected revision is
         // captured and before the insert transaction reads it.
@@ -1549,13 +1570,15 @@ impl Host {
             }
             _ => return Ok(()),
         };
+        self.note_bridge_down();
         if let Err(error) = session.stop() {
             if let RuntimeAdapter::Confined(runtime) = &mut self.runtime {
                 runtime.sessions.insert(binding.session_id.clone(), session);
             }
             return Err(error);
         }
-        let lifecycle = session.lifecycle();
+        let mut lifecycle = session.lifecycle();
+        self.stamp_attempt_clock(&mut lifecycle);
         let observation = self
             .store
             .pi_host_view(&binding.attempt_id)?
@@ -2034,6 +2057,15 @@ impl Host {
     /// Order: drift, plan-digest mismatch, phase, then [`Self::ready_workspace`].
     /// Drift uses the same refusal as admission.
     pub fn verify_mission(&mut self, mission_id: &str) -> Result<(MissionSnapshot, String)> {
+        let result = self.verify_mission_inner(mission_id);
+        // Always closes the interval, including on an early refusal that never
+        // opened one. Confirmed: the 45-minute attempt wall counts only
+        // bridge-alive time and excludes mission verify.
+        self.attempt_clock.end_verify();
+        result
+    }
+
+    fn verify_mission_inner(&mut self, mission_id: &str) -> Result<(MissionSnapshot, String)> {
         let mission = self.store.load_mission(mission_id)?;
         // `needs_attention` stays on this path so a second verify returns the
         // same category and does not write another uncertainty row.
@@ -2058,6 +2090,7 @@ impl Host {
                 command: "verify".into(),
             });
         }
+        self.attempt_clock.begin_verify();
         let tree = PathBuf::from(self.ready_workspace(mission_id)?.path);
         let mission = self.store.load_mission(mission_id)?;
         let verifier =
@@ -3194,6 +3227,76 @@ fn suppress_pending(phase: Phase, kind: CommandKind, admitted_runtime_work: bool
 
 fn is_runtime_work(kind: CommandKind) -> bool {
     kind.is_runtime_bound() && !matches!(kind, CommandKind::Pause | CommandKind::Cancel)
+}
+
+/// A repair dispatched after the bridge generation has settled.
+///
+/// These commands stay pending. Confined dispatch returns
+/// [`Error::RepairAfterSettle`] instead of superseding them.
+#[cfg_attr(
+    not(all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn is_post_settle_repair(kind: CommandKind) -> bool {
+    matches!(
+        kind,
+        CommandKind::AuthorizeBoundedRepair | CommandKind::RequestChanges
+    )
+}
+
+/// Used only after an inspect found no Pi receipt. It does not claim that
+/// Pi had not accepted the command when the inspect itself failed.
+pub const OPERATOR_STOP_NO_RECEIPT: &str = "no Pi receipt was present before the operator stop";
+
+/// Plan foreground wait. A failed or unanswered run ends immediately.
+/// `None` means keep waiting. This does not wait out the bridge wall.
+pub fn plan_wait_outcome(
+    s3_acceptance: bool,
+    idle: bool,
+    pending_work: bool,
+    composed: bool,
+    failed_or_unanswered: bool,
+) -> Option<&'static str> {
+    if failed_or_unanswered {
+        return Some("failed");
+    }
+    if foreground_run_complete(s3_acceptance, idle, pending_work, composed, false) {
+        return Some("complete");
+    }
+    None
+}
+
+/// Product mode completes when the runtime is idle and nothing is pending.
+/// The composed `s3-acceptance` replay still waits for its three effects.
+pub fn foreground_run_complete(
+    s3_acceptance: bool,
+    idle: bool,
+    pending_work: bool,
+    composed: bool,
+    failed_or_unanswered: bool,
+) -> bool {
+    idle && !pending_work && !failed_or_unanswered && (!s3_acceptance || composed)
+}
+
+/// Foreground repair wait. `None` means keep waiting.
+///
+/// A pending repair is not treated as settled. A superseded repair is not
+/// reported as complete.
+pub fn repair_wait_outcome(
+    idle: bool,
+    repair_state: Option<&str>,
+    failed_or_unanswered: bool,
+) -> Option<&'static str> {
+    match repair_state {
+        Some("pending") => None,
+        Some("superseded") => Some("repair_after_settle"),
+        Some("acknowledged" | "reconciled") if idle && !failed_or_unanswered => Some("complete"),
+        _ => None,
+    }
 }
 
 /// The latest phase-entry command identifies the current planning/repair

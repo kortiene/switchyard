@@ -148,6 +148,21 @@ pub(crate) fn remove_empty_leaf(expected: &CgroupIdentity) -> Result<Quiescence>
     Ok(proof)
 }
 
+/// `cpu.stat` `usage_usec`, if the leaf is still there. Missing stats are
+/// not a budget event. This read does not resolve a name or open a credential.
+#[cfg(all(feature = "pi-contract", target_os = "linux"))]
+pub(crate) fn cpu_usage(path: &Path) -> Option<Duration> {
+    let text = fs::read_to_string(path.join("cpu.stat")).ok()?;
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        if parts.next() == Some("usage_usec") {
+            let usec: u64 = parts.next()?.parse().ok()?;
+            return Some(Duration::from_micros(usec));
+        }
+    }
+    None
+}
+
 /// Kill the recorded leaf even when it already reads empty, then require
 /// `populated 0`. A missing or replaced leaf is returned without a write.
 pub(crate) fn rekill_and_prove(expected: &CgroupIdentity, timeout: Duration) -> Result<Quiescence> {

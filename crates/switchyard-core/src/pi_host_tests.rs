@@ -904,7 +904,9 @@ fn busy_continue_stays_pending_and_a_later_dispatch_retries_it() {
     )
     .unwrap();
     let error = h.dispatch_pending(&mission.mission_id).unwrap_err();
-    assert_eq!(error.category(), "guard_failed");
+    // Protocol category `busy`, not a guard failure. It is not a durable
+    // refusal, so the continue stays pending and the next dispatch retries it.
+    assert_eq!(error.category(), "busy", "{error}");
     assert!(error.rejected_admission().is_none(), "{error}");
     assert!(error.to_string().contains("bridge: busy"), "{error}");
     let blocked = h.snapshot(&mission.mission_id).unwrap();

@@ -82,6 +82,12 @@ fn confined_pi_recovery_rejects_foreign_leaf_and_invalid_identity() {
     assert!(!production_session_fixture("busy-once"));
     assert!(validate(&binding, "busy-once").is_ok());
     assert!(validate_fixture(&binding, "busy-once", false).is_err());
+    assert!(!production_session_fixture("slow-stream"));
+    assert!(validate(&binding, "slow-stream").is_ok());
+    assert!(validate_fixture(&binding, "slow-stream", false).is_err());
+    assert!(!production_session_fixture("write-then-hold"));
+    assert!(validate(&binding, "write-then-hold").is_ok());
+    assert!(validate_fixture(&binding, "write-then-hold", false).is_err());
     assert!(validate(&binding, "http://169.254.169.254/latest").is_err());
     assert!(validate(&binding, "http://127.0.0.1:9/v1").is_err());
 }
@@ -327,6 +333,10 @@ fn confined_pi_mismatched_runtime_digest_is_refused_before_recovery() {
         false,
         Some("sha256:not-the-installed-runtime"),
         false,
+        super::OpenLimits {
+            wall: super::BRIDGE_WALL,
+            model_request_cap: crate::budget::MAX_MODEL_REQUESTS,
+        },
     ) {
         Ok(_) => panic!("a mismatched runtime digest must be refused"),
         Err(error) => error.to_string(),
@@ -485,6 +495,7 @@ fn confined_pi_changed_runtime_root_on_existing_ledger_is_refused() {
             decision_rationale: None,
             expected_source: None,
             plan_source: crate::freeze::PlanSource::Runtime,
+            model_endpoint: false,
         })
         .unwrap();
     store.require_runtime_config(&saved).unwrap();

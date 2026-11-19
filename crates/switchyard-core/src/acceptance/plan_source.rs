@@ -47,6 +47,7 @@ fn default_freeze_records_plan_source_runtime_and_still_enqueues() {
     let document: serde_json::Value =
         serde_json::from_str(frozen.frozen_inputs_json.as_deref().unwrap()).unwrap();
     assert!(document.get("planSource").is_none());
+    assert!(document["executionLimits"].get("modelHarness").is_none());
     assert!(
         document["sandboxPolicy"]["policy"]
             .get("planSource")
@@ -82,8 +83,11 @@ fn ledger_frozen_at_1a12f25_reopens_without_drift_and_admits_pause() {
     )
     .unwrap();
     conn.execute(
-        "UPDATE attempts SET base_sha = 'abc' WHERE mission_id = ?1 AND active = 1",
-        [&created.mission_id],
+        "UPDATE attempts SET base_sha = 'abc', max_repairs = 2, max_plan_revisions = 3, policy_json = ?1 WHERE mission_id = ?2 AND active = 1",
+        rusqlite::params![
+            r#"{"credentials":"none","maxPlanRevisions":3,"maxRepairs":2,"planningTools":"read-only"}"#,
+            created.mission_id,
+        ],
     )
     .unwrap();
     drop(conn);

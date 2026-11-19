@@ -1850,6 +1850,9 @@ fn simulated_no_row_error_is_transient(error: &Error) -> bool {
         | Error::PlanSourceNotOperator
         | Error::StalePlanDigest
         | Error::PlanRevisionLimitReached { .. }
+        | Error::RuntimeBudgetExhausted
+        | Error::RepairAfterSettle
+        | Error::SettleNotProven
         | Error::SuccessorSourceNotTerminal
         | Error::SuccessorExists { .. }
         | Error::SourceChangedDuringCreate
@@ -1862,6 +1865,7 @@ fn simulated_no_row_error_is_transient(error: &Error) -> bool {
         | Error::OperatorWritePhaseClosed { .. }
         | Error::ExportTargetExists
         | Error::AdmissionRejected { .. }
+        | Error::BridgeBusy
         | Error::GuardFailed { .. }
         | Error::UnknownNotification { .. }
         | Error::NotFound
@@ -1947,6 +1951,7 @@ fn execute_fake_operation_pins_is_transient_for_every_error_it_can_return() {
         Error::OperatorWritePhaseClosed {
             phase: "draft".into(),
         },
+        Error::SettleNotProven,
         Error::ExportTargetExists,
         Error::AdmissionRejected {
             category: "busy".into(),

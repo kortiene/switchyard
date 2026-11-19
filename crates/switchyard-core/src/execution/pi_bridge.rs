@@ -314,7 +314,7 @@ impl PiBridge {
 
     /// Calls never replay after a transport failure. The owner reconciles the
     /// original durable command/operation identity before deciding what to send.
-    /// The response timeout restarts after each effect receipt; trusted callback
+    /// The response deadline is reset after each effect receipt; trusted callback
     /// execution time is excluded. The peer retains its separate effect timeout.
     pub fn call(
         &mut self,
@@ -350,7 +350,9 @@ impl PiBridge {
             Ok(value) => Ok(value),
             // idle/stopping and busy are complete responses. Killing the peer
             // would hide the refusal or make a busy Continue impossible to retry.
-            Err(error) if keeps_peer(&error) => Err(error),
+            // Ctrl-C must leave the bridge up so the stop path can prove the
+            // cgroup. `failure` would kill the peer first.
+            Err(error) if keeps_peer(&error) || crate::operator_stop_requested() => Err(error),
             Err(error) => Err(self.failure(error)),
         }
     }
@@ -374,12 +376,24 @@ impl PiBridge {
         let mut limit = std::time::Instant::now() + self.deadline;
         let mut effects = 0;
         loop {
+            if crate::operator_stop_requested() {
+                return Err(Error::guard("operator stop"));
+            }
             let remaining = limit.saturating_duration_since(std::time::Instant::now());
-            let frame = self
-                .reader
-                .recv_timeout(remaining)
-                .map_err(|_| Error::guard("bridge interrupted or deadline exceeded"))?
-                .map_err(Error::guard)?;
+            if remaining.is_zero() {
+                return Err(Error::guard("bridge interrupted or deadline exceeded"));
+            }
+            // Slice the wait so a Ctrl-C during a held tool is visible without
+            // waiting out the bridge wall. A frame that is already queued
+            // still returns immediately.
+            let slice = remaining.min(std::time::Duration::from_millis(50));
+            let frame = match self.reader.recv_timeout(slice) {
+                Ok(frame) => frame.map_err(Error::guard)?,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Error::guard("bridge interrupted or deadline exceeded"));
+                }
+            };
             if frame["protocol"] != pins().bridge.protocol
                 || frame["binding"] != binding_json(&self.binding)
             {
@@ -521,8 +535,6 @@ impl Drop for PiBridge {
     }
 }
 
-const BRIDGE_BUSY_MESSAGE: &str = "bridge: busy";
-
 /// Only these categories are durable refusals. `busy` is retried. Every other
 /// category, including one that claims `admission: rejected`, stays pending.
 fn classify_bridge_error(category: &str) -> Error {
@@ -530,7 +542,7 @@ fn classify_bridge_error(category: &str) -> Error {
         "idle" | "stopping" => Error::AdmissionRejected {
             category: category.to_string(),
         },
-        "busy" => Error::guard(BRIDGE_BUSY_MESSAGE),
+        "busy" => Error::BridgeBusy,
         other => Error::guard(format!("bridge: {other}")),
     }
 }
@@ -539,7 +551,7 @@ fn keeps_peer(error: &Error) -> bool {
     if error.rejected_admission().is_some() {
         return true;
     }
-    matches!(error, Error::GuardFailed { detail } if detail == BRIDGE_BUSY_MESSAGE)
+    matches!(error, Error::BridgeBusy)
 }
 
 fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {

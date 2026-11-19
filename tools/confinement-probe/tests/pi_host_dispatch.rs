@@ -13,8 +13,16 @@ use switchyard_core::{
     LinuxExecutionConfig, Phase, payload_hash,
 };
 
+#[path = "pi_host_dispatch/budget_cancel.rs"]
+mod budget_cancel;
 #[path = "pi_host_dispatch/composed.rs"]
 mod composed;
+#[path = "pi_host_dispatch/held_tool.rs"]
+mod held_tool;
+#[path = "pi_host_dispatch/repair_after_settle.rs"]
+mod repair_after_settle;
+#[path = "pi_host_dispatch/slow_stream.rs"]
+mod slow_stream;
 #[path = "pi_host_dispatch/stop_admission.rs"]
 mod stop_admission;
 
@@ -37,7 +45,7 @@ fn bridge(root: &Path) -> ConfinedPiConfig {
 }
 fn open_confined(db: &Path, config: ConfinedPiConfig, fixture: &str) -> Host {
     let linux = linux(None);
-    if fixture == "busy-once" {
+    if fixture == "busy-once" || fixture == "slow-stream" || fixture == "write-then-hold" {
         Host::open_confined_test_fixture(db, config, linux, fixture).unwrap()
     } else {
         Host::open_confined_pi(db, config, linux, fixture).unwrap()

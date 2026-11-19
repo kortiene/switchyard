@@ -10,8 +10,9 @@ use crate::error::{Error, Result};
 
 pub(crate) const ATTEMPT_FREEZE_SCHEMA: &str = "switchyard.attempt-freeze.v1";
 
-/// Canonical freeze `1a12f25` wrote for the unit-test mission. `planSource` is
-/// absent, which is `runtime`. A newer binary must rebuild these bytes.
+/// Canonical freeze `1a12f25` wrote for the unit-test mission. Budget keys are
+/// absent, and `planSource` is absent, which is `runtime`. A newer binary must
+/// rebuild these bytes when the attempt policy has neither.
 #[cfg(test)]
 pub(crate) const FREEZE_AT_1A12F25: &str = concat!(
     r#"{"acceptanceCriteria":"Inputs stay put","baseSha":"abc","executionLimits":{"maxPlanRevisions":3,"maxRepairs":2},"#,
@@ -21,6 +22,25 @@ pub(crate) const FREEZE_AT_1A12F25: &str = concat!(
     r#""verifier":{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}}"#
 );
 pub(crate) const PLAN_DIGEST_SCHEMA: &str = "switchyard.plan-digest.v1";
+
+/// Endpoint missions freeze this object. No-endpoint missions omit it, so
+/// `FREEZE_AT_1A12F25` and every other no-endpoint freeze stay byte-identical.
+pub(crate) fn model_harness_off() -> Value {
+    json!({
+        "retryEnabled": false,
+        "retryMaxRetries": 0,
+        "streamMaxRetries": 0,
+    })
+}
+
+const BUDGET_KEYS: [&str; 6] = [
+    "attemptWallSeconds",
+    "bridgeCpuSeconds",
+    "bridgeWallSeconds",
+    "maxModelRequests",
+    "maxRequestBytes",
+    "maxResponseBytes",
+];
 
 /// Who writes the plan. Frozen on the attempt at `start_planning`.
 ///
@@ -88,10 +108,7 @@ pub(crate) fn frozen_document(mission: &MissionRecord) -> Result<Value> {
     let mut document = json!({
         "acceptanceCriteria": mission.acceptance_criteria,
         "baseSha": mission.attempt.base_sha,
-        "executionLimits": {
-            "maxPlanRevisions": mission.attempt.max_plan_revisions,
-            "maxRepairs": mission.attempt.max_repairs,
-        },
+        "executionLimits": execution_limits(mission)?,
         "issueSnapshot": {
             "number": mission.source_issue.number,
             "provider": mission.source_issue.provider,
@@ -201,6 +218,10 @@ fn sandbox_policy(environment_json: &str, policy_json: &str) -> Result<Value> {
         object.remove("maxRepairs");
         object.remove("maxPlanRevisions");
         object.remove("planSource");
+        object.remove("modelHarness");
+        for key in BUDGET_KEYS {
+            object.remove(key);
+        }
     }
     Ok(json!({
         "environment": environment,
@@ -215,6 +236,33 @@ pub(crate) fn parse_object(raw: &str, label: &str) -> Result<Value> {
         return Err(Error::guard(format!("{label} must be a JSON object")));
     }
     Ok(value)
+}
+
+/// `maxPlanRevisions` and `maxRepairs` are always present. Each §3.4 budget
+/// key is copied from the attempt policy only when that key is already
+/// there. Absence is the pre-#218 freeze, not an error.
+fn execution_limits(mission: &MissionRecord) -> Result<Value> {
+    let policy = parse_object(&mission.attempt.policy_json, "sandbox policy")?;
+    let mut limits = serde_json::Map::new();
+    limits.insert(
+        "maxPlanRevisions".into(),
+        json!(mission.attempt.max_plan_revisions),
+    );
+    limits.insert("maxRepairs".into(), json!(mission.attempt.max_repairs));
+    if let Some(object) = policy.as_object() {
+        for key in BUDGET_KEYS {
+            if let Some(value) = object
+                .get(key)
+                .filter(|value| value.is_u64() || value.is_i64())
+            {
+                limits.insert(key.into(), value.clone());
+            }
+        }
+        if let Some(value) = object.get("modelHarness").filter(|value| value.is_object()) {
+            limits.insert("modelHarness".into(), value.clone());
+        }
+    }
+    Ok(Value::Object(limits))
 }
 
 fn require_text(value: &str, label: &str) -> Result<()> {
@@ -289,6 +337,7 @@ mod tests {
     #[test]
     fn frozen_document_is_sorted_rfc8785_and_drops_the_session_marker() {
         let canonical = frozen_canonical(&mission()).unwrap();
+        assert_eq!(canonical, FREEZE_AT_1A12F25);
         assert!(!canonical.contains("sessionInitialized"), "{canonical}");
         assert!(
             canonical.starts_with(r#"{"acceptanceCriteria":"Inputs stay put","baseSha":"abc","#)
@@ -355,6 +404,28 @@ mod tests {
             frozen_canonical(&mission()).unwrap(),
             super::FREEZE_AT_1A12F25
         );
+    }
+
+    #[test]
+    fn endpoint_freeze_carries_model_harness_and_a_plain_freeze_does_not() {
+        let plain = frozen_document(&mission()).unwrap();
+        assert!(plain["executionLimits"].get("modelHarness").is_none());
+        assert_eq!(frozen_canonical(&mission()).unwrap(), FREEZE_AT_1A12F25);
+        let mut record = mission();
+        let mut policy = parse_object(&record.attempt.policy_json, "sandbox policy").unwrap();
+        policy["modelHarness"] = model_harness_off();
+        record.attempt.policy_json = policy.to_string();
+        let document = frozen_document(&record).unwrap();
+        assert_eq!(
+            document["executionLimits"]["modelHarness"],
+            model_harness_off()
+        );
+        assert!(
+            document["sandboxPolicy"]["policy"]
+                .get("modelHarness")
+                .is_none()
+        );
+        assert_ne!(frozen_canonical(&record).unwrap(), FREEZE_AT_1A12F25);
     }
 
     #[test]
