@@ -162,7 +162,12 @@ fn sigint_during_implementation_reaches_cancelled_with_cgroup_proof() {
     let receipt = confirm_receipt(&world.db(), &world.mission);
     assert_eq!(receipt["proven"], true, "{receipt}");
     assert!(receipt["cgroup"].is_object(), "{receipt}");
-    assert!(receipt["events"].is_array(), "{receipt}");
+    assert!(
+        receipt["events"]
+            .as_str()
+            .is_some_and(|events| events.contains("populated 0")),
+        "{receipt}"
+    );
 }
 
 #[test]

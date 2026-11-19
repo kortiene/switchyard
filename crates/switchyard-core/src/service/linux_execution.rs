@@ -616,14 +616,15 @@ mod os {
         fn settle_unsupervised_writer(&mut self, mission_id: &str) -> Result<()> {
             let views = self.store.linux_views(mission_id)?;
             for view in views {
-                // Uncertain rows were already quarantined. Killing them again
-                // during stop delivery would treat a previous owner's orphan as
-                // a fresh cancellation. Only entered or running rows are settled.
+                // A previous owner's entered writer is quarantined when that
+                // host dies. Once this stop proves that leaf empty, the
+                // cancellation is the outcome and `confirm_cancelled` can
+                // settle. An unproven uncertain row stays quarantined.
                 if view.method != "exec_start"
                     || view.receipt_retained
                     || view.superseded
                     || !view.entered
-                    || !matches!(view.state.as_str(), "entered" | "running")
+                    || !matches!(view.state.as_str(), "entered" | "running" | "uncertain")
                 {
                     continue;
                 }
@@ -646,6 +647,9 @@ mod os {
                 }
                 let proof = self.prove_effect(&effect)?;
                 if proof["proven"] != true {
+                    if view.state == "uncertain" {
+                        continue;
+                    }
                     // Missing or mismatched identity never reaches cgroup.kill.
                     // Quarantine instead of failing Pause/Cancel permanently.
                     self.store.quarantine_linux(&view.operation_id)?;
