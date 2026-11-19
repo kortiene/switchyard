@@ -327,6 +327,10 @@ fn confined_pi_mismatched_runtime_digest_is_refused_before_recovery() {
         false,
         Some("sha256:not-the-installed-runtime"),
         false,
+        super::OpenLimits {
+            wall: super::BRIDGE_WALL,
+            model_request_cap: crate::budget::MAX_MODEL_REQUESTS,
+        },
     ) {
         Ok(_) => panic!("a mismatched runtime digest must be refused"),
         Err(error) => error.to_string(),

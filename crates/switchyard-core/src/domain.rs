@@ -353,6 +353,10 @@ pub enum AttentionReason {
     /// `attempts.plan_digest` does not match the digest recomputed from
     /// `attempts.plan_body` and the stored freeze. The freeze is not rewritten.
     PlanDigestMismatch,
+    /// A frozen runtime budget ran out. The freeze is not rewritten.
+    /// Leave with cancel, then confirm_cancelled, then a successor.
+    /// This is not a verification edge.
+    RuntimeBudgetExhausted,
 }
 
 impl AttentionReason {
@@ -367,6 +371,7 @@ impl AttentionReason {
             Self::ExecutionUncertain => "execution_uncertain",
             Self::FrozenInputDrift => "frozen_input_drift",
             Self::PlanDigestMismatch => "plan_digest_mismatch",
+            Self::RuntimeBudgetExhausted => "runtime_budget_exhausted",
         }
     }
 }
@@ -391,6 +396,7 @@ impl FromStr for AttentionReason {
             "execution_uncertain" => Ok(Self::ExecutionUncertain),
             "frozen_input_drift" => Ok(Self::FrozenInputDrift),
             "plan_digest_mismatch" => Ok(Self::PlanDigestMismatch),
+            "runtime_budget_exhausted" => Ok(Self::RuntimeBudgetExhausted),
             other => Err(Error::guard(format!("unknown attention reason {other}"))),
         }
     }

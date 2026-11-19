@@ -167,9 +167,11 @@ pub(crate) enum MissionCommand {
         acceptance: String,
         #[arg(long, default_value = "operator")]
         actor: String,
-        #[arg(long, default_value_t = 2)]
+        /// §3.4 default. Frozen at start_planning; a different limit is a successor.
+        #[arg(long, default_value_t = 1)]
         max_repairs: u32,
-        #[arg(long, default_value_t = 3)]
+        /// §3.4 default. Frozen at start_planning; a different limit is a successor.
+        #[arg(long, default_value_t = 2)]
         max_plan_revisions: u32,
         /// Also admit this command before exiting.
         #[arg(long)]

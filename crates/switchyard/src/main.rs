@@ -8,6 +8,15 @@ use std::path::Path;
 ))]
 use std::path::PathBuf;
 use std::process::ExitCode;
+#[cfg(any(
+    test,
+    all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    )
+))]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
 use cli::{Cli, Command, MissionCommand, RuntimeSelection};
@@ -16,6 +25,61 @@ use switchyard_core::{
     AdmitRequest, CommandBody, CommandKind, CommandOrigin, CreateMission, EffectProof, Error, Host,
     Phase, SuccessorChanges, write_export_exclusive,
 };
+
+/// Set by SIGINT and SIGTERM in this process. The waiting command admits
+/// `cancel` as the operator and uses the existing confined stop proof.
+#[cfg(any(
+    test,
+    all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    )
+))]
+static OPERATOR_STOP: AtomicBool = AtomicBool::new(false);
+
+#[cfg(any(
+    test,
+    all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    )
+))]
+extern "C" fn on_operator_stop(_: libc::c_int) {
+    OPERATOR_STOP.store(true, Ordering::SeqCst);
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    )
+))]
+fn arm_operator_stop() {
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_operator_stop as *const () as usize;
+        action.sa_flags = 0;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+    }
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    )
+))]
+fn operator_stop_requested() -> bool {
+    OPERATOR_STOP.load(Ordering::SeqCst)
+}
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -224,7 +288,7 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     json!({"ok": true, "mission": host.snapshot(&snapshot.mission_id)?.to_json()});
                 if schedule_scenario {
                     created["composedScenario"] =
-                        json!(settle_approve_plan(&mut host, &snapshot.mission_id));
+                        json!(settle_confined(&mut host, &snapshot.mission_id, true));
                     created["mission"] = host.snapshot(&snapshot.mission_id)?.to_json();
                 }
                 Ok(created)
@@ -270,6 +334,10 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                 )?;
                 let is_stop = matches!(body, CommandBody::Pause | CommandBody::Cancel);
                 let approve_plan = matches!(body, CommandBody::ApprovePlan { .. });
+                let repair = matches!(
+                    body,
+                    CommandBody::AuthorizeBoundedRepair { .. } | CommandBody::RequestChanges { .. }
+                );
                 // Reconcile once per invocation. `--persist-only` skips that
                 // and both dispatches, so it cannot create a worktree.
                 // Isolated workspace failures still allow admission and stop
@@ -312,11 +380,11 @@ fn run(cli: Cli) -> switchyard_core::Result<Value> {
                     }
                 }
                 let scenario = if runtime == RuntimeSelection::ConfinedPi
-                    && approve_plan
+                    && (approve_plan || repair)
                     && !persist_only
                     && workspace_error.is_none()
                 {
-                    Some(settle_approve_plan(&mut host, &mission))
+                    Some(settle_confined(&mut host, &mission, approve_plan))
                 } else {
                     None
                 };
@@ -750,32 +818,87 @@ fn bridge_root(db: &Path) -> switchyard_core::Result<PathBuf> {
     std::fs::canonicalize(&root).map_err(Error::storage)
 }
 
-/// Wait for the composed scenario after `approve_plan` has already been
-/// admitted. A missing effect or a poll failure stays `"pending"`; this never
-/// turns a committed command into `guard_failed`.
-fn settle_approve_plan(host: &mut Host, mission: &str) -> &'static str {
+/// Foreground wait after `approve_plan` or a repair has been admitted.
+///
+/// The old fixed 60s cap is the frozen bridge wall (20 minutes per
+/// generation) and the attempt wall. SIGINT/SIGTERM admits `cancel` as the
+/// operator and delivers it through [`Host::interrupt_operator`]. A missing
+/// effect or a poll failure stays `"pending"`; this never turns a committed
+/// command into `guard_failed`.
+///
+/// TODO(#217): the product fixture uses this same wait. There is no
+/// product-mode flag; the frozen budgets are the gate.
+#[cfg(all(
+    feature = "pi-contract",
+    feature = "linux-execution",
+    target_os = "linux"
+))]
+fn latest_repair_state(snapshot: &switchyard_core::MissionSnapshot) -> Option<&str> {
+    snapshot
+        .commands
+        .iter()
+        .rev()
+        .find(|command| {
+            command.kind == "authorize_bounded_repair" || command.kind == "request_changes"
+        })
+        .map(|command| command.state.as_str())
+}
+
+fn settle_confined(host: &mut Host, mission: &str, require_composed: bool) -> &'static str {
     #[cfg(all(
         feature = "pi-contract",
         feature = "linux-execution",
         target_os = "linux"
     ))]
     {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        OPERATOR_STOP.store(false, Ordering::SeqCst);
+        arm_operator_stop();
+        let Ok(Some(budgets)) = host.frozen_budgets(mission) else {
+            return "pending";
+        };
         loop {
+            if operator_stop_requested() {
+                return match host.interrupt_operator(mission) {
+                    Ok(snapshot) if snapshot.phase == Phase::Cancelled => "cancelled",
+                    _ => "pending",
+                };
+            }
             if host.poll_runtime(mission).is_err() {
-                return "pending";
+                let exhausted = host.snapshot(mission).is_ok_and(|snapshot| {
+                    snapshot.attention_reason.as_deref() == Some("runtime_budget_exhausted")
+                });
+                return if exhausted {
+                    "needs_attention"
+                } else {
+                    "pending"
+                };
+            }
+            if host.enforce_attempt_wall(mission).is_err() {
+                return "needs_attention";
             }
             let Ok(snapshot) = host.snapshot(mission) else {
                 return "pending";
             };
-            let value = snapshot.to_json();
-            if value["piHost"]["observation"]["runtimeIdle"] == true
-                && composed_scenario_settled(&value)
-            {
-                return "complete";
+            if snapshot.attention_reason.as_deref() == Some("runtime_budget_exhausted") {
+                return "needs_attention";
             }
-            if std::time::Instant::now() >= deadline {
-                return "pending";
+            let value = snapshot.to_json();
+            let idle = value["piHost"]["observation"]["runtimeIdle"] == true;
+            if require_composed {
+                if idle && composed_scenario_settled(&value) {
+                    return "complete";
+                }
+            } else if let Some(outcome) =
+                switchyard_core::repair_wait_outcome(idle, latest_repair_state(&snapshot))
+            {
+                return outcome;
+            }
+            if host
+                .generation_over_bridge_wall(mission, budgets.bridge_wall)
+                .unwrap_or(false)
+            {
+                let _ = host.exhaust_runtime_budget(mission);
+                return "needs_attention";
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
@@ -786,7 +909,7 @@ fn settle_approve_plan(host: &mut Host, mission: &str) -> &'static str {
         target_os = "linux"
     )))]
     {
-        let _ = (host, mission);
+        let _ = (host, mission, require_composed);
         "pending"
     }
 }
@@ -927,4 +1050,61 @@ fn command_body(kind: &str, payload: &Value) -> switchyard_core::Result<CommandB
             activity: text("activity")?,
         },
     })
+}
+
+#[cfg(test)]
+mod operator_stop_tests {
+    use super::{OPERATOR_STOP, arm_operator_stop, operator_stop_requested};
+    use clap::Parser;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn create_defaults_are_the_section_3_4_limits() {
+        let cli = crate::cli::Cli::try_parse_from([
+            "switchyard",
+            "mission",
+            "create",
+            "--db",
+            "mission.sqlite",
+            "--repo",
+            "repo",
+            "--issue",
+            "218",
+            "--objective",
+            "defaults",
+            "--acceptance",
+            "caps",
+        ])
+        .unwrap();
+        let crate::cli::Command::Mission { action } = cli.command;
+        let crate::cli::MissionCommand::Create {
+            max_repairs,
+            max_plan_revisions,
+            ..
+        } = action
+        else {
+            panic!("expected create");
+        };
+        assert_eq!(max_repairs, 1);
+        assert_eq!(max_plan_revisions, 2);
+        assert!(cli.runtime.is_none(), "FakeRuntime stays the default");
+    }
+
+    #[test]
+    fn sigint_sets_the_operator_stop_flag() {
+        arm_operator_stop();
+        OPERATOR_STOP.store(false, Ordering::SeqCst);
+        unsafe {
+            libc::raise(libc::SIGINT);
+        }
+        assert!(operator_stop_requested());
+        OPERATOR_STOP.store(false, Ordering::SeqCst);
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = libc::SIG_DFL;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+            libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+        }
+    }
 }

@@ -1,6 +1,7 @@
 // Contract-focused acceptance tests. Dependencies are explicit in each module.
 
 mod admission_identity;
+mod budgets;
 mod build_contract;
 mod fixtures;
 mod host_verifier;

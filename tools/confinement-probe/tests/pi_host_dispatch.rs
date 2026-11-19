@@ -13,6 +13,8 @@ use switchyard_core::{
     LinuxExecutionConfig, Phase, payload_hash,
 };
 
+#[path = "pi_host_dispatch/budget_cancel.rs"]
+mod budget_cancel;
 #[path = "pi_host_dispatch/composed.rs"]
 mod composed;
 #[path = "pi_host_dispatch/stop_admission.rs"]

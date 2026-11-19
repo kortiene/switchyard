@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+mod budget;
 mod canonical;
 mod delivery;
 mod domain;
@@ -44,6 +45,11 @@ mod workspace;
 
 pub use workspace::WorkspaceView;
 
+pub use budget::{
+    ATTEMPT_WALL_COUNTS_VERIFIER, ATTEMPT_WALL_SECONDS, BRIDGE_CPU_SECONDS, BRIDGE_WALL_SECONDS,
+    DEFAULT_MAX_PLAN_REVISIONS, DEFAULT_MAX_REPAIRS, FrozenBudgets, MAX_MODEL_REQUESTS,
+    MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, attempt_wall_charge,
+};
 pub use canonical::{canonicalize, payload_hash};
 pub use delivery::{proof_matches, publication_operation_id};
 pub use domain::{
@@ -62,6 +68,7 @@ pub use freeze::bound_plan_digest;
 #[cfg(all(test, feature = "linux-execution", target_os = "linux"))]
 pub(crate) use service::VerifierResultPlant;
 pub use service::read_attempt_freeze;
+pub use service::repair_wait_outcome;
 pub use service::{
     AdmitRequest, AdmitResult, CommandView, CreateMission, DeliveryView, ExportReceipt, Host,
     MissionSnapshot, NotifyOutcome, OperatorWrite, SuccessorChanges, journal_path,

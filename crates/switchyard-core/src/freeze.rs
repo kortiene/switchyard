@@ -27,8 +27,14 @@ pub(crate) fn frozen_document(mission: &MissionRecord) -> Result<Value> {
         "acceptanceCriteria": mission.acceptance_criteria,
         "baseSha": mission.attempt.base_sha,
         "executionLimits": {
+            "attemptWallSeconds": crate::budget::ATTEMPT_WALL_SECONDS,
+            "bridgeCpuSeconds": crate::budget::BRIDGE_CPU_SECONDS,
+            "bridgeWallSeconds": crate::budget::BRIDGE_WALL_SECONDS,
+            "maxModelRequests": crate::budget::MAX_MODEL_REQUESTS,
             "maxPlanRevisions": mission.attempt.max_plan_revisions,
             "maxRepairs": mission.attempt.max_repairs,
+            "maxRequestBytes": crate::budget::MAX_REQUEST_BYTES,
+            "maxResponseBytes": crate::budget::MAX_RESPONSE_BYTES,
         },
         "issueSnapshot": {
             "number": mission.source_issue.number,

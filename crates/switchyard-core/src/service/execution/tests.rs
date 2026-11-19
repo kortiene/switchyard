@@ -1849,6 +1849,8 @@ fn simulated_no_row_error_is_transient(error: &Error) -> bool {
         | Error::FrozenInputDrift
         | Error::StalePlanDigest
         | Error::PlanRevisionLimitReached { .. }
+        | Error::RuntimeBudgetExhausted
+        | Error::RepairAfterSettle
         | Error::SuccessorSourceNotTerminal
         | Error::SuccessorExists { .. }
         | Error::SourceChangedDuringCreate

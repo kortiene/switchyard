@@ -82,6 +82,20 @@ pub enum Error {
     #[error("plan revision limit reached ({count}/{max}); a higher cap needs a successor attempt")]
     PlanRevisionLimitReached { count: u32, max: u32 },
 
+    /// A frozen runtime budget is exhausted. The mission is in `needs_attention`
+    /// after the first observation. The freeze is not rewritten, and this is
+    /// not a verification edge. Way out: `cancel`, then `confirm_cancelled`,
+    /// then a successor with new limits.
+    #[error("runtime budget exhausted; cancel, then confirm_cancelled, then a successor")]
+    RuntimeBudgetExhausted,
+
+    /// A repair was dispatched after this bridge generation had already
+    /// settled. The command stays pending. It is not superseded.
+    /// Way out: keep the pending repair and run it on a generation whose
+    /// bridge has not settled, or `cancel`, then `confirm_cancelled`.
+    #[error("repair after settle was not sent; the command stays pending and was not superseded")]
+    RepairAfterSettle,
+
     /// `mission successor` on a source that is not published, rejected, or cancelled.
     #[error("successor requires a terminal source; cancel, then confirm_cancelled")]
     SuccessorSourceNotTerminal,
@@ -192,6 +206,8 @@ impl Error {
             Self::FrozenInputDrift => "frozen_input_drift",
             Self::StalePlanDigest => "stale_plan_digest",
             Self::PlanRevisionLimitReached { .. } => "plan_revision_limit_reached",
+            Self::RuntimeBudgetExhausted => "runtime_budget_exhausted",
+            Self::RepairAfterSettle => "repair_after_settle",
             Self::SuccessorSourceNotTerminal => "successor_source_not_terminal",
             Self::SuccessorExists { .. } => "successor_exists",
             Self::SourceChangedDuringCreate => "source_changed_during_create",

@@ -1,6 +1,9 @@
 //! B5 composes the outbox, confined session and Linux effect ledger. Public
 //! runtime observations never acquire mission/verification/quiescence authority.
 //! Rust cgroup proofs are recorded as `CommandOrigin::HostSupervisor`.
+use std::path::Path;
+use std::time::Duration;
+
 use super::*;
 use crate::execution::confined_pi::BRIDGE_WALL;
 use crate::execution::confined_runtime::ConfinedRuntime;
@@ -163,7 +166,7 @@ impl Host {
         Ok(true)
     }
 
-    fn confined_mut(&mut self) -> Result<&mut ConfinedRuntime> {
+    pub(super) fn confined_mut(&mut self) -> Result<&mut ConfinedRuntime> {
         match &mut self.runtime {
             RuntimeAdapter::Confined(runtime) => Ok(runtime),
             _ => Err(Error::guard("Host was not opened with confined Pi")),
@@ -184,6 +187,14 @@ impl Host {
             return Ok(());
         }
         let initialized = self.store.runtime_initialized(&binding.attempt_id)?;
+        // Frozen generation wall when the attempt has one. Direct session
+        // opens keep the 60s conformance watchdog. No product-mode flag.
+        // TODO(#217): the product fixture should keep this wall. Do not add a
+        // product-mode flag here; the freeze is the gate.
+        let (wall, model_request_cap) = match self.frozen_budgets(mission_id)? {
+            Some(budgets) => (budgets.bridge_wall, budgets.max_model_requests),
+            None => (BRIDGE_WALL, crate::budget::MAX_MODEL_REQUESTS),
+        };
         let digest = self.confined_mut()?.runtime_digest.clone();
         let runtime = self.confined_mut()?;
         let test_fixtures = runtime.allow_test_fixtures();
@@ -194,6 +205,10 @@ impl Host {
             initialized,
             Some(&digest),
             test_fixtures,
+            crate::execution::confined_pi::OpenLimits {
+                wall,
+                model_request_cap,
+            },
         );
         let session = match opened {
             Ok(session) => session,
@@ -204,10 +219,13 @@ impl Host {
                 return Err(error);
             }
         };
+        self.note_bridge_up(&binding.attempt_id)?;
+        let mut lifecycle = session.lifecycle();
+        self.stamp_attempt_clock(&mut lifecycle);
         self.store.save_pi_host(
             &binding.attempt_id,
             binding.generation,
-            &session.lifecycle(),
+            &lifecycle,
             &Value::Null,
         )?;
         self.store.mark_runtime_initialized(&binding.attempt_id)?;
@@ -253,7 +271,9 @@ impl Host {
                 ConfinedEffectRoute::Rejected => PiEffectOutcome::Rejected,
             }
         });
-        let lifecycle = session.lifecycle();
+        let wall_hit = session.wall_exhausted();
+        let mut lifecycle = session.lifecycle();
+        self.stamp_attempt_clock(&mut lifecycle);
         self.confined_mut()?
             .sessions
             .insert(binding.session_id.clone(), session);
@@ -274,7 +294,17 @@ impl Host {
             &lifecycle,
             &observation,
         )?;
-        if let Err(error) = &result
+        if wall_hit {
+            let mission = self.store.load_mission(&binding.mission_id)?;
+            if !mission.phase.is_terminal()
+                && !matches!(
+                    mission.phase,
+                    Phase::NeedsAttention | Phase::Pausing | Phase::Cancelling
+                )
+            {
+                self.exhaust_runtime_budget(&binding.mission_id)?;
+            }
+        } else if let Err(error) = &result
             && lifecycle["phase"] == "stopped"
         {
             self.terminate_linux_writers(&binding.mission_id)?;
@@ -308,6 +338,56 @@ impl Host {
         receipt_from_row(request, method, &params, &rows[0])
     }
 
+    /// Walls, CPU, and size caps from the freeze. `count_requests` is set only
+    /// when a model turn is about to be sent, so a poll does not treat a full
+    /// budget of 40 as already exhausted.
+    fn enforce_observed(
+        &mut self,
+        binding: &RuntimeBinding,
+        request_bytes: u64,
+        response_bytes: u64,
+        count_requests: bool,
+    ) -> Result<()> {
+        let (bridge, verifier) = self.attempt_clock.components();
+        let (generation, cpu, wall_hit) = self.confined_generation_usage(&binding.session_id);
+        let model_requests = if count_requests {
+            self.model_requests_sent(&binding.mission_id)?
+        } else {
+            0
+        };
+        let usage = crate::budget::BudgetUsage {
+            bridge_generation: if wall_hit {
+                Duration::from_secs(crate::BRIDGE_WALL_SECONDS.saturating_add(1))
+            } else {
+                generation
+            },
+            bridge_outside_verify: bridge,
+            verifier,
+            model_requests,
+            request_bytes,
+            response_bytes,
+            bridge_cpu: cpu,
+        };
+        self.enforce_usage(&binding.mission_id, &usage)
+    }
+
+    fn confined_generation_usage(&mut self, session_id: &str) -> (Duration, Duration, bool) {
+        let Ok(runtime) = self.confined_mut() else {
+            return (Duration::ZERO, Duration::ZERO, false);
+        };
+        let Some(session) = runtime.sessions.get(session_id) else {
+            return (Duration::ZERO, Duration::ZERO, false);
+        };
+        let cpu = session
+            .lifecycle()
+            .get("cgroup")
+            .and_then(|cgroup| cgroup.get("path"))
+            .and_then(Value::as_str)
+            .and_then(|path| crate::linux_execution::cgroup::cpu_usage(Path::new(path)))
+            .unwrap_or(Duration::ZERO);
+        (session.generation_elapsed(), cpu, session.wall_exhausted())
+    }
+
     fn confined_send(
         &mut self,
         request: &RuntimeRequest,
@@ -315,7 +395,21 @@ impl Host {
     ) -> Result<RuntimeReceipt> {
         crate::execution::PiRuntime::validate_command(request, payload)?;
         let (method, params) = mapped(request, payload)?;
-        self.confined_call(&request.binding, method, Some(&request.request_id), params)?;
+        let model_turn = matches!(method, "runtime.submit" | "runtime.steer");
+        if model_turn {
+            let request_bytes = serde_json::to_vec(&params)
+                .map(|bytes| bytes.len() as u64)
+                .unwrap_or(u64::MAX);
+            self.enforce_observed(&request.binding, request_bytes, 0, true)?;
+        }
+        let result =
+            self.confined_call(&request.binding, method, Some(&request.request_id), params)?;
+        if model_turn {
+            let response_bytes = serde_json::to_vec(&result)
+                .map(|bytes| bytes.len() as u64)
+                .unwrap_or(u64::MAX);
+            self.enforce_observed(&request.binding, 0, response_bytes, false)?;
+        }
         self.barrier("pi-before-ack");
         // Read the public durable receipt, including hash/binding checks, rather
         // than trusting a successful transport return as an admission fact.
@@ -332,6 +426,15 @@ impl Host {
             self.uncertainty(mission, AttentionReason::ExecutionUncertain)?;
         }
         result
+    }
+
+    /// True when this generation's bridge already has a proven `stop`.
+    /// A same-process repair must not be superseded on that proof (#226).
+    fn bridge_termination_proven(&mut self, binding: &RuntimeBinding) -> Result<bool> {
+        let Some(session) = self.confined_mut()?.sessions.get(&binding.session_id) else {
+            return Ok(false);
+        };
+        Ok(session.lifecycle()["termination"]["proven"] == true)
     }
 
     fn check_confined_history(&mut self, mission: &MissionRecord) -> Result<()> {
@@ -396,6 +499,23 @@ impl Host {
             return Ok(count);
         }
         self.ensure_confined_session(mission_id)?;
+        if self.bridge_termination_proven(&binding)? {
+            // The settle proof already stopped this bridge. Do not send on it
+            // again. A repair is refused and left pending; other runtime work
+            // is still superseded because its admission has closed.
+            for command in self.store.list_commands(mission_id)? {
+                if command.state == CommandState::Pending && is_runtime_work(command.kind) {
+                    if is_post_settle_repair(command.kind) {
+                        return Err(Error::RepairAfterSettle);
+                    }
+                    self.store.supersede_pending(
+                        &command.id,
+                        "admission closed before runtime accepted this command",
+                    )?;
+                }
+            }
+            return Ok(count);
+        }
         self.confined_history(&mission)?;
         for command in self
             .store
@@ -419,6 +539,11 @@ impl Host {
                 None => {
                     let current = self.store.load_mission(mission_id)?;
                     if !matches!(current.phase, Phase::Planning | Phase::Implementing) {
+                        // A repair after settle stays pending. Superseding it
+                        // would drop the command with no named reason (#226).
+                        if is_post_settle_repair(command.kind) {
+                            return Err(Error::RepairAfterSettle);
+                        }
                         self.store.supersede_pending(
                             &command.id,
                             "admission closed before runtime accepted this command",
@@ -559,18 +684,33 @@ impl Host {
                 )?;
             }
         }
+        // Fold bridge-alive time before `stop`. Proof stays `stop` then
+        // `rekill_and_prove`, then reconcile and the ops_blocked check.
+        self.note_bridge_down();
         let proof = self
             .confined_mut()?
             .sessions
             .get_mut(&binding.session_id)
             .ok_or(Error::NotFound)?
             .stop()?;
-        let lifecycle = self
+        // TODO(d1b-splice-timeout-connection-cap): that PR merges first and
+        // writes `modelEgress` from the proxy inside `stop` (scope
+        // "generation", allowance `UNWIRED_CONNECTION_ALLOWANCE` = 40). After
+        // it lands, if the proxy reported `exhausted()`, call
+        // `exhaust_runtime_budget` (`detect_uncertainty` /
+        // `runtime_budget_exhausted`). Do not admit `request_verification`.
+        // Replace the unwired allowance with the frozen per-mission cap (40)
+        // minus connections already recorded for the mission. A prior
+        // generation that had egress but no recorded count is 0 remaining
+        // (fail closed), and the scope becomes "mission". No second
+        // connection counter in this slice.
+        let mut lifecycle = self
             .confined_mut()?
             .sessions
             .get(&binding.session_id)
             .ok_or(Error::NotFound)?
             .lifecycle();
+        self.stamp_attempt_clock(&mut lifecycle);
         self.store.save_pi_host(
             &binding.attempt_id,
             binding.generation,
@@ -586,7 +726,9 @@ impl Host {
                 _ => None,
             };
             if let Some(body) = body {
-                self.admit_host_fact(&current, body)?;
+                let admitted = self.admit_host_fact(&current, body)?;
+                self.store
+                    .record_supervisor_receipt(&admitted.command_id, &proof.to_string())?;
             }
         }
         // Cancel is terminal, so this drops the proven-stopped bridge. Pause is
@@ -603,6 +745,12 @@ impl Host {
             return Ok(Vec::new());
         }
         self.ensure_confined_session(mission_id)?;
+        if let Err(error) = self.enforce_observed(&binding, 0, 0, false) {
+            if error.category() == "runtime_budget_exhausted" {
+                return Ok(vec![unchanged(&self.store.load_mission(mission_id)?)]);
+            }
+            return Err(error);
+        }
         if self.confined_mut()?.is_released(&binding.session_id)
             || self
                 .confined_mut()?

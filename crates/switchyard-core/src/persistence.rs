@@ -1130,6 +1130,46 @@ impl Store {
         Ok(())
     }
 
+    /// Attach a supervisor proof to a command that is already reconciled.
+    /// Cancel's cgroup proof is this receipt. A second call leaves the first
+    /// proof in place.
+    #[cfg(all(
+        feature = "pi-contract",
+        feature = "linux-execution",
+        target_os = "linux"
+    ))]
+    pub(crate) fn record_supervisor_receipt(
+        &mut self,
+        command_id: &str,
+        receipt_json: &str,
+    ) -> Result<()> {
+        let tx = self.immediate()?;
+        let existing: Option<Option<String>> = tx
+            .query_row(
+                "SELECT runtime_receipt_json FROM commands WHERE id = ?1 AND state = 'reconciled'",
+                params![command_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Error::storage)?;
+        let Some(existing) = existing else {
+            return Err(Error::storage(format!(
+                "supervisor receipt was not recorded for {command_id}"
+            )));
+        };
+        if existing.is_some() {
+            tx.commit().map_err(Error::storage)?;
+            return Ok(());
+        }
+        tx.execute(
+            "UPDATE commands SET runtime_receipt_json = ?1, updated_at = ?2 WHERE id = ?3",
+            params![receipt_json, now_ms(), command_id],
+        )
+        .map_err(Error::storage)?;
+        tx.commit().map_err(Error::storage)?;
+        Ok(())
+    }
+
     pub fn acknowledge(&mut self, command_id: &str, receipt_json: &str) -> Result<()> {
         let tx = self.immediate()?;
         let changed = tx
