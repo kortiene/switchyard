@@ -1263,6 +1263,10 @@ mod os {
         /// Fresh proof of this writer's own leaf. The same `rekill_and_prove`
         /// the mission bridge uses. A missing or mismatched leaf is unproven;
         /// the bridge stop is not evidence that this cgroup is empty.
+        ///
+        /// Only the confined stop path calls this, and that path is
+        /// `pi-contract`.
+        #[cfg(feature = "pi-contract")]
         fn rekill_writer_leaf(
             &self,
             effect: &crate::persistence::linux_execution::LinuxEffectRecord,
