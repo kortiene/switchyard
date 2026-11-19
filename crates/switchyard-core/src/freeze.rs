@@ -144,9 +144,10 @@ fn sandbox_policy(environment_json: &str, policy_json: &str) -> Result<Value> {
 /// `request_changes`. RFC 8785 JSON. Built only from the stored freeze and
 /// the approved plan. `writeScope` is the frozen sandbox policy.
 /// `repairFeedback` is omitted unless the command carries feedback.
-pub(crate) fn work_brief(
+pub fn work_brief(
     frozen_inputs_json: &str,
     plan: &str,
+    plan_digest: &str,
     repair_feedback: Option<&str>,
 ) -> Result<String> {
     let frozen: Value = serde_json::from_str(frozen_inputs_json)
@@ -167,10 +168,12 @@ pub(crate) fn work_brief(
         .filter(|value| value.is_object())
         .ok_or_else(|| Error::guard("frozen inputs have no verifier"))?;
     require_text(plan, "plan")?;
+    require_text(plan_digest, "plan digest")?;
     let mut document = json!({
         "acceptanceCriteria": acceptance,
         "objective": objective,
         "plan": plan,
+        "planDigest": plan_digest,
         "schema": WORK_BRIEF_SCHEMA,
         "verifier": verifier,
         "writeScope": write_scope,
@@ -211,7 +214,16 @@ pub(crate) fn optional_work_brief(
     ) else {
         return Ok(None);
     };
-    Ok(Some(work_brief(frozen, plan, feedback)?))
+    // Prefer the ledger's approved digest. Recompute only when it was not stored.
+    let digest = match mission
+        .plan_digest
+        .as_deref()
+        .filter(|digest| !digest.trim().is_empty())
+    {
+        Some(digest) => digest.to_string(),
+        None => bound_plan_digest(plan, &mission.attempt.id, frozen)?,
+    };
+    Ok(Some(work_brief(frozen, plan, &digest, feedback)?))
 }
 
 #[cfg(any(test, feature = "pi-contract"))]
@@ -388,20 +400,26 @@ mod tests {
     fn work_brief_replay_sends_identical_bytes_and_keeps_host_command() {
         let frozen = frozen_canonical(&mission()).unwrap();
         let plan = "do the work";
-        let first = work_brief(&frozen, plan, None).unwrap();
-        let second = work_brief(&frozen, plan, None).unwrap();
+        let digest = bound_plan_digest(plan, "a-test", &frozen).unwrap();
+        let first = work_brief(&frozen, plan, &digest, None).unwrap();
+        let second = work_brief(&frozen, plan, &digest, None).unwrap();
         assert_eq!(first.as_bytes(), second.as_bytes());
         assert_eq!(
             first,
-            r#"{"acceptanceCriteria":"Inputs stay put","objective":"Ship the freeze","plan":"do the work","schema":"switchyard.work-brief.v1","verifier":{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"},"writeScope":{"environment":{"confinement":"deferred_to_s3","host":"single"},"policy":{"credentials":"none","planningTools":"read-only"}}}"#
+            format!(
+                r#"{{"acceptanceCriteria":"Inputs stay put","objective":"Ship the freeze","plan":"do the work","planDigest":"{digest}","schema":"switchyard.work-brief.v1","verifier":{{"executes":false,"frozen":true,"id":"switchyard.verifier.v1"}},"writeScope":{{"environment":{{"confinement":"deferred_to_s3","host":"single"}},"policy":{{"credentials":"none","planningTools":"read-only"}}}}}}"#
+            )
         );
         assert!(!first.contains("baseSha"), "{first}");
         assert!(!first.contains("issueSnapshot"), "{first}");
         assert!(!first.contains("runtimeConfig"), "{first}");
-        assert!(!first.contains("planDigest"), "{first}");
+        assert!(
+            first.contains(&format!(r#""planDigest":"{digest}""#)),
+            "{first}"
+        );
         assert!(!first.contains("repairFeedback"), "{first}");
-        let repaired = work_brief(&frozen, plan, Some("try again")).unwrap();
-        let repaired_again = work_brief(&frozen, plan, Some("try again")).unwrap();
+        let repaired = work_brief(&frozen, plan, &digest, Some("try again")).unwrap();
+        let repaired_again = work_brief(&frozen, plan, &digest, Some("try again")).unwrap();
         assert_eq!(repaired.as_bytes(), repaired_again.as_bytes());
         assert!(
             repaired.contains(r#""repairFeedback":"try again""#),
@@ -428,5 +446,23 @@ mod tests {
         assert_ne!(params["content"], canonicalize(&payload).unwrap());
         assert!(command_uses_work_brief(&payload));
         assert!(!command_uses_work_brief(&json!({"kind": "start_planning"})));
+    }
+
+    #[test]
+    fn cancel_and_abort_do_not_read_a_damaged_plan() {
+        let mut stored = mission();
+        let frozen = frozen_canonical(&stored).unwrap();
+        stored.attempt.frozen_inputs_json = Some(frozen);
+        stored.plan_body = Some("   ".into());
+        for kind in ["cancel", "pause"] {
+            let payload = json!({"kind": kind, "body": {}});
+            assert_eq!(
+                optional_work_brief(&stored, &payload).unwrap(),
+                None,
+                "{kind}"
+            );
+        }
+        let approve = json!({"kind": "approve_plan", "body": {"planDigest": "sha256:x"}});
+        assert!(optional_work_brief(&stored, &approve).is_err());
     }
 }

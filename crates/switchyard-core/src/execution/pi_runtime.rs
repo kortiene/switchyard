@@ -488,3 +488,77 @@ pub(crate) fn mapped(request: &RuntimeRequest, payload: &Value) -> Result<(&'sta
     };
     Ok((method, params))
 }
+
+#[cfg(test)]
+mod mapped_tests {
+    use super::{mapped, require_work_brief_for_send};
+    use crate::canonical::payload_hash;
+    use crate::execution::{RuntimeBinding, RuntimeRequest};
+    use serde_json::json;
+
+    fn request(method: &'static str, brief: Option<&str>, payload_hash: String) -> RuntimeRequest {
+        RuntimeRequest {
+            binding: RuntimeBinding {
+                mission_id: "m".into(),
+                attempt_id: "a".into(),
+                session_id: "s".into(),
+                generation: 1,
+            },
+            request_id: "a:c".into(),
+            payload_hash,
+            method,
+            work_brief: brief.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn require_work_brief_for_send_allows_abort_and_refuses_an_unbriefed_plan() {
+        let cancel = json!({"kind":"cancel","missionId":"m","attemptId":"a","body":{}});
+        require_work_brief_for_send(
+            &request("abort", None, payload_hash(&cancel).unwrap()),
+            &cancel,
+        )
+        .unwrap();
+        let approve = json!({
+            "kind": "approve_plan",
+            "missionId": "m",
+            "attemptId": "a",
+            "body": {"planDigest": "sha256:plan"},
+        });
+        assert!(
+            require_work_brief_for_send(
+                &request("submit", None, payload_hash(&approve).unwrap()),
+                &approve,
+            )
+            .is_err()
+        );
+        require_work_brief_for_send(
+            &request("submit", Some("brief"), payload_hash(&approve).unwrap()),
+            &approve,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn mapped_keeps_host_command_and_uses_the_brief_for_approve_plan() {
+        let payload = json!({
+            "kind": "approve_plan",
+            "missionId": "m",
+            "attemptId": "a",
+            "body": {"planDigest": "sha256:plan"},
+        });
+        let hash = payload_hash(&payload).unwrap();
+        let (method, params) =
+            mapped(&request("submit", Some("BRIEF"), hash.clone()), &payload).unwrap();
+        assert_eq!(method, "runtime.submit");
+        assert_eq!(params["content"], "BRIEF");
+        assert_eq!(params["hostCommand"]["payload"], payload);
+        assert_eq!(params["hostCommand"]["payloadHash"], hash);
+        let cancel = json!({"kind":"cancel","missionId":"m","attemptId":"a","body":{}});
+        let cancel_hash = payload_hash(&cancel).unwrap();
+        let (method, params) = mapped(&request("abort", None, cancel_hash), &cancel).unwrap();
+        assert_eq!(method, "runtime.abort");
+        assert!(params.get("content").is_none());
+        assert_eq!(params["hostCommand"]["payload"], cancel);
+    }
+}

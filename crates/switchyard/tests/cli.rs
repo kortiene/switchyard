@@ -1398,6 +1398,57 @@ fn model_endpoint_https_is_refused_in_the_ungated_cli_suite() {
 }
 
 #[test]
+fn model_endpoint_path_other_than_exact_v1_is_refused_without_a_database() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_repo(&repo);
+    // Empty path, `/`, `/v1/`, another path, and a query. No normalisation.
+    let cases = [
+        "http://127.0.0.1:9",
+        "http://127.0.0.1:9/",
+        "http://127.0.0.1:9/v1/",
+        "http://127.0.0.1:9/v2",
+        "http://127.0.0.1:9/v1?q=1",
+        "http://127.0.0.1:9/v1#frag",
+    ];
+    for endpoint in cases {
+        let db = tmp.path().join(format!("path-{}.sqlite", endpoint.len()));
+        let output = model_endpoint_output(&[
+            "mission",
+            "create",
+            "--runtime",
+            "confined-pi",
+            "--model-endpoint",
+            endpoint,
+            "--db",
+            db.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--issue",
+            "217",
+            "--objective",
+            "path must be exact v1",
+            "--acceptance",
+            "no database",
+        ]);
+        let message = assert_model_endpoint_guard(
+            &output,
+            &db,
+            "--model-endpoint path must be /v1 with no query or fragment; use http://<ip>:<port>/v1",
+        );
+        assert!(
+            message.contains("use http://<ip>:<port>/v1"),
+            "{endpoint}: {message}"
+        );
+        assert!(!message.contains(endpoint), "{endpoint}: {message}");
+        assert!(!message.contains("q=1"), "{message}");
+        assert!(!message.contains("#frag"), "{message}");
+        assert!(!db.exists(), "{endpoint}");
+        assert!(!owner_lock(&db).exists(), "{endpoint}");
+    }
+}
+
+#[test]
 fn model_endpoint_invalid_port_is_a_parse_refusal_without_a_database() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");

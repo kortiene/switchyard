@@ -615,9 +615,17 @@ fn model_endpoint_from_flag(
             "HTTPS model endpoints require a TLS client; only credential-free HTTP routes are supported",
         ));
     }
-    if !endpoint_host_is_loopback_literal(value) {
+    if !endpoint_authority_is_loopback(value) {
         return Err(Error::model_endpoint_not_allowed(
             "--model-endpoint accepts only a loopback IP literal in 127.0.0.0/8 or ::1, with or without a port; hostnames and other addresses are refused without a DNS lookup",
+        ));
+    }
+    // Path is not normalised. Empty, `/`, `/v1/`, any other path, and any
+    // query or fragment are refused here, before open_host. Way out: use
+    // `http://<ip>:<port>/v1`.
+    if !endpoint_path_is_exactly_v1(value) {
+        return Err(Error::model_endpoint_not_allowed(
+            "--model-endpoint path must be /v1 with no query or fragment; use http://<ip>:<port>/v1",
         ));
     }
     if !endpoint_port_is_valid(value) {
@@ -625,15 +633,58 @@ fn model_endpoint_from_flag(
             "model endpoint must be one http URL without credentials",
         ));
     }
+    if !endpoint_host_is_loopback_literal(value) {
+        return Err(Error::model_endpoint_not_allowed(
+            "--model-endpoint accepts only a loopback IP literal in 127.0.0.0/8 or ::1, with or without a port; hostnames and other addresses are refused without a DNS lookup",
+        ));
+    }
     Ok(Some(parse_pinned_loopback(value)?))
+}
+
+/// True only for the exact path `/v1`, with no query and no fragment.
+/// `/`, `/v1/`, an empty path, and every other path are false. Nothing is rewritten.
+fn endpoint_path_is_exactly_v1(input: &str) -> bool {
+    let Some((_, rest)) = input.split_once("://") else {
+        return false;
+    };
+    if rest.contains(['?', '#']) {
+        return false;
+    }
+    match rest.split_once('/') {
+        Some((_, path)) => path == "v1",
+        None => false,
+    }
+}
+
+/// Loopback check of the authority only, so a bad path can be refused without
+/// calling it a hostname. The path, query, and fragment are not rewritten.
+fn endpoint_authority_is_loopback(input: &str) -> bool {
+    let Some((scheme, rest)) = input.split_once("://") else {
+        return false;
+    };
+    if scheme != "http" {
+        return false;
+    }
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty()
+        || authority.contains(['@', '\\', '%'])
+        || authority
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return false;
+    }
+    endpoint_host_is_loopback_literal(&format!("http://{authority}/v1"))
 }
 
 /// True only for an `http` URL whose host is an IPv4 address in
 /// `127.0.0.0/8` or the IPv6 address `::1`. `https` is not a loopback literal.
 ///
 /// This never resolves a name. [`parse_pinned_loopback`] calls
-/// `ModelEndpoint::parse` only after this returns true, and only an IP
-/// literal reaches that parser, so `to_socket_addrs` does not query DNS.
+/// `ModelEndpoint::parse` only after this returns true. That parser does call
+/// `to_socket_addrs`, and only on the IP literal this function already
+/// accepted, so the call does not look up a name.
 fn endpoint_host_is_loopback_literal(input: &str) -> bool {
     let Some((scheme, rest)) = input.split_once("://") else {
         return false;
@@ -683,8 +734,12 @@ fn endpoint_host_is_loopback_literal(input: &str) -> bool {
         .is_ok_and(|ip| ip.is_loopback())
 }
 
-/// Port rules shared with `ModelEndpoint::parse`, without resolving a name.
-/// A missing port is the scheme default and is valid.
+/// Port rules shared with `parse_port` in
+/// `switchyard-core`'s `execution/confined_pi/egress.rs`.
+/// A missing port is the scheme default and is valid. This copy exists so the
+/// ungated CLI can refuse a bad port before `ModelEndpoint::parse`. Keep the
+/// two checks in step: empty, a leading zero, `0`, and anything outside `u16`
+/// are rejected. No name is resolved here.
 fn endpoint_port_is_valid(input: &str) -> bool {
     let Some((_, rest)) = input.split_once("://") else {
         return false;

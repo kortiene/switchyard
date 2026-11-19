@@ -511,6 +511,10 @@ fn split_host(authority: &str, default_port: u16) -> Result<(String, u16)> {
     Ok((host.to_string(), port))
 }
 
+/// Same port rules as `endpoint_port_is_valid` in `crates/switchyard/src/main.rs`.
+/// That copy runs before this parser so the ungated CLI can refuse a bad port
+/// without this module. Keep the two checks in step: empty, a leading zero,
+/// `0`, and anything outside `u16` are rejected.
 fn parse_port(value: &str) -> Result<u16> {
     if value.is_empty()
         || !value.bytes().all(|byte| byte.is_ascii_digit())

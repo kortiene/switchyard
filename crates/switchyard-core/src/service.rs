@@ -588,11 +588,33 @@ pub fn read_attempt_freeze(db_path: &Path, mission_id: &str) -> Result<String> {
     crate::freeze::frozen_canonical(&store.load_mission(mission_id)?)
 }
 
+fn runtime_sends_model_brief(runtime: &RuntimeAdapter) -> bool {
+    match runtime {
+        #[cfg(feature = "pi-contract")]
+        RuntimeAdapter::Pi(_) => true,
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        RuntimeAdapter::Confined(_) => true,
+        _ => false,
+    }
+}
+
+/// The brief is only the Pi model input for approve_plan,
+/// authorize_bounded_repair, and request_changes. Abort and cancel skip it,
+/// so a damaged plan cannot block a stop.
 fn attach_work_brief(
+    pi: bool,
     mission: &MissionRecord,
     payload: &Value,
     mut request: RuntimeRequest,
 ) -> Result<RuntimeRequest> {
+    if !pi || request.method != "submit" {
+        request.work_brief = None;
+        return Ok(request);
+    }
     request.work_brief = crate::freeze::optional_work_brief(mission, payload)?;
     Ok(request)
 }
@@ -891,7 +913,11 @@ impl Host {
                 request_id: format!("{attempt_id}:{command_id}"),
                 payload_hash: hash.clone(),
                 method: RuntimeAdapter::runtime_method(request.body.kind()),
-                work_brief: crate::freeze::optional_work_brief(&mission, &payload)?,
+                work_brief: if runtime_sends_model_brief(&self.runtime) {
+                    crate::freeze::optional_work_brief(&mission, &payload)?
+                } else {
+                    None
+                },
             };
             self.runtime.validate_command(&runtime_request, &payload)?;
         }
@@ -1125,6 +1151,7 @@ impl Host {
                             serde_json::from_str(&c.payload_canonical).map_err(Error::storage)?;
                         Ok(crate::execution::AcknowledgedCheck {
                             request: attach_work_brief(
+                                true,
                                 &mission,
                                 &payload,
                                 RuntimeRequest {
@@ -1161,6 +1188,7 @@ impl Host {
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
             let request = attach_work_brief(
+                runtime_sends_model_brief(&self.runtime),
                 &mission,
                 &payload,
                 RuntimeRequest {
@@ -1272,6 +1300,7 @@ impl Host {
                         serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
                     acknowledged.push(crate::execution::AcknowledgedCheck {
                         request: attach_work_brief(
+                            true,
                             &mission,
                             &payload,
                             RuntimeRequest {
@@ -1294,6 +1323,7 @@ impl Host {
             let payload: Value =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
             let request = attach_work_brief(
+                runtime_sends_model_brief(&self.runtime),
                 &mission,
                 &payload,
                 RuntimeRequest {
@@ -1397,6 +1427,7 @@ impl Host {
         let payload: Value =
             serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
         let request = attach_work_brief(
+            true,
             mission,
             &payload,
             RuntimeRequest {

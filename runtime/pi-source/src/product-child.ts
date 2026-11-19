@@ -20,7 +20,11 @@ export const PRODUCT_SOCKET = '/model-proxy/endpoint.sock';
 /** Fixed base URL handed to pi-ai. Not a dial target. */
 export const PRODUCT_BASE_URL = 'http://127.0.0.1/v1';
 export const PRODUCT_PROVIDER = 'switchyard';
-export const PRODUCT_MODEL = 'switchyard-product-1';
+/**
+ * Upstream model id. The forwarder allowlist expects `grok-4.7`.
+ * Fingerprinted with the adapter via this file.
+ */
+export const PRODUCT_MODEL = 'grok-4.7';
 const KEYLESS = 'unused';
 
 type Head = { status: number; headers: Headers; mode: 'length' | 'chunked' | 'close'; length: number };
@@ -68,7 +72,13 @@ function takeChunked(state: { buffer: Buffer; done: boolean }): Buffer {
   return Buffer.concat(out);
 }
 
-function socketFetch(socketPath: string): typeof globalThis.fetch {
+/**
+ * HTTP/1.1 over the model Unix socket.
+ *
+ * The write side is half-closed after the request body (`socket.end`) so the
+ * peer sees EOF. The read side stays open for the SSE response.
+ */
+export function productSocketFetch(socketPath: string): typeof globalThis.fetch {
   return async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
@@ -82,22 +92,32 @@ function socketFetch(socketPath: string): typeof globalThis.fetch {
     const payload = Buffer.concat([Buffer.from(lines.join('\r\n')), body]);
     return await new Promise((resolve, reject) => {
       const socket: Socket = connect(socketPath);
-      const fail = (error: unknown) => {
-        socket.destroy();
-        reject(error instanceof Error ? error : new Error(String(error)));
-      };
-      if (request.signal.aborted) {
-        fail(new Error('model socket request aborted'));
-        return;
-      }
-      const onAbort = () => fail(new Error('model socket request aborted'));
-      request.signal.addEventListener('abort', onAbort, { once: true });
       let buffer = Buffer.alloc(0);
       let head: Head | null = null;
       let received = 0;
       let settled = false;
       const chunked = { buffer: Buffer.alloc(0), done: false };
       let controller!: ReadableStreamDefaultController<Uint8Array>;
+      const fail = (error: unknown) => {
+        const err = error instanceof Error ? error : new Error(String(error));
+        if (settled) {
+          socket.destroy();
+          return;
+        }
+        settled = true;
+        request.signal.removeEventListener('abort', onAbort);
+        socket.destroy();
+        // The fetch promise is already resolved once the head is parsed.
+        // A later cut or reset must fail the body, or read() waits forever.
+        if (head) controller.error(err);
+        else reject(err);
+      };
+      const onAbort = () => fail(new Error('model socket request aborted'));
+      if (request.signal.aborted) {
+        fail(new Error('model socket request aborted'));
+        return;
+      }
+      request.signal.addEventListener('abort', onAbort, { once: true });
       const stream = new ReadableStream<Uint8Array>({ start(control) { controller = control; } });
       const finish = () => {
         if (settled) return;
@@ -147,30 +167,42 @@ function socketFetch(socketPath: string): typeof globalThis.fetch {
         if (head.mode === 'close' || (head.mode === 'length' && received >= head.length) || chunked.done) finish();
         else fail(new Error('model socket response ended early'));
       });
+      // Request-side half-close: the body is the last bytes we write.
       socket.on('connect', () => socket.end(payload));
     });
   };
 }
 
 function productModel(): Model<'openai-completions'> {
+  // grok-4.7 limits: https://docs.x.ai/developers/grok-4-7
+  // Context window 500,000. Output limit is published as "No text output limit",
+  // so maxTokens is the pinned pi-ai catalog ceiling for this id (500,000),
+  // not an xAI output cap. https://docs.x.ai/developers/models
+  // reasoning is true because grok-4.7 is a reasoning model (default effort
+  // high). thinkingLevelMap.off is null, which is what pi-ai's grok-4.7
+  // catalog entry uses: a null off value does not send reasoning_effort
+  // "none", so the xAI default stands.
   return {
     id: PRODUCT_MODEL,
-    name: 'Switchyard product socket',
+    name: 'Grok 4.7',
     api: 'openai-completions',
     provider: PRODUCT_PROVIDER,
     baseUrl: PRODUCT_BASE_URL,
-    input: ['text'],
-    reasoning: false,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 8192,
-    maxTokens: 2048,
+    input: ['text', 'image'],
+    reasoning: true,
+    thinkingLevelMap: {
+      off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: null,
+    },
+    cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+    contextWindow: 500_000,
+    maxTokens: 500_000,
   };
 }
 
 /** Keyless provider. Auth does not read the environment or any file. */
 export function productProvider(socketPath: string): Provider {
   const model = productModel();
-  const fetch = socketFetch(socketPath);
+  const fetch = productSocketFetch(socketPath);
   const call = (context: TranscriptContext, options: { apiKey?: string; fetch?: typeof fetch; signal?: AbortSignal } | undefined, simple: boolean) => {
     const next = { ...options, apiKey: KEYLESS, fetch };
     return simple

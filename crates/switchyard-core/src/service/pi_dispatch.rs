@@ -347,6 +347,7 @@ impl Host {
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
             let request = super::attach_work_brief(
+                true,
                 mission,
                 &payload,
                 RuntimeRequest {
@@ -416,6 +417,7 @@ impl Host {
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
             let request = super::attach_work_brief(
+                true,
                 &mission,
                 &payload,
                 RuntimeRequest {
@@ -491,6 +493,7 @@ impl Host {
                     serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
                 let current = self.store.load_mission(mission_id)?;
                 let request = super::attach_work_brief(
+                    true,
                     &current,
                     &payload,
                     RuntimeRequest {
@@ -539,6 +542,7 @@ impl Host {
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
             let request = super::attach_work_brief(
+                true,
                 &mission,
                 &payload,
                 RuntimeRequest {
@@ -567,6 +571,7 @@ impl Host {
             let payload =
                 serde_json::from_str(&command.payload_canonical).map_err(Error::storage)?;
             let request = super::attach_work_brief(
+                true,
                 &mission,
                 &payload,
                 RuntimeRequest {
