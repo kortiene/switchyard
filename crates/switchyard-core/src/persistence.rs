@@ -15,7 +15,7 @@ use crate::domain::{
 };
 use crate::error::{Error, Result};
 use crate::execution::OwnerLock;
-use crate::freeze::{drift_exit, frozen_canonical};
+use crate::freeze::{PlanSource, drift_exit, frozen_canonical};
 use crate::policy::TransitionPlan;
 use crate::verification::NewVerification;
 
@@ -119,6 +119,8 @@ pub struct CreatedMission {
     pub decision_rationale: Option<String>,
     /// Set for a successor. Compared inside the insert transaction before any write.
     pub expected_source: Option<ExpectedSource>,
+    /// `operator` is stored on the policy in this insert. `runtime` omits the key.
+    pub plan_source: PlanSource,
 }
 
 /// Source row a successor must still match when its insert transaction starts.
@@ -585,12 +587,15 @@ impl Store {
             }
         }
         let now = now_ms();
-        let policy_value = json!({
+        let mut policy_value = json!({
             "maxRepairs": created.max_repairs,
             "maxPlanRevisions": created.max_plan_revisions,
             "planningTools": "read-only",
             "credentials": "none"
         });
+        if created.plan_source == PlanSource::Operator {
+            policy_value["planSource"] = json!("operator");
+        }
         let policy_json = canonicalize(&policy_value)?;
         let policy_hash = payload_hash(&policy_value)?;
         let verifier_json = created.verifier_json.as_deref().unwrap_or(VERIFIER_JSON);
@@ -673,6 +678,53 @@ impl Store {
                 command_id: None,
             },
         )?;
+        tx.commit().map_err(Error::storage)?;
+        Ok(())
+    }
+
+    /// Record who writes the plan. Refused once the attempt is frozen.
+    ///
+    /// `runtime` omits the policy key. `operator` stores `planSource`. The
+    /// freeze reads that key at `start_planning`.
+    pub(crate) fn set_plan_source(&mut self, mission_id: &str, source: PlanSource) -> Result<()> {
+        let tx = self.immediate()?;
+        let (policy_json, frozen): (String, Option<String>) = tx
+            .query_row(
+                "SELECT policy_json, frozen_inputs_json FROM attempts
+                 WHERE mission_id = ?1 AND active = 1",
+                [mission_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Error::storage)?
+            .ok_or(Error::NotFound)?;
+        if frozen.is_some() {
+            return Err(Error::guard("frozen attempt inputs are immutable"));
+        }
+        let mut policy: Value = serde_json::from_str(&policy_json).map_err(Error::storage)?;
+        let object = policy
+            .as_object_mut()
+            .ok_or_else(|| Error::guard("sandbox policy must be a JSON object"))?;
+        match source {
+            PlanSource::Operator => {
+                object.insert("planSource".into(), json!("operator"));
+            }
+            PlanSource::Runtime => {
+                object.remove("planSource");
+            }
+        }
+        let canonical = canonicalize(&policy)?;
+        let hash = payload_hash(&policy)?;
+        let changed = tx
+            .execute(
+                "UPDATE attempts SET policy_json = ?1, policy_hash = ?2
+                 WHERE mission_id = ?3 AND active = 1 AND frozen_inputs_json IS NULL",
+                params![canonical, hash, mission_id],
+            )
+            .map_err(Error::storage)?;
+        if changed != 1 {
+            return Err(Error::guard("frozen attempt inputs are immutable"));
+        }
         tx.commit().map_err(Error::storage)?;
         Ok(())
     }
@@ -2681,6 +2733,7 @@ mod tests {
             verifier_json: None,
             decision_rationale: None,
             expected_source: None,
+            plan_source: PlanSource::Runtime,
         }
     }
 }

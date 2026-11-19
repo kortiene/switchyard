@@ -182,6 +182,10 @@ pub(crate) enum MissionCommand {
         /// Verifier document JSON. Omitted stores `switchyard.verifier.v1`.
         #[arg(long)]
         verifier: Option<String>,
+        /// Who writes the plan. `runtime` (default) or `operator`.
+        /// Frozen at `start_planning`. `operator` enqueues no planning runtime work.
+        #[arg(long, default_value = "runtime", value_parser = ["runtime", "operator"])]
+        plan_source: String,
     },
     /// Read mission state without taking the owner lock.
     Status {
@@ -312,6 +316,10 @@ pub(crate) enum MissionCommand {
         /// `switchyard.verifier.v1` or `switchyard.verifier.rust-verify.v1`.
         #[arg(long)]
         verifier: Option<String>,
+        /// Replace who writes the plan. `runtime` or `operator`.
+        /// Omitting this flag copies the source. The default source is `runtime`.
+        #[arg(long, value_parser = ["runtime", "operator"])]
+        plan_source: Option<String>,
     },
     /// Run the frozen changed-path gate. Does not execute the verifier.
     Verify {
