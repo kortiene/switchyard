@@ -579,6 +579,9 @@ fn retry_after_the_writer_exits_reaches_verifying() {
     // The helper writes result.json after the sandbox exits. Give it that beat
     // before the host reconciles, so a missing result is not an orphan.
     std::thread::sleep(Duration::from_millis(200));
+    let observed_before = host.snapshot(&world.mission).unwrap().to_json()["piHost"]["observedAt"]
+        .as_i64()
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         match request_verification(&mut host, &world.mission, true) {
@@ -601,6 +604,44 @@ fn retry_after_the_writer_exits_reaches_verifying() {
         vec![("host_supervisor".into(), true)]
     );
     assert!(snap.to_json()["attentionReason"].is_null());
+    assert!(
+        snap.to_json()["piHost"]["observedAt"].as_i64().unwrap() > observed_before,
+        "retry must store a fresh termination proof"
+    );
+}
+
+#[test]
+fn unproven_leaf_with_pending_work_is_settle_not_proven() {
+    let (world, mut host) = World::new("answer");
+    host.dispatch_pending(&world.mission).unwrap();
+    until(&mut host, &world.mission, |value| {
+        value["piHost"]["observation"]["runtimeIdle"] == true
+    });
+    admit(
+        &mut host,
+        &world.mission,
+        CommandBody::Continue {
+            activity: "implementing".into(),
+        },
+    );
+    request_verification(&mut host, &world.mission, true).unwrap();
+    let settled = host.snapshot(&world.mission).unwrap();
+    assert_eq!(settled.phase, Phase::Verifying);
+    let leaf = settled.to_json()["piHost"]["lifecycle"]["cgroup"]["path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fs::remove_dir(&leaf).unwrap();
+    let error = host.dispatch_reconciled(&world.mission).unwrap_err();
+    assert_eq!(error.category(), "settle_not_proven", "{error}");
+    let snap = host.snapshot(&world.mission).unwrap();
+    assert_eq!(snap.phase, Phase::Verifying);
+    let pending = snap
+        .commands
+        .iter()
+        .find(|command| command.kind == "continue")
+        .unwrap();
+    assert_eq!(pending.state, "pending");
 }
 
 #[test]

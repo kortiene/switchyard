@@ -425,9 +425,11 @@ impl Host {
         }))
     }
 
-    /// The bridge process is already stopped. `uncertain` is the unproven
-    /// stop: the child is dead, so a later stop must `reprove` instead of
-    /// sending another abort.
+    /// The bridge was already stopped. `stop` kills and reaps the direct child
+    /// before it records `uncertain`, so that phase is never written while the
+    /// direct child is alive. `uncertain` means the leaf was not proven empty,
+    /// so descendants such as tool processes may still be running. A later
+    /// stop must `reprove` instead of sending another abort.
     fn bridge_already_stopped(&mut self, binding: &RuntimeBinding) -> Result<bool> {
         let Some(session) = self.confined_mut()?.sessions.get(&binding.session_id) else {
             return Ok(false);
@@ -499,15 +501,27 @@ impl Host {
                 &mut |_| PiEffectOutcome::Rejected,
             );
         }
-        let proof = match session.stop() {
-            Ok(evidence) => evidence,
-            Err(stop_error) => match session.reprove() {
+        // A retry on a stopped or uncertain bridge must prove again. `stop`
+        // would return the recorded proof and would not re-read the leaf.
+        let proof = if phase == "stopped" || phase == "uncertain" {
+            match session.reprove() {
                 Ok(evidence) => evidence,
-                Err(reprove_error) => {
+                Err(error) => {
                     self.confined_mut()?.sessions.insert(session_id, session);
-                    return Err(stop_error.with_context(reprove_error.to_string()));
+                    return Err(error);
                 }
-            },
+            }
+        } else {
+            match session.stop() {
+                Ok(evidence) => evidence,
+                Err(stop_error) => match session.reprove() {
+                    Ok(evidence) => evidence,
+                    Err(reprove_error) => {
+                        self.confined_mut()?.sessions.insert(session_id, session);
+                        return Err(stop_error.with_context(reprove_error.to_string()));
+                    }
+                },
+            }
         };
         let lifecycle = session.lifecycle();
         let observation = match self.store.pi_host_view(&binding.attempt_id) {
@@ -556,8 +570,12 @@ impl Host {
         }
         self.ensure_confined_session(mission_id)?;
         if self.bridge_already_stopped(&binding)? {
-            // The settle proof already stopped this bridge. Do not call it again
-            // and do not record uncertainty from a dead transport.
+            // Prove the stopped leaf again before the outbox changes.
+            // #228's repair guard will later go inside the proven arm.
+            let proof = self.reprove_and_store(&binding)?;
+            if proof.get("proven").and_then(Value::as_bool) != Some(true) {
+                return Err(Error::SettleNotProven);
+            }
             for command in self.store.list_commands(mission_id)? {
                 if command.state == CommandState::Pending && is_runtime_work(command.kind) {
                     self.store.supersede_pending(
