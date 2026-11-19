@@ -183,6 +183,11 @@ export class Runtime {
       if (state.sessionId && (state.sessionId !== this.binding.sessionId || state.missionId !== this.binding.missionId
         || state.attemptId !== this.binding.attemptId || state.source !== SOURCE || state.adapter !== ADAPTER)) throw new ProtocolError('binding_mismatch');
       if (state.sessionId && this.binding.generation <= state.generation) throw new ProtocolError('stale_generation');
+      // Host generation only. Do not clear `pi.live.run`. startRun writes it
+      // (pi-durable generation.ts:1149 onto live.ts:194). Only endRun deletes
+      // live.run and live.generation (live.ts:290, :312, :314). A killed bridge
+      // never calls endRun, so the next submit stays ConversationBusy
+      // (submissions.ts:255, thrown at :265). The host records unsettled_turn.
       Object.assign(state, this.binding);
     }, BACKGROUND_CONTEXT);
     this.root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: 'faux', modelId: 'faux-1' },
@@ -293,9 +298,12 @@ export class Runtime {
     }
     const inspection = await this.harness!.inspect(BACKGROUND_CONTEXT);
     const state = await this.harness!.snapshot(Session, BACKGROUND_CONTEXT);
+    // `scheduling === "busy"` is pi-durable treating the conversation as busy
+    // while `pi.live.run` is set. This read does not delete that field.
     return { source: SOURCE, scheduling: inspection.scheduling, commands, stopping: !!state?.stopCommand,
       runtimeIdle: inspection.tasks.length === 0, liveTaskCount: inspection.tasks.length,
-      unsettledSubmissionCount: inspection.submissions.length };
+      unsettledSubmissionCount: inspection.submissions.length,
+      liveRun: inspection.scheduling === 'busy' };
   }
 }
 

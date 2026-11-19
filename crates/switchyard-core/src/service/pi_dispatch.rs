@@ -262,13 +262,7 @@ impl Host {
             return Ok(());
         }
         let binding = self.binding(&mission);
-        let recovered = self
-            .confined_mut()?
-            .sessions
-            .get(&binding.session_id)
-            .map(|session| session.lifecycle()["recovered"].clone())
-            .unwrap_or(Value::Null);
-        if recovered["proven"] != true || recovered["generation"].as_u64().is_none() {
+        if !self.recovered_dead_generation(&binding)? {
             return Ok(());
         }
         let ids: Vec<String> = self
@@ -280,15 +274,13 @@ impl Host {
             .take(32)
             .collect();
         let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-        let snapshot = match self.confined_inspect(&binding, &id_refs) {
-            Ok(snapshot) => snapshot,
-            Err(_) => {
-                let mission = self.store.load_mission(mission_id)?;
-                self.admit_unsettled_turn(&mission, "unreadable")?;
-                return Ok(());
-            }
-        };
-        if snapshot["unsettledSubmissionCount"].as_u64().unwrap_or(0) == 0 {
+        // `liveRun` is `pi.live.run` still set (pi-durable submissions.ts:255).
+        // Opening does not delete it. A non-zero unsettled count is the same
+        // dead generation's submission. Neither is a timeout.
+        let snapshot = self.confined_inspect(&binding, &id_refs)?;
+        let live_run = snapshot["liveRun"] == true || snapshot["scheduling"] == "busy";
+        let unsettled = snapshot["unsettledSubmissionCount"].as_u64().unwrap_or(0) > 0;
+        if !live_run && !unsettled {
             return Ok(());
         }
         let mut turns: Vec<String> = snapshot["commands"]
@@ -303,12 +295,27 @@ impl Host {
                 row["commandId"].as_str().map(str::to_owned)
             })
             .collect();
+        if live_run {
+            turns.insert(0, "pi.live.run".into());
+        }
         if turns.is_empty() {
             turns.push("unsettled-submission".into());
         }
         let mission = self.store.load_mission(mission_id)?;
         self.admit_unsettled_turn(&mission, &turns.join(","))?;
         Ok(())
+    }
+
+    /// The open proved a previous generation's cgroup empty. That generation
+    /// is dead. `pi.live.run` from it is not cleared here.
+    fn recovered_dead_generation(&mut self, binding: &RuntimeBinding) -> Result<bool> {
+        let recovered = self
+            .confined_mut()?
+            .sessions
+            .get(&binding.session_id)
+            .map(|session| session.lifecycle()["recovered"].clone())
+            .unwrap_or(Value::Null);
+        Ok(recovered["proven"] == true && recovered["generation"].as_u64().is_some())
     }
 
     fn admit_unsettled_turn(
@@ -619,6 +626,16 @@ impl Host {
                     match self.confined_send(&request, &payload) {
                         Ok(receipt) => receipt,
                         Err(error) => {
+                            // A dead generation left `pi.live.run` set. Do not
+                            // clear it and do not retry the submit. Cancel is
+                            // the way out.
+                            if self.recovered_dead_generation(&request.binding)?
+                                && error.to_string().contains("bridge: busy")
+                            {
+                                let current = self.store.load_mission(mission_id)?;
+                                self.admit_unsettled_turn(&current, &command.request_id)?;
+                                return Ok(count);
+                            }
                             let Some(category) = error.rejected_admission().map(str::to_owned)
                             else {
                                 return Err(error);
