@@ -1153,6 +1153,7 @@ fn host_verifier_confined_measure_full_rust_verify() {
         "stdoutTail": stdout_tail,
         "testsPassed": tests_passed,
         "testsFailed": tests_failed,
+        "testsPassedExpected": 293,
         "cpuStat": cpu_stat,
         "memoryPeak": memory_peak,
         "nproc": nproc,
@@ -1164,7 +1165,11 @@ fn host_verifier_confined_measure_full_rust_verify() {
     println!("{}", serde_json::to_string(&line).unwrap());
     assert_eq!(outcome, "pass", "verifier outcome");
     assert_eq!(tests_failed, 0, "testsFailed");
-    assert!(tests_passed > 0, "testsPassed");
+    // Floor calibrated at 1a12f25, where the untouched suite sums to 293.
+    assert!(
+        tests_passed >= 290,
+        "testsPassed {tests_passed} is below 290; expected 293 at 1a12f25"
+    );
 
     #[derive(Clone)]
     struct LeafSample {
