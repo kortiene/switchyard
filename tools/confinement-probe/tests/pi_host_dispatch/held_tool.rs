@@ -106,7 +106,9 @@ fn sigkill_while_a_second_tool_holds(endpoint: Option<&str>) {
     let killed = worker.wait().unwrap();
     assert_eq!(killed.signal(), Some(9));
     let mut host = open_hold(&world, endpoint);
-    host.recover(&world.mission).unwrap();
+    // The held process is still unresolved, so recover reports that block
+    // after open has already admitted unsettled_turn.
+    let recover_result = host.recover(&world.mission);
     let recovered = host.snapshot(&world.mission).unwrap();
     assert_eq!(recovered.phase, Phase::NeedsAttention);
     assert_eq!(
@@ -114,6 +116,9 @@ fn sigkill_while_a_second_tool_holds(endpoint: Option<&str>) {
         "unsettled_turn",
         "{recovered:?}"
     );
+    if let Err(error) = recover_result {
+        assert_eq!(error.category(), "execution_blocked", "{error}");
+    }
 }
 
 #[test]
