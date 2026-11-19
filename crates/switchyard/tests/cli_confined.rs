@@ -464,22 +464,6 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> std::io::Result<Vec<u8
     Ok(buf)
 }
 
-fn session_is_idle(db: &Path) -> bool {
-    let Ok(conn) = rusqlite::Connection::open(db) else {
-        return false;
-    };
-    let _ = conn.busy_timeout(Duration::from_millis(200));
-    let Ok(json) = conn.query_row("SELECT observation_json FROM pi_host_sessions", [], |row| {
-        row.get::<_, String>(0)
-    }) else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_str::<Value>(&json) else {
-        return false;
-    };
-    value["runtimeIdle"] == json!(true) && value["unsettledSubmissionCount"] == json!(0)
-}
-
 fn sse_reply() -> Vec<u8> {
     let body = "data: {\"id\":\"stub\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"stub-done\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"stub\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
     let mut bytes = format!(
@@ -548,8 +532,6 @@ fn product_fixture_sends_the_work_brief_and_cancel_returns_while_the_stub_holds(
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     let db = tmp.path().join("mission.sqlite");
-    let root = tmp.path().join("workspaces");
-    std::fs::create_dir(&root).unwrap();
     init_repo(&repo);
     let db_arg = db.to_str().unwrap();
     let (code, created, error) = run(&[
@@ -559,6 +541,8 @@ fn product_fixture_sends_the_work_brief_and_cancel_returns_while_the_stub_holds(
         "confined-pi",
         "--model-endpoint",
         &endpoint,
+        "--plan-source",
+        "operator",
         "--db",
         db_arg,
         "--repo",
@@ -580,25 +564,7 @@ fn product_fixture_sends_the_work_brief_and_cancel_returns_while_the_stub_holds(
         .unwrap()
         .to_string();
     let revision = created["mission"]["revision"].as_u64().unwrap().to_string();
-    let (code, prepared, error) = run(&[
-        "mission",
-        "workspace",
-        "--runtime",
-        "confined-pi",
-        "--model-endpoint",
-        &endpoint,
-        "--db",
-        db_arg,
-        "--mission",
-        &mission,
-        "--attempt",
-        &attempt,
-        "--root",
-        root.to_str().unwrap(),
-    ]);
-    assert_eq!(code, 0, "{error}");
-    assert_eq!(prepared["workspace"]["state"], "ready");
-    let (code, _planned, error) = run(&[
+    let (code, planned, error) = run(&[
         "mission",
         "command",
         "--runtime",
@@ -617,10 +583,43 @@ fn product_fixture_sends_the_work_brief_and_cancel_returns_while_the_stub_holds(
         "{}",
     ]);
     assert_eq!(code, 0, "{error}");
+    assert_eq!(planned["commandState"], "reconciled", "{planned}");
+    assert_eq!(planned["dispatched"], false, "{planned}");
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "operator start_planning enqueues no model turn: {:?}",
+        seen.lock().unwrap()
+    );
+    let plan = "fixture plan\n";
+    let plan_path = tmp.path().join("plan.txt");
+    std::fs::write(&plan_path, plan).unwrap();
+    let (code, filed, error) = run(&[
+        "mission",
+        "plan",
+        "--runtime",
+        "confined-pi",
+        "--model-endpoint",
+        &endpoint,
+        "--db",
+        db_arg,
+        "--mission",
+        &mission,
+        "--file",
+        plan_path.to_str().unwrap(),
+        "--quiescent",
+        "true",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(filed["phase"], "awaiting_plan_approval", "{filed}");
     let frozen = switchyard_core::read_attempt_freeze(Path::new(db_arg), &mission).unwrap();
-    let plan = "fixture plan";
     let digest = switchyard_core::bound_plan_digest(plan, &attempt, &frozen).unwrap();
     let brief = switchyard_core::work_brief(&frozen, plan, &digest, None).unwrap();
+    assert_eq!(filed["mission"]["planDigest"], digest, "{filed}");
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "plan --file does not call the model: {:?}",
+        seen.lock().unwrap()
+    );
 
     let bridge = {
         let name = db.file_name().unwrap().to_str().unwrap();
@@ -650,36 +649,6 @@ fn product_fixture_sends_the_work_brief_and_cancel_returns_while_the_stub_holds(
         "product",
     )
     .unwrap();
-    // The CLI returns when start_planning is admitted, then drops the bridge
-    // while that model turn is still open. The persisted session stays busy
-    // until this process replays the acknowledged submit and the turn settles.
-    host.dispatch_pending(&mission).unwrap();
-    let started_idle = Instant::now();
-    loop {
-        host.poll_runtime(&mission).unwrap();
-        if session_is_idle(&db) {
-            break;
-        }
-        assert!(
-            started_idle.elapsed() < Duration::from_secs(20),
-            "start_planning stayed busy: {:?}",
-            seen.lock().unwrap()
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let conn = rusqlite::Connection::open(&db).unwrap();
-    conn.busy_timeout(Duration::from_secs(5)).unwrap();
-    conn.execute(
-        "UPDATE missions SET phase='awaiting_plan_approval' WHERE id=?1",
-        [&mission],
-    )
-    .unwrap();
-    conn.execute(
-        "UPDATE attempts SET plan_body=?1, plan_digest=?2 WHERE id=?3",
-        rusqlite::params![plan, digest, attempt],
-    )
-    .unwrap();
-    drop(conn);
     let expected_revision = host.snapshot(&mission).unwrap().revision;
     host.admit(switchyard_core::AdmitRequest {
         command_id: None,
