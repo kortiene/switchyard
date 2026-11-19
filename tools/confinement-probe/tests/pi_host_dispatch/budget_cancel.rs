@@ -254,6 +254,12 @@ fn unproven_reproof_leaves_cancel_pending() {
             .all(|command| command["kind"] != "confirm_cancelled"),
         "{value}"
     );
+    drop(host);
+    let mut host = world.reopen();
+    let recovered = host.recover(&world.mission).unwrap();
+    assert_eq!(recovered.phase, Phase::Cancelled);
+    let receipt = confirm_receipt(&world.db(), &world.mission);
+    assert_eq!(receipt["proven"], true, "{receipt}");
 }
 
 #[test]

@@ -150,7 +150,23 @@ fn sigkill_mid_model_stream_is_unsettled_and_does_not_reconnect() {
         "unsettled_turn",
         "{recovered:?}"
     );
-    thread::sleep(Duration::from_millis(400));
+    // pi-durable retries a cut-off model request after about 2s. Keep this
+    // bridge up longer than that backoff and require the run to stay paused.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        host.poll_runtime(&world.mission).unwrap();
+        let observation =
+            host.snapshot(&world.mission).unwrap().to_json()["piHost"]["observation"].clone();
+        assert_eq!(observation["scheduling"], "paused", "{observation}");
+        assert!(
+            observation["liveRun"].is_string(),
+            "the run was resumed or cleared: {observation}"
+        );
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
     assert_eq!(stub.count(), before, "reopen replayed the model request");
     admit(&mut host, &world.mission, CommandBody::Cancel);
     host.dispatch_pending(&world.mission).unwrap();

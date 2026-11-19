@@ -635,19 +635,16 @@ fn open_confined(
 
 /// Default is the composed `s3-acceptance` replay. Tests may set
 /// `SWITCHYARD_CONFINED_FIXTURE` to another allowlisted fixture so the
-/// foreground wait stays open. Unknown values stay on `s3-acceptance`.
+/// foreground wait stays open. An unset variable stays on `s3-acceptance`.
+/// Any other value is refused.
 #[cfg(all(
     feature = "pi-contract",
     feature = "linux-execution",
     target_os = "linux"
 ))]
 fn confined_fixture() -> switchyard_core::Result<String> {
-    if std::env::var("SWITCHYARD_CONFINED_FIXTURE").ok().as_deref() == Some("ignore-abort") {
-        return Err(switchyard_core::Error::guard(
-            "SWITCHYARD_CONFINED_FIXTURE=ignore-abort is not a CLI fixture",
-        ));
-    }
     match std::env::var("SWITCHYARD_CONFINED_FIXTURE") {
+        Err(_) => Ok("s3-acceptance".into()),
         Ok(value)
             if matches!(
                 value.as_str(),
@@ -662,7 +659,9 @@ fn confined_fixture() -> switchyard_core::Result<String> {
         {
             Ok(value)
         }
-        _ => Ok("s3-acceptance".into()),
+        Ok(value) => Err(switchyard_core::Error::guard(format!(
+            "SWITCHYARD_CONFINED_FIXTURE={value} is not a CLI fixture"
+        ))),
     }
 }
 
@@ -940,12 +939,14 @@ fn settle_confined(host: &mut Host, mission: &str, require_composed: bool) -> &'
             let value = snapshot.to_json();
             let idle = value["piHost"]["observation"]["runtimeIdle"] == true;
             let pending = has_pending_runtime_work(&snapshot);
+            let failed_or_unanswered = value["piHost"]["observation"]["runFailure"].is_string();
             if require_composed {
                 if switchyard_core::foreground_run_complete(
                     s3_acceptance,
                     idle,
                     pending,
                     composed_scenario_settled(&value),
+                    failed_or_unanswered,
                 ) {
                     return "complete";
                 }

@@ -163,13 +163,25 @@ fn attempt_wall_does_not_count_two_verifier_deadlines() {
 
 #[test]
 fn product_mode_completes_when_idle_with_no_pending_work() {
-    assert!(crate::foreground_run_complete(false, true, false, false));
-    assert!(!crate::foreground_run_complete(false, true, true, true));
-    assert!(!crate::foreground_run_complete(false, false, false, true));
-    assert!(crate::foreground_run_complete(true, true, false, true));
+    assert!(crate::foreground_run_complete(
+        false, true, false, false, false
+    ));
+    assert!(!crate::foreground_run_complete(
+        false, true, true, true, false
+    ));
+    assert!(!crate::foreground_run_complete(
+        false, false, false, true, false
+    ));
+    assert!(crate::foreground_run_complete(
+        true, true, false, true, false
+    ));
     assert!(
-        !crate::foreground_run_complete(true, true, false, false),
+        !crate::foreground_run_complete(true, true, false, false, false),
         "the s3-acceptance replay still waits for its composed effects"
+    );
+    assert!(
+        !crate::foreground_run_complete(false, true, false, true, true),
+        "a failed or unanswered run is not complete"
     );
 }
 
@@ -247,6 +259,28 @@ fn ledger_frozen_at_1a12f25_reopens_without_drift_and_admits_pause_and_verificat
     assert!(verifying.attention_reason.is_none());
     assert_eq!(
         verifying.frozen_inputs_json.as_deref(),
+        Some(crate::freeze::FREEZE_AT_1A12F25)
+    );
+}
+
+#[test]
+fn old_freeze_without_model_harness_still_cancels() {
+    let world = open_world();
+    let mut host = crate::Host::open(&world.db).unwrap();
+    let written = plant_pre_budget_freeze(&mut host, &world);
+    admit(&mut host, &written.mission_id, CommandBody::Cancel);
+    let cancelling = host.snapshot(&written.mission_id).unwrap();
+    assert_eq!(cancelling.phase, Phase::Cancelling);
+    assert!(
+        cancelling
+            .frozen_inputs_json
+            .as_deref()
+            .is_some_and(|frozen| !frozen.contains("modelHarness")),
+        "{}",
+        cancelling.frozen_inputs_json.as_deref().unwrap_or("")
+    );
+    assert_eq!(
+        cancelling.frozen_inputs_json.as_deref(),
         Some(crate::freeze::FREEZE_AT_1A12F25)
     );
 }

@@ -806,10 +806,25 @@ impl Host {
             decision_rationale: None,
             expected_source: None,
             plan_source,
+            model_endpoint: self.host_has_model_endpoint(),
         };
         let id = created.id.clone();
         self.store.create_mission(created)?;
         self.snapshot(&id)
+    }
+
+    fn host_has_model_endpoint(&self) -> bool {
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        {
+            if let RuntimeAdapter::Confined(runtime) = &self.runtime {
+                return runtime.config.model_endpoint.is_some();
+            }
+        }
+        false
     }
 
     pub fn create_successor(
@@ -873,6 +888,7 @@ impl Host {
                 phase: source.phase.as_str().to_string(),
             }),
             plan_source,
+            model_endpoint: self.host_has_model_endpoint(),
         };
         // Test seam only: change the source after the expected revision is
         // captured and before the insert transaction reads it.
@@ -3239,8 +3255,9 @@ pub fn foreground_run_complete(
     idle: bool,
     pending_work: bool,
     composed: bool,
+    failed_or_unanswered: bool,
 ) -> bool {
-    idle && !pending_work && (!s3_acceptance || composed)
+    idle && !pending_work && !failed_or_unanswered && (!s3_acceptance || composed)
 }
 
 /// Foreground repair wait. `None` means keep waiting.

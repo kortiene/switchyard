@@ -492,6 +492,7 @@ fn confined_pi_changed_runtime_root_on_existing_ledger_is_refused() {
             decision_rationale: None,
             expected_source: None,
             plan_source: crate::freeze::PlanSource::Runtime,
+            model_endpoint: false,
         })
         .unwrap();
     store.require_runtime_config(&saved).unwrap();

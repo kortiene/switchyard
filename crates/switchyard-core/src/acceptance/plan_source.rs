@@ -47,6 +47,7 @@ fn default_freeze_records_plan_source_runtime_and_still_enqueues() {
     let document: serde_json::Value =
         serde_json::from_str(frozen.frozen_inputs_json.as_deref().unwrap()).unwrap();
     assert!(document.get("planSource").is_none());
+    assert!(document["executionLimits"].get("modelHarness").is_none());
     assert!(
         document["sandboxPolicy"]["policy"]
             .get("planSource")

@@ -23,6 +23,17 @@ pub(crate) const FREEZE_AT_1A12F25: &str = concat!(
 );
 pub(crate) const PLAN_DIGEST_SCHEMA: &str = "switchyard.plan-digest.v1";
 
+/// Endpoint missions freeze this object. No-endpoint missions omit it, so
+/// `FREEZE_AT_1A12F25` and every other no-endpoint freeze stay byte-identical.
+pub(crate) fn model_harness_off() -> Value {
+    json!({
+        "restartLimit": 0,
+        "retryEnabled": false,
+        "retryMaxRetries": 0,
+        "streamMaxRetries": 0,
+    })
+}
+
 const BUDGET_KEYS: [&str; 6] = [
     "attemptWallSeconds",
     "bridgeCpuSeconds",
@@ -208,6 +219,7 @@ fn sandbox_policy(environment_json: &str, policy_json: &str) -> Result<Value> {
         object.remove("maxRepairs");
         object.remove("maxPlanRevisions");
         object.remove("planSource");
+        object.remove("modelHarness");
         for key in BUDGET_KEYS {
             object.remove(key);
         }
@@ -246,6 +258,9 @@ fn execution_limits(mission: &MissionRecord) -> Result<Value> {
             {
                 limits.insert(key.into(), value.clone());
             }
+        }
+        if let Some(value) = object.get("modelHarness").filter(|value| value.is_object()) {
+            limits.insert("modelHarness".into(), value.clone());
         }
     }
     Ok(Value::Object(limits))
@@ -390,6 +405,28 @@ mod tests {
             frozen_canonical(&mission()).unwrap(),
             super::FREEZE_AT_1A12F25
         );
+    }
+
+    #[test]
+    fn endpoint_freeze_carries_model_harness_and_a_plain_freeze_does_not() {
+        let plain = frozen_document(&mission()).unwrap();
+        assert!(plain["executionLimits"].get("modelHarness").is_none());
+        assert_eq!(frozen_canonical(&mission()).unwrap(), FREEZE_AT_1A12F25);
+        let mut record = mission();
+        let mut policy = parse_object(&record.attempt.policy_json, "sandbox policy").unwrap();
+        policy["modelHarness"] = model_harness_off();
+        record.attempt.policy_json = policy.to_string();
+        let document = frozen_document(&record).unwrap();
+        assert_eq!(
+            document["executionLimits"]["modelHarness"],
+            model_harness_off()
+        );
+        assert!(
+            document["sandboxPolicy"]["policy"]
+                .get("modelHarness")
+                .is_none()
+        );
+        assert_ne!(frozen_canonical(&record).unwrap(), FREEZE_AT_1A12F25);
     }
 
     #[test]

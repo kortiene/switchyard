@@ -292,6 +292,7 @@ impl Host {
         // exists. Flag here, before replay. The way out is cancel, then
         // `confirm_cancelled`. With no endpoint, keep the stuck-tool rule so
         // a captured receipt can still be replayed.
+        // Open already compared `network` via `runtime_config_mismatch`, so this is the frozen endpoint.
         let has_endpoint = self.confined_mut()?.config.model_endpoint.is_some();
         if !has_endpoint {
             let stuck_tool = self.store.linux_views(mission_id)?.iter().any(|view| {
@@ -870,12 +871,8 @@ impl Host {
         // prior generations, saturating at 0 (`try_from`, 0 on overflow).
         // No frozen budget, or a prior generation with egress and no recorded
         // count, is allowance 0. Persist that generation's `modelEgress`
-        // before the next open. Freeze `maxRetries` 0. No second counter.
-        // `Harness.open` must then pass `retry: { enabled: false, maxRetries: 0 }`,
-        // `stream.maxRetries: 0`, and `restartLimit: 0`. Not set in this slice:
-        // `restartLimit` 0 ends a crashed generation instead of replaying it,
-        // which the no-endpoint SIGKILL tests still require. The product wait
-        // must not treat an unanswered or failed run as complete.
+        // before the next open. Endpoint missions already freeze `modelHarness`
+        // and open with retries and restarts off. No second counter.
         let mut lifecycle = self
             .confined_mut()?
             .sessions

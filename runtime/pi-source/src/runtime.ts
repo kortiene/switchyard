@@ -179,6 +179,7 @@ export class Runtime {
       // `closed` waits for task invocations to join. An uncooperative tool can
       // prevent that forever, so surface the fatal report as soon as it occurs.
       onReport: report => { if (report.kind === 'storage_failed') fail(report.error); },
+      ...harnessSettings(process.env.SWITCHYARD_BRIDGE_EGRESS === 'model-socket'),
     }, BACKGROUND_CONTEXT);
     this.harness = harness;
     void harness.closed.then(end => {
@@ -312,8 +313,26 @@ export class Runtime {
     return { source: SOURCE, scheduling: inspection.scheduling, commands, stopping: !!state?.stopCommand,
       runtimeIdle: inspection.tasks.length === 0, liveTaskCount: inspection.tasks.length,
       unsettledSubmissionCount: inspection.submissions.length,
-      liveRun: liveRunName((live as { run?: unknown } | undefined)?.run) };
+      liveRun: liveRunName((live as { run?: unknown } | undefined)?.run),
+      runFailure: runFailureName((live as { runFailure?: unknown } | undefined)?.runFailure) };
   }
+}
+
+/** Endpoint missions disable pi-durable retries and restarts. No endpoint keeps the defaults. */
+export function harnessSettings(modelEndpoint: boolean): { settings: {
+  retry: { enabled: false, maxRetries: 0 },
+  stream: { maxRetries: 0 },
+  restartLimit: 0,
+} } | Record<string, never> {
+  if (!modelEndpoint) return {};
+  return { settings: { retry: { enabled: false, maxRetries: 0 }, stream: { maxRetries: 0 }, restartLimit: 0 } };
+}
+
+function runFailureName(failure: unknown): string | null {
+  if (failure == null || typeof failure !== 'object') return null;
+  const reason = (failure as { reason?: unknown }).reason;
+  if (typeof reason === 'string' && reason.length > 0) return reason;
+  return 'unanswered';
 }
 
 function liveRunName(run: unknown): string | null {

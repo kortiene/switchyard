@@ -121,6 +121,9 @@ pub struct CreatedMission {
     pub expected_source: Option<ExpectedSource>,
     /// `operator` is stored on the policy in this insert. `runtime` omits the key.
     pub plan_source: PlanSource,
+    /// Endpoint missions freeze `modelHarness` with retries and restarts off.
+    /// No-endpoint missions omit the object.
+    pub model_endpoint: bool,
 }
 
 /// Source row a successor must still match when its insert transaction starts.
@@ -601,6 +604,9 @@ impl Store {
         });
         if created.plan_source == PlanSource::Operator {
             policy_value["planSource"] = json!("operator");
+        }
+        if created.model_endpoint {
+            policy_value["modelHarness"] = crate::freeze::model_harness_off();
         }
         let policy_json = canonicalize(&policy_value)?;
         let policy_hash = payload_hash(&policy_value)?;
@@ -2780,6 +2786,7 @@ mod tests {
             decision_rationale: None,
             expected_source: None,
             plan_source: PlanSource::Runtime,
+            model_endpoint: false,
         }
     }
 }

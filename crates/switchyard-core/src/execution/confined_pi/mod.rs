@@ -113,12 +113,12 @@ pub(crate) struct OpenLimits {
 /// 40, when a prior generation had egress but no recorded count, and when the
 /// mission has no frozen budget. Old ledgers keep cancel and get no new model
 /// egress. After wiring, `UNWIRED_CONNECTION_ALLOWANCE` has zero uses. Freeze
-/// `maxRetries` 0 by passing `Harness.open` settings
+/// `maxRetries` 0. Endpoint missions already open the harness with
 /// `retry: { enabled: false, maxRetries: 0 }`, `stream.maxRetries: 0`, and
-/// `restartLimit: 0`. Not set in this slice: `restartLimit` 0 ends a crashed
-/// generation instead of replaying it, which the no-endpoint SIGKILL tests
-/// still require. The product wait must not treat an unanswered or failed run
-/// as complete. Do not edit `egress.rs` in this slice.
+/// `restartLimit: 0`, and freeze `modelHarness`. No-endpoint missions keep
+/// pi-durable's defaults so a crashed generation can still replay. The product
+/// wait does not treat an unanswered or failed run as complete. Do not edit
+/// `egress.rs` in this slice.
 fn start_model_proxy(
     endpoint: &egress::ModelEndpoint,
     model_request_cap: u64,
