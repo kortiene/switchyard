@@ -175,26 +175,31 @@ pub(super) struct ModelProxy {
     cap: Arc<GenerationCap>,
 }
 
-/// Per-generation connection allowance. A splice counts only after the
-/// pinned dial succeeds and the sockets are registered. Scope stays
-/// `generation` until #218 records a mission budget.
+/// Connection allowance for one proxy. A splice counts only after the
+/// pinned dial succeeds and the sockets are registered. `scope` is chosen
+/// by the caller (`generation` today; #218 passes `mission`).
 struct GenerationCap {
     allowance: u32,
+    scope: String,
     accepted: AtomicU32,
     refused: AtomicU32,
     exhausted: AtomicBool,
 }
 
 impl GenerationCap {
-    fn new(allowance: u32) -> Self {
+    fn new(allowance: u32, scope: &str) -> Self {
         Self {
             allowance,
+            scope: scope.to_string(),
             accepted: AtomicU32::new(0),
             refused: AtomicU32::new(0),
             exhausted: AtomicBool::new(false),
         }
     }
 
+    /// Check-then-increment is safe only because the accept thread is the
+    /// single counter. No other thread calls [`Self::record_splice`] or
+    /// [`Self::refuse`].
     fn has_room(&self) -> bool {
         self.accepted.load(Ordering::Relaxed) < self.allowance
     }
@@ -213,7 +218,7 @@ impl GenerationCap {
             "allowance": self.allowance,
             "accepted": self.accepted.load(Ordering::Relaxed),
             "refused": self.refused.load(Ordering::Relaxed),
-            "scope": "generation",
+            "scope": self.scope,
         })
     }
 }
@@ -228,7 +233,7 @@ struct SpliceSet {
 }
 
 impl ModelProxy {
-    pub(super) fn start(endpoint: &ModelEndpoint, allowance: u32) -> Result<Self> {
+    pub(super) fn start(endpoint: &ModelEndpoint, allowance: u32, scope: &str) -> Result<Self> {
         let directory = create_proxy_dir()?;
         let socket_path = directory.join(SOCKET_NAME);
         // Linux `sun_path` is 108 bytes including the trailing NUL.
@@ -264,7 +269,7 @@ impl ModelProxy {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let inflight = Arc::new(AtomicUsize::new(0));
-        let cap = Arc::new(GenerationCap::new(allowance));
+        let cap = Arc::new(GenerationCap::new(allowance, scope));
         let cap_for_accept = Arc::clone(&cap);
         let splices = Arc::new(SpliceSet {
             next_id: AtomicU64::new(1),
@@ -317,10 +322,16 @@ impl ModelProxy {
     pub(super) fn exhausted(&self) -> bool {
         self.cap.exhausted.load(Ordering::Relaxed)
     }
-}
 
-impl Drop for ModelProxy {
-    fn drop(&mut self) {
+    /// Join the accept thread, shut the splices down, and return the counts.
+    /// The read is after the join, so a connection still queued on the
+    /// listener cannot be accepted, dialed, or refused without being counted.
+    pub(super) fn finish(mut self) -> Value {
+        self.shutdown();
+        self.counts()
+    }
+
+    fn shutdown(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         // The accept thread registers every splice before it returns, so the
         // sets below are complete once this join finishes.
@@ -341,6 +352,12 @@ impl Drop for ModelProxy {
         if proxy_dir_is_ours(&self.directory) {
             let _ = fs::remove_dir(&self.directory);
         }
+    }
+}
+
+impl Drop for ModelProxy {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -405,7 +422,10 @@ fn accept_loop(
                 // Count a connection only after its dial succeeds and the
                 // splice is registered. At `accepted == allowance`, close
                 // without dialing. A full in-flight table or a failed dial
-                // does not count and does not exhaust the allowance.
+                // does not count and does not exhaust the allowance. A dial
+                // that succeeds but then fails socket setup or thread spawn
+                // is not counted: `start_splice` returns false and rolls the
+                // registration back.
                 if !cap.has_room() {
                     cap.refuse();
                     continue;
@@ -429,8 +449,9 @@ fn accept_loop(
     reap_finished(&splices);
 }
 
-/// Idle bound on both sockets, read and write. Below the 20-minute bridge
-/// wall. [`Drop`] shuts the sockets down without waiting for it.
+/// Idle bound on both sockets, read and write. At this head the bridge
+/// watchdog is 60 s and ends the generation first. [`Drop`] shuts the
+/// sockets down without waiting for this bound.
 const SPLICE_IO_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Connect on this thread, register both sockets, then spawn the copy. [`Drop`]
@@ -785,7 +806,7 @@ mod tests {
         stub.set_nonblocking(true).unwrap();
         let endpoint =
             ModelEndpoint::parse(&format!("http://{}/", stub.local_addr().unwrap())).unwrap();
-        let proxy = ModelProxy::start(&endpoint, 16).unwrap();
+        let proxy = ModelProxy::start(&endpoint, 16, "generation").unwrap();
         let splices = Arc::clone(&proxy.splices);
         let mut clients = Vec::new();
         let mut upstreams = Vec::new();
@@ -849,7 +870,7 @@ mod tests {
         decoy.set_nonblocking(true).unwrap();
         let port = stub.local_addr().unwrap().port();
         let endpoint = ModelEndpoint::parse(&format!("http://127.0.0.1:{port}/v1")).unwrap();
-        let proxy = ModelProxy::start(&endpoint, 2).unwrap();
+        let proxy = ModelProxy::start(&endpoint, 2, "generation").unwrap();
         let socket_dir = proxy.directory().to_path_buf();
         assert!(super::proxy_dir_is_ours(&socket_dir));
         let args = mount_args(proxy.directory()).unwrap();
@@ -918,7 +939,7 @@ mod tests {
         let stub = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = stub.local_addr().unwrap().port();
         let endpoint = ModelEndpoint::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
-        let proxy = ModelProxy::start(&endpoint, 2).unwrap();
+        let proxy = ModelProxy::start(&endpoint, 2, "generation").unwrap();
         let mut client = UnixStream::connect(proxy.directory().join(SOCKET_NAME)).unwrap();
         let (_stuck, _) = stub.accept().unwrap();
         client.write_all(b"still-open").unwrap();
@@ -937,7 +958,7 @@ mod tests {
         stub.set_nonblocking(true).unwrap();
         let port = stub.local_addr().unwrap().port();
         let endpoint = ModelEndpoint::parse(&format!("http://127.0.0.1:{port}/v1")).unwrap();
-        let proxy = ModelProxy::start(&endpoint, 128).unwrap();
+        let proxy = ModelProxy::start(&endpoint, 128, "generation").unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let server = thread::spawn(move || {
@@ -1027,7 +1048,7 @@ mod tests {
             stub.local_addr().unwrap().port()
         ))
         .unwrap();
-        let proxy = ModelProxy::start(&endpoint, 2).unwrap();
+        let proxy = ModelProxy::start(&endpoint, 2, "generation").unwrap();
         let body = b"whole-response-body";
         let response = format!(
             "HTTP/1.0 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1111,7 +1132,7 @@ mod tests {
         stub.set_nonblocking(true).unwrap();
         let endpoint =
             ModelEndpoint::parse(&format!("http://{}/v1", stub.local_addr().unwrap())).unwrap();
-        let proxy = ModelProxy::start(&endpoint, 40).unwrap();
+        let proxy = ModelProxy::start(&endpoint, 40, "generation").unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let served = Arc::new(AtomicUsize::new(0));
         let flag = Arc::clone(&stop);
@@ -1202,7 +1223,7 @@ mod tests {
         let stub = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = stub.local_addr().unwrap().port();
         let endpoint = ModelEndpoint::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
-        let proxy = ModelProxy::start(&endpoint, 2).unwrap();
+        let proxy = ModelProxy::start(&endpoint, 2, "generation").unwrap();
         let (eof, upstream_eof) = mpsc::channel();
         thread::spawn(move || {
             let (mut upstream, _) = stub.accept().unwrap();
