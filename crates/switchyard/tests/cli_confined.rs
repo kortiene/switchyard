@@ -594,3 +594,220 @@ fn cli_sigint_during_foreground_wait_cancels_with_cgroup_proof() {
     assert_eq!(receipt["proven"], true, "{receipt}");
     assert!(receipt["cgroup"].is_object(), "{receipt}");
 }
+
+/// SIGKILL while a turn is still open. The next open must record
+/// `unsettled_turn` instead of failing the following submit with
+/// `bridge: busy`. Cancel then uses the same cgroup proof.
+#[test]
+fn cli_sigkill_mid_turn_reopens_uncertain_and_cancel_needs_proof() {
+    for key in [
+        "SWITCHYARD_PI_RUNTIME",
+        "SWITCHYARD_BWRAP",
+        "SWITCHYARD_CGROUP_ROOT",
+        "SWITCHYARD_PI_NODE",
+        "SWITCHYARD_BRIDGE_LAUNCHER",
+        "SWITCHYARD_BRIDGE_POLICY",
+        "SWITCHYARD_EXECUTION_HELPER",
+    ] {
+        require_env(key);
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let db = tmp.path().join("mission.sqlite");
+    let root = tmp.path().join("workspaces");
+    std::fs::create_dir(&root).unwrap();
+    init_repo(&repo);
+    let db_arg = db.to_str().unwrap();
+    let (code, created, error) = run(&[
+        "mission",
+        "create",
+        "--runtime",
+        "confined-pi",
+        "--db",
+        db_arg,
+        "--repo",
+        repo.to_str().unwrap(),
+        "--issue",
+        "227",
+        "--objective",
+        "die mid turn",
+        "--acceptance",
+        "reopen names the unsettled turn",
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let mission = created["mission"]["missionId"].as_str().unwrap();
+    let attempt = created["mission"]["attemptId"].as_str().unwrap();
+    let (code, prepared, error) = run(&[
+        "mission",
+        "workspace",
+        "--runtime",
+        "confined-pi",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--attempt",
+        attempt,
+        "--root",
+        root.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(prepared["workspace"]["state"], "ready");
+    let frozen = switchyard_core::read_attempt_freeze(Path::new(db_arg), mission).unwrap();
+    let digest = switchyard_core::bound_plan_digest("fixture plan", attempt, &frozen).unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "UPDATE missions SET phase='awaiting_plan_approval' WHERE id=?1",
+        [mission],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE attempts SET frozen_inputs_json=?1, plan_body='fixture plan', plan_digest=?2 WHERE id=?3",
+        rusqlite::params![frozen, digest, attempt],
+    )
+    .unwrap();
+    drop(conn);
+    let (code, status, error) = run(&[
+        "mission",
+        "status",
+        "--runtime",
+        "confined-pi",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    let revision = status["missions"][0]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let payload = json!({"planDigest": digest}).to_string();
+    let mut child = Command::new(bin())
+        .args([
+            "mission",
+            "command",
+            "--runtime",
+            "confined-pi",
+            "--db",
+            db_arg,
+            "--mission",
+            mission,
+            "--kind",
+            "approve_plan",
+            "--expected-revision",
+            &revision,
+            "--payload",
+            &payload,
+        ])
+        .env("SWITCHYARD_CONFINED_FIXTURE", "process-hold")
+        .env_remove("SWITCHYARD_MODEL_ENDPOINT")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let phase: String = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row("SELECT phase FROM missions WHERE id=?1", [mission], |row| {
+                row.get(0)
+            })
+            .unwrap_or_default();
+        let effects: i64 = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM linux_execution_effects", [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(0);
+        if phase == "implementing" && effects > 0 {
+            break;
+        }
+        match child.try_wait().unwrap() {
+            Some(status) => panic!("turn ended before SIGKILL: {status} phase={phase}"),
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            None => panic!("process-hold did not enter the turn"),
+        }
+    }
+    let status = Command::new("kill")
+        .args(["-KILL", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let killed = child.wait_with_output().unwrap();
+    assert!(!killed.status.success());
+    let (code, recovered, error) = run(&[
+        "mission",
+        "recover",
+        "--runtime",
+        "confined-pi",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+    ]);
+    let recovered_text = format!("{recovered} {error}");
+    assert!(
+        !recovered_text.contains("bridge: busy"),
+        "reopen must not surface bridge: busy ({code}): {recovered_text}"
+    );
+    let (code, status, error) = run(&[
+        "mission",
+        "status",
+        "--runtime",
+        "confined-pi",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(
+        status["missions"][0]["phase"], "needs_attention",
+        "{status}"
+    );
+    assert_eq!(
+        status["missions"][0]["attentionReason"], "unsettled_turn",
+        "{status}"
+    );
+    let payload: String = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT payload_canonical FROM commands WHERE kind='detect_uncertainty' ORDER BY created_at DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(payload.contains("unsettled_turn"), "{payload}");
+    assert!(payload.contains("contentDigest"), "{payload}");
+    let revision = status["missions"][0]["revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let (code, cancelled, error) = run(&[
+        "mission",
+        "command",
+        "--runtime",
+        "confined-pi",
+        "--db",
+        db_arg,
+        "--mission",
+        mission,
+        "--kind",
+        "cancel",
+        "--expected-revision",
+        &revision,
+    ]);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(cancelled["mission"]["phase"], "cancelled", "{cancelled}");
+    let export =
+        switchyard_core::Host::export_document(Path::new(db_arg), mission, "s2-2").unwrap();
+    let receipt = export["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["kind"] == "confirm_cancelled")
+        .expect("confirm_cancelled")["receipt"]
+        .clone();
+    assert_eq!(receipt["proven"], true, "{receipt}");
+}

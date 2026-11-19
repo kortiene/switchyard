@@ -239,7 +239,93 @@ impl Host {
         self.store.mark_runtime_initialized(&binding.attempt_id)?;
         self.confined_mut()?
             .sessions
-            .insert(binding.session_id, session);
+            .insert(binding.session_id.clone(), session);
+        // The previous generation was just proved dead by `rekill_and_prove`
+        // inside `open`. An unsettled submission still in its sqlite belongs
+        // to that generation. This process has not submitted yet, so the
+        // count is not this generation's own turn and it is not a timeout.
+        self.note_unsettled_dead_generation(mission_id)?;
+        Ok(())
+    }
+
+    /// `recovered.proven` is the fresh cgroup proof of the generation that
+    /// just died. A submission still open there is `unsettled_turn`. The way
+    /// out is cancel, then `confirm_cancelled`, on that same stop path.
+    fn note_unsettled_dead_generation(&mut self, mission_id: &str) -> Result<()> {
+        let mission = self.store.load_mission(mission_id)?;
+        if mission.phase.is_terminal()
+            || matches!(
+                mission.phase,
+                Phase::Cancelling | Phase::Pausing | Phase::NeedsAttention
+            )
+        {
+            return Ok(());
+        }
+        let binding = self.binding(&mission);
+        let recovered = self
+            .confined_mut()?
+            .sessions
+            .get(&binding.session_id)
+            .map(|session| session.lifecycle()["recovered"].clone())
+            .unwrap_or(Value::Null);
+        if recovered["proven"] != true || recovered["generation"].as_u64().is_none() {
+            return Ok(());
+        }
+        let ids: Vec<String> = self
+            .store
+            .list_commands(mission_id)?
+            .into_iter()
+            .filter(|command| command.kind.is_runtime_bound())
+            .map(|command| command.request_id)
+            .take(32)
+            .collect();
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let snapshot = match self.confined_inspect(&binding, &id_refs) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                let mission = self.store.load_mission(mission_id)?;
+                self.admit_unsettled_turn(&mission, "unreadable")?;
+                return Ok(());
+            }
+        };
+        if snapshot["unsettledSubmissionCount"].as_u64().unwrap_or(0) == 0 {
+            return Ok(());
+        }
+        let mut turns: Vec<String> = snapshot["commands"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| {
+                let status = row["status"].as_str()?;
+                if status == "done" {
+                    return None;
+                }
+                row["commandId"].as_str().map(str::to_owned)
+            })
+            .collect();
+        if turns.is_empty() {
+            turns.push("unsettled-submission".into());
+        }
+        let mission = self.store.load_mission(mission_id)?;
+        self.admit_unsettled_turn(&mission, &turns.join(","))?;
+        Ok(())
+    }
+
+    fn admit_unsettled_turn(
+        &mut self,
+        mission: &crate::domain::MissionRecord,
+        turn: &str,
+    ) -> Result<()> {
+        if mission.phase == Phase::NeedsAttention || mission.phase.is_terminal() {
+            return Ok(());
+        }
+        self.admit_host_fact(
+            mission,
+            CommandBody::DetectUncertainty {
+                reason: AttentionReason::UnsettledTurn,
+                content_digest: Some(turn.to_string()),
+            },
+        )?;
         Ok(())
     }
 
@@ -478,6 +564,9 @@ impl Host {
             return Ok(count);
         }
         self.ensure_confined_session(mission_id)?;
+        if self.store.load_mission(mission_id)?.phase == Phase::NeedsAttention {
+            return Ok(count);
+        }
         if self.bridge_termination_proven(&binding)? {
             // The settle proof already stopped this bridge. Do not send on it
             // again. A repair is refused and left pending; other runtime work

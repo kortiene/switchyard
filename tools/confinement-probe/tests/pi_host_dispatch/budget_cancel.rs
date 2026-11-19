@@ -120,6 +120,68 @@ fn pre_budget_ledger_cancels_with_a_cgroup_proof() {
     assert!(receipt["cgroup"].is_object(), "{receipt}");
 }
 
+/// A quarantined writer whose own leaf does not prove empty blocks
+/// `confirm_cancelled`. The mission bridge may still stop; that is not
+/// evidence this cgroup is empty.
+#[test]
+fn unproven_writer_leaf_blocks_confirm_cancelled() {
+    let (world, mut host) = World::new("answer");
+    let snap = host.snapshot(&world.mission).unwrap();
+    let root = std::path::PathBuf::from(std::env::var("SWITCHYARD_CGROUP_ROOT").unwrap());
+    let leaf = root.join(format!("unproven-writer-{}", std::process::id()));
+    std::fs::create_dir_all(&leaf).unwrap();
+    let meta = std::fs::metadata(&leaf).unwrap();
+    use std::os::unix::fs::MetadataExt;
+    let request = serde_json::json!({
+        "operation": {"method": "exec_start", "argv": ["/bin/true"]},
+        "scope": "linux.exec.start.v1",
+        "deadlineMs": 1,
+        "toolTaskId": "unproven",
+        "effectKey": "unproven-start"
+    });
+    rusqlite::Connection::open(world.db())
+        .unwrap()
+        .execute(
+            "INSERT INTO linux_execution_effects(
+                operation_id, mission_id, attempt_id, session_id, payload_hash, request_json,
+                started_generation, state, cgroup_path, cgroup_dev, cgroup_ino, boot_id,
+                entered_at, created_at
+             ) VALUES ('unproven-writer',?1,?2,?3,'sha256:unproven',?4,?5,'uncertain',?6,?7,?8,'not-this-boot',1,?9)",
+            rusqlite::params![
+                snap.mission_id,
+                snap.attempt_id,
+                snap.session_id,
+                request.to_string(),
+                host.generation(),
+                leaf.to_str().unwrap(),
+                i64::try_from(meta.dev()).unwrap(),
+                i64::try_from(meta.ino()).unwrap(),
+                1_i64,
+            ],
+        )
+        .unwrap();
+    let settled = host.interrupt_operator(&world.mission).unwrap();
+    assert_eq!(settled.phase, Phase::Cancelling);
+    let value = settled.to_json();
+    let row = value["linuxExecutionEffects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|effect| effect["operationId"] == "unproven-writer")
+        .expect("quarantined writer");
+    assert_eq!(row["state"], "uncertain", "{row}");
+    assert_eq!(row["receiptRetained"], false, "{row}");
+    assert!(
+        value["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|command| command["kind"] != "confirm_cancelled"),
+        "{value}"
+    );
+    let _ = std::fs::remove_dir_all(&leaf);
+}
+
 #[test]
 fn sigint_worker() {
     let Ok(root) = std::env::var("SW_BUDGET_ROOT") else {
