@@ -25,7 +25,7 @@ Proposed register row for [`wiki/decisions/invariants.md`](../../wiki/decisions/
   - `FactProfile.uncertainty_is_host_fact`: whether uncertainty is recorded as a supervisor fact instead of a runtime observation.
   - `LinuxLedgerProfile`: whether Linux effects are admitted, an admitted stop is kept, and live effects are supervised.
   - `GuidanceProfile`: operator status text. A recorded adapter name resolves through a table of the names `name()` publishes, paired with that variant's `guidance()` value. Unknown names stay inert.
-  - `AuthorityProfile`: whether the adapter may certify mission facts and quiescence, and which command check it declared (`Simulated` or `PiProtocol`). `validate_admission` and `validate_command` read this profile. `certifies_mission_facts` is an authority gate only. Plan shape, digest, and freeze checks stay in Host admission.
+  - `AuthorityProfile`: whether the adapter may certify mission facts and quiescence, which command check it declared (`Simulated` or `PiProtocol`), and `host_proves_settle` (set explicitly on every variant: confined true, Pi probe false, Fake false; no default). `validate_admission` and `validate_command` read this profile. `certifies_mission_facts` is an authority gate only. Plan shape, digest, and freeze checks stay in Host admission.
   - `PlanningToolProfile.admits_writes`: whether planning may admit a write tool. Every sealed adapter sets it false. The host calls `admit_planning_tool` and does not branch on the variant.
   - `ExecutionProfile.simulated`: whether the in-process simulated `ExecutionEnv` is available. Only Fake sets it.
 - `Host::recover` runs one recovery sequence parameterized by `RecoveryProfile`.

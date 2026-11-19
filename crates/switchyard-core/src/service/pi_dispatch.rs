@@ -370,6 +370,144 @@ impl Host {
         Ok(())
     }
 
+    /// Operator `request_verification` on a host whose profile sets
+    /// `host_proves_settle`. The operator body is not a ledger command.
+    ///
+    /// Order: abort the session, `stop` (which drops the model proxy and runs
+    /// `rekill_and_prove`), `reconcile_execution`, then `ops_blocked`. Only a
+    /// proven empty bridge with reconciled effects admits
+    /// `RequestVerification{quiescent:true}` through [`Host::admit_host_fact`].
+    pub(super) fn settle_confined_under_proof(
+        &mut self,
+        request: AdmitRequest,
+    ) -> Result<AdmitResult> {
+        let mission = self.store.load_mission(&request.mission_id)?;
+        let attempt_id = request
+            .attempt_id
+            .clone()
+            .unwrap_or_else(|| mission.attempt.id.clone());
+        if attempt_id != mission.attempt.id {
+            return Err(Error::BindingMismatch {
+                detail: "attempt does not match the mission's active attempt".into(),
+            });
+        }
+        if mission.phase.is_terminal() {
+            return Err(Error::TerminalImmutable {
+                phase: mission.phase.to_string(),
+            });
+        }
+        if request.expected_revision != mission.revision {
+            return Err(Error::StaleRevision {
+                expected: request.expected_revision,
+                actual: mission.revision,
+            });
+        }
+        if mission.phase != Phase::Implementing {
+            return Err(Error::IllegalTransition {
+                from: mission.phase.to_string(),
+                command: "request_verification".into(),
+            });
+        }
+        if self.frozen_input_drifted(&mission)?
+            && !crate::freeze::drift_exit(mission.phase, CommandKind::RequestVerification)
+        {
+            return self.refuse_frozen_input_drift(&mission);
+        }
+        if self.plan_digest_mismatched(&mission)?
+            && !crate::freeze::drift_exit(mission.phase, CommandKind::RequestVerification)
+        {
+            if mission.phase != Phase::NeedsAttention && !mission.phase.is_terminal() {
+                self.record_plan_digest_mismatch(&mission)?;
+            }
+            return Err(Error::guard(
+                "stored plan digest does not match the plan body; the command was not applied",
+            ));
+        }
+        self.ensure_confined_session(&mission.id)?;
+        let binding = self.binding(&mission);
+        if self.confined_mut()?.is_released(&binding.session_id) {
+            return Err(Error::SettleNotProven);
+        }
+        let proof = self.abort_stop_and_prove(&binding)?;
+        self.reconcile_execution(&mission.id)?;
+        let current = self.store.load_mission(&mission.id)?;
+        if current.phase != Phase::Implementing {
+            return Err(Error::SettleNotProven);
+        }
+        if proof.get("proven").and_then(Value::as_bool) != Some(true)
+            || self.settle_blocked(&mission.id)?
+        {
+            return Err(Error::SettleNotProven);
+        }
+        let current = self.store.load_mission(&mission.id)?;
+        self.admit_host_fact(
+            &current,
+            CommandBody::RequestVerification { quiescent: true },
+        )
+    }
+
+    fn settle_blocked(&self, mission_id: &str) -> Result<bool> {
+        if self.store.ops_blocked(mission_id)? {
+            return Ok(true);
+        }
+        Ok(self.store.linux_views(mission_id)?.iter().any(|view| {
+            !view.superseded && !matches!(view.state.as_str(), "completed" | "not_applied")
+        }))
+    }
+
+    fn bridge_termination_proven(&mut self, binding: &RuntimeBinding) -> Result<bool> {
+        let Some(session) = self.confined_mut()?.sessions.get(&binding.session_id) else {
+            return Ok(false);
+        };
+        Ok(session.lifecycle()["termination"]["proven"] == true)
+    }
+
+    /// Abort, then `stop`. `stop` drops the model proxy after the bridge dies
+    /// and runs `rekill_and_prove`. A retry calls `reprove` so an unproven
+    /// leaf is proved again. This does not record `needs_attention`.
+    fn abort_stop_and_prove(&mut self, binding: &RuntimeBinding) -> Result<Value> {
+        let session_id = binding.session_id.clone();
+        let mut session = self
+            .confined_mut()?
+            .sessions
+            .remove(&session_id)
+            .ok_or_else(|| Error::guard("confined session is unavailable"))?;
+        let phase = session.lifecycle()["phase"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if phase != "stopped" && phase != "uncertain" {
+            let abort_id = format!("settle-abort-{}", binding.generation);
+            // The operator command is not admitted. This abort is the session
+            // stop, not a ledger row. `stop` then proves the cgroup.
+            let _ = session.call(
+                binding,
+                "runtime.abort",
+                Some(&abort_id),
+                json!({}),
+                &mut |_| PiEffectOutcome::Rejected,
+            );
+        }
+        let proof = match session.stop() {
+            Ok(evidence) => evidence,
+            Err(_) => session.reprove()?,
+        };
+        let lifecycle = session.lifecycle();
+        let observation = self
+            .store
+            .pi_host_view(&binding.attempt_id)?
+            .map(|view| view["observation"].clone())
+            .unwrap_or(Value::Null);
+        self.confined_mut()?.sessions.insert(session_id, session);
+        self.store.save_pi_host(
+            &binding.attempt_id,
+            binding.generation,
+            &lifecycle,
+            &observation,
+        )?;
+        Ok(proof)
+    }
+
     pub(super) fn dispatch_confined_work(&mut self, mission_id: &str) -> Result<usize> {
         let count = self.dispatch_confined_work_inner(mission_id)?;
         // Terminal and superseded bridges are proven stopped here. Pause keeps
@@ -396,6 +534,19 @@ impl Host {
             return Ok(count);
         }
         self.ensure_confined_session(mission_id)?;
+        if self.bridge_termination_proven(&binding)? {
+            // The settle proof already stopped this bridge. Do not call it again
+            // and do not record uncertainty from a dead transport.
+            for command in self.store.list_commands(mission_id)? {
+                if command.state == CommandState::Pending && is_runtime_work(command.kind) {
+                    self.store.supersede_pending(
+                        &command.id,
+                        "admission closed before runtime accepted this command",
+                    )?;
+                }
+            }
+            return Ok(count);
+        }
         self.confined_history(&mission)?;
         for command in self
             .store
@@ -515,8 +666,52 @@ impl Host {
         }
         self.stop_confined_linux_writers(mission_id)?;
         self.reconcile_execution(mission_id)?;
-        self.confined_history(&mission)?;
         let mut count = 0;
+        // A settle that already proved the bridge empty leaves the session
+        // stopped. Cancel still uses this path: kill writers, acknowledge the
+        // stop from that proof, then confirm. No second protocol call, no DNS,
+        // and no credential read.
+        if self.bridge_termination_proven(&binding)? {
+            for command in &stops {
+                let request = RuntimeRequest {
+                    binding: binding.clone(),
+                    request_id: command.request_id.clone(),
+                    payload_hash: command.payload_hash.clone(),
+                    method: "abort",
+                };
+                let receipt = RuntimeReceipt {
+                    receipt_id: request.request_id.clone(),
+                    request_id: request.request_id.clone(),
+                    payload_hash: request.payload_hash.clone(),
+                };
+                self.store
+                    .acknowledge(&command.id, &receipt_json(&receipt, self.runtime.name()))?;
+                count += 1;
+            }
+            for command in self.store.list_commands(mission_id)? {
+                if command.state == CommandState::Pending && is_runtime_work(command.kind) {
+                    self.store.supersede_pending(
+                        &command.id,
+                        "admission closed before runtime accepted this command",
+                    )?;
+                }
+            }
+            self.reconcile_execution(mission_id)?;
+            if !self.store.ops_blocked(mission_id)? {
+                let current = self.store.load_mission(mission_id)?;
+                let body = match current.phase {
+                    Phase::Pausing => Some(CommandBody::ConfirmStopped),
+                    Phase::Cancelling => Some(CommandBody::ConfirmCancelled),
+                    _ => None,
+                };
+                if let Some(body) = body {
+                    self.admit_host_fact(&current, body)?;
+                }
+            }
+            self.release_finished_sessions()?;
+            return Ok(count);
+        }
+        self.confined_history(&mission)?;
         for command in stops {
             let request = RuntimeRequest {
                 binding: binding.clone(),

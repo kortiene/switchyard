@@ -139,6 +139,8 @@ This table is normative for the proposed M1 implementation. Rust rejects every u
 | Any nonterminal state except needs_attention | detect uncertainty, invalid approval, ERROR/INCOMPLETE, exhausted limits, or failed stop | Revoke mutation/publication admission; persist prior phase, reason and permitted recovery target; invalidate stale evidence/approval | needs_attention |
 | needs_attention | explicit recovery | Prove ownership and effect outcomes; restore only a recorded, revalidated normal phase or paused; require that phase's guards; content drift returns to verifying, never directly approved | validated recovery target |
 
+A confined host admits that implementing → verifying edge only as a host-supervisor fact, `RequestVerification{quiescent:true}`, after it aborts the session, proves the bridge cgroup empty, and reconciles effects.
+
 Normal phases are draft, planning, awaiting_plan_approval, implementing, verifying, awaiting_review, approved, and publishing. Recovery cannot jump past a failed gate: pending stop/cancel intents must settle before resuming, and uncertain publication must reconcile before another publish attempt. A pause during publishing is rejected; cancellation during publishing follows the delivery-reconciliation rows above.
 
 published, rejected, and cancelled are terminal for the attempt. A successor attempt requires an explicit new command and identity; terminal records are never reopened. Policy/scope/verifier changes also require a successor attempt and new plan approval. A restart is not a new business attempt.

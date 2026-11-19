@@ -3,6 +3,7 @@
 //! calls PiBridge/ConfinedPiSession directly.
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -10,7 +11,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use switchyard_core::{
     AdmitRequest, CommandBody, CommandOrigin, ConfinedPiConfig, CreateMission, Host,
-    LinuxExecutionConfig, Phase, payload_hash,
+    LinuxExecutionConfig, ModelEndpoint, Phase, payload_hash,
 };
 
 #[path = "pi_host_dispatch/composed.rs"]
@@ -193,6 +194,53 @@ fn command_origin(host: &Host, mission: &str, kind: &str) -> String {
         .unwrap()
         .to_string()
 }
+fn request_verification(
+    host: &mut Host,
+    mission: &str,
+    quiescent: bool,
+) -> switchyard_core::Result<()> {
+    host.admit(AdmitRequest {
+        command_id: None,
+        mission_id: mission.into(),
+        attempt_id: None,
+        expected_revision: host.snapshot(mission).unwrap().revision,
+        actor: "operator".into(),
+        origin: CommandOrigin::Operator,
+        body: CommandBody::RequestVerification { quiescent },
+    })
+    .map(|_| ())
+}
+
+fn verification_commands(db: &Path, mission: &str) -> Vec<(String, bool)> {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT origin, payload_canonical FROM commands
+             WHERE mission_id=?1 AND kind='request_verification' ORDER BY seq",
+        )
+        .unwrap();
+    statement
+        .query_map([mission], |row| {
+            let origin: String = row.get(0)?;
+            let payload: String = row.get(1)?;
+            Ok((origin, payload))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .map(|(origin, payload)| {
+            let value: Value = serde_json::from_str(&payload).unwrap();
+            (origin, value["body"]["quiescent"] == true)
+        })
+        .collect()
+}
+
+fn schema_version(db: &Path) -> i64 {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap()
+}
+
 fn admit(host: &mut Host, mission: &str, body: CommandBody) {
     host.admit(AdmitRequest {
         command_id: None,
@@ -344,6 +392,186 @@ fn host_confined_refuses_forged_authority_and_adapter_switch() {
     drop(host);
     assert!(Host::open(&world.db()).is_err());
     assert!(Host::open_pi_probe(&world.db(), &env_path("SWITCHYARD_PI_NODE")).is_err());
+}
+
+#[test]
+fn confined_request_verification_reaches_verifying_under_proof() {
+    let (world, mut host) = World::new("answer");
+    host.dispatch_pending(&world.mission).unwrap();
+    until(&mut host, &world.mission, |value| {
+        value["piHost"]["observation"]["runtimeIdle"] == true
+    });
+    let before = host.snapshot(&world.mission).unwrap();
+    // The operator flag is not the fact. The host admits quiescent:true.
+    request_verification(&mut host, &world.mission, false).unwrap();
+    let snap = host.snapshot(&world.mission).unwrap();
+    assert_eq!(snap.phase, Phase::Verifying);
+    assert!(snap.to_json()["attentionReason"].is_null());
+    let rows = verification_commands(&world.db(), &world.mission);
+    assert_eq!(rows, vec![("host_supervisor".into(), true)]);
+    assert_eq!(
+        snap.to_json()["piHost"]["lifecycle"]["termination"]["proven"],
+        true
+    );
+    assert_eq!(schema_version(&world.db()), 12);
+    assert!(
+        snap.commands
+            .iter()
+            .filter(|command| command.kind == "request_verification")
+            .count()
+            == before
+                .commands
+                .iter()
+                .filter(|command| command.kind == "request_verification")
+                .count()
+                + 1
+    );
+    let error = host.verify_mission(&world.mission).unwrap_err();
+    assert_ne!(error.category(), "illegal_transition", "{error}");
+    assert_eq!(
+        host.snapshot(&world.mission).unwrap().phase,
+        Phase::Verifying
+    );
+}
+
+#[test]
+fn live_writer_is_settle_not_proven_until_cancel_or_retry() {
+    let (world, mut host) = World::new("process-hold");
+    host.dispatch_pending(&world.mission).unwrap();
+    until(&mut host, &world.mission, |value| {
+        value["linuxExecutionEffects"]
+            .as_array()
+            .is_some_and(|effects| effects.iter().any(|effect| effect["state"] == "running"))
+            && world.workspace.join("process.heartbeat").exists()
+    });
+    let error = request_verification(&mut host, &world.mission, true).unwrap_err();
+    assert_eq!(error.category(), "settle_not_proven", "{error}");
+    let blocked = host.snapshot(&world.mission).unwrap();
+    assert_eq!(blocked.phase, Phase::Implementing);
+    assert!(blocked.to_json()["attentionReason"].is_null());
+    assert!(
+        !blocked
+            .commands
+            .iter()
+            .any(|command| command.kind == "detect_uncertainty")
+    );
+    assert!(verification_commands(&world.db(), &world.mission).is_empty());
+    assert_eq!(
+        blocked.to_json()["piHost"]["lifecycle"]["termination"]["proven"],
+        true
+    );
+
+    let again = request_verification(&mut host, &world.mission, true).unwrap_err();
+    assert_eq!(again.category(), "settle_not_proven", "{again}");
+    assert_eq!(
+        host.snapshot(&world.mission).unwrap().phase,
+        Phase::Implementing
+    );
+
+    admit(&mut host, &world.mission, CommandBody::Cancel);
+    host.dispatch_stops(&world.mission).unwrap();
+    let cancelled = host.snapshot(&world.mission).unwrap();
+    assert_eq!(cancelled.phase, Phase::Cancelled);
+    assert_eq!(
+        cancelled.to_json()["piHost"]["lifecycle"]["termination"]["proven"],
+        true
+    );
+}
+
+#[test]
+fn retry_after_the_writer_exits_reaches_verifying() {
+    let (world, mut host) = World::new("process-hold");
+    host.dispatch_pending(&world.mission).unwrap();
+    until(&mut host, &world.mission, |value| {
+        value["linuxExecutionEffects"]
+            .as_array()
+            .is_some_and(|effects| effects.iter().any(|effect| effect["state"] == "running"))
+            && world.workspace.join("process.heartbeat").exists()
+    });
+    let error = request_verification(&mut host, &world.mission, true).unwrap_err();
+    assert_eq!(error.category(), "settle_not_proven", "{error}");
+    assert_eq!(
+        host.snapshot(&world.mission).unwrap().phase,
+        Phase::Implementing
+    );
+    let conn = rusqlite::Connection::open(world.db()).unwrap();
+    let paths: Vec<String> = conn
+        .prepare(
+            "SELECT cgroup_path FROM linux_execution_effects
+             WHERE mission_id=?1 AND cgroup_path IS NOT NULL",
+        )
+        .unwrap()
+        .query_map([&world.mission], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(!paths.is_empty());
+    for path in &paths {
+        fs::write(Path::new(path).join("cgroup.kill"), "1").unwrap();
+    }
+    let drained = Instant::now() + Duration::from_secs(10);
+    while paths.iter().any(|path| {
+        fs::read_to_string(Path::new(path).join("cgroup.procs"))
+            .map(|text| !text.trim().is_empty())
+            .unwrap_or(false)
+    }) && Instant::now() < drained
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The helper writes result.json after the sandbox exits. Give it that beat
+    // before the host reconciles, so a missing result is not an orphan.
+    std::thread::sleep(Duration::from_millis(200));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match request_verification(&mut host, &world.mission, true) {
+            Ok(()) => break,
+            Err(error) if error.category() == "settle_not_proven" && Instant::now() < deadline => {
+                assert_eq!(
+                    host.snapshot(&world.mission).unwrap().phase,
+                    Phase::Implementing,
+                    "{error}"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+    let snap = host.snapshot(&world.mission).unwrap();
+    assert_eq!(snap.phase, Phase::Verifying);
+    assert_eq!(
+        verification_commands(&world.db(), &world.mission),
+        vec![("host_supervisor".into(), true)]
+    );
+    assert!(snap.to_json()["attentionReason"].is_null());
+}
+
+#[test]
+fn settle_drops_the_model_proxy_before_verify() {
+    let (world, mut host) = World::configured("answer", |_, config| {
+        config.model_endpoint = Some(ModelEndpoint::parse("http://127.0.0.1:9/v1").unwrap());
+    });
+    host.dispatch_pending(&world.mission).unwrap();
+    until(&mut host, &world.mission, |value| {
+        value["piHost"]["observation"]["runtimeIdle"] == true
+    });
+    request_verification(&mut host, &world.mission, false).unwrap();
+    let snap = host.snapshot(&world.mission).unwrap();
+    assert_eq!(snap.phase, Phase::Verifying);
+    let directory = snap.to_json()["piHost"]["lifecycle"]["proxyDirectory"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!Path::new(&directory).exists(), "{directory}");
+    assert!(
+        UnixStream::connect(Path::new(&directory).join("endpoint.sock")).is_err(),
+        "{directory}"
+    );
+    let error = host.verify_mission(&world.mission).unwrap_err();
+    assert_ne!(error.category(), "illegal_transition", "{error}");
+    assert_eq!(
+        host.snapshot(&world.mission).unwrap().phase,
+        Phase::Verifying
+    );
 }
 
 #[test]

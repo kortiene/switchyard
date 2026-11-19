@@ -823,7 +823,39 @@ impl Host {
     }
 
     pub fn admit(&mut self, request: AdmitRequest) -> Result<AdmitResult> {
+        // The profile is the only branch. The operator command is not a ledger
+        // row: the settle routine admits the host fact after the proof.
+        if self.runtime.authority().host_proves_settle
+            && request.origin == CommandOrigin::Operator
+            && matches!(request.body, CommandBody::RequestVerification { .. })
+        {
+            return self.settle_under_proof(request);
+        }
         self.admit_attached(request, None)
+    }
+
+    /// Confined `request_verification`. Reads [`AuthorityProfile::host_proves_settle`]
+    /// only; the caller already checked it. The operator body is not admitted.
+    fn settle_under_proof(&mut self, request: AdmitRequest) -> Result<AdmitResult> {
+        #[cfg(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        ))]
+        {
+            self.settle_confined_under_proof(request)
+        }
+        #[cfg(not(all(
+            feature = "pi-contract",
+            feature = "linux-execution",
+            target_os = "linux"
+        )))]
+        {
+            // Unreachable. Only the confined adapter sets `host_proves_settle`,
+            // and that variant exists only in the cfg arm above.
+            let _ = request;
+            Err(Error::guard("settle proof requires a confined session"))
+        }
     }
 
     fn admit_attached(
@@ -861,8 +893,12 @@ impl Host {
         let host_pass = host_verifier_pass(&request.body, verification, &mission.content_digest);
         if host_fact {
             // The body allowlist lives in [`host_supervisor_fact`].
+            // `RequestVerification{quiescent:true}` also requires the profile.
             if request.origin != CommandOrigin::HostSupervisor
-                || !(host_supervisor_fact(&request.body) || host_pass)
+                || !(host_supervisor_fact(
+                    &request.body,
+                    self.runtime.authority().host_proves_settle,
+                ) || host_pass)
             {
                 return Err(Error::guard(
                     "host facts are limited to supervisor stop and uncertainty proofs",
@@ -2240,7 +2276,7 @@ impl Host {
         mission: &MissionRecord,
         body: CommandBody,
     ) -> Result<AdmitResult> {
-        if !host_supervisor_fact(&body) {
+        if !host_supervisor_fact(&body, self.runtime.authority().host_proves_settle) {
             return Err(Error::guard("unsupported Host-owned fact"));
         }
         self.admit_checked(
@@ -3136,13 +3172,17 @@ fn host_verifier_pass(
 
 /// Supervisor facts the Host may record. Runtime observations and operator
 /// commands never use this list.
-fn host_supervisor_fact(body: &CommandBody) -> bool {
-    matches!(
-        body,
+///
+/// `RequestVerification{quiescent:true}` is the one extra body, and only when
+/// `host_proves_settle` is set. `quiescent:false` stays off the list.
+fn host_supervisor_fact(body: &CommandBody, host_proves_settle: bool) -> bool {
+    match body {
         CommandBody::DetectUncertainty { .. }
-            | CommandBody::ConfirmStopped
-            | CommandBody::ConfirmCancelled
-    )
+        | CommandBody::ConfirmStopped
+        | CommandBody::ConfirmCancelled => true,
+        CommandBody::RequestVerification { quiescent: true } => host_proves_settle,
+        _ => false,
+    }
 }
 
 /// Put a popped observation back. The apply or quarantine error stays
@@ -3245,23 +3285,55 @@ mod create_acceptance_tests {
 
 #[cfg(test)]
 mod host_fact_tests {
-    use super::host_supervisor_fact;
+    use super::{Host, host_supervisor_fact};
     use crate::domain::{AttentionReason, CommandBody};
 
     #[test]
-    fn host_supervisor_facts_are_only_stop_and_uncertainty() {
-        assert!(host_supervisor_fact(&CommandBody::ConfirmStopped));
-        assert!(host_supervisor_fact(&CommandBody::ConfirmCancelled));
-        assert!(host_supervisor_fact(&CommandBody::DetectUncertainty {
+    fn host_supervisor_facts_are_stop_uncertainty_and_a_proven_settle() {
+        let stop = |body: &CommandBody| host_supervisor_fact(body, false);
+        assert!(stop(&CommandBody::ConfirmStopped));
+        assert!(stop(&CommandBody::ConfirmCancelled));
+        assert!(stop(&CommandBody::DetectUncertainty {
             reason: AttentionReason::ExecutionUncertain,
             content_digest: None,
         }));
-        assert!(!host_supervisor_fact(&CommandBody::Pause));
-        assert!(!host_supervisor_fact(&CommandBody::Cancel));
-        assert!(!host_supervisor_fact(&CommandBody::Steer {
-            content: "later".into(),
-        }));
-        assert!(!host_supervisor_fact(&CommandBody::CompletePass));
+        assert!(host_supervisor_fact(
+            &CommandBody::RequestVerification { quiescent: true },
+            true
+        ));
+        assert!(!host_supervisor_fact(
+            &CommandBody::RequestVerification { quiescent: true },
+            false
+        ));
+        assert!(!host_supervisor_fact(
+            &CommandBody::RequestVerification { quiescent: false },
+            true
+        ));
+        assert!(!host_supervisor_fact(
+            &CommandBody::RequestVerification { quiescent: false },
+            false
+        ));
+        assert!(!host_supervisor_fact(&CommandBody::Pause, true));
+        assert!(!host_supervisor_fact(&CommandBody::Cancel, true));
+        assert!(!host_supervisor_fact(
+            &CommandBody::Steer {
+                content: "later".into(),
+            },
+            true
+        ));
+        assert!(!host_supervisor_fact(&CommandBody::CompletePass, true));
+    }
+
+    #[test]
+    fn ledger_schema_stays_12() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mission.sqlite");
+        let _host = Host::open(&db).unwrap();
+        let version: i64 = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 12);
     }
 
     #[test]
